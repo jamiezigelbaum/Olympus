@@ -122,6 +122,8 @@ export interface DashboardOutsideHelpStatus {
    * refuses Add zkAPI and turning on with the same words.
    */
   readonly unavailable?: 'confinement_unavailable';
+  /** A supported host can install or update the missing pinned launcher. */
+  readonly confinementInstallRequired?: true;
   readonly settings: {
     readonly state: 'off' | 'on' | 'invalid';
     /** 0 when there is no valid file. */
@@ -254,12 +256,12 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
   const on = status.settings.state === 'on';
-  // No network confinement here: the one line, and Turn off if it is on. Nothing to set up.
+  // No dispatch without confinement; a missing launcher still offers installation.
   const unavailable = summary.state === 'unavailable';
   const parts: string[] = [];
   // Under the Private answers page's own "Anonymous answers" heading, no second title.
   if (input.untitled !== true) parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
-  if (canUnlock && (on || !unavailable)) {
+  if (canUnlock && (on || !unavailable || status.confinementInstallRequired)) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
       + `<span class="actmsg" data-action-message role="status"></span></form>`);
@@ -270,8 +272,10 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
   if (unavailable) {
-    const script = (canEdit || canUnlock) && on ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
-    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}`;
+    if (status.confinementInstallRequired) parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
+    const toolsScript = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) }) : '';
+    const script = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
+    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
   }
 
   // 2. Problems: one line each, one button each.

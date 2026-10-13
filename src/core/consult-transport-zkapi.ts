@@ -1,4 +1,4 @@
-import { parseLinuxStatus, type LinuxEvent, type LinuxBackend, type ZkapiPreparedConfinement } from './zkapi-confinement-linux.ts';
+import { linuxZkapiConfinement, type LinuxConfinementDependencies, parseLinuxStatus, type LinuxEvent, type LinuxBackend, type ZkapiPreparedConfinement } from './zkapi-confinement-linux.ts';
 export { linuxZkapiConfinement } from './zkapi-confinement-linux.ts';
 import type { Readable } from 'node:stream';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
@@ -220,7 +220,7 @@ export interface ZkapiConfinement {
   readonly level: ZkapiConfinementLevel;
   /** Optional per-session preparation; Linux requires the private status channel. */
   prepare?(workDir: string, ports: ZkapiConfinementPorts): Promise<ZkapiPreparedConfinement>;
-  check?(): Promise<{ ok: boolean; line: string }>;
+  check?(): Promise<{ ok: boolean; line: string; installRequired?: boolean }>;
   /** A fixed sentence naming what this confinement does not cover. */
   readonly limit: string;
   /** The argv that runs `argv` under the confinement. */
@@ -797,14 +797,15 @@ export function zkapiConfinementAvailable(confinement: Pick<ZkapiConfinement, 'l
 }
 
 /**
- * This platform's confinement: the macOS sandbox, else none (Linux until its
- * launcher lands, docs/design/linux-zkapi-confinement.md), which refuses.
+ * This platform's confinement: the macOS sandbox or the checked Linux launcher.
+ * Unsupported hosts refuse; every session still runs its confinement self-test.
  * `host` is a seam for tests; it defaults to this process's platform.
  */
 export function defaultZkapiConfinement(
-  host: { platform?: NodeJS.Platform; sandboxAvailable?: boolean } = {},
+  host: LinuxConfinementDependencies & { sandboxAvailable?: boolean } = {},
 ): ZkapiConfinement {
   const platform = host.platform ?? process.platform;
+  if (platform === 'linux') return linuxZkapiConfinement(host);
   if (platform === 'darwin' && (host.sandboxAvailable ?? existsSync('/usr/bin/sandbox-exec'))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
@@ -1940,7 +1941,7 @@ export async function zkapiConsultReadiness(
   const now = (options.now ?? (() => new Date()))();
   const env = options.env ?? process.env;
   const settings = options.settings;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
   const confinementCheck = await confinement.check?.();
@@ -2394,7 +2395,7 @@ async function runSession(
   let fetchImpl = options.fetchImpl ?? fetch;
   let confinementSession: ZkapiPreparedConfinement | undefined;
   const inspect = options.inspectListener ?? inspectLoopbackListener;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === 'per_consult';

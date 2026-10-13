@@ -32,8 +32,7 @@
  *     conflict and nothing is written), then asks the worker to restart,
  *     because the policy is read at boot;
  *   - `addRoute`: adds the one zkapi profile when none exists;
- *   - where this computer has no network confinement (Linux until its
- *     launcher lands), `status` says `unavailable` and `addRoute` and turning
+ *   - where this computer has no network confinement (unsupported Linux hosts), `status` says `unavailable` and `addRoute` and turning
  *     on refuse `confinement_unavailable` (owner ruling 2026-10-12: no
  *     weaker mode);
  *   - `recover` / `abandon`: the two fence buttons (§A.8), both explicit;
@@ -206,7 +205,7 @@ const MESSAGES = {
   invalidCurrent: 'The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.',
   routeMissing: 'Add zkAPI before turning anonymous answers on.',
   /** The card's own line (vocabulary.ts DASHBOARD_OUTSIDE_HELP_COPY.confinementUnavailable). */
-  confinementUnavailable: 'Anonymous answers aren\'t available on Linux yet: they need network confinement, which this version of Olympus doesn\'t have on Linux. Nothing is ever sent without it.',
+  confinementUnavailable: 'Anonymous answers aren\'t available on this computer because its network isolation check hasn\'t passed. Nothing is sent without it.',
   acknowledgementsIncomplete: 'Accept the statements on this page before turning anonymous answers on.',
   levelUnknown: 'Choose what zkAPI may send: Standard or Strict.',
   levelSaved: 'Saved.',
@@ -278,8 +277,16 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   const location: ConsultSettingsLocation = options.settingsLocation ?? { env };
   const readiness = options.readiness ?? zkapiConsultReadiness;
   // One judgement of this computer's confinement, for the card and the readiness probe alike.
-  const confinement = options.confinement ?? defaultZkapiConfinement();
-  const confined = zkapiConfinementAvailable(confinement);
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
+  let confinementInstallRequired = false;
+  const confined = async (): Promise<boolean> => {
+    confinementInstallRequired = false;
+    try {
+      const check = await confinement.check?.();
+      confinementInstallRequired = check?.installRequired === true;
+      return (!check || check.ok) && zkapiConfinementAvailable(confinement);
+    } catch { return false; }
+  };
   const toolsJob = options.toolsJob ?? createManagedToolsJob({ env });
   // Olympus's own verified install first (what the transport runs), else the
   // transport's own fallback resolver: PATH, then the standard install
@@ -292,7 +299,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     return managedToolsState({ env }).map((entry) => {
       const explicit = entry.tool === 'tor' ? settings?.torExecutable : settings?.daemonExecutable;
       if (explicit) {
-        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? 'configured' : 'configured_missing', path: explicit, version: entry.version };
+        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? 'configured' : 'configured_missing', path: explicit, version: entry.version, offered: entry.offered };
       }
       // An earlier Olympus build is named as such even when PATH has another
       // copy: updating Olympus's own is the fix, and it wins over PATH after.
@@ -515,7 +522,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
 
     async status() {
       return {
-        ...(confined ? {} : { unavailable: 'confinement_unavailable' as const }),
+        ...(await confined() ? {} : { unavailable: 'confinement_unavailable' as const, ...(confinementInstallRequired ? { confinementInstallRequired: true as const } : {}) }),
         settings: settingsView(),
         route: await routeView(),
         languages: languages(),
@@ -696,7 +703,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       // here, for the same reason: no question leaves without them.
       const turningOn = enabled && !(current.state === 'valid' && current.settings.enabled);
       if (turningOn) {
-        if (!confined) return confinementUnavailable();
+        if (!await confined()) return confinementUnavailable();
         const route = zkapiProfile();
         if (!route) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
         if (!acknowledgementsComplete()) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.acknowledgementsIncomplete };
@@ -779,7 +786,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     },
 
     async addRoute(update) {
-      if (!confined) return confinementUnavailable();
+      if (!await confined()) return confinementUnavailable();
       if (update.confirm !== true) return invalid(MESSAGES.confirm, 'confirmation_required');
       if (zkapiProfile()) return { ok: false, httpStatus: 409, code: 'route_exists', message: MESSAGES.routeExists };
       try {

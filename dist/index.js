@@ -1,4 +1,20 @@
+import { createRequire } from "node:module";
+var __defProp = Object.defineProperty;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: __exportSetter.bind(all, name)
+    });
+};
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 // src/core/operation-error.ts
 function sourceAnswerJobNotFound() {
@@ -2162,7 +2178,7 @@ import {
   writeFileSync as writeFileSync4
 } from "node:fs";
 import { mkdir, open as open2, readFile, stat, unlink, utimes } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { createRequire as createRequire2 } from "node:module";
 import { dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const normalized = normalizeOptions(options);
@@ -2829,7 +2845,7 @@ var init_file_lease = __esm(() => {
     staleAfterMs: 30000,
     heartbeatIntervalMs: 5000
   };
-  runtimeRequire = createRequire(import.meta.url);
+  runtimeRequire = createRequire2(import.meta.url);
   FileLeaseBusyError = class FileLeaseBusyError extends Error {
     code = "file_lease_busy";
     targetPath;
@@ -5590,9 +5606,47 @@ var init_router = __esm(() => {
 });
 
 // src/core/engine-maintenance.ts
-var PROBE_OPTIONS, MAINTENANCE_OPTIONS;
+function maintenanceTarget(statePath) {
+  return `${statePath}.maintenance`;
+}
+function admissionTarget(statePath) {
+  return `${statePath}.session`;
+}
+async function assertMaintenanceClear(statePath) {
+  try {
+    await withFileLease(maintenanceTarget(statePath), async () => {
+      return;
+    }, {
+      ...MAINTENANCE_OPTIONS,
+      ...PROBE_OPTIONS
+    });
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      throw new EngineMaintenanceInProgressError;
+    throw error;
+  }
+}
+function admissionOptions(options) {
+  return {
+    ...options,
+    staleAfterMs: Number.MAX_SAFE_INTEGER
+  };
+}
+async function withEngineConsultAdmission(statePath, callback, options = {}) {
+  return withFileLease(admissionTarget(statePath), async () => {
+    await assertMaintenanceClear(statePath);
+    return callback();
+  }, admissionOptions(options));
+}
+var ENGINE_MAINTENANCE_IN_PROGRESS_MESSAGE = "Olympus engine maintenance is in progress; try again after it finishes.", EngineMaintenanceInProgressError, PROBE_OPTIONS, MAINTENANCE_OPTIONS;
 var init_engine_maintenance = __esm(() => {
   init_file_lease();
+  EngineMaintenanceInProgressError = class EngineMaintenanceInProgressError extends Error {
+    code = "engine_maintenance_in_progress";
+    constructor() {
+      super(ENGINE_MAINTENANCE_IN_PROGRESS_MESSAGE);
+    }
+  };
   PROBE_OPTIONS = {
     acquireTimeoutMs: 1,
     pollIntervalMs: 1,
@@ -6470,6 +6524,10 @@ function managedToolsBase(host = {}) {
   }
   return;
 }
+function managedToolsRoot(host = {}) {
+  const base = managedToolsBase(host);
+  return base ? join23(base, "tools") : undefined;
+}
 function currentUid(host) {
   return host.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
 }
@@ -6676,12 +6734,546 @@ var init_managed_tools = __esm(() => {
 });
 
 // src/core/zkapi-confine-fetch.ts
-var MAX_RESPONSE_HEAD_BYTES, MAX_BODY_BYTES, MAX_CHUNK_BYTES, MAX_TRAILER_BYTES, FORBIDDEN_REQUEST_HEADERS;
+var exports_zkapi_confine_fetch = {};
+__export(exports_zkapi_confine_fetch, {
+  linuxConfinementFetch: () => linuxConfinementFetch
+});
+import { createHmac as createHmac2, randomBytes as randomBytes4, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createConnection } from "node:net";
+function abortError() {
+  return new DOMException("This operation was aborted", "AbortError");
+}
+function authError(reason) {
+  return Object.assign(new Error(`api_peer_unauthenticated: ${reason}`), { code: "EAUTH" });
+}
+function bridgeMac(token, role, name, ...parts) {
+  const hmac = createHmac2("sha256", token);
+  hmac.update(`zkapi-confine/${role}/${name}\x00`);
+  for (const part of parts)
+    hmac.update(part);
+  return hmac.digest();
+}
+function authenticate(socketPath, token, name, signal) {
+  return new Promise((resolve5, reject) => {
+    const socket = createConnection({ path: socketPath });
+    const clientNonce = randomBytes4(16);
+    let buffered = Buffer.alloc(0);
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      socket.off("data", onData);
+      socket.off("close", onClose);
+    };
+    const fail = (error) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const onAbort = () => fail(abortError());
+    const onClose = () => fail(authError("closed"));
+    const onError = (error) => fail(authError(error.code ?? error.message));
+    const onData = (data) => {
+      if (settled)
+        return;
+      buffered = Buffer.concat([buffered, data]);
+      if (buffered.length < 48)
+        return;
+      if (buffered.length !== 48) {
+        fail(authError("unexpected pre-auth bytes"));
+        return;
+      }
+      const serverNonce = buffered.subarray(0, 16);
+      const proof = buffered.subarray(16);
+      const expected = bridgeMac(token, "srv", name, clientNonce, serverNonce);
+      if (!timingSafeEqual2(proof, expected)) {
+        fail(authError("bad server proof"));
+        return;
+      }
+      socket.pause();
+      socket.write(bridgeMac(token, "cli", name, clientNonce, serverNonce), (error) => {
+        if (error) {
+          fail(authError(error.message));
+          return;
+        }
+        if (signal.aborted) {
+          fail(abortError());
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve5(socket);
+      });
+    };
+    const timer = setTimeout(() => fail(authError("timeout")), HANDSHAKE_TIMEOUT_MS);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+    socket.on("data", onData);
+    signal.addEventListener("abort", onAbort, { once: true });
+    socket.once("connect", () => socket.write(clientNonce));
+    if (signal.aborted)
+      onAbort();
+  });
+}
+function knownBodyLength(body) {
+  if (body === undefined || body === null)
+    return 0;
+  if (typeof body === "string")
+    return Buffer.byteLength(body);
+  if (body instanceof URLSearchParams)
+    return Buffer.byteLength(body.toString());
+  if (body instanceof Blob)
+    return body.size;
+  if (body instanceof ArrayBuffer)
+    return body.byteLength;
+  if (ArrayBuffer.isView(body))
+    return body.byteLength;
+  return;
+}
+function validateUrl(url) {
+  if (url.protocol !== "http:")
+    throw new TypeError("linux confinement fetch supports HTTP only");
+  if (url.username || url.password)
+    throw new TypeError("linux confinement fetch refuses URL credentials");
+  const hostname = url.hostname.toLowerCase();
+  if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "[::1]") {
+    throw new TypeError("linux confinement fetch supports loopback daemon URLs only");
+  }
+}
+function serializeRequestHead(request, contentLength) {
+  let head = `${request.method} ${new URL(request.url).pathname}${new URL(request.url).search} HTTP/1.1\r
+Host: daemon\r
+Connection: close\r
+`;
+  let count = 0;
+  for (const [rawName, value] of request.headers) {
+    const name = rawName.toLowerCase();
+    if (FORBIDDEN_REQUEST_HEADERS.has(name))
+      throw new TypeError(`unsupported request header: ${name}`);
+    if (!HEADER_NAME.test(rawName) || /[\0\r\n]/.test(value))
+      throw new TypeError("invalid request header");
+    count += 1;
+    if (count > MAX_HEADER_COUNT)
+      throw new TypeError("too many request headers");
+    head += `${rawName}: ${value}\r
+`;
+  }
+  if (request.body) {
+    if (contentLength === undefined)
+      throw new TypeError("streaming request bodies are unsupported");
+    head += `Content-Length: ${contentLength}\r
+`;
+  }
+  head += `\r
+`;
+  if (Buffer.byteLength(head, "latin1") > MAX_RESPONSE_HEAD_BYTES)
+    throw new TypeError("request head too large");
+  return Buffer.from(head, "latin1");
+}
+function writeSocket(socket, bytes) {
+  if (bytes.byteLength === 0)
+    return Promise.resolve();
+  return new Promise((resolve5, reject) => {
+    socket.write(bytes, (error) => error ? reject(error) : resolve5());
+  });
+}
+async function writeRequestBody(socket, request, contentLength, signal) {
+  if (!request.body)
+    return;
+  if (contentLength === undefined)
+    throw new TypeError("streaming request bodies are unsupported");
+  const reader = request.body.getReader();
+  let sent = 0;
+  try {
+    while (true) {
+      if (signal.aborted)
+        throw abortError();
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      sent += value.byteLength;
+      if (sent > MAX_BODY_BYTES || contentLength !== undefined && sent > contentLength) {
+        throw new TypeError("request body exceeds its bound");
+      }
+      await writeSocket(socket, value);
+    }
+    if (sent !== contentLength)
+      throw new TypeError("request body length changed while streaming");
+  } finally {
+    reader.releaseLock();
+  }
+}
+function parseContentLength(text2) {
+  if (!/^[0-9]{1,10}$/.test(text2))
+    return;
+  const value = Number(text2);
+  return value <= MAX_BODY_BYTES ? value : undefined;
+}
+function validHeaderValue(value) {
+  for (let index = 0;index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 32 && code !== 9 || code === 127)
+      return false;
+  }
+  return true;
+}
+function exchange(socket, request, head, contentLength, signal) {
+  return new Promise((resolve5, reject) => {
+    let state = "head";
+    let buffered = Buffer.alloc(0);
+    let remaining = 0;
+    let totalBodyBytes = 0;
+    let trailerBytes = 0;
+    let settled = false;
+    let responseController;
+    let responseStream;
+    let draining = false;
+    let pullWhileDraining = false;
+    const active = () => state !== "failed" && state !== "done";
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+    };
+    const fail = (error) => {
+      if (state === "failed" || state === "done")
+        return;
+      state = "failed";
+      cleanup();
+      socket.destroy();
+      if (responseController) {
+        try {
+          responseController.error(error);
+        } catch {}
+      }
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+    const finish = () => {
+      if (state === "failed" || state === "done")
+        return;
+      state = "done";
+      cleanup();
+      try {
+        responseController?.close();
+      } catch {}
+      socket.destroy();
+    };
+    const onAbort = () => fail(abortError());
+    const emit = (bytes) => {
+      if (bytes.length === 0)
+        return true;
+      totalBodyBytes += bytes.length;
+      if (totalBodyBytes > MAX_BODY_BYTES) {
+        fail(new TypeError("response body exceeds its bound"));
+        return false;
+      }
+      responseController.enqueue(new Uint8Array(bytes));
+      if ((responseController.desiredSize ?? 1) <= 0) {
+        socket.pause();
+        return false;
+      }
+      return true;
+    };
+    const drain = () => {
+      if (draining || !active())
+        return;
+      draining = true;
+      try {
+        while (buffered.length > 0 && active()) {
+          if (state === "head") {
+            const boundary = buffered.indexOf(`\r
+\r
+`);
+            if (boundary < 0) {
+              if (buffered.length > MAX_RESPONSE_HEAD_BYTES)
+                fail(new TypeError("response head too large"));
+              break;
+            }
+            if (boundary + 4 > MAX_RESPONSE_HEAD_BYTES) {
+              fail(new TypeError("response head too large"));
+              break;
+            }
+            const lines = buffered.subarray(0, boundary).toString("latin1").split(`\r
+`);
+            buffered = buffered.subarray(boundary + 4);
+            const statusMatch = /^HTTP\/1\.[01] ([1-5][0-9]{2})(?: ([\x20-\x7e]*))?$/.exec(lines[0] ?? "");
+            if (!statusMatch) {
+              fail(new TypeError("bad status line"));
+              break;
+            }
+            const status = Number(statusMatch[1]);
+            if (status < 200) {
+              fail(new TypeError("informational responses are unsupported"));
+              break;
+            }
+            if (lines.length - 1 > MAX_HEADER_COUNT) {
+              fail(new TypeError("too many response headers"));
+              break;
+            }
+            const pairs = [];
+            for (const line of lines.slice(1)) {
+              const colon = line.indexOf(":");
+              const name = line.slice(0, colon);
+              const value = line.slice(colon + 1).trim();
+              if (colon <= 0 || !HEADER_NAME.test(name) || !validHeaderValue(value)) {
+                fail(new TypeError("bad header line"));
+                return;
+              }
+              pairs.push([name.toLowerCase(), value]);
+            }
+            const values = (name) => pairs.filter(([key]) => key === name).map(([, value]) => value);
+            const transferEncodings = values("transfer-encoding");
+            const contentLengths = values("content-length");
+            if (transferEncodings.length > 1 || transferEncodings.length === 1 && transferEncodings[0].toLowerCase() !== "chunked") {
+              fail(new TypeError("unsupported transfer-encoding"));
+              break;
+            }
+            if (contentLengths.length > 1 && new Set(contentLengths).size !== 1) {
+              fail(new TypeError("conflicting content-length"));
+              break;
+            }
+            if (transferEncodings.length > 0 && contentLengths.length > 0) {
+              fail(new TypeError("content-length with chunked"));
+              break;
+            }
+            const parsedLength = contentLengths[0] === undefined ? undefined : parseContentLength(contentLengths[0]);
+            if (contentLengths[0] !== undefined && parsedLength === undefined) {
+              fail(new TypeError("bad content-length"));
+              break;
+            }
+            if (status >= 300 && status < 400) {
+              fail(new TypeError("redirect refused"));
+              break;
+            }
+            const bodyless = request.method === "HEAD" || status === 204 || status === 205 || status === 304;
+            if (bodyless && buffered.length > 0) {
+              fail(new TypeError("unexpected response body"));
+              break;
+            }
+            responseStream = bodyless ? undefined : new ReadableStream({
+              start(controller) {
+                responseController = controller;
+              },
+              pull() {
+                if (draining) {
+                  pullWhileDraining = true;
+                  return;
+                }
+                drain();
+                if (state !== "failed" && state !== "done" && (responseController?.desiredSize ?? 1) > 0)
+                  socket.resume();
+              },
+              cancel() {
+                state = "done";
+                cleanup();
+                socket.destroy();
+              }
+            });
+            const headers = new Headers;
+            for (const [name, value] of pairs)
+              headers.append(name, value);
+            const response = new Response(responseStream ?? null, { status, statusText: statusMatch[2] ?? "", headers });
+            settled = true;
+            resolve5(response);
+            if (bodyless) {
+              finish();
+              break;
+            }
+            if (transferEncodings.length > 0)
+              state = "chunk-size";
+            else if (parsedLength !== undefined) {
+              remaining = parsedLength;
+              state = "fixed";
+              if (remaining === 0) {
+                if (buffered.length > 0)
+                  fail(new TypeError("bytes after response body"));
+                else
+                  finish();
+              }
+            } else
+              state = "close";
+          } else if (state === "fixed") {
+            const take = Math.min(remaining, buffered.length);
+            const chunk = buffered.subarray(0, take);
+            buffered = buffered.subarray(take);
+            remaining -= take;
+            const canContinue = emit(chunk);
+            if (!active())
+              break;
+            if (remaining === 0) {
+              if (buffered.length > 0)
+                fail(new TypeError("bytes after response body"));
+              else
+                finish();
+            }
+            if (!canContinue)
+              break;
+          } else if (state === "close") {
+            const chunk = buffered;
+            buffered = Buffer.alloc(0);
+            if (!emit(chunk))
+              break;
+          } else if (state === "chunk-size") {
+            const end = buffered.indexOf(`\r
+`);
+            if (end < 0) {
+              if (buffered.length > MAX_CHUNK_LINE_BYTES)
+                fail(new TypeError("chunk size line too long"));
+              break;
+            }
+            if (end === 0 || end > MAX_CHUNK_LINE_BYTES) {
+              fail(new TypeError(end === 0 ? "bad chunk size" : "chunk size line too long"));
+              break;
+            }
+            const line = buffered.subarray(0, end).toString("latin1");
+            buffered = buffered.subarray(end + 2);
+            if (!/^[0-9a-fA-F]{1,8}$/.test(line)) {
+              fail(new TypeError("bad chunk size"));
+              break;
+            }
+            remaining = Number.parseInt(line, 16);
+            if (remaining > MAX_CHUNK_BYTES || totalBodyBytes + remaining > MAX_BODY_BYTES) {
+              fail(new TypeError("chunk exceeds its bound"));
+              break;
+            }
+            state = remaining === 0 ? "trailers" : "chunk-data";
+          } else if (state === "chunk-data") {
+            const take = Math.min(remaining, buffered.length);
+            const chunk = buffered.subarray(0, take);
+            buffered = buffered.subarray(take);
+            remaining -= take;
+            const canContinue = emit(chunk);
+            if (!active())
+              break;
+            if (remaining === 0)
+              state = "chunk-crlf";
+            if (!canContinue)
+              break;
+          } else if (state === "chunk-crlf") {
+            if (buffered.length < 2)
+              break;
+            if (buffered[0] !== 13 || buffered[1] !== 10) {
+              fail(new TypeError("chunk not terminated by CRLF"));
+              break;
+            }
+            buffered = buffered.subarray(2);
+            state = "chunk-size";
+          } else if (state === "trailers") {
+            const end = buffered.indexOf(`\r
+`);
+            if (end < 0) {
+              if (trailerBytes + buffered.length > MAX_TRAILER_BYTES)
+                fail(new TypeError("response trailers too large"));
+              break;
+            }
+            trailerBytes += end + 2;
+            if (trailerBytes > MAX_TRAILER_BYTES) {
+              fail(new TypeError("response trailers too large"));
+              break;
+            }
+            const line = buffered.subarray(0, end).toString("latin1");
+            buffered = buffered.subarray(end + 2);
+            if (line.length === 0) {
+              if (buffered.length > 0)
+                fail(new TypeError("bytes after response body"));
+              else
+                finish();
+              break;
+            }
+            const colon = line.indexOf(":");
+            const name = line.slice(0, colon).toLowerCase();
+            const value = line.slice(colon + 1).trim();
+            if (colon <= 0 || !HEADER_NAME.test(name) || !validHeaderValue(value) || name === "content-length" || name === "transfer-encoding" || name === "trailer") {
+              fail(new TypeError("bad trailer line"));
+              break;
+            }
+          }
+        }
+      } catch (error) {
+        fail(error);
+      } finally {
+        draining = false;
+        if (pullWhileDraining) {
+          pullWhileDraining = false;
+          drain();
+          if (active() && (responseController?.desiredSize ?? 1) > 0)
+            socket.resume();
+        }
+      }
+    };
+    socket.on("data", (data) => {
+      if (state === "failed" || state === "done")
+        return;
+      const bytes = typeof data === "string" ? Buffer.from(data, "latin1") : data;
+      buffered = buffered.length === 0 ? bytes : Buffer.concat([buffered, bytes]);
+      drain();
+    });
+    socket.on("end", () => {
+      if (state === "close")
+        finish();
+      else if (state !== "failed" && state !== "done")
+        fail(new TypeError(state === "head" ? "connection closed before a response" : "connection closed mid-body"));
+    });
+    socket.on("close", () => {
+      if (state !== "failed" && state !== "done")
+        fail(new TypeError("connection closed unexpectedly"));
+    });
+    socket.on("error", (error) => fail(error));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    socket.resume();
+    (async () => {
+      try {
+        await writeSocket(socket, head);
+        await writeRequestBody(socket, request, contentLength, signal);
+      } catch (error) {
+        fail(signal.aborted ? abortError() : error);
+      }
+    })();
+  });
+}
+function linuxConfinementFetch(socketPath, tokenHex, name = "api") {
+  if (!socketPath)
+    throw new TypeError("socket path is required");
+  if (!/^[0-9a-fA-F]{64}$/.test(tokenHex))
+    throw new TypeError("bridge token must be exactly 32 hexadecimal bytes");
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name))
+    throw new TypeError("invalid bridge name");
+  const token = Buffer.from(tokenHex, "hex");
+  const confinedFetch = async (input, init) => {
+    if (init?.redirect === "follow")
+      throw new TypeError("redirect following is unsupported");
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    validateUrl(url);
+    const length = init?.body !== undefined ? knownBodyLength(init.body) : undefined;
+    if (length !== undefined && length > MAX_BODY_BYTES)
+      throw new TypeError("request body exceeds its bound");
+    if (request.body && length === undefined)
+      throw new TypeError("streaming request bodies are unsupported");
+    const head = serializeRequestHead(request, length);
+    const signal = request.signal;
+    if (signal.aborted)
+      throw abortError();
+    const socket = await authenticate(socketPath, token, name, signal);
+    return exchange(socket, request, head, length, signal);
+  };
+  return confinedFetch;
+}
+var HANDSHAKE_TIMEOUT_MS = 2000, MAX_RESPONSE_HEAD_BYTES, MAX_HEADER_COUNT = 256, MAX_BODY_BYTES, MAX_CHUNK_BYTES, MAX_CHUNK_LINE_BYTES = 256, MAX_TRAILER_BYTES, HEADER_NAME, FORBIDDEN_REQUEST_HEADERS;
 var init_zkapi_confine_fetch = __esm(() => {
   MAX_RESPONSE_HEAD_BYTES = 64 * 1024;
   MAX_BODY_BYTES = 2 ** 30;
   MAX_CHUNK_BYTES = 2 ** 28;
   MAX_TRAILER_BYTES = 8 * 1024;
+  HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
   FORBIDDEN_REQUEST_HEADERS = new Set([
     "connection",
     "content-length",
@@ -6697,8 +7289,542 @@ var init_zkapi_confine_fetch = __esm(() => {
 });
 
 // src/core/zkapi-confine-selftest.ts
-var LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE;
+import { randomBytes as randomBytes5 } from "node:crypto";
+import { chmodSync as chmodSync4, readFileSync as readFileSync18, readlinkSync, readdirSync as readdirSync3, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { createServer, createConnection as createConnection2 } from "node:net";
+import { createSocket } from "node:dgram";
+import { networkInterfaces } from "node:os";
+import { join as join24 } from "node:path";
+function hasEvery(row, keys) {
+  return Boolean(row) && keys.every((key) => Object.hasOwn(row, key));
+}
+function matches(got, wanted) {
+  return got !== undefined && (wanted instanceof RegExp ? wanted.test(String(got)) : String(got) === wanted);
+}
+function matchesExpected(rows, expected) {
+  return Object.entries(expected).every(([key, wanted]) => matches(rows[key], wanted));
+}
+function validReady(status) {
+  if (!status || status.event !== "ready")
+    return false;
+  const abi = status.landlockAbi;
+  if (typeof abi !== "number" || !Number.isInteger(abi) || abi < 4)
+    return false;
+  const required = ["netns", "pidns", "ipv6-off", "caps", "nnp", "launcher-undumpable", "launcher-seccomp", "landlock-net", "seccomp"];
+  if (abi >= 6)
+    required.push("landlock-scope");
+  if (abi >= 8)
+    required.push("launcher-landlock");
+  if (abi >= 9)
+    required.push("landlock-unix");
+  const stage0 = ["nnp", "launcher-undumpable", "launcher-seccomp", ...abi >= 8 ? ["launcher-landlock"] : []];
+  return Array.isArray(status.layers) && required.every((layer) => status.layers.includes(layer)) && Array.isArray(status.stage0Layers) && stage0.every((layer) => status.stage0Layers.includes(layer)) && JSON.stringify(status.bridgesExpose) === '["api"]' && Array.isArray(status.bridgesReach) && status.bridgesReach.length === 1 && /^\d+$/.test(status.bridgesReach[0]);
+}
+function evaluateLinuxConfinementSelfTestObservation(observation) {
+  const control = observation.control;
+  const confined = observation.confined;
+  if (!control || !confined || control.daemonApiListener !== "listening" || confined.daemonApiListener !== "listening")
+    return false;
+  if (!hasEvery(control.parent, JS_ROWS) || !hasEvery(control.child, JS_ROWS) || !hasEvery(confined.parent, JS_ROWS) || !hasEvery(confined.child, JS_ROWS) || !hasEvery(control.go, GO_ROWS) || !hasEvery(confined.go, GO_ROWS))
+    return false;
+  if (!matchesExpected(control.parent, OUTSIDE) || !matchesExpected(control.child, OUTSIDE) || !matchesExpected(confined.parent, INSIDE) || !matchesExpected(confined.child, INSIDE) || !matchesExpected(control.go, GO_OUTSIDE) || !matchesExpected(confined.go, GO_INSIDE))
+    return false;
+  if (Number(control.parent.inherited_decoy_fds) < 2 || control.child.inherited_decoy_fds !== "0")
+    return false;
+  if (control.parent.connect_lan === "no_interface" || control.child.connect_lan === "no_interface") {
+    if (control.parent.connect_lan !== "no_interface" || control.child.connect_lan !== "no_interface" || confined.parent.connect_lan !== "no_interface" || confined.child.connect_lan !== "no_interface")
+      return false;
+  } else if (control.parent.connect_lan !== "connected" || control.child.connect_lan !== "connected" || confined.parent.connect_lan !== "failed_fast" || confined.child.connect_lan !== "failed_fast")
+    return false;
+  if (confined.parent.tor_bridge_removed !== "closed_fast")
+    return false;
+  if (confined.apiBridgeBulk !== "intact")
+    return false;
+  if (control.unixStreamConnections < 1 || control.unixDatagrams < 1 || confined.unixStreamConnections !== 0 || confined.unixDatagrams !== 0)
+    return false;
+  return validReady(confined.status) && confined.instanceBound === true && confined.listenerSetBound === true;
+}
+async function runLinuxConfinementSelfTestWithRunner(launcher, workDir, env, ports, runner) {
+  try {
+    const values = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
+    if (!launcher || values.some((port) => !Number.isInteger(port) || port < 1 || port > 65535) || new Set(values).size !== 4)
+      return false;
+    return evaluateLinuxConfinementSelfTestObservation(await runner.run(launcher, workDir, env, ports));
+  } catch {
+    return false;
+  }
+}
+function listen(server, port, host, ipv6Only = false) {
+  return new Promise((resolve5, reject) => {
+    server.once("error", reject);
+    server.listen({ port, host, exclusive: true, ipv6Only }, () => {
+      server.removeListener("error", reject);
+      resolve5(server.address().port);
+    });
+  });
+}
+function listenPath(server, path) {
+  return new Promise((resolve5, reject) => {
+    server.once("error", reject);
+    server.listen({ path }, () => {
+      server.removeListener("error", reject);
+      resolve5();
+    });
+  });
+}
+function closeServer(server) {
+  return new Promise((resolve5) => server.close(() => resolve5()));
+}
+function socketFd(socket) {
+  return socket._handle?.fd ?? -1;
+}
+function connected(options) {
+  return new Promise((resolve5, reject) => {
+    const socket = createConnection2(options);
+    socket.once("connect", () => resolve5(socket));
+    socket.once("error", reject);
+  });
+}
+function processGone(pgid) {
+  if (process.platform === "linux") {
+    try {
+      for (const name of readdirSync3("/proc")) {
+        if (!/^\d+$/.test(name))
+          continue;
+        try {
+          const raw = readFileSync18(`/proc/${name}/stat`, "utf8");
+          const fields = raw.slice(raw.lastIndexOf(")") + 1).trim().split(/\s+/);
+          if (Number(fields[2]) === pgid && fields[0] !== "Z" && fields[0] !== "X")
+            return false;
+        } catch {}
+      }
+      return true;
+    } catch {}
+  }
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch (error) {
+    return error.code !== "EPERM";
+  }
+}
+async function stopGroup(pgid) {
+  if (pgid <= 1 || processGone(pgid))
+    return;
+  try {
+    process.kill(-pgid, "SIGTERM");
+  } catch {}
+  const deadline = Date.now() + 2500;
+  while (!processGone(pgid) && Date.now() < deadline)
+    await new Promise((resolve5) => setTimeout(resolve5, 50));
+  if (!processGone(pgid)) {
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch {}
+    const killDeadline = Date.now() + 1500;
+    while (!processGone(pgid) && Date.now() < killDeadline)
+      await new Promise((resolve5) => setTimeout(resolve5, 50));
+  }
+  if (!processGone(pgid))
+    throw new Error(`self-test process group ${pgid} survived cleanup`);
+}
+function startDgramDecoy(script, pathname, env, watchdogPath, supervise) {
+  let count = 0;
+  let started = false;
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolve5, reject) => {
+    resolveReady = resolve5;
+    rejectReady = reject;
+  });
+  const timer = setTimeout(() => rejectReady(new Error("Unix datagram decoy did not start")), 3000);
+  const handle = supervise("daemon", watchdogPath, [process.execPath, script, "--dgram-decoy", pathname], env, (line) => {
+    if (line === "ready") {
+      started = true;
+      clearTimeout(timer);
+      resolveReady();
+    }
+    if (line === "datagram")
+      count += 1;
+  }, () => {
+    clearTimeout(timer);
+    if (!started)
+      rejectReady(new Error("Unix datagram decoy exited"));
+  });
+  handle.go();
+  return { handle, count: () => count, ready };
+}
+async function releaseFixtureResources(servers, datagrams, sockets, acceptedSockets, decoys, paths) {
+  for (const socket of [...sockets, ...acceptedSockets])
+    socket.destroy();
+  for (const socket of datagrams) {
+    try {
+      socket.close();
+    } catch {}
+  }
+  await Promise.all(servers.map(async (server) => {
+    let timer;
+    try {
+      await Promise.race([
+        closeServer(server),
+        new Promise((resolve5) => {
+          timer = setTimeout(resolve5, 1000);
+        })
+      ]);
+    } catch {} finally {
+      if (timer)
+        clearTimeout(timer);
+    }
+  }));
+  const stopped = await Promise.allSettled(decoys.map(({ handle }) => stopGroup(handle.pgid)));
+  for (const path of paths)
+    rmSync5(path, { force: true });
+  const failure = stopped.find((result) => result.status === "rejected");
+  if (failure)
+    throw failure.reason;
+}
+async function createFixture(script, workDir, launcher, ports, env, watchdogPath, supervise) {
+  const servers = [];
+  const datagrams = [];
+  const inheritedSockets = [];
+  const acceptedSockets = [];
+  const decoys = [];
+  const cleanupPaths = [];
+  const track = (server) => {
+    servers.push(server);
+    return server;
+  };
+  try {
+    let confinedTorConnections = 0;
+    const confinedTor = track(createServer((socket) => {
+      confinedTorConnections += 1;
+      const prefix = confinedTorConnections % 2 === 1;
+      let short = Buffer.alloc(0);
+      socket.on("data", (chunk) => {
+        if (!prefix) {
+          socket.write(chunk);
+          return;
+        }
+        short = Buffer.concat([short, Buffer.from(chunk)]);
+        if (short.length >= 5)
+          socket.write(Buffer.from("TOR-HOST:" + String(short)));
+      });
+      socket.on("error", () => {
+        return;
+      });
+      if (confinedTorConnections === 4)
+        confinedTor.close();
+    }));
+    const torHost = await listen(confinedTor, 0, "127.0.0.1");
+    let controlTorConnections = 0;
+    const controlTor = track(createServer((socket) => {
+      controlTorConnections += 1;
+      const prefix = controlTorConnections % 2 === 1;
+      let short = Buffer.alloc(0);
+      socket.on("data", (chunk) => {
+        if (!prefix) {
+          socket.write(chunk);
+          return;
+        }
+        short = Buffer.concat([short, Buffer.from(chunk)]);
+        if (short.length >= 5)
+          socket.write(Buffer.from("TOR-HOST:" + String(short)));
+      });
+      socket.on("error", () => {
+        return;
+      });
+    }));
+    const controlTorPort = await listen(controlTor, 0, "127.0.0.1");
+    await listen(track(createServer((socket) => socket.end("HOST"))), controlTorPort, "::1", true);
+    for (const port of [ports.companionProxy, ports.walletApi])
+      await listen(track(createServer((socket) => socket.end("HOST"))), port, "127.0.0.1");
+    const otherServer = track(createServer((socket) => socket.end("HOST")));
+    const other = await listen(otherServer, 0, "127.0.0.1");
+    const aliasServer = track(createServer((socket) => socket.end("HOST")));
+    const alias = await listen(aliasServer, 0, "127.0.0.2");
+    const reserve = track(createServer());
+    const bindOther = await listen(reserve, 0, "127.0.0.1");
+    await closeServer(reserve);
+    const interfaces = Object.values(networkInterfaces()).flat().filter((item) => Boolean(item));
+    const local = interfaces.find((item) => item.family === "IPv4" && !item.internal);
+    let lan;
+    if (local) {
+      const server = track(createServer((socket) => socket.end("HOST")));
+      lan = { address: local.address, port: await listen(server, 0, local.address) };
+    }
+    const dnsTcp = track(createServer((socket) => socket.end()));
+    const dnsPort = await listen(dnsTcp, 0, "127.0.0.53");
+    const dnsUdp = createSocket("udp4");
+    datagrams.push(dnsUdp);
+    dnsUdp.on("message", (query, info) => {
+      if (query.length < 12)
+        return;
+      const response = Buffer.from(query);
+      response[2] = 129;
+      response[3] = 128;
+      response.writeUInt16BE(1, 6);
+      const answer = Buffer.from([192, 12, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 127, 0, 0, 1]);
+      dnsUdp.send(Buffer.concat([response, answer]), info.port, info.address);
+    });
+    await new Promise((resolve5, reject) => {
+      dnsUdp.once("error", reject);
+      dnsUdp.bind(dnsPort, "127.0.0.53", resolve5);
+    });
+    let controlStreams = 0;
+    let confinedStreams = 0;
+    const controlUnix = join24(workDir, "selftest-control.sock");
+    const confinedUnix = join24(workDir, "selftest-confined.sock");
+    const inheritedUnix = join24(workDir, "selftest-inherited.sock");
+    cleanupPaths.push(controlUnix, confinedUnix, inheritedUnix);
+    const keepUnixSocket = (socket) => {
+      acceptedSockets.push(socket);
+      socket.on("error", () => {
+        return;
+      });
+    };
+    const controlUnixServer = () => track(createServer((socket) => {
+      controlStreams += 1;
+      keepUnixSocket(socket);
+    }));
+    const confinedUnixServer = () => track(createServer((socket) => {
+      confinedStreams += 1;
+      keepUnixSocket(socket);
+    }));
+    await listenPath(controlUnixServer(), controlUnix);
+    await listenPath(confinedUnixServer(), confinedUnix);
+    await listenPath(track(createServer(keepUnixSocket)), inheritedUnix);
+    const suffix = `${process.pid}-${randomBytes5(5).toString("hex")}`;
+    const controlAbstract = `olympus-zkc-control-${suffix}`;
+    const confinedAbstract = `olympus-zkc-confined-${suffix}`;
+    await listenPath(controlUnixServer(), `\x00${controlAbstract}`);
+    await listenPath(confinedUnixServer(), `\x00${confinedAbstract}`);
+    const controlDgramPath = join24(workDir, "selftest-control-dgram.sock");
+    const confinedDgramPath = join24(workDir, "selftest-confined-dgram.sock");
+    cleanupPaths.push(controlDgramPath, confinedDgramPath);
+    const controlDgram = startDgramDecoy(script, controlDgramPath, env, watchdogPath, supervise);
+    decoys.push(controlDgram);
+    const confinedDgram = startDgramDecoy(script, confinedDgramPath, env, watchdogPath, supervise);
+    decoys.push(confinedDgram);
+    await Promise.all([controlDgram.ready, confinedDgram.ready]);
+    inheritedSockets.push(await connected({ path: inheritedUnix }));
+    inheritedSockets.push(await connected({ host: "127.0.0.1", port: other }));
+    const decoyInodes = inheritedSockets.map((socket) => readlinkSync(`/proc/self/fd/${socketFd(socket)}`));
+    const common = { launcher, companion: ports.companionProxy, wallet: ports.walletApi, daemon: ports.daemon, other, alias, bindOther, dnsPort, lan, decoyInodes, hostNetNs: readlinkSync("/proc/self/ns/net"), hostUserNs: readlinkSync("/proc/self/ns/user") };
+    return {
+      controlTarget: { ...common, tor: controlTorPort, hostUnix: controlUnix, hostAbstract: controlAbstract, hostDgram: controlDgramPath, confined: false, bridgeRemoval: false },
+      confinedTarget: { ...common, tor: ports.tor, hostUnix: confinedUnix, hostAbstract: confinedAbstract, hostDgram: confinedDgramPath, confined: true, bridgeRemoval: true, torHost },
+      inheritedSockets,
+      controlStreamCount: () => controlStreams,
+      confinedStreamCount: () => confinedStreams,
+      controlDgram,
+      confinedDgram,
+      async close() {
+        await releaseFixtureResources(servers, datagrams, inheritedSockets, acceptedSockets, decoys, cleanupPaths);
+      }
+    };
+  } catch (error) {
+    await releaseFixtureResources(servers, datagrams, inheritedSockets, acceptedSockets, decoys, cleanupPaths);
+    throw error;
+  }
+}
+function parseProbeLine(line) {
+  try {
+    const value = JSON.parse(line);
+    if (value.kind !== "zkapi-selftest" || value.error || typeof value.parent !== "object" || typeof value.child !== "object" || typeof value.go !== "object")
+      return;
+    return { daemonApiListener: value.daemonApiListener, parent: value.parent, child: value.child, go: value.go };
+  } catch {
+    return;
+  }
+}
+async function runLinuxConfinementSelfTest(launcher, workDir, env, ports) {
+  return runLinuxConfinementSelfTestWithRunner(launcher, workDir, env, ports, defaultRunner);
+}
+var JS_ROWS, GO_ROWS, INSIDE, OUTSIDE, GO_INSIDE, GO_OUTSIDE, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, defaultRunner;
 var init_zkapi_confine_selftest = __esm(() => {
+  JS_ROWS = [
+    "inherited_decoy_fds",
+    "caps",
+    "no_new_privs",
+    "seccomp_mode",
+    "net_ns_differs",
+    "user_ns_differs",
+    "interfaces",
+    "tor_bridge_echo",
+    "tor_bridge_bulk",
+    "companion_bind_connect",
+    "wallet_bind_connect",
+    "connect_other_port",
+    "connect_loopback_alias",
+    "connect_lan",
+    "connect_remote_testnet",
+    "ipv6_loopback",
+    "ipv4_mapped",
+    "udp_remote",
+    "udp_loopback",
+    "udp_bind",
+    "dns_stub_tcp",
+    "dns_lookup",
+    "unix_host_path",
+    "unix_host_abstract",
+    "bind_other_port",
+    "bind_tor_port",
+    "bind_ephemeral",
+    "bind_wildcard_forbidden_port",
+    "bind_wildcard_permitted_port"
+  ];
+  GO_ROWS = [
+    "socket_inet_stream",
+    "socket_inet6",
+    "socket_inet_dgram",
+    "socket_inet_raw",
+    "socket_unix",
+    "socket_unix_dgram",
+    "socket_netlink_route",
+    "socket_netlink_generic",
+    "socket_packet",
+    "socket_vsock",
+    "socketpair_unix_stream",
+    "socketpair_unix_dgram",
+    "socketpair_unix_seqpacket",
+    "pair_stream_connect_host_path",
+    "pair_stream_sendto_host_path",
+    "pair_stream_connect_after_shutdown",
+    "pair_dgram_connect_host_path",
+    "pair_dgram_sendto_host_path",
+    "inet_connect_unix_addr",
+    "listen_unbound",
+    "ptrace_attach_launcher",
+    "ptrace_attach_stage0",
+    "ptrace_attach_ns_init",
+    "process_vm_readv_launcher",
+    "io_uring_setup",
+    "unshare_newuser",
+    "unshare_newnet",
+    "unshare_newpid",
+    "clone3",
+    "clone_newuser_exec",
+    "clone_newpid_exec",
+    "setns_net",
+    "mount_tmpfs",
+    "open_launcher_mem_rw",
+    "open_stage0_mem_rw",
+    "signal_launcher",
+    "signal_stage0",
+    "signal_ns_init_sigkill",
+    "ns_init_alive_after"
+  ];
+  INSIDE = {
+    inherited_decoy_fds: "0",
+    caps: "zero",
+    no_new_privs: "1",
+    seccomp_mode: "2",
+    net_ns_differs: "yes",
+    user_ns_differs: "yes",
+    interfaces: "lo",
+    tor_bridge_echo: "TOR-HOST:probe",
+    tor_bridge_bulk: "intact",
+    companion_bind_connect: "bound_connected_ns",
+    wallet_bind_connect: "bound_connected_ns",
+    connect_other_port: "failed_fast",
+    connect_loopback_alias: "failed_fast",
+    connect_remote_testnet: "failed_fast",
+    ipv6_loopback: "failed_fast",
+    ipv4_mapped: "failed_fast",
+    udp_remote: "failed",
+    udp_loopback: "failed",
+    udp_bind: "failed",
+    dns_stub_tcp: "failed_fast",
+    dns_lookup: "failed_fast",
+    unix_host_path: "failed_fast",
+    unix_host_abstract: "failed_fast",
+    bind_other_port: /^denied:/,
+    bind_tor_port: /^denied:/,
+    bind_ephemeral: /^denied:/,
+    bind_wildcard_forbidden_port: /^denied:/,
+    bind_wildcard_permitted_port: "bound"
+  };
+  OUTSIDE = {
+    no_new_privs: "0",
+    seccomp_mode: "0",
+    net_ns_differs: "no",
+    user_ns_differs: "no",
+    tor_bridge_echo: "TOR-HOST:probe",
+    tor_bridge_bulk: "intact",
+    companion_bind_connect: "denied:EADDRINUSE",
+    wallet_bind_connect: "denied:EADDRINUSE",
+    connect_other_port: "connected",
+    connect_loopback_alias: "connected",
+    connect_remote_testnet: /^(timeout|failed_slow)$/,
+    ipv6_loopback: "connected",
+    ipv4_mapped: "connected",
+    udp_remote: "sent",
+    udp_loopback: "sent",
+    udp_bind: "bound",
+    dns_stub_tcp: "connected",
+    dns_lookup: "resolved",
+    unix_host_path: "connected",
+    unix_host_abstract: "connected",
+    bind_other_port: "bound",
+    bind_tor_port: "denied:EADDRINUSE",
+    bind_ephemeral: "bound",
+    bind_wildcard_forbidden_port: "bound",
+    bind_wildcard_permitted_port: "denied:EADDRINUSE"
+  };
+  GO_INSIDE = {
+    socket_inet_stream: "ok",
+    socket_inet6: "EPERM",
+    socket_inet_dgram: "EPERM",
+    socket_inet_raw: "EPERM",
+    socket_unix: "EPERM",
+    socket_unix_dgram: "EPERM",
+    socket_netlink_route: "ok",
+    socket_netlink_generic: "EPERM",
+    socket_packet: "EPERM",
+    socket_vsock: "EPERM",
+    socketpair_unix_stream: "ok",
+    socketpair_unix_dgram: "EPERM",
+    socketpair_unix_seqpacket: "EPERM",
+    pair_stream_connect_host_path: /^(EISCONN|EACCES)$/,
+    pair_stream_sendto_host_path: /^(EISCONN|EACCES)$/,
+    pair_stream_connect_after_shutdown: /^(?!ok$).+/,
+    pair_dgram_connect_host_path: "no_socket",
+    pair_dgram_sendto_host_path: "no_socket",
+    inet_connect_unix_addr: /^(EAFNOSUPPORT|EINVAL)$/,
+    listen_unbound: /^listening:\d+$/,
+    ptrace_attach_launcher: "EPERM",
+    ptrace_attach_stage0: "EPERM",
+    ptrace_attach_ns_init: "EPERM",
+    process_vm_readv_launcher: "EPERM",
+    io_uring_setup: "EPERM",
+    unshare_newuser: "EPERM",
+    unshare_newnet: "EPERM",
+    unshare_newpid: "EPERM",
+    clone3: "ENOSYS",
+    clone_newuser_exec: /^(?!ok$).+/,
+    clone_newpid_exec: /^(?!ok$).+/,
+    setns_net: "EPERM",
+    mount_tmpfs: "EPERM",
+    open_launcher_mem_rw: /^(EACCES|EPERM)$/,
+    open_stage0_mem_rw: /^(EACCES|EPERM)$/,
+    signal_launcher: /^(ESRCH|EPERM)$/,
+    signal_stage0: /^(ESRCH|EPERM)$/,
+    signal_ns_init_sigkill: /^(ok|EPERM)$/,
+    ns_init_alive_after: "yes"
+  };
+  GO_OUTSIDE = {
+    socket_inet6: "ok",
+    socket_inet_dgram: "ok",
+    socket_unix: "ok",
+    socket_unix_dgram: "ok",
+    socketpair_unix_stream: "ok",
+    socketpair_unix_dgram: "ok",
+    socketpair_unix_seqpacket: "ok",
+    pair_stream_connect_host_path: "EISCONN",
+    pair_dgram_connect_host_path: "ok",
+    pair_dgram_sendto_host_path: "ok",
+    listen_unbound: /^listening:\d+$/
+  };
   LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE = String.raw`
 'use strict';
 const net = require('node:net');
@@ -6826,26 +7952,543 @@ async function main() {
 }
 main().catch(() => process.exit(1));
 `;
+  defaultRunner = {
+    async run(launcher, workDir, env, partialPorts) {
+      if (process.getuid?.() === 0)
+        throw new Error("the unconfined syscall control must not run as root");
+      const ports = partialPorts;
+      const probePath = join24(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes5(4).toString("hex")}.cjs`);
+      const watchdogPath = join24(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes5(4).toString("hex")}.cjs`);
+      try {
+        writeFileSync6(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
+        chmodSync4(probePath, 448);
+        const transport = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
+        const linux = await Promise.resolve().then(() => (init_zkapi_confinement_linux(), exports_zkapi_confinement_linux));
+        const bridge = await Promise.resolve().then(() => (init_zkapi_confine_fetch(), exports_zkapi_confine_fetch));
+        writeFileSync6(watchdogPath, transport.WATCHDOG_SCRIPT, { mode: 448 });
+        chmodSync4(watchdogPath, 448);
+        let fixture;
+        let control;
+        let supervised;
+        try {
+          fixture = await createFixture(probePath, workDir, launcher, ports, env, watchdogPath, transport.supervise);
+          const inheritedFds = fixture.inheritedSockets.map(socketFd);
+          if (inheritedFds.some((fd) => fd < 0))
+            throw new Error("descriptor unavailable");
+          let controlResult;
+          let confinedResult;
+          let status;
+          let instanceBound = false;
+          let listenerSetBound = false;
+          const controlDone = new Promise((resolve5, reject) => {
+            control = transport.supervise("daemon", watchdogPath, [process.execPath, probePath, JSON.stringify(fixture.controlTarget)], env, (line) => {
+              controlResult ??= parseProbeLine(line);
+              if (controlResult)
+                resolve5();
+            }, () => {
+              if (!controlResult)
+                reject(new Error("control exited"));
+            }, () => {
+              return;
+            }, () => {
+              return;
+            }, inheritedFds);
+            control.go();
+          });
+          let resolveConfined;
+          let rejectConfined;
+          const confinedDone = new Promise((resolve5, reject) => {
+            resolveConfined = resolve5;
+            rejectConfined = reject;
+          });
+          const args = [
+            launcher,
+            "run",
+            "--dir",
+            workDir,
+            "--status-fd",
+            "3",
+            "--expose",
+            `api=${ports.daemon}`,
+            "--reach",
+            `${ports.tor}=${String(fixture.confinedTarget.torHost)}`,
+            ...[ports.tor, ports.daemon, ports.companionProxy, ports.walletApi].flatMap((port) => ["--connect-port", String(port)]),
+            ...[ports.daemon, ports.companionProxy, ports.walletApi].flatMap((port) => ["--bind-port", String(port)]),
+            "--",
+            process.execPath,
+            probePath,
+            JSON.stringify(fixture.confinedTarget)
+          ];
+          supervised = transport.supervise("daemon", watchdogPath, args, env, (line) => {
+            const parsed = parseProbeLine(line);
+            if (!parsed)
+              return;
+            confinedResult = parsed;
+            (async () => {
+              if (status?.event !== "ready" || !supervised?.leader)
+                throw new Error("ready event missing");
+              const ready = status;
+              const watchdog = { pid: supervised.pgid, startTime: supervised.leader.startTime };
+              instanceBound = linux.verifyLinuxInstance(ready, watchdog) && JSON.stringify(ready.bridgesExpose) === '["api"]' && JSON.stringify(ready.bridgesReach) === JSON.stringify([String(ports.tor)]);
+              listenerSetBound = linux.inspectLinuxNamespace(ready, watchdog, ports);
+              const payload2 = Buffer.alloc(4194304, 90);
+              const response = await bridge.linuxConfinementFetch(join24(workDir, "api.sock"), ready.apiToken)(`http://127.0.0.1:${ports.daemon}/echo`, { method: "POST", body: payload2 });
+              const echoed = Buffer.from(await response.arrayBuffer());
+              parsed.apiBridgeBulk = response.status === 200 && echoed.equals(payload2) ? "intact" : "corrupt";
+              resolveConfined();
+            })().catch(rejectConfined);
+          }, () => {
+            if (!confinedResult)
+              rejectConfined(new Error("confined launcher exited"));
+          }, (event) => {
+            status = event;
+            if (event.event !== "ready")
+              rejectConfined(new Error("launcher refused"));
+          }, () => {
+            if (!confinedResult)
+              rejectConfined(new Error("status closed"));
+          }, inheritedFds);
+          supervised.go();
+          let timeoutId;
+          const timeout = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error("self-test timeout")), 35000);
+          });
+          try {
+            await Promise.race([Promise.all([controlDone, confinedDone]), timeout]);
+          } finally {
+            if (timeoutId)
+              clearTimeout(timeoutId);
+          }
+          await new Promise((resolve5) => setTimeout(resolve5, 50));
+          if (!controlResult || !confinedResult)
+            throw new Error("probe missing");
+          return {
+            control: { ...controlResult, unixStreamConnections: fixture.controlStreamCount(), unixDatagrams: fixture.controlDgram.count() },
+            confined: { ...confinedResult, unixStreamConnections: fixture.confinedStreamCount(), unixDatagrams: fixture.confinedDgram.count(), ...status ? { status } : {}, instanceBound, listenerSetBound }
+          };
+        } finally {
+          let cleanupError;
+          const cleanup = async (operation) => {
+            try {
+              await operation();
+            } catch (error) {
+              cleanupError ??= error;
+            }
+          };
+          if (control)
+            await cleanup(() => stopGroup(control.pgid));
+          if (supervised)
+            await cleanup(() => stopGroup(supervised.pgid));
+          if (fixture)
+            await cleanup(() => fixture.close());
+          if (cleanupError)
+            throw cleanupError;
+        }
+      } finally {
+        rmSync5(probePath, { force: true });
+        rmSync5(watchdogPath, { force: true });
+      }
+    }
+  };
 });
 
 // src/core/zkapi-confinement-linux.ts
+var exports_zkapi_confinement_linux = {};
+__export(exports_zkapi_confinement_linux, {
+  verifyLinuxInstance: () => verifyLinuxInstance,
+  parseLinuxStatus: () => parseLinuxStatus,
+  linuxZkapiConfinement: () => linuxZkapiConfinement,
+  linuxConfinementRemedy: () => linuxConfinementRemedy,
+  linuxConfinementCheck: () => linuxConfinementCheck,
+  inspectLinuxNamespace: () => inspectLinuxNamespace
+});
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { createHash as createHash3 } from "node:crypto";
+import { lstatSync as lstatSync7, readFileSync as readFileSync19, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
+import { dirname as dirname17, join as join25 } from "node:path";
+function record(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function linuxConfinementCheck(value) {
+  const v = record(value);
+  if (!v || v.ok !== true)
+    return { ok: false, code: typeof v?.code === "string" ? v.code : "no_status_event", ...typeof v?.detail === "string" ? { detail: v.detail.slice(0, 512) } : {} };
+  const abi = v.landlockAbi;
+  if (!Number.isInteger(abi) || abi < 4)
+    return { ok: false, code: "landlock_unavailable" };
+  const required = ["netns", "pidns", "ipv6-off", "caps", "nnp", "launcher-undumpable", "launcher-seccomp", "landlock-net", "seccomp", ...abi >= 6 ? ["landlock-scope"] : [], ...abi >= 8 ? ["launcher-landlock"] : [], ...abi >= 9 ? ["landlock-unix"] : []];
+  const stage0 = ["nnp", "launcher-undumpable", "launcher-seccomp", ...abi >= 8 ? ["launcher-landlock"] : []];
+  const has = (v2, wants) => Array.isArray(v2) && v2.every((x) => typeof x === "string") && wants.every((x) => v2.includes(x));
+  if (!has(v.layers, required) || !has(v.stage0Layers, stage0))
+    return { ok: false, code: "restriction_failed" };
+  return { ok: true, kind: "linux_netns", landlockAbi: abi, layers: [...v.layers], stage0Layers: [...v.stage0Layers] };
+}
+function parseLinuxStatus(line) {
+  if (!line.startsWith("zkapi-confine: "))
+    return;
+  try {
+    const v = record(JSON.parse(line.slice(15)));
+    if (!v)
+      return;
+    if (v.event === "refused" && typeof v.code === "string")
+      return { event: "refused", code: v.code };
+    if (v.event === "launcher_exited")
+      return { event: "launcher_exited" };
+    if (v.event !== "ready" || !linuxConfinementCheck({ ...v, ok: true }).ok)
+      return;
+    if (!["stage0Pid", "stage1Pid", "daemonPid"].every((k) => Number.isSafeInteger(v[k]) && v[k] > 1))
+      return;
+    if (!["stage0Start", "stage1Start", "daemonStart"].every((k) => typeof v[k] === "string" && /^\d+$/.test(v[k])))
+      return;
+    if (typeof v.apiToken !== "string" || !/^[a-f0-9]{64}$/.test(v.apiToken))
+      return;
+    if (!Array.isArray(v.bridgesExpose) || !Array.isArray(v.bridgesReach))
+      return;
+    return v;
+  } catch {
+    return;
+  }
+}
+function stat3(pid, proc) {
+  const s = proc.read(`/proc/${pid}/stat`);
+  const f = s.slice(s.lastIndexOf(")") + 1).trim().split(/\s+/);
+  if (!/^\d+$/.test(f[19] ?? "") || f[0] === "Z" || f[0] === "X")
+    throw new Error("dead instance");
+  return { parent: Number(f[1]), start: f[19] };
+}
+function depth(pid, proc) {
+  const line = /^NSpid:\s*(.+)$/m.exec(proc.read(`/proc/${pid}/status`));
+  if (!line)
+    throw new Error("missing namespace depth");
+  return line[1].trim().split(/\s+/).map(Number);
+}
+function verifyLinuxInstance(e, w, proc = realProc) {
+  try {
+    if (new Set([w.pid, e.stage0Pid, e.stage1Pid, e.daemonPid]).size !== 4)
+      return false;
+    const wd = stat3(w.pid, proc), s0 = stat3(e.stage0Pid, proc), s1 = stat3(e.stage1Pid, proc), d = stat3(e.daemonPid, proc);
+    if (wd.start !== w.startTime || s0.start !== e.stage0Start || s1.start !== e.stage1Start || d.start !== e.daemonStart)
+      return false;
+    if (s0.parent !== w.pid || s1.parent !== e.stage0Pid || d.parent !== e.stage1Pid)
+      return false;
+    const n0 = depth(e.stage0Pid, proc), n1 = depth(e.stage1Pid, proc), nd = depth(e.daemonPid, proc);
+    if (n0.length !== 1 || n0[0] !== e.stage0Pid || n1.length !== 2 || n1[0] !== e.stage1Pid || n1[1] !== 1 || nd.length !== 2 || nd[0] !== e.daemonPid || nd[1] < 2)
+      return false;
+    return ["net", "pid"].every((ns) => proc.link(`/proc/${e.daemonPid}/ns/${ns}`) !== proc.link(`/proc/self/ns/${ns}`));
+  } catch {
+    return false;
+  }
+}
+function inspectLinuxNamespace(e, w, ports, proc = realProc) {
+  try {
+    if (!verifyLinuxInstance(e, w, proc))
+      return false;
+    const wanted = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
+    const rows = [];
+    for (const table of ["tcp", "tcp6"]) {
+      for (const line of proc.read(`/proc/${e.daemonPid}/net/${table}`).split(`
+`).slice(1)) {
+        if (!line.trim())
+          continue;
+        const f = line.trim().split(/\s+/);
+        if (f[3] !== "0A")
+          continue;
+        if (table === "tcp6" || f.length < 10 || !/^\d+$/.test(f[9]) || f[9] === "0")
+          return false;
+        const [address, port] = f[1].split(":");
+        if (!["0100007F", "00000000"].includes(address))
+          return false;
+        rows.push({ port: parseInt(port, 16), inode: f[9] });
+      }
+    }
+    if (rows.length !== 4 || new Set(rows.map((r) => r.port)).size !== 4 || wanted.some((p) => !rows.some((r) => r.port === p)))
+      return false;
+    const inodes = new Set(rows.filter((r) => r.port !== ports.tor).map((r) => r.inode));
+    const seen = new Set;
+    const netns = proc.link(`/proc/${e.daemonPid}/ns/net`);
+    for (const name of proc.list("/proc")) {
+      if (!/^\d+$/.test(name))
+        continue;
+      const pid = Number(name);
+      try {
+        if (proc.link(`/proc/${pid}/ns/net`) !== netns)
+          continue;
+        let parent = pid;
+        const visited = new Set;
+        while (parent !== e.daemonPid && !visited.has(parent) && parent > 1) {
+          visited.add(parent);
+          parent = stat3(parent, proc).parent;
+        }
+        if (parent !== e.daemonPid)
+          continue;
+        for (const fd of proc.list(`/proc/${pid}/fd`)) {
+          try {
+            const m = /^socket:\[(\d+)\]$/.exec(proc.link(`/proc/${pid}/fd/${fd}`));
+            if (m && inodes.has(m[1]))
+              seen.add(m[1]);
+          } catch {}
+        }
+      } catch {}
+    }
+    return seen.size === inodes.size && verifyLinuxInstance(e, w, proc);
+  } catch {
+    return false;
+  }
+}
+function linuxConfinementRemedy(code, sysctls, launcher) {
+  if (code === "landlock_unavailable")
+    return "Needs Linux 6.7 or newer with Landlock enabled.";
+  if (["namespace_unavailable", "loopback_unavailable"].includes(code)) {
+    if (sysctls["/proc/sys/kernel/apparmor_restrict_unprivileged_userns"]?.trim() === "1")
+      return `One step needs an administrator. Ubuntu blocks the isolated network space used for private answers. These commands allow only an administrator-owned copy of the helper. This guidance has not been qualified on Ubuntu; answers remain unavailable until the checks pass.
+
+sudo install -D -m 0755 -o root -g root ${shellQuote(launcher)} /usr/local/libexec/olympus/zkapi-confine
+sudo tee /etc/apparmor.d/olympus-zkapi-confine >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+profile olympus-zkapi-confine /usr/local/libexec/olympus/zkapi-confine flags=(unconfined) {
+  userns,
+  include if exists <local/olympus-zkapi-confine>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/olympus-zkapi-confine
+
+Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus-zkapi-confine && sudo rm /etc/apparmor.d/olympus-zkapi-confine /usr/local/libexec/olympus/zkapi-confine`;
+    for (const p of ["/proc/sys/user/max_user_namespaces", "/proc/sys/kernel/unprivileged_userns_clone"])
+      if (sysctls[p]?.trim() === "0")
+        return `${p} is 0. Private answers are unavailable on this computer.`;
+    return "This environment does not allow the required isolated network space. Private answers are unavailable on this computer.";
+  }
+  return "The private-answer helper could not establish its protections. Private answers are unavailable on this computer.";
+}
+function launcherPath(env) {
+  const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
+  const managed = daemon ? join25(dirname17(daemon), "zkapi-confine") : undefined;
+  const system = "/usr/local/libexec/olympus/zkapi-confine";
+  for (const path of [system, managed]) {
+    if (!path)
+      continue;
+    try {
+      if (realpathSync5(path) !== path)
+        continue;
+      let current2 = path;
+      while (true) {
+        const s = lstatSync7(current2);
+        if (s.isSymbolicLink() || (s.mode & 18) !== 0 || (path === system ? s.uid !== 0 : s.uid !== 0 && s.uid !== process.getuid?.()))
+          throw new Error("untrusted path");
+        if (current2 === "/")
+          break;
+        current2 = dirname17(current2);
+      }
+      if (!lstatSync7(path).isFile() || createHash3("sha256").update(readFileSync19(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+        continue;
+      if (execFileSync2(path, ["--version"], { env, encoding: "utf8", timeout: 5000 }).trim() !== `zkapi-confine ${MANAGED_TOOL_PINS["zkapi-clientd"].version}`)
+        continue;
+      return path;
+    } catch {}
+  }
+  return;
+}
+function linuxZkapiConfinement(deps = {}) {
+  const env = deps.env ?? process.env;
+  const proc = deps.proc ?? realProc;
+  let check = { ok: false, code: "confinement_unavailable" };
+  let launcher;
+  const refresh = () => {
+    if ((deps.platform ?? process.platform) !== "linux" || (deps.arch ?? process.arch) !== "x64")
+      return check = { ok: false, code: "unsupported_platform" };
+    launcher = (deps.resolveLauncher ?? (() => launcherPath(env)))();
+    if (!launcher)
+      return check = { ok: false, code: "launcher_missing_or_untrusted" };
+    try {
+      check = linuxConfinementCheck(deps.check ? deps.check(launcher) : JSON.parse(execFileSync2(launcher, ["check"], { env, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })));
+    } catch (e) {
+      try {
+        check = linuxConfinementCheck(JSON.parse(String(e.stdout)));
+      } catch {
+        check = { ok: false, code: "no_status_event" };
+      }
+    }
+    return check;
+  };
+  refresh();
+  return {
+    get level() {
+      return check.ok ? "loopback_filtered" : "none";
+    },
+    limit: "Linux network isolation is checked before each session.",
+    wrap: () => {
+      throw new Error("Linux requires a prepared session");
+    },
+    check: async () => {
+      const result = refresh();
+      const sysctls = {};
+      for (const p of ["/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "/proc/sys/user/max_user_namespaces", "/proc/sys/kernel/unprivileged_userns_clone"])
+        try {
+          sysctls[p] = proc.read(p);
+        } catch {}
+      const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join25(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
+      return { ok: result.ok, line, ...!result.ok && result.code === "launcher_missing_or_untrusted" ? { installRequired: true } : {} };
+    },
+    selfTest: async (dir, childEnv, ports) => Boolean(launcher && check.ok && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
+    prepare: async (dir, ports) => {
+      if (!check.ok || !launcher)
+        throw new Error("confinement_unavailable");
+      const selected = launcher;
+      const nums = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
+      if (nums.some((n) => !Number.isInteger(n) || n < 1 || n > 65535) || new Set(nums).size !== 4)
+        throw new Error("invalid ports");
+      let event;
+      let wd;
+      let refusal;
+      let closed = false;
+      const verify = () => !closed && !refusal && !!event && !!wd && verifyLinuxInstance(event, wd, proc);
+      const session = {
+        wrap: (argv) => [selected, "run", "--dir", dir, "--status-fd", "3", "--expose", `api=${ports.daemon}`, "--reach", `${ports.tor}=${ports.tor}`, ...nums.flatMap((p) => ["--connect-port", String(p)]), ...nums.slice(1).flatMap((p) => ["--bind-port", String(p)]), "--", ...argv],
+        status: (e, w) => {
+          if (closed || refusal)
+            return;
+          if (e.event !== "ready") {
+            refusal = e.event === "refused" ? e.code : "launcher_exited";
+            return;
+          }
+          if (event || !w || !linuxConfinementCheck({ ...e, ok: true }).ok || !verifyLinuxInstance(e, w, proc) || JSON.stringify(e.bridgesExpose) !== '["api"]' || JSON.stringify(e.bridgesReach) !== JSON.stringify([String(ports.tor)])) {
+            refusal = "instance_binding_failed";
+            return;
+          }
+          event = structuredClone(e);
+          wd = { ...w };
+        },
+        statusClosed: () => {
+          refusal ??= event ? "launcher_exited" : "no_status_event";
+        },
+        get ready() {
+          return verify();
+        },
+        get refusal() {
+          return refusal;
+        },
+        get backend() {
+          return event ? { kind: "linux_netns", landlockAbi: event.landlockAbi, layers: [...event.layers], stage0Layers: [...event.stage0Layers] } : undefined;
+        },
+        fetch: async (input, init) => {
+          if (!verify())
+            throw new Error("confinement_unavailable");
+          if (!session.inspect())
+            throw new Error("daemon_identity_failed");
+          const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+          if (url.origin !== `http://127.0.0.1:${ports.daemon}`)
+            throw new Error("wrong daemon origin");
+          return linuxConfinementFetch(join25(dir, "api.sock"), event.apiToken)(input, init);
+        },
+        verifyInstance: verify,
+        inspect: () => verify() && inspectLinuxNamespace(event, wd, ports, proc),
+        close: () => {
+          closed = true;
+          event = undefined;
+          wd = undefined;
+        }
+      };
+      return session;
+    }
+  };
+}
+var realProc, shellQuote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
+  realProc = { read: (p) => readFileSync19(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync4(p) };
 });
 
 // src/core/consult-transport-zkapi.ts
-import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash3, randomUUID as randomUUID8 } from "node:crypto";
-import { accessSync as accessSync7, chmodSync as chmodSync4, closeSync as closeSync4, constants as constants3, existsSync as existsSync9, mkdirSync as mkdirSync11, mkdtempSync as mkdtempSync2, readdirSync as readdirSync3, readFileSync as readFileSync18, readlinkSync, realpathSync as realpathSync5, rmSync as rmSync5, statSync as statSync13, writeFileSync as writeFileSync6 } from "node:fs";
-import { createConnection, createServer } from "node:net";
+var exports_consult_transport_zkapi = {};
+__export(exports_consult_transport_zkapi, {
+  zkapiWalletDirectory: () => zkapiWalletDirectory,
+  zkapiUsageToday: () => zkapiUsageToday,
+  zkapiUnresolvedSession: () => zkapiUnresolvedSession,
+  zkapiStageRows: () => zkapiStageRows,
+  zkapiRouteLabel: () => zkapiRouteLabel,
+  zkapiProcessExitMessage: () => zkapiProcessExitMessage,
+  zkapiOutstandingFences: () => zkapiOutstandingFences,
+  zkapiMoneyStatus: () => zkapiMoneyStatus,
+  zkapiLastSession: () => zkapiLastSession,
+  zkapiFenceScope: () => zkapiFenceScope,
+  zkapiDailyLimitState: () => zkapiDailyLimitState,
+  zkapiConsultReadiness: () => zkapiConsultReadiness,
+  zkapiConsultInFlightOnDisk: () => zkapiConsultInFlightOnDisk,
+  zkapiConfinementAvailable: () => zkapiConfinementAvailable,
+  validZkapiConsultQuestion: () => validZkapiConsultQuestion,
+  trustedFallbackExecutable: () => trustedFallbackExecutable,
+  supervise: () => supervise,
+  standardExecutableDirectories: () => standardExecutableDirectories,
+  sendZkapiConsult: () => sendZkapiConsult,
+  resolveZkapiExecutable: () => resolveZkapiExecutable,
+  resolveZkapiConsultTransport: () => resolveZkapiConsultTransport,
+  resolveExecutable: () => resolveExecutable,
+  reserveZkapiRequest: () => reserveZkapiRequest,
+  recoverZkapiSession: () => recoverZkapiSession,
+  openZkapiConsultSession: () => openZkapiConsultSession,
+  linuxZkapiConfinement: () => linuxZkapiConfinement,
+  inspectLoopbackListener: () => inspectLoopbackListener,
+  formatZkapiStageTable: () => formatZkapiStageTable,
+  defaultZkapiStatePath: () => defaultZkapiStatePath,
+  defaultZkapiConfinement: () => defaultZkapiConfinement,
+  darwinSandboxProfile: () => darwinSandboxProfile,
+  daemonEnvironment: () => daemonEnvironment,
+  confinementStatement: () => confinementStatement,
+  confinementLevel: () => confinementLevel,
+  abandonZkapiFence: () => abandonZkapiFence,
+  ZKAPI_SUPPORTED_DAEMON_VERSIONS: () => ZKAPI_SUPPORTED_DAEMON_VERSIONS,
+  ZKAPI_STAGE_LABELS: () => ZKAPI_STAGE_LABELS,
+  ZKAPI_SESSION_READY_TIMEOUT_MS: () => ZKAPI_SESSION_READY_TIMEOUT_MS,
+  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+  ZKAPI_CONSULT_ERROR_MESSAGES: () => ZKAPI_CONSULT_ERROR_MESSAGES,
+  WATCHDOG_SCRIPT: () => WATCHDOG_SCRIPT,
+  DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
+});
+import { spawn as spawn2, execFileSync as execFileSync3 } from "node:child_process";
+import { createHash as createHash4, randomUUID as randomUUID8 } from "node:crypto";
+import { accessSync as accessSync7, chmodSync as chmodSync5, closeSync as closeSync4, constants as constants3, existsSync as existsSync9, mkdirSync as mkdirSync11, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync20, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync6, statSync as statSync13, writeFileSync as writeFileSync7 } from "node:fs";
+import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir12, tmpdir as tmpdir3 } from "node:os";
-import { delimiter as delimiter5, dirname as dirname17, isAbsolute as isAbsolute17, join as join24, resolve as resolvePath } from "node:path";
+import { delimiter as delimiter5, dirname as dirname18, isAbsolute as isAbsolute17, join as join26, resolve as resolvePath } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
   return ZKAPI_STAGE_LABELS.filter(([key]) => typeof timings[key] === "number").map(([key, label]) => ({ label, ms: timings[key] }));
+}
+function formatZkapiStageTable(timings) {
+  const rows = zkapiStageRows(timings);
+  if (rows.length === 0)
+    return "no stage timings recorded";
+  const width = Math.max(...rows.map((row) => row.label.length));
+  const msWidth = Math.max(...rows.map((row) => String(row.ms).length));
+  return rows.map((row) => `${row.label.padEnd(width)}  ${String(row.ms).padStart(msWidth)} ms`).join(`
+`);
+}
+function resolveZkapiConsultTransport(profiles, resolveSecret, extra = {}) {
+  const routes = Object.values(profiles).filter((profile) => profile.provider === "zkapi" && profile.zkapi && profile.baseUrl);
+  if (routes.length !== 1)
+    return;
+  const route = routes[0];
+  let apiKey;
+  try {
+    apiKey = resolveSecret(route.secretRef);
+  } catch {
+    apiKey = undefined;
+  }
+  return {
+    baseUrl: route.baseUrl,
+    model: extra.model ?? route.model ?? "",
+    ...apiKey ? { apiKey } : {},
+    settings: route.zkapi,
+    ...extra.env ? { env: extra.env } : {},
+    ...extra.statePath ? { statePath: extra.statePath } : {}
+  };
+}
+function failure(code, outcome, networkIdentity, extra = {}) {
+  return { ok: false, error: { code, message: MESSAGES[code], outcome, networkIdentity, ...extra } };
 }
 function zkapiRouteLabel(receipt) {
   if (receipt.keyReuse !== "verified_off" || receipt.inferenceAuth !== "verified") {
@@ -6862,6 +8505,11 @@ function zkapiRouteLabel(receipt) {
   }
   const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : receipt.settlement === "pending" ? "; lease settlement pending" : "";
   return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
+}
+function networkIdentityFor(receipt) {
+  if (receipt.tor === "off" || receipt.postStopProbe === "still_reachable")
+    return "visible";
+  return zkapiRouteLabel(receipt).startsWith("anonymous route") ? "hidden" : "not_verified";
 }
 function zkapiMoneyStatus(settings, now) {
   const required = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id);
@@ -6908,7 +8556,7 @@ function versionSupported(version) {
 }
 function supportsManagedConfinement(executable, env) {
   try {
-    const help = execFileSync2(executable, ["serve", "--help"], {
+    const help = execFileSync3(executable, ["serve", "--help"], {
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 64 * 1024,
@@ -6962,7 +8610,7 @@ function darwinSandboxProfile(policy, ports) {
 }
 function runSelfTestProbe(argv, env) {
   try {
-    return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
+    return JSON.parse(execFileSync3(argv[0], argv.slice(1), {
       encoding: "utf8",
       timeout: 25000,
       env,
@@ -6973,7 +8621,7 @@ function runSelfTestProbe(argv, env) {
   }
 }
 async function listenProbe(port = 0, host = "127.0.0.1") {
-  const server = createServer((socket) => socket.end());
+  const server = createServer2((socket) => socket.end());
   await new Promise((resolve5, reject) => {
     server.once("error", reject);
     server.listen({ port, host, exclusive: true }, () => {
@@ -6983,11 +8631,30 @@ async function listenProbe(port = 0, host = "127.0.0.1") {
   });
   return server;
 }
+async function companionPorts(excluded) {
+  const servers = [];
+  try {
+    const ports = [];
+    while (ports.length < 2) {
+      const server = await listenProbe();
+      servers.push(server);
+      const port = server.address().port;
+      if (!excluded.includes(port))
+        ports.push(port);
+    }
+    return { companionProxy: ports[0], walletApi: ports[1] };
+  } finally {
+    for (const server of servers)
+      server.close();
+  }
+}
 function zkapiConfinementAvailable(confinement) {
   return confinement.level !== "none";
 }
 function defaultZkapiConfinement(host = {}) {
   const platform2 = host.platform ?? process.platform;
+  if (platform2 === "linux")
+    return linuxZkapiConfinement(host);
   if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync9("/usr/bin/sandbox-exec"))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
@@ -7004,12 +8671,12 @@ function defaultZkapiConfinement(host = {}) {
           const other = await listenProbe();
           servers.push(other);
           const targets = JSON.stringify({ allowed, other: other.address().port });
-          const script = join24(workDir, "confinement-self-test.cjs");
-          writeFileSync6(script, SELF_TEST_SCRIPT, { mode: 384 });
+          const script = join26(workDir, "confinement-self-test.cjs");
+          writeFileSync7(script, SELF_TEST_SCRIPT, { mode: 384 });
           const outside = runSelfTestProbe([process.execPath, script, targets], env);
           const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
-          const matches = (out, confined) => Boolean(out && confined) && allowed.every((port) => out["allowed" + port] === "connected" && confined["allowed" + port] === "connected") && ["other", "ipv6", "mapped", "resolver"].every((key) => out[key] === "connected" && confined[key] === "failed_fast") && ["udp", "loopbackUdp"].every((key) => out[key] === "sent" && confined[key] === "failed") && (out.tcp === "timeout" || out.tcp === "failed_slow") && confined.tcp === "failed_fast";
-          return matches(outside, inside) && matches(outside?.child, inside?.child);
+          const matches2 = (out, confined) => Boolean(out && confined) && allowed.every((port) => out["allowed" + port] === "connected" && confined["allowed" + port] === "connected") && ["other", "ipv6", "mapped", "resolver"].every((key) => out[key] === "connected" && confined[key] === "failed_fast") && ["udp", "loopbackUdp"].every((key) => out[key] === "sent" && confined[key] === "failed") && (out.tcp === "timeout" || out.tcp === "failed_slow") && confined.tcp === "failed_fast";
+          return matches2(outside, inside) && matches2(outside?.child, inside?.child);
         } catch {
           return false;
         } finally {
@@ -7028,8 +8695,8 @@ function defaultZkapiConfinement(host = {}) {
 }
 function defaultZkapiStatePath(home = homedir12()) {
   if (process.platform === "linux")
-    return join24(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, "zkapi-consult-state.json");
-  return join24(home, ".olympus", "zkapi-consult-state.json");
+    return join26(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, "zkapi-consult-state.json");
+  return join26(home, ".olympus", "zkapi-consult-state.json");
 }
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
@@ -7037,7 +8704,7 @@ function utcDay(now) {
 function readState(path) {
   if (!existsSync9(path))
     return;
-  const parsed = JSON.parse(readFileSync18(path, "utf8"));
+  const parsed = JSON.parse(readFileSync20(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
     throw new Error("zkAPI state record is malformed");
   }
@@ -7050,21 +8717,45 @@ function zkapiUsageToday(path, now) {
 function zkapiLastSession(path) {
   return readState(path)?.lastSession;
 }
+function zkapiOutstandingFences(path) {
+  return readState(path)?.fences ?? {};
+}
+function zkapiUnresolvedSession(path, scope) {
+  const fences = zkapiOutstandingFences(path);
+  return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
+}
 function zkapiWalletDirectory(env) {
   const home = env.HOME?.trim() || homedir12();
-  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join24(home, "Library", "Application Support", "zkapi-clientd") : join24(env.XDG_CONFIG_HOME?.trim() || join24(home, ".config"), "zkapi-clientd"));
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join26(home, "Library", "Application Support", "zkapi-clientd") : join26(env.XDG_CONFIG_HOME?.trim() || join26(home, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath(configured);
   try {
-    return realpathSync5(absolute2);
+    return realpathSync6(absolute2);
   } catch {
     return absolute2;
   }
 }
 function zkapiFenceScope(input) {
-  return createHash3("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash4("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+}
+function abandonZkapiFence(path, scope, now) {
+  let found = false;
+  updateState(path, now, (state) => {
+    const fence = state.fences?.[scope];
+    if (!fence)
+      return;
+    found = true;
+    const { [scope]: _abandoned, ...others } = state.fences ?? {};
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      ...Object.keys(others).length > 0 ? { fences: others } : {},
+      abandonedFences: { ...state.abandonedFences, [scope]: { ...fence, abandonedAt: now.toISOString() } }
+    };
+  });
+  return found;
 }
 function updateState(path, now, mutate) {
-  mkdirSync11(dirname17(path), { recursive: true, mode: 448 });
+  mkdirSync11(dirname18(path), { recursive: true, mode: 448 });
   return withFileLeaseSync(path, (lease) => {
     const day = utcDay(now);
     const current2 = readState(path);
@@ -7092,6 +8783,180 @@ function ownerLimits(settings) {
     ...settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1e6) } : {}
   };
 }
+function zkapiDailyLimitState(settings, statePath, now) {
+  const limit = ownerLimits(settings);
+  if (limit.requestCap === undefined && limit.spendCapMicroUsd === undefined)
+    return "unset";
+  let usage;
+  try {
+    usage = zkapiUsageToday(statePath, now);
+  } catch {
+    return "reached";
+  }
+  if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
+    return "reached";
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd)
+    return "reached";
+  return "available";
+}
+function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
+  let refusal;
+  updateState(path, now, (state) => {
+    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
+      refusal = "daily_cap_reached";
+      return;
+    }
+    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
+      refusal = "spend_cap_reached";
+      return;
+    }
+    return {
+      ...state,
+      count: state.count + 1,
+      reservedMicroUsd: state.reservedMicroUsd + allowanceMicroUsd,
+      fences: (() => {
+        const { scope, ...facts } = fence;
+        return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
+      })()
+    };
+  });
+  return refusal ? { reserved: false, reason: refusal } : { reserved: true };
+}
+function linuxBunStatusChannel() {
+  if (process.platform !== "linux" || !process.versions.bun)
+    return;
+  const { dlopen, FFIType, ptr } = __require("bun:ffi");
+  const libc = dlopen("libc.so.6", {
+    socketpair: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr], returns: FFIType.i32 }
+  });
+  const fds = new Int32Array(2);
+  try {
+    if (libc.symbols.socketpair(1, 1 | 524288, 0, ptr(fds)) !== 0)
+      throw new Error("private status socketpair unavailable");
+  } finally {
+    libc.close();
+  }
+  try {
+    const reader = createConnection3({ fd: fds[0] });
+    return { reader, writer: fds[1] };
+  } catch (error) {
+    closeSync4(fds[0]);
+    closeSync4(fds[1]);
+    throw error;
+  }
+}
+function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatusClosed, inheritedFds = []) {
+  const statusChannel = onStatus ? linuxBunStatusChannel() : undefined;
+  let child;
+  try {
+    child = spawn2(process.execPath, [watchdog, String(process.pid), ...onStatus ? ["--private-status", String(inheritedFds.length)] : [], ...argv], { env, detached: true, stdio: onStatus ? ["pipe", "pipe", "pipe", statusChannel?.writer ?? "pipe", ...inheritedFds] : ["pipe", "pipe", "pipe"] });
+  } catch (error) {
+    statusChannel?.reader.destroy();
+    throw error;
+  } finally {
+    if (statusChannel)
+      closeSync4(statusChannel.writer);
+  }
+  const handle = {
+    role,
+    child,
+    pgid: child.pid ?? -1,
+    leader: child.pid ? processInstanceIdentity(child.pid) : undefined,
+    gone: false,
+    leaderExited: false,
+    childExited: false,
+    deliberate: false,
+    go: () => {
+      child.stdin?.write(`go
+`);
+    }
+  };
+  let reported = false;
+  const report = () => {
+    if (reported)
+      return;
+    reported = true;
+    onExit(handle);
+  };
+  const exited = () => {
+    handle.leaderExited = true;
+    report();
+  };
+  child.on("exit", exited);
+  child.on("error", exited);
+  child.stdin?.on("error", () => {
+    return;
+  });
+  for (const stream of [child.stdout, child.stderr]) {
+    let pending = "";
+    stream?.setEncoding("utf8");
+    stream?.on("data", (chunk) => {
+      pending += chunk;
+      let index = pending.indexOf(`
+`);
+      while (index >= 0) {
+        const line = pending.slice(0, index);
+        if (line === WATCHDOG_CHILD_EXITED || line.startsWith(`${WATCHDOG_CHILD_EXITED} `)) {
+          const [, code, signal] = line.split(" ");
+          handle.exit = {
+            ...code && /^\d+$/.test(code) ? { code: Number(code) } : {},
+            ...signal && signal !== "-" ? { signal } : {}
+          };
+          handle.childExited = true;
+          report();
+        } else {
+          onLine(line);
+        }
+        pending = pending.slice(index + 1);
+        index = pending.indexOf(`
+`);
+      }
+      if (pending.length > 64 * 1024)
+        pending = "";
+    });
+  }
+  if (onStatus) {
+    const stream = statusChannel?.reader ?? child.stdio[3];
+    let pending = "";
+    let invalid = false;
+    const reject = () => {
+      if (!invalid) {
+        invalid = true;
+        onStatus({ event: "refused", code: "no_status_event" });
+      }
+    };
+    if (!stream)
+      reject();
+    stream?.setEncoding("utf8");
+    stream?.on("data", (chunk) => {
+      if (invalid)
+        return;
+      pending += chunk;
+      if (pending.length > 65536) {
+        reject();
+        return;
+      }
+      let index;
+      while ((index = pending.indexOf(`
+`)) >= 0) {
+        const event = parseLinuxStatus(pending.slice(0, index));
+        pending = pending.slice(index + 1);
+        if (!event) {
+          reject();
+          return;
+        }
+        onStatus(event);
+      }
+    });
+    stream?.on("error", reject);
+    stream?.on("end", () => {
+      if (pending)
+        reject();
+      onStatusClosed?.();
+    });
+  }
+  return handle;
+}
 function groupAlive(pgid) {
   if (pgid <= 0)
     return false;
@@ -7102,7 +8967,7 @@ function groupAlive(pgid) {
     return error.code === "EPERM";
   }
 }
-async function stopGroup(pgid, stillOurs = () => true) {
+async function stopGroup2(pgid, stillOurs = () => true) {
   if (!groupAlive(pgid))
     return true;
   if (!stillOurs())
@@ -7124,6 +8989,30 @@ async function stopGroup(pgid, stillOurs = () => true) {
   while (groupAlive(pgid) && Date.now() < killDeadline)
     await sleep2(POLL_MS);
   return !groupAlive(pgid);
+}
+function activeGroupIsOurs(handle) {
+  if (!handle.leader)
+    return false;
+  try {
+    process.kill(handle.pgid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM")
+      return false;
+  }
+  const current2 = processInstanceIdentity(handle.pgid);
+  if (!current2)
+    return false;
+  if (handle.leader.bootId && current2.bootId && handle.leader.bootId !== current2.bootId)
+    return false;
+  return current2.platform === handle.leader.platform && current2.mechanism === handle.leader.mechanism && current2.startTime === handle.leader.startTime;
+}
+async function stopOwned(handle) {
+  if (handle.gone)
+    return true;
+  const stopped = await stopGroup2(handle.pgid, () => activeGroupIsOurs(handle));
+  if (stopped)
+    handle.gone = true;
+  return stopped;
 }
 function currentBootId() {
   return processInstanceIdentity(process.pid)?.bootId;
@@ -7149,6 +9038,25 @@ function recordedGroupState(group, recordedBootId) {
   if (group.leader.platform !== current2.platform || group.leader.mechanism !== current2.mechanism)
     return "unknown";
   return group.leader.startTime === current2.startTime ? "ours" : "gone";
+}
+function zkapiConsultInFlightOnDisk(statePath) {
+  let state;
+  try {
+    state = readState(statePath);
+  } catch {
+    return;
+  }
+  const running = state?.running;
+  if (!running || !supervisorAlive(running))
+    return;
+  return { since: zkapiRunningSince(statePath) };
+}
+function zkapiRunningSince(statePath) {
+  try {
+    return statSync13(statePath).mtime.toISOString();
+  } catch {
+    return "an unknown time";
+  }
 }
 function supervisorAlive(running) {
   const { supervisor } = running;
@@ -7182,7 +9090,7 @@ async function recoverStrandedGroups(statePath, now) {
       allGone = false;
       continue;
     }
-    if (state === "ours" && !await stopGroup(group.pgid, () => recordedGroupState(group, recordedBoot) === "ours")) {
+    if (state === "ours" && !await stopGroup2(group.pgid, () => recordedGroupState(group, recordedBoot) === "ours")) {
       allGone = false;
     }
   }
@@ -7190,7 +9098,7 @@ async function recoverStrandedGroups(statePath, now) {
     return "stranded";
   if (running.workDir) {
     try {
-      rmSync5(running.workDir, { recursive: true, force: true });
+      rmSync6(running.workDir, { recursive: true, force: true });
     } catch {}
   }
   updateState(statePath, now, (state) => {
@@ -7198,6 +9106,24 @@ async function recoverStrandedGroups(statePath, now) {
     return rest;
   });
   return "clear";
+}
+function processGroupOf(pid) {
+  try {
+    if (process.platform === "linux") {
+      const stat4 = readFileSync20(`/proc/${pid}/stat`, "utf8");
+      const fields = stat4.slice(stat4.lastIndexOf(")") + 1).trim().split(/\s+/);
+      const pgrp = Number(fields[2]);
+      return Number.isInteger(pgrp) ? pgrp : undefined;
+    }
+    const out = execFileSync3("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return /^\d+$/.test(out) ? Number(out) : undefined;
+  } catch {
+    return;
+  }
 }
 function childEnvironment(env) {
   const out = {};
@@ -7208,9 +9134,18 @@ function childEnvironment(env) {
   }
   return out;
 }
+function daemonEnvironment(base, daemonExecutable) {
+  let real = daemonExecutable;
+  try {
+    real = realpathSync6(daemonExecutable);
+  } catch {}
+  const installBin = dirname18(real);
+  const rest = (base.PATH ?? "").split(delimiter5).filter((entry) => entry && entry !== installBin);
+  return { ...base, PATH: [installBin, ...rest].join(delimiter5) };
+}
 function standardExecutableDirectories(env, platform2 = process.platform) {
   const home = env.HOME?.trim();
-  const local = home && isAbsolute17(home) ? [join24(home, ".local", "bin")] : [];
+  const local = home && isAbsolute17(home) ? [join26(home, ".local", "bin")] : [];
   if (platform2 === "darwin")
     return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
   if (platform2 === "linux")
@@ -7218,7 +9153,7 @@ function standardExecutableDirectories(env, platform2 = process.platform) {
   return local;
 }
 function trustedChain(path, probe, uid) {
-  for (let current2 = path;; current2 = dirname17(current2)) {
+  for (let current2 = path;; current2 = dirname18(current2)) {
     const stats = probe.stat(current2);
     if (current2 !== path && !stats.isDirectory())
       return false;
@@ -7226,7 +9161,7 @@ function trustedChain(path, probe, uid) {
       return false;
     if ((stats.mode & 18) !== 0)
       return false;
-    if (dirname17(current2) === current2)
+    if (dirname18(current2) === current2)
       return true;
   }
 }
@@ -7241,7 +9176,7 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
       return;
     if (!trustedChain(real, probe, uid))
       return;
-    if (!trustedChain(probe.realpath(dirname17(candidate)), probe, uid))
+    if (!trustedChain(probe.realpath(dirname18(candidate)), probe, uid))
       return;
     return real;
   } catch {
@@ -7250,7 +9185,7 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
 }
 function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
   const pathDirectories = (env.PATH ?? "").split(delimiter5).filter(Boolean);
-  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join24(dir, name));
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join26(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync7(candidate, constants3.X_OK);
@@ -7263,7 +9198,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   for (const dir of standardExecutableDirectories(env, platform2)) {
     if (pathDirectories.includes(dir))
       continue;
-    const found = trustedFallbackExecutable(join24(dir, name), trust);
+    const found = trustedFallbackExecutable(join26(dir, name), trust);
     if (found)
       return found;
   }
@@ -7272,9 +9207,21 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
 function sleep2(ms) {
   return new Promise((resolve5) => setTimeout(resolve5, ms));
 }
+async function waitFor(condition, timeoutMs, options = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;; ) {
+    if (await condition(Math.max(0, deadline - Date.now())))
+      return true;
+    if (options.signal?.aborted || options.giveUp?.())
+      return false;
+    if (Date.now() >= deadline)
+      return false;
+    await sleep2(Math.min(options.pollMs ?? POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
 function portAnswers(port) {
   return new Promise((resolve5) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
+    const socket = createConnection3({ host: "127.0.0.1", port });
     const done = (value) => {
       socket.destroy();
       resolve5(value);
@@ -7283,6 +9230,171 @@ function portAnswers(port) {
     socket.once("connect", () => done(true));
     socket.once("error", () => done(false));
   });
+}
+function parseDaemonLine(facts, line) {
+  let match = /zkAPI client (\S+) listening at http:\/\/(\S+)\/v1 \(zkapi\); (.+)$/.exec(line);
+  if (match) {
+    facts.version = match[1];
+    facts.listen = match[2];
+    facts.transport = match[3].trim();
+    return;
+  }
+  if (line.includes("Ephemeral key isolation: fresh OpenRouter key for every completion")) {
+    facts.keyReuse = "off";
+    return;
+  }
+  if (/Ephemeral key reuse enabled for up to \d+ seconds/.test(line)) {
+    facts.keyReuse = "on";
+    return;
+  }
+  if (line.includes("Use zkapi-clientd config --api-key to configure your client")) {
+    facts.inferenceAuth = "required";
+    return;
+  }
+  if (line.includes("Localhost inference needs no API key")) {
+    facts.inferenceAuth = "not_required";
+    return;
+  }
+  match = /request started method=\S+ route=(\S+) request=(\d+)/.exec(line);
+  if (match) {
+    facts.requests.set(Number(match[2]), { route: match[1], keys: [] });
+    return;
+  }
+  match = /request key selected request=(\d+) key_ref=(\d+) source=(fresh|reused)/.exec(line);
+  if (match) {
+    facts.requests.get(Number(match[1]))?.keys.push({ keyRef: Number(match[2]), source: match[3] });
+    return;
+  }
+  match = /request \S+ method=\S+ route=\S+ status=(\d+) duration=\S+ request=(\d+)/.exec(line);
+  if (match) {
+    const request = facts.requests.get(Number(match[2]));
+    if (request)
+      request.finished = { status: Number(match[1]) };
+    return;
+  }
+  match = /automatic settlement result key_ref=(\d+) ready=(true|false)/.exec(line);
+  if (match)
+    facts.settled.set(Number(match[1]), match[2] === "true");
+}
+async function probeRequest(fetchImpl, url, init, signal, timeoutMs = PROBE_TIMEOUT_MS) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const response = await fetchImpl(url, { ...init, redirect: "error", signal: controller.signal });
+    const body = await readBounded(response, PROBE_MAX_BYTES);
+    return { status: response.status, headers: response.headers, body: body.ok ? body.text : "" };
+  } catch {
+    return;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function daemonErrorEnvelope(body) {
+  try {
+    const error = JSON.parse(body).error;
+    if (!error || typeof error.code !== "string" || error.type !== error.code || typeof error.message !== "string" || error.param !== null) {
+      return;
+    }
+    return error.code;
+  } catch {
+    return;
+  }
+}
+function healthFingerprint(response) {
+  return Boolean(response) && response.status === 200 && response.body === '{"status":"ok"}' && response.headers.get("cache-control") === "no-store" && response.headers.get("x-content-type-options") === "nosniff";
+}
+function modelListing(body, model) {
+  try {
+    const data = JSON.parse(body).data;
+    if (!Array.isArray(data) || data.length === 0)
+      return { listed: false };
+    const entry = data.find((item) => item.id === model);
+    const allowance = entry?.oa_request_limit_micro_usd;
+    return typeof allowance === "number" && Number.isInteger(allowance) && allowance > 0 ? { listed: true, allowance } : { listed: true };
+  } catch {
+    return { listed: false };
+  }
+}
+function inspectLoopbackListener(port) {
+  let pids;
+  if (process.platform === "darwin") {
+    try {
+      const out = execFileSync3("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+        encoding: "utf8",
+        timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      pids = [...new Set(out.split(`
+`).filter((line) => /^p\d+$/.test(line)).map((line) => Number(line.slice(1))))];
+    } catch (error) {
+      return error.status === 1 ? { kind: "not_visible" } : { kind: "unavailable" };
+    }
+  } else if (process.platform === "linux") {
+    const found = linuxListenerPids(port);
+    if (!Array.isArray(found))
+      return found;
+    pids = found;
+  } else {
+    return { kind: "unavailable" };
+  }
+  if (pids.length === 0)
+    return { kind: "not_visible" };
+  const pgids = new Set(pids.map((pid) => processGroupOf(pid)));
+  const [pgid] = [...pgids];
+  return pgids.size === 1 && pgid !== undefined ? { kind: "found", pid: pids[0], pgid } : { kind: "found", pid: pids[0] };
+}
+function linuxListenerPids(port) {
+  const inodes = new Set;
+  const hexPort = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text2;
+    try {
+      text2 = readFileSync20(table, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text2.split(`
+`).slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 10 || fields[3] !== "0A" || !fields[1]?.endsWith(`:${hexPort}`))
+        continue;
+      if (fields[9] && fields[9] !== "0")
+        inodes.add(fields[9]);
+    }
+  }
+  if (inodes.size === 0)
+    return { kind: "not_visible" };
+  let entries;
+  try {
+    entries = readdirSync5("/proc").filter((name) => /^\d+$/.test(name));
+  } catch {
+    return { kind: "unavailable" };
+  }
+  const owners = new Set;
+  const seen = new Set;
+  for (const pid of entries) {
+    let fds;
+    try {
+      fds = readdirSync5(`/proc/${pid}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        const match = /^socket:\[(\d+)\]$/.exec(readlinkSync3(`/proc/${pid}/fd/${fd}`));
+        if (match && inodes.has(match[1])) {
+          owners.add(Number(pid));
+          seen.add(match[1]);
+        }
+      } catch {}
+    }
+  }
+  if (seen.size !== inodes.size)
+    return { kind: "unavailable" };
+  return [...owners];
 }
 function resolveZkapiExecutable(name, explicit, env) {
   if (!explicit) {
@@ -7296,7 +9408,7 @@ async function zkapiConsultReadiness(options) {
   const now = (options.now ?? (() => new Date))();
   const env = options.env ?? process.env;
   const settings = options.settings;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
   const confinementCheck = await confinement.check?.();
@@ -7313,7 +9425,7 @@ async function zkapiConsultReadiness(options) {
     blockers.push("daemon_not_found");
   } else {
     try {
-      const out = execFileSync2(daemonExecutable, ["--version"], {
+      const out = execFileSync3(daemonExecutable, ["--version"], {
         encoding: "utf8",
         timeout: 5000,
         env: childEnvironment(env),
@@ -7400,6 +9512,717 @@ async function zkapiConsultReadiness(options) {
     blockers
   };
 }
+function deferred() {
+  let settled = false;
+  let resolve5;
+  const promise = new Promise((done) => {
+    resolve5 = (value) => {
+      if (settled)
+        return;
+      settled = true;
+      done(value);
+    };
+  });
+  return { promise, resolve: resolve5, settled: () => settled };
+}
+async function openZkapiConsultSession(options, control = {}) {
+  return openSession(options, control, false);
+}
+async function sendZkapiConsult(question, options, control = {}) {
+  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
+  if (typeof question !== "string" || !validQuestion(question)) {
+    return failure("invalid_question", "not_sent", initialIdentity);
+  }
+  return oneShot(question, false, options, control.signal);
+}
+async function recoverZkapiSession(options, control = {}) {
+  return oneShot(RECOVERY_QUESTION, true, options, control.signal);
+}
+async function oneShot(question, recovery, options, signal) {
+  const opened = await openSession(options, { signal }, recovery);
+  if (!opened.ok)
+    return opened;
+  await opened.session.send(question, { signal });
+  const result = await opened.session.finished;
+  if (signal?.aborted && (result.ok || result.error.outcome !== "not_sent" && !SESSION_OWNED_FAILURES.has(result.error.code))) {
+    const receipt = result.ok ? result.receipt : result.error.receipt;
+    const identity = result.ok ? result.networkIdentity : result.error.networkIdentity;
+    return failure("aborted", "unknown", identity, receipt ? { receipt } : {});
+  }
+  return result;
+}
+async function openSession(options, control, recovery) {
+  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
+  const statePath = options.statePath ?? defaultZkapiStatePath();
+  const sent = { dispatched: false };
+  const clock2 = options.clock ?? (() => performance.now());
+  const startedAt = sampleClock(clock2);
+  const bridge = {
+    state: "opening",
+    openSignal: control.signal,
+    readyTimeoutMs: control.readyTimeoutMs ?? ZKAPI_SESSION_READY_TIMEOUT_MS,
+    cancelRequested: undefined,
+    cancel: undefined,
+    ready: deferred(),
+    dispatch: deferred(),
+    reply: deferred()
+  };
+  const requestCancel = (reason) => {
+    if (bridge.cancel)
+      bridge.cancel(reason);
+    else
+      bridge.cancelRequested ??= reason;
+  };
+  const openDeadline = control.deadlineMs !== undefined ? setTimeout(() => {
+    if (bridge.state === "opening")
+      requestCancel("deadline");
+  }, control.deadlineMs) : undefined;
+  let leaseHeld = false;
+  let admissionHeld = false;
+  const finished = (async () => {
+    try {
+      mkdirSync11(dirname18(statePath), { recursive: true, mode: 448 });
+      const result2 = await withEngineConsultAdmission(statePath, () => {
+        leaseHeld = true;
+        if (zkapiConsultInFlight)
+          return Promise.resolve(failure("busy", "not_sent", initialIdentity));
+        zkapiConsultInFlight = true;
+        admissionHeld = true;
+        return runSession(recovery, options, statePath, bridge, sent, clock2, startedAt);
+      }, { acquireTimeoutMs: 50 });
+      const receipt = result2.ok ? result2.receipt : result2.error.receipt;
+      if (receipt && receipt.stageMs?.totalMs === undefined) {
+        receipt.stageMs = withTiming(receipt.stageMs ?? {}, "totalMs", elapsedMs(clock2, startedAt));
+        if (Object.keys(receipt.stageMs).length === 0)
+          delete receipt.stageMs;
+      }
+      return result2;
+    } catch (error) {
+      const total = elapsedMs(clock2, startedAt);
+      let stageMs = withTiming({}, "totalMs", total);
+      if (!leaseHeld)
+        stageMs = withTiming(stageMs, "leaseAcquireMs", total);
+      const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
+      if (error instanceof FileLeaseBusyError)
+        return failure("busy", "not_sent", initialIdentity, timed);
+      if (error instanceof EngineMaintenanceInProgressError)
+        return failure("busy", "not_sent", initialIdentity, timed);
+      return failure("internal_error", sent.dispatched ? "unknown" : "not_sent", initialIdentity, timed);
+    } finally {
+      if (admissionHeld) {
+        zkapiConsultInFlight = false;
+        activeSessionId = undefined;
+      }
+    }
+  })().then((result2) => {
+    clearTimeout(openDeadline);
+    bridge.state = sent.dispatched ? "finished" : "cancelled";
+    if (!result2.ok)
+      bridge.reply.resolve({ kind: "failed", error: result2.error });
+    return result2;
+  });
+  const session = {
+    get state() {
+      return bridge.state;
+    },
+    finished,
+    cancel: () => requestCancel("cancel"),
+    send: async (question, sendControl = {}) => {
+      if (typeof question !== "string" || !validQuestion(question)) {
+        return { kind: "failed", error: failure("invalid_question", "not_sent", initialIdentity).error };
+      }
+      if (bridge.state !== "ready") {
+        return { kind: "failed", error: failure("session_spent", "not_sent", initialIdentity).error };
+      }
+      bridge.state = "authorizing";
+      const deadlineAt = sendControl.deadlineMs !== undefined ? performance.now() + sendControl.deadlineMs : undefined;
+      bridge.dispatch.resolve({
+        question,
+        signal: sendControl.signal,
+        authorize: sendControl.authorize,
+        deadlineAt
+      });
+      return bridge.reply.promise;
+    }
+  };
+  const ready = await Promise.race([
+    bridge.ready.promise.then(() => true),
+    finished.then(() => false)
+  ]);
+  if (ready) {
+    clearTimeout(openDeadline);
+    return { ok: true, session };
+  }
+  const result = await finished;
+  return result.ok ? failure("internal_error", "unknown", result.networkIdentity, { receipt: result.receipt }) : result;
+}
+async function runSession(recovery, options, statePath, bridge, sent, clock2, startedAt) {
+  let timings = withTiming({}, "leaseAcquireMs", elapsedMs(clock2, startedAt));
+  let openStage;
+  let lastSampleAt;
+  const stage = (key) => {
+    const at = sampleClock(clock2);
+    lastSampleAt = at;
+    if (openStage)
+      timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
+    openStage = key ? { key, at } : undefined;
+  };
+  const now = options.now ?? (() => new Date);
+  const settings = options.settings;
+  const env = options.env ?? process.env;
+  let fetchImpl = options.fetchImpl ?? fetch;
+  let confinementSession;
+  const inspect = options.inspectListener ?? inspectLoopbackListener;
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
+  const origin = new URL(options.baseUrl).origin;
+  const daemonPort = Number(new URL(options.baseUrl).port || 80);
+  const perConsultTor = settings.tor === "per_consult";
+  const filtered = perConsultTor && confinement.level === "loopback_filtered";
+  const ports = { tor: settings.torSocksPort, daemon: daemonPort };
+  const receipt = {
+    recovery,
+    keyReuse: "not_verified",
+    inferenceAuth: "not_verified",
+    tor: perConsultTor ? "per_consult" : "off",
+    freshTorClient: false,
+    confinement: perConsultTor ? confinement.level : "none",
+    confinementSelfTest: "not_run",
+    postStopProbe: "not_run",
+    settlement: "no_lease",
+    fence: "clear"
+  };
+  const snapshot = () => Object.keys(timings).length > 0 ? { ...receipt, stageMs: { ...timings } } : { ...receipt };
+  const pendingSnapshot = () => ({ ...snapshot(), settlement: "pending", fence: "held" });
+  const identity = () => perConsultTor ? networkIdentityFor(receipt) : "visible";
+  const fail = (code, extra = {}) => failure(code, sent.dispatched ? extra.httpStatus ? "sent_failed" : "unknown" : "not_sent", identity(), { ...extra, receipt: snapshot() });
+  const sessionAbort = new AbortController;
+  const sessionSignal = sessionAbort.signal;
+  let abortCause = "aborted";
+  const cancelBeforeDispatch = (reason) => {
+    if (sessionSignal.aborted)
+      return;
+    abortCause = reason === "deadline" ? "timeout" : "aborted";
+    sessionAbort.abort();
+  };
+  let detachCaller;
+  bridge.cancel = (reason) => {
+    if (sent.dispatched)
+      detachCaller?.();
+    else
+      cancelBeforeDispatch(reason);
+  };
+  const onCallerAbort = () => bridge.cancel("cancel");
+  bridge.openSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  if (bridge.openSignal?.aborted)
+    cancelBeforeDispatch("cancel");
+  if (bridge.cancelRequested)
+    cancelBeforeDispatch(bridge.cancelRequested);
+  let sendSignal;
+  const cleanupCallerSignals = () => {
+    bridge.openSignal?.removeEventListener("abort", onCallerAbort);
+    sendSignal?.removeEventListener("abort", onCallerAbort);
+  };
+  const scope = zkapiFenceScope({ env });
+  let fences;
+  try {
+    fences = zkapiOutstandingFences(statePath);
+  } catch {
+    cleanupCallerSignals();
+    return fail("state_unavailable");
+  }
+  const fenced = Boolean(fences[scope]);
+  const fencedElsewhere = Object.keys(fences).some((key) => key !== scope);
+  if (fenced || fencedElsewhere)
+    receipt.fence = "held";
+  if (fenced)
+    receipt.settlement = "not_confirmed";
+  const refuse = (code) => {
+    cleanupCallerSignals();
+    return fail(code);
+  };
+  if (!zkapiConfinementAvailable(confinement))
+    return refuse("confinement_unavailable");
+  if (confinement.prepare && !perConsultTor)
+    return refuse("confinement_unavailable");
+  try {
+    if (confinement.check && !(await confinement.check()).ok)
+      return refuse("confinement_unavailable");
+  } catch {
+    return refuse("confinement_unavailable");
+  }
+  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now())).find((code) => !(recovery && code === "acknowledgements_incomplete"));
+  if (blocked)
+    return refuse(blocked);
+  if (!options.apiKey)
+    return refuse("daemon_api_key_missing");
+  const daemonExecutable = resolveZkapiExecutable("zkapi-clientd", settings.daemonExecutable, env);
+  if (!daemonExecutable)
+    return refuse("daemon_not_found");
+  if (filtered && !supportsManagedConfinement(daemonExecutable, childEnvironment(env)))
+    return refuse("daemon_supervisor_unsupported");
+  const torExecutable = perConsultTor ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
+  if (perConsultTor && !torExecutable)
+    return refuse("tor_not_found");
+  try {
+    const stranded = await recoverStrandedGroups(statePath, now());
+    if (stranded === "busy")
+      return refuse("busy");
+    if (stranded === "stranded")
+      return refuse("stranded_processes");
+    if (!recovery && fenced)
+      return refuse("unresolved_session");
+    if (fencedElsewhere && !fenced)
+      return refuse("unresolved_session_other_wallet");
+    if (!fenced && recovery)
+      return refuse("no_unresolved_session");
+    const usage = zkapiUsageToday(statePath, now());
+    const limit = ownerLimits(settings);
+    if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
+      return refuse("daily_cap_reached");
+    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
+      return refuse("spend_cap_reached");
+    }
+  } catch {
+    return refuse("state_unavailable");
+  }
+  if (await portAnswers(daemonPort))
+    return refuse("daemon_already_running");
+  if (perConsultTor && await portAnswers(settings.torSocksPort))
+    return refuse("tor_port_busy");
+  if (sessionSignal.aborted)
+    return refuse(abortCause);
+  const sessionId = randomUUID8();
+  const workDir = mkdtempSync2(join26(tmpdir3(), "olympus-zkapi-"));
+  chmodSync5(workDir, 448);
+  const watchdog = join26(workDir, "watchdog.cjs");
+  const childEnv = childEnvironment(env);
+  const groups = [];
+  let tor;
+  let daemon;
+  let result = failure("internal_error", "not_sent", "not_verified");
+  const unexpectedExit = () => groups.some((group) => (group.leaderExited || group.childExited) && !group.deliberate);
+  const onChildExit = (handle) => {
+    if (handle.deliberate)
+      return;
+    receipt.exited ??= { role: handle.role, ...openStage ? { stage: openStage.key } : {} };
+    sessionAbort.abort();
+  };
+  const settleExitFacts = () => {
+    const exited = receipt.exited;
+    if (!exited)
+      return;
+    const handle = groups.find((group) => group.role === exited.role);
+    if (handle?.exit?.code !== undefined && exited.code === undefined)
+      exited.code = handle.exit.code;
+    if (handle?.exit?.signal && !exited.signal)
+      exited.signal = handle.exit.signal;
+  };
+  const interrupted = () => unexpectedExit() ? "session_process_exited" : abortCause;
+  let sendDeadline;
+  result = await (async () => {
+    try {
+      writeFileSync7(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
+      const supervisorInstance = processInstanceIdentity(process.pid);
+      activeSessionId = sessionId;
+      updateState(statePath, now(), (state) => ({
+        ...state,
+        running: { sessionId, supervisor: { pid: process.pid, ...supervisorInstance ? { instance: supervisorInstance } : {} }, workDir, groups: [] }
+      }));
+      const recordAndStart = (handle) => {
+        groups.push(handle);
+        const leader = handle.leader;
+        updateState(statePath, now(), (state) => ({
+          ...state,
+          ...state.running ? { running: { ...state.running, groups: [...state.running.groups, { role: handle.role, pgid: handle.pgid, ...leader ? { leader } : {} }] } } : {}
+        }));
+        handle.go();
+      };
+      const anyExited = unexpectedExit;
+      if (perConsultTor) {
+        stage("confinementSelfTestMs");
+        if (filtered)
+          Object.assign(ports, await companionPorts([ports.tor, ports.daemon]));
+        if (await confinement.selfTest(workDir, childEnv, ports)) {
+          receipt.confinementSelfTest = "passed";
+        } else {
+          receipt.confinementSelfTest = "failed";
+          return result = fail("confinement_self_test_failed");
+        }
+        if (sessionSignal.aborted)
+          return result = fail(interrupted());
+        if (confinement.prepare) {
+          try {
+            confinementSession = await confinement.prepare(workDir, ports);
+            fetchImpl = confinementSession.fetch;
+          } catch {
+            return result = fail("confinement_unavailable");
+          }
+        }
+        const torDataDir = join26(workDir, "tor");
+        mkdirSync11(torDataDir, { mode: 448 });
+        let bootstrapped = false;
+        stage("torBootstrapMs");
+        tor = supervise("tor", watchdog, [
+          torExecutable,
+          "--ClientOnly",
+          "1",
+          "--PublishServerDescriptor",
+          "0",
+          "--DataDirectory",
+          torDataDir,
+          "--SocksPort",
+          `127.0.0.1:${settings.torSocksPort}`,
+          "--SafeLogging",
+          "1",
+          "--__OwningControllerProcess",
+          String(process.pid)
+        ], childEnv, (line) => {
+          if (line.includes("Bootstrapped 100"))
+            bootstrapped = true;
+        }, onChildExit);
+        recordAndStart(tor);
+        if (!await waitFor(() => bootstrapped, settings.torBootstrapTimeoutMs, { signal: sessionSignal, giveUp: anyExited })) {
+          return result = fail(sessionSignal.aborted ? interrupted() : "tor_bootstrap_failed");
+        }
+        receipt.freshTorClient = true;
+      }
+      const facts = { requests: new Map, settled: new Map };
+      const daemonArgv = [daemonExecutable, "serve"];
+      if (filtered)
+        daemonArgv.push("--relay-url", `socks5://127.0.0.1:${ports.tor}`, "--companion-proxy-listen", `127.0.0.1:${ports.companionProxy}`, "--wallet-api-listen", `127.0.0.1:${ports.walletApi}`, "--require-managed-companion", "--require-companion-custody");
+      stage("daemonReadyMs");
+      daemon = supervise("daemon", watchdog, confinementSession ? confinementSession.wrap(daemonArgv) : perConsultTor ? confinement.wrap(daemonArgv, ports) : daemonArgv, daemonEnvironment(childEnv, daemonExecutable), (line) => parseDaemonLine(facts, line), onChildExit, confinementSession ? (event) => confinementSession.status(event, daemon?.leader ? { pid: daemon.pgid, startTime: daemon.leader.startTime } : undefined) : undefined, confinementSession ? () => confinementSession.statusClosed() : undefined);
+      recordAndStart(daemon);
+      if (confinementSession) {
+        const statusReady = await waitFor(() => confinementSession.ready, settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: () => Boolean(confinementSession.refusal) || anyExited() });
+        if (!statusReady) {
+          receipt.confinementFailure = confinementSession.refusal ?? "no_status_event";
+          return result = fail("confinement_unavailable");
+        }
+        receipt.confinementBackend = confinementSession.backend;
+      }
+      const daemonGone = () => daemon.leaderExited || daemon.childExited;
+      const owned = async (includeTor = true) => {
+        if (includeTor ? anyExited() : daemonGone())
+          return false;
+        if (confinementSession && (!confinementSession.verifyInstance() || !confinementSession.inspect()))
+          return false;
+        const listener = confinementSession ? { kind: "found", pgid: daemon.pgid } : await inspect(daemonPort);
+        if (listener.kind !== "found" || listener.pgid !== daemon.pgid)
+          return false;
+        if (filtered && !confinementSession) {
+          for (const port of [ports.companionProxy, ports.walletApi]) {
+            const companion = await inspect(port);
+            if (companion.kind !== "found" || companion.pgid !== daemon.pgid)
+              return false;
+          }
+        }
+        if (tor && includeTor) {
+          const socks = await inspect(settings.torSocksPort);
+          if (socks.kind !== "found" || socks.pgid !== tor.pgid)
+            return false;
+        }
+        return includeTor ? !anyExited() : !daemonGone();
+      };
+      const guard = async () => {
+        if (sessionSignal.aborted)
+          return interrupted();
+        if (anyExited())
+          return "session_process_exited";
+        if (await owned())
+          return;
+        await sleep2(300);
+        return anyExited() ? "session_process_exited" : "daemon_identity_failed";
+      };
+      const ready = await waitFor(async (remainingMs) => Boolean(facts.listen) && (!confinementSession || await owned()) && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: "GET" }, sessionSignal, Math.min(2000, remainingMs))) && (!filtered || await owned()), settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: 250 });
+      if (!ready)
+        return result = fail(sessionSignal.aborted ? interrupted() : filtered && facts.listen ? "daemon_identity_failed" : "daemon_start_failed");
+      stage("daemonVerifyMs");
+      receipt.daemonVersion = facts.version;
+      if (!versionSupported(facts.version))
+        return result = fail("daemon_version_unsupported");
+      if (facts.listen !== new URL(options.baseUrl).host)
+        return result = fail("daemon_identity_failed");
+      const expectedTransport = perConsultTor ? "SOCKS5 proxy required" : "direct HTTPS (network proxy off)";
+      if (facts.transport !== expectedTransport)
+        return result = fail("relay_mismatch");
+      if (facts.keyReuse === "on")
+        return result = fail("key_reuse_on");
+      if (facts.keyReuse !== "off")
+        return result = fail("key_reuse_unverified");
+      receipt.keyReuse = "verified_off";
+      if (facts.inferenceAuth !== "required")
+        return result = fail("daemon_keyless");
+      let problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      const unauthenticated = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "POST" }, sessionSignal);
+      if (!unauthenticated || unauthenticated.status !== 401 || daemonErrorEnvelope(unauthenticated.body) !== "invalid_api_key" || unauthenticated.headers.get("www-authenticate") !== "Bearer") {
+        return result = fail(unauthenticated?.status === 405 ? "daemon_keyless" : "daemon_identity_failed");
+      }
+      const authorization = { Authorization: `Bearer ${options.apiKey}` };
+      problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      const status = await probeRequest(fetchImpl, `${origin}/admin/status`, { method: "GET", headers: authorization }, sessionSignal);
+      if (sessionSignal.aborted)
+        return result = fail(interrupted());
+      if (!status || status.status === 401)
+        return result = fail("daemon_api_key_rejected");
+      const network = adminStatusNetwork(status);
+      if (!network)
+        return result = fail("daemon_identity_failed");
+      if (filtered && !managedTransportMatches(status, ports))
+        return result = fail("relay_mismatch");
+      receipt.inferenceAuth = "verified";
+      receipt.network = network;
+      let listing = { listed: false };
+      let guardProblem;
+      stage("policyWarmMs");
+      await waitFor(async (remainingMs) => {
+        guardProblem = await guard();
+        if (guardProblem)
+          return true;
+        const models = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, sessionSignal, Math.min(MODELS_PROBE_TIMEOUT_MS, remainingMs));
+        if (models?.status !== 200)
+          return false;
+        listing = modelListing(models.body, options.model);
+        return listing.listed;
+      }, settings.policyWarmTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: POLICY_POLL_MS });
+      if (guardProblem)
+        return result = fail(guardProblem);
+      if (!listing.listed)
+        return result = fail(sessionSignal.aborted ? interrupted() : "policy_unavailable");
+      if (listing.allowance === undefined)
+        return result = fail("model_unavailable");
+      const allowanceMicroUsd = Math.min(listing.allowance, ZKAPI_MAX_ALLOWANCE_MICRO_USD);
+      receipt.listedAllowanceUsd = listing.allowance / 1e6;
+      stage(undefined);
+      timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
+      bridge.state = "ready";
+      bridge.ready.resolve();
+      const aborted = new Promise((resolve5) => {
+        if (sessionSignal.aborted)
+          resolve5(undefined);
+        else
+          sessionSignal.addEventListener("abort", () => resolve5(undefined), { once: true });
+      });
+      const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
+      const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
+      clearTimeout(readyTimer);
+      if (!dispatch || sessionSignal.aborted)
+        return result = fail(interrupted());
+      stage("reservationMs");
+      const prepared = prepareCompletionRequest(dispatch.question, options, origin);
+      sendSignal = dispatch.signal;
+      sendSignal?.addEventListener("abort", onCallerAbort, { once: true });
+      if (sendSignal?.aborted)
+        cancelBeforeDispatch("cancel");
+      const deadlineAt = dispatch.deadlineAt;
+      const pastDeadline = () => deadlineAt !== undefined && performance.now() >= deadlineAt;
+      if (pastDeadline())
+        return result = fail("timeout");
+      if (deadlineAt !== undefined)
+        sendDeadline = setTimeout(() => cancelBeforeDispatch("deadline"), Math.max(0, deadlineAt - performance.now()));
+      problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      let authorized = true;
+      if (dispatch.authorize) {
+        let pending;
+        try {
+          pending = Promise.resolve(dispatch.authorize(sessionSignal));
+        } catch {
+          return result = fail("internal_error");
+        }
+        const settled = await Promise.race([
+          pending.then((value) => ({ ok: true, value }), () => ({ ok: false })),
+          aborted.then(() => {
+            return;
+          })
+        ]);
+        if (settled === undefined) {
+          pending.catch(() => {
+            return;
+          });
+          return result = fail(interrupted());
+        }
+        if (!settled.ok)
+          return result = fail("internal_error");
+        authorized = settled.value;
+      }
+      if (sessionSignal.aborted)
+        return result = fail(interrupted());
+      if (pastDeadline())
+        return result = fail("timeout");
+      if (!authorized)
+        return result = fail("authorization_refused");
+      if (anyExited())
+        return result = fail("session_process_exited");
+      clearTimeout(sendDeadline);
+      let reservation;
+      try {
+        reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
+          scope,
+          configDir: zkapiWalletDirectory(env),
+          daemonExecutable,
+          daemonPort
+        }, allowanceMicroUsd);
+      } catch {
+        return result = fail("state_unavailable");
+      }
+      if (!reservation.reserved)
+        return result = fail(reservation.reason);
+      receipt.reservedUsd = allowanceMicroUsd / 1e6;
+      receipt.fence = "held";
+      const requestsBefore = new Set(facts.requests.keys());
+      sent.dispatched = true;
+      bridge.state = "dispatched";
+      detachCaller = () => bridge.reply.resolve({ kind: "failed", error: failure("aborted", "unknown", identity(), { receipt: pendingSnapshot() }).error });
+      const completion = await sendCompletion(prepared, confinementSession ? { ...options, fetchImpl } : options, sessionSignal, stage, pastDeadline);
+      if (!completion.ok && completion.error.outcome === "not_sent") {
+        sent.dispatched = false;
+        detachCaller = undefined;
+        try {
+          releaseZkapiReservation(statePath, scope, fences[scope], now(), allowanceMicroUsd);
+          delete receipt.reservedUsd;
+          receipt.fence = fenced || fencedElsewhere ? "held" : "clear";
+        } catch {}
+        return result = fail(completion.error.code);
+      }
+      if (completion.ok)
+        timings = withTiming(timings, "replyHandedOverAtMs", durationMs(startedAt, lastSampleAt));
+      bridge.state = "replied";
+      bridge.reply.resolve(completion.ok ? {
+        kind: "reply",
+        text: completion.text,
+        routeLabel: zkapiRouteLabel(pendingSnapshot()),
+        networkIdentity: identity(),
+        receipt: pendingSnapshot(),
+        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
+        elapsedMs: completion.elapsedMs
+      } : {
+        kind: "failed",
+        error: failure(completion.error.code, completion.error.outcome, identity(), {
+          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
+          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
+          receipt: pendingSnapshot()
+        }).error
+      });
+      stage("correlationWaitMs");
+      const correlated = await waitFor(() => {
+        const ours2 = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
+        return ours2.length === 1 && ours2[0][1].finished !== undefined;
+      }, settings.settleTimeoutMs, { giveUp: unexpectedExit });
+      const ours = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
+      const request = correlated && ours.length === 1 ? ours[0][1] : undefined;
+      if (request && request.keys.some((key) => key.source !== "fresh"))
+        receipt.keyReuse = "not_verified";
+      const keyRef = request?.keys.length === 1 ? request.keys[0].keyRef : undefined;
+      let fenceClears = false;
+      if (keyRef !== undefined) {
+        stage("settlementWaitMs");
+        receipt.settlement = await waitFor(() => facts.settled.get(keyRef) === true, settings.settleTimeoutMs, { giveUp: unexpectedExit }) ? "confirmed" : "not_confirmed";
+        fenceClears = receipt.settlement === "confirmed" && request.keys[0].source === "fresh";
+      } else {
+        const preLease = !recovery && request !== undefined && request.keys.length === 0 && request.finished?.status === 400 && !completion.ok && (completion.error.daemonCode === "invalid_model" || completion.error.daemonCode === "model_budget_unavailable");
+        receipt.settlement = preLease ? "no_lease" : "not_confirmed";
+        fenceClears = preLease;
+      }
+      stage(undefined);
+      if (fenceClears) {
+        try {
+          updateState(statePath, now(), (state) => {
+            const { [scope]: _cleared, ...others } = state.fences ?? {};
+            const { fences: _all, ...rest } = state;
+            return Object.keys(others).length > 0 ? { ...rest, fences: others } : rest;
+          });
+          receipt.fence = "clear";
+        } catch {}
+      }
+      if (perConsultTor && !unexpectedExit()) {
+        tor.deliberate = true;
+        stage("torStopMs");
+        const torStopped = await stopOwned(tor);
+        stage(undefined);
+        let after;
+        if (torStopped && !daemonGone() && await owned(false)) {
+          stage("postStopProbeMs");
+          after = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS);
+          stage(undefined);
+        }
+        receipt.postStopProbe = after?.status === 200 ? "still_reachable" : after?.status === 502 && daemonErrorEnvelope(after.body) === "models_unavailable" ? "route_lost" : "inconclusive";
+      }
+      if (unexpectedExit())
+        return result = fail("session_process_exited");
+      if (!completion.ok) {
+        result = failure(completion.error.code, completion.error.outcome, identity(), {
+          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
+          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
+          receipt: snapshot()
+        });
+        return result;
+      }
+      result = {
+        ok: true,
+        text: completion.text,
+        routeLabel: zkapiRouteLabel(receipt),
+        networkIdentity: identity(),
+        receipt: snapshot(),
+        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
+        elapsedMs: completion.elapsedMs
+      };
+      return result;
+    } catch {
+      return result = fail("internal_error");
+    }
+  })();
+  clearTimeout(sendDeadline);
+  cleanupCallerSignals();
+  stage("teardownMs");
+  let allStopped = true;
+  for (const group of [...groups].reverse()) {
+    group.deliberate = true;
+    try {
+      if (!await stopOwned(group))
+        allStopped = false;
+    } catch {
+      allStopped = false;
+    }
+  }
+  confinementSession?.close();
+  if (allStopped) {
+    try {
+      rmSync6(workDir, { recursive: true, force: true });
+    } catch {}
+  } else {
+    result = fail("teardown_incomplete");
+  }
+  stage(undefined);
+  settleExitFacts();
+  timings = withTiming(timings, "totalMs", elapsedMs(clock2, startedAt));
+  const final = result;
+  const finalReceipt = final.ok ? final.receipt : final.error.receipt;
+  if (finalReceipt && Object.keys(timings).length > 0)
+    finalReceipt.stageMs = { ...timings };
+  if (finalReceipt && receipt.exited)
+    finalReceipt.exited = { ...receipt.exited };
+  if (!final.ok && final.error.code === "session_process_exited" && receipt.exited)
+    final.error.message = zkapiProcessExitMessage(receipt.exited);
+  try {
+    updateState(statePath, now(), (state) => {
+      const { running, ...rest } = state;
+      return {
+        ...rest,
+        ...allStopped ? {} : running ? { running } : {},
+        lastSession: { ...snapshot(), at: now().toISOString(), result: final.ok ? "ok" : final.error.code }
+      };
+    });
+  } catch {} finally {
+    activeSessionId = undefined;
+  }
+  return final;
+}
 function zkapiProcessExitMessage(exit) {
   const who = exit.role === "tor" ? "The Tor client" : "The zkAPI daemon";
   const how = exit.signal ? ` (signal ${exit.signal})` : exit.code !== undefined ? ` (exit code ${exit.code})` : "";
@@ -7407,7 +10230,217 @@ function zkapiProcessExitMessage(exit) {
   const outside = exit.signal ? " Something else on this computer stopped it." : "";
   return `${who} of this session stopped unexpectedly${how}${when}.${outside}`;
 }
-var DAY_MS, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, CHILD_ENV_KEYS, ZKAPI_STAGE_LABELS, DARWIN_POLICY, SELF_TEST_SCRIPT = `
+function releaseZkapiReservation(path, scope, earlierFence, now, allowanceMicroUsd) {
+  updateState(path, now, (state) => {
+    const { [scope]: _ours, ...others } = state.fences ?? {};
+    const fences = earlierFence ? { ...others, [scope]: earlierFence } : others;
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      count: Math.max(0, state.count - 1),
+      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - allowanceMicroUsd),
+      ...Object.keys(fences).length > 0 ? { fences } : {}
+    };
+  });
+}
+function sampleClock(clock2) {
+  try {
+    const value = clock2();
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function durationMs(from, to) {
+  if (from === undefined || to === undefined)
+    return;
+  const ms = Math.round(to - from);
+  return Number.isFinite(ms) ? Math.max(0, ms) : undefined;
+}
+function elapsedMs(clock2, since) {
+  return since === undefined ? undefined : durationMs(since, sampleClock(clock2));
+}
+function withTiming(timings, key, ms) {
+  return ms === undefined ? timings : { ...timings, [key]: ms };
+}
+function managedTransportMatches(response, ports) {
+  try {
+    const transport = JSON.parse(response.body).transport;
+    return response.status === 200 && transport?.kind === "socks5" && transport.relay_endpoint === `127.0.0.1:${ports.tor}` && transport.companion === "managed" && transport.wallet_custody === "connection_owner_verified" && transport.connect_proxy === `127.0.0.1:${ports.companionProxy}` && transport.wallet_api === `127.0.0.1:${ports.walletApi}`;
+  } catch {
+    return false;
+  }
+}
+function adminStatusNetwork(response) {
+  if (response.status !== 200)
+    return;
+  try {
+    const parsed = JSON.parse(response.body);
+    if (parsed.backend !== "zkapi")
+      return;
+    return parsed.network === "mainnet" || parsed.network === "sepolia" ? parsed.network : undefined;
+  } catch {
+    return;
+  }
+}
+function prepareCompletionRequest(question, options, origin) {
+  return {
+    url: `${origin}/v1/chat/completions`,
+    init: {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${options.apiKey}`
+      },
+      body: JSON.stringify({
+        model: options.model,
+        messages: [{ role: "user", content: question }],
+        stream: false
+      })
+    }
+  };
+}
+async function sendCompletion(prepared, options, signal, stage, pastDeadline = () => false) {
+  const settings = options.settings;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const started = Date.now();
+  const controller = new AbortController;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, settings.timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const bad = (code, outcome, extra = {}) => ({ ok: false, error: { code, outcome, ...extra } });
+  try {
+    let response;
+    stage("dispatchToFirstByteMs");
+    if (pastDeadline())
+      return bad("timeout", "not_sent");
+    try {
+      response = await fetchImpl(prepared.url, { ...prepared.init, signal: controller.signal });
+    } catch (error) {
+      if (timedOut)
+        return bad("timeout", "unknown");
+      if (controller.signal.aborted)
+        return bad("aborted", "unknown");
+      if (isRedirectError(error))
+        return bad("redirect_refused", "unknown");
+      return bad("transport_failed", "unknown");
+    }
+    stage("firstByteToCompletionMs");
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => {
+        return;
+      });
+      return bad("redirect_refused", "unknown", { httpStatus: response.status });
+    }
+    const body = await readBounded(response, settings.maxResponseBytes).catch(() => {
+      return;
+    });
+    stage(undefined);
+    if (!body) {
+      if (timedOut)
+        return bad("timeout", "unknown");
+      if (controller.signal.aborted)
+        return bad("aborted", "unknown");
+      return bad("transport_failed", "unknown");
+    }
+    if (!body.ok)
+      return bad("response_too_large", "unknown", { httpStatus: response.status });
+    if (response.status < 200 || response.status >= 300) {
+      return bad("daemon_error", "sent_failed", {
+        httpStatus: response.status,
+        daemonCode: knownDaemonCode(daemonErrorEnvelope(body.text))
+      });
+    }
+    const text2 = completionText(body.text);
+    if (text2 === undefined)
+      return bad("invalid_response", "unknown", { httpStatus: response.status });
+    const verification = response.headers.get("x-oa-verification-status");
+    return {
+      ok: true,
+      text: text2,
+      ...verification === "verified" || verification === "verifier-unavailable" ? { providerVerification: verification } : {},
+      elapsedMs: Date.now() - started
+    };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function validZkapiConsultQuestion(question) {
+  return typeof question === "string" && validQuestion(question);
+}
+function validQuestion(question) {
+  if (!question.trim())
+    return false;
+  if (new TextEncoder().encode(question).byteLength > MAX_QUESTION_BYTES)
+    return false;
+  return !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(question);
+}
+function knownDaemonCode(code) {
+  return KNOWN_DAEMON_ERROR_CODES.includes(code ?? "") ? code : "unrecognized";
+}
+function completionText(body) {
+  try {
+    const parsed = JSON.parse(body);
+    if (!Array.isArray(parsed.choices) || parsed.choices.length !== 1)
+      return;
+    const choice = parsed.choices[0];
+    const content = choice.message?.content;
+    if (choice.message?.role !== undefined && choice.message.role !== "assistant")
+      return;
+    return typeof content === "string" && content.trim() ? content : undefined;
+  } catch {
+    return;
+  }
+}
+function isRedirectError(error) {
+  const seen = new Set;
+  let current2 = error;
+  while (current2 && typeof current2 === "object" && !seen.has(current2)) {
+    seen.add(current2);
+    const record2 = current2;
+    if (record2.code === "UnexpectedRedirect")
+      return true;
+    if (typeof record2.message === "string" && /redirect/i.test(record2.message))
+      return true;
+    current2 = record2.cause;
+  }
+  return false;
+}
+async function readBounded(response, maxBytes) {
+  const reader = response.body?.getReader();
+  if (!reader)
+    return { ok: true, text: "" };
+  const chunks = [];
+  let total = 0;
+  for (;; ) {
+    const { done, value } = await reader.read();
+    if (done)
+      break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {
+        return;
+      });
+      return { ok: false };
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(joined) };
+}
+var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, ZKAPI_CONSULT_ERROR_MESSAGES, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
 const { execFileSync } = require('node:child_process');
@@ -7438,7 +10471,7 @@ const udp = (host, port) => new Promise((resolve) => {
   if (process.argv[3] !== 'child') result.child = JSON.parse(execFileSync(process.execPath, [__filename, process.argv[2], 'child'], { timeout: 10000 }));
   process.stdout.write(JSON.stringify(result));
 })().catch(() => process.exit(1));
-`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, activeSessionId, DEFAULT_EXECUTABLE_TRUST, SESSION_OWNED_FAILURES, EXIT_STAGE_NAMES;
+`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, activeSessionId, DEFAULT_EXECUTABLE_TRUST, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES, EXIT_STAGE_NAMES;
 var init_consult_transport_zkapi = __esm(() => {
   init_zkapi_confinement_linux();
   init_zkapi_confinement_linux();
@@ -7463,6 +10496,25 @@ var init_consult_transport_zkapi = __esm(() => {
     "ZKAPI_CLIENTD_CONFIG_DIR",
     "OA_CHAT_CONFIG_DIR"
   ];
+  KNOWN_DAEMON_ERROR_CODES = [
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied"
+  ];
   ZKAPI_STAGE_LABELS = [
     ["leaseAcquireMs", "lease acquire"],
     ["confinementSelfTestMs", "confinement self-test"],
@@ -7482,6 +10534,53 @@ var init_consult_transport_zkapi = __esm(() => {
     ["teardownMs", "teardown"],
     ["totalMs", "total"]
   ];
+  ZKAPI_CONSULT_ERROR_MESSAGES = {
+    invalid_question: "The consult question is empty, too long, or contains control characters.",
+    busy: "Another zkAPI consult is in flight; consults are sent one at a time.",
+    acknowledgements_incomplete: "The zkAPI risk acknowledgements are not all accepted for the current version.",
+    funding_date_missing: "No owner-confirmed funding date is recorded, so the note expiry cannot be estimated.",
+    funding_date_invalid: "The recorded funding date is in the future.",
+    note_expired: "By the owner-confirmed funding date, the note is past its estimated 30-day expiry.",
+    daemon_api_key_missing: "No local API key for the daemon is configured in Olympus.",
+    daemon_not_found: "The zkapi-clientd executable was not found.",
+    tor_not_found: 'The tor executable was not found; install Tor or set tor to "off".',
+    unresolved_session: "An earlier zkAPI session may have left a lease unsettled; run a recovery-only session before another consult.",
+    unresolved_session_other_wallet: "An unresolved zkAPI session belongs to another wallet directory; recover it there, or abandon it explicitly, before another consult.",
+    no_unresolved_session: "There is no unresolved zkAPI session to recover.",
+    stranded_processes: "Processes from an earlier zkAPI session could not be confirmed stopped.",
+    daemon_already_running: "Something already serves on the zkAPI port; stop your own zkapi-clientd serve, because Olympus runs and verifies its own for each consult.",
+    tor_port_busy: "Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.",
+    tor_bootstrap_failed: "The per-consult Tor client did not finish bootstrapping.",
+    daemon_start_failed: "zkapi-clientd serve did not become ready.",
+    daemon_version_unsupported: "This zkapi-clientd version is not a reviewed version (0.1.5, 0.1.6, 0.1.6-olympus2, 0.1.6-olympus3 or 0.1.6-olympus4).",
+    daemon_supervisor_unsupported: "This zkAPI app cannot enforce the managed anonymous route. Use the Olympus zkapi-clientd fork with companion custody support (0.1.6-olympus4); nothing was sent.",
+    relay_mismatch: "The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).",
+    key_reuse_on: "The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.",
+    key_reuse_unverified: "The daemon did not confirm a fresh key for every request.",
+    daemon_keyless: "The daemon accepts inference without a local API key, so any local process can spend the balance.",
+    daemon_identity_failed: "A port of this session is not held by the process group Olympus started.",
+    daemon_api_key_rejected: "The daemon rejected the configured local API key.",
+    session_process_exited: "The Tor client or the daemon of this session stopped unexpectedly.",
+    confinement_self_test_failed: "The network confinement for this platform did not pass its self-test, so the session was refused.",
+    confinement_unavailable: "Anonymous answers need network confinement, which this computer does not have yet. Nothing was sent.",
+    policy_unavailable: "The daemon could not load the model policy in time.",
+    model_unavailable: "The selected model is not in the daemon's live model list.",
+    daily_cap_reached: "The daily zkAPI request limit you set is reached.",
+    spend_cap_reached: "Another request would exceed the daily zkAPI spend limit you set (each question counts the amount zkAPI holds for its model).",
+    state_unavailable: "The persistent zkAPI session ledger could not be read or written.",
+    timeout: "The zkAPI consult timed out; it may still have been charged.",
+    aborted: "The zkAPI consult was cancelled; it may still have been charged.",
+    redirect_refused: "The daemon answered with a redirect, which is never followed.",
+    response_too_large: "The zkAPI response exceeded the size limit and was cut off.",
+    invalid_response: "The zkAPI response was not a single non-empty chat completion.",
+    daemon_error: "The zkAPI daemon returned an error.",
+    transport_failed: "The request to the zkAPI daemon failed.",
+    teardown_incomplete: "The session's processes could not be confirmed stopped; the next session will not start until they are.",
+    authorization_refused: "The final authorization immediately before dispatch refused the consult; nothing was reserved or sent.",
+    session_spent: "This zkAPI session has already sent, was cancelled, or has ended; each session sends at most once.",
+    internal_error: "The zkAPI session failed inside Olympus."
+  };
+  MESSAGES = ZKAPI_CONSULT_ERROR_MESSAGES;
   DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "session_ports_only" };
   WATCHDOG_SCRIPT = `
 const { spawn, execFileSync } = require('node:child_process');
@@ -7554,7 +10653,7 @@ process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
-    realpath: (path) => realpathSync5(path),
+    realpath: (path) => realpathSync6(path),
     stat: (path) => statSync13(path),
     executable: (path) => {
       try {
@@ -7735,9 +10834,9 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname20 } from "node:path";
+import { dirname as dirname21 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -7777,7 +10876,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash5("sha256").update(handle).digest("hex");
+    const digest = createHash6("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest}`;
   }
   async save(handle, state) {
@@ -7806,7 +10905,7 @@ class JsonCredentialOAuth2StateStore {
         merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname20(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname21(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -7818,7 +10917,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname20(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname21(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -7842,11 +10941,11 @@ class JsonCredentialOAuth2StateStore {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("Credential OAuth2 state store must be a JSON object.");
     }
-    const record = parsed;
-    if (record.version !== 1) {
+    const record2 = parsed;
+    if (record2.version !== 1) {
       throw new Error("Credential OAuth2 state store has an unsupported version.");
     }
-    const handles = record.handles;
+    const handles = record2.handles;
     if (!handles || typeof handles !== "object" || Array.isArray(handles)) {
       throw new Error("Credential OAuth2 state store must include a handles object.");
     }
@@ -8476,7 +11575,7 @@ function bearerSessionFromMintedToken(options) {
 }
 function mintedSessionCacheKey(namespace, definition, capability, env) {
   const envRefreshToken = firstNonEmptyEnv2(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
-  const envGrant = envRefreshToken ? createHash5("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  const envGrant = envRefreshToken ? createHash6("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
   return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
 ${envGrant}`;
 }
@@ -8876,17 +11975,17 @@ function normalizeOAuth2HandleState(value, handle) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Credential OAuth2 state for handle ${handle} is invalid.`);
   }
-  const record = value;
-  const refreshToken = optionalString3(record.refreshToken);
-  const providerAccountId = optionalString3(record.providerAccountId);
-  if (record.status !== undefined && record.status !== "available" && record.status !== "reauth_required") {
+  const record2 = value;
+  const refreshToken = optionalString3(record2.refreshToken);
+  const providerAccountId = optionalString3(record2.providerAccountId);
+  if (record2.status !== undefined && record2.status !== "available" && record2.status !== "reauth_required") {
     throw new Error(`Credential OAuth2 state for handle ${handle} has an unsupported status.`);
   }
-  const status = record.status;
-  const updatedAt = optionalString3(record.updatedAt);
-  const pendingRefreshStartedAt = optionalString3(record.pendingRefreshStartedAt);
-  const pendingRefreshGrantGeneration = typeof record.pendingRefreshGrantGeneration === "string" && record.pendingRefreshGrantGeneration ? record.pendingRefreshGrantGeneration : undefined;
-  const scopes = Array.isArray(record.scopes) ? record.scopes.map((item) => optionalString3(item)).filter((item) => !!item) : undefined;
+  const status = record2.status;
+  const updatedAt = optionalString3(record2.updatedAt);
+  const pendingRefreshStartedAt = optionalString3(record2.pendingRefreshStartedAt);
+  const pendingRefreshGrantGeneration = typeof record2.pendingRefreshGrantGeneration === "string" && record2.pendingRefreshGrantGeneration ? record2.pendingRefreshGrantGeneration : undefined;
+  const scopes = Array.isArray(record2.scopes) ? record2.scopes.map((item) => optionalString3(item)).filter((item) => !!item) : undefined;
   return {
     ...refreshToken ? { refreshToken } : {},
     ...providerAccountId ? { providerAccountId } : {},
@@ -8901,15 +12000,15 @@ function normalizeBackendState(value, handle, expectedKind) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw backendMalformedError(handle);
   }
-  const record = value;
-  if (record.kind !== expectedKind)
+  const record2 = value;
+  if (record2.kind !== expectedKind)
     throw backendMalformedError(handle);
-  const status = record.status === undefined || record.status === "available" ? "available" : record.status === "reauth_required" ? "reauth_required" : undefined;
+  const status = record2.status === undefined || record2.status === "available" ? "available" : record2.status === "reauth_required" ? "reauth_required" : undefined;
   if (!status)
     throw backendMalformedError(handle);
-  const expiresAt = safeOptionalDescriptorFieldValue(record, handle, "expiresAt");
-  const expiresInSeconds = safeOptionalDescriptorNumberValue(record, handle, "expiresInSeconds");
-  const backendLabel = safeOptionalDescriptorFieldValue(record, handle, "backendLabel");
+  const expiresAt = safeOptionalDescriptorFieldValue(record2, handle, "expiresAt");
+  const expiresInSeconds = safeOptionalDescriptorNumberValue(record2, handle, "expiresInSeconds");
+  const backendLabel = safeOptionalDescriptorFieldValue(record2, handle, "backendLabel");
   const base = {
     status,
     ...expiresAt ? { expiresAt } : {},
@@ -8921,78 +12020,78 @@ function normalizeBackendState(value, handle, expectedKind) {
       return {
         ...base,
         kind: "runtime_connector",
-        connectorBackendId: safeRequiredDescriptorField(record, handle, "connectorBackendId"),
-        ...safeOptionalDescriptorField(record, handle, "connectorRoute"),
-        ...safeOptionalDescriptorField(record, handle, "leaseId")
+        connectorBackendId: safeRequiredDescriptorField(record2, handle, "connectorBackendId"),
+        ...safeOptionalDescriptorField(record2, handle, "connectorRoute"),
+        ...safeOptionalDescriptorField(record2, handle, "leaseId")
       };
     case "mtproto_session":
       return {
         ...base,
         kind: "mtproto_session",
-        mtprotoProfileId: safeRequiredDescriptorField(record, handle, "mtprotoProfileId"),
-        runtimeEndpointId: safeRequiredDescriptorField(record, handle, "runtimeEndpointId"),
-        ...safeOptionalDescriptorField(record, handle, "library"),
-        ...safeOptionalDescriptorField(record, handle, "leaseId")
+        mtprotoProfileId: safeRequiredDescriptorField(record2, handle, "mtprotoProfileId"),
+        runtimeEndpointId: safeRequiredDescriptorField(record2, handle, "runtimeEndpointId"),
+        ...safeOptionalDescriptorField(record2, handle, "library"),
+        ...safeOptionalDescriptorField(record2, handle, "leaseId")
       };
     case "tdlib_session":
       return {
         ...base,
         kind: "tdlib_session",
-        tdlibProfileId: safeRequiredDescriptorField(record, handle, "tdlibProfileId"),
-        runtimeEndpointId: safeRequiredDescriptorField(record, handle, "runtimeEndpointId"),
-        ...safeOptionalDescriptorField(record, handle, "leaseId")
+        tdlibProfileId: safeRequiredDescriptorField(record2, handle, "tdlibProfileId"),
+        runtimeEndpointId: safeRequiredDescriptorField(record2, handle, "runtimeEndpointId"),
+        ...safeOptionalDescriptorField(record2, handle, "leaseId")
       };
     case "local_app_database":
       return {
         ...base,
         kind: "local_app_database",
-        databaseSourceId: safeRequiredDescriptorField(record, handle, "databaseSourceId"),
-        readerWorker: safeRequiredDescriptorField(record, handle, "readerWorker"),
-        databaseRole: safeRequiredDescriptorField(record, handle, "databaseRole"),
-        ...safeOptionalDescriptorField(record, handle, "scopeLabel")
+        databaseSourceId: safeRequiredDescriptorField(record2, handle, "databaseSourceId"),
+        readerWorker: safeRequiredDescriptorField(record2, handle, "readerWorker"),
+        databaseRole: safeRequiredDescriptorField(record2, handle, "databaseRole"),
+        ...safeOptionalDescriptorField(record2, handle, "scopeLabel")
       };
     case "archive_path":
       return {
         ...base,
         kind: "archive_path",
-        archiveRootAlias: safeRequiredDescriptorField(record, handle, "archiveRootAlias"),
-        readerWorker: safeRequiredDescriptorField(record, handle, "readerWorker"),
-        ...safeOptionalDescriptorField(record, handle, "contentBounds"),
-        ...safeOptionalDescriptorField(record, handle, "importRunId")
+        archiveRootAlias: safeRequiredDescriptorField(record2, handle, "archiveRootAlias"),
+        readerWorker: safeRequiredDescriptorField(record2, handle, "readerWorker"),
+        ...safeOptionalDescriptorField(record2, handle, "contentBounds"),
+        ...safeOptionalDescriptorField(record2, handle, "importRunId")
       };
     case "webhook_token":
       return {
         ...base,
         kind: "webhook_token",
-        webhookIntegrationId: safeRequiredDescriptorField(record, handle, "webhookIntegrationId"),
-        validationMode: safeRequiredDescriptorField(record, handle, "validationMode"),
-        verifierReference: safeRequiredDescriptorField(record, handle, "verifierReference"),
-        ...safeOptionalDescriptorField(record, handle, "leaseId")
+        webhookIntegrationId: safeRequiredDescriptorField(record2, handle, "webhookIntegrationId"),
+        validationMode: safeRequiredDescriptorField(record2, handle, "validationMode"),
+        verifierReference: safeRequiredDescriptorField(record2, handle, "verifierReference"),
+        ...safeOptionalDescriptorField(record2, handle, "leaseId")
       };
   }
 }
-function safeRequiredDescriptorField(record, handle, field) {
-  const value = safeDescriptorString(record[field]);
+function safeRequiredDescriptorField(record2, handle, field) {
+  const value = safeDescriptorString(record2[field]);
   if (!value)
     throw backendMalformedError(handle);
   return value;
 }
-function safeOptionalDescriptorField(record, handle, field) {
-  const value = safeOptionalDescriptorFieldValue(record, handle, field);
+function safeOptionalDescriptorField(record2, handle, field) {
+  const value = safeOptionalDescriptorFieldValue(record2, handle, field);
   return value ? { [field]: value } : {};
 }
-function safeOptionalDescriptorFieldValue(record, handle, field) {
-  if (record[field] === undefined)
+function safeOptionalDescriptorFieldValue(record2, handle, field) {
+  if (record2[field] === undefined)
     return;
-  const value = safeDescriptorString(record[field]);
+  const value = safeDescriptorString(record2[field]);
   if (!value)
     throw backendMalformedError(handle);
   return value;
 }
-function safeOptionalDescriptorNumberValue(record, handle, field) {
-  if (record[field] === undefined)
+function safeOptionalDescriptorNumberValue(record2, handle, field) {
+  if (record2[field] === undefined)
     return;
-  const value = optionalNumber(record[field]);
+  const value = optionalNumber(record2[field]);
   if (value === undefined || value <= 0)
     throw backendMalformedError(handle);
   return Math.floor(value);
@@ -9527,11 +12626,11 @@ var init_credential_broker = __esm(() => {
 
 // src/workers/credential-broker/connected-handles.ts
 import { randomUUID as randomUUID9 } from "node:crypto";
-import { existsSync as existsSync13, mkdirSync as mkdirSync13, readFileSync as readFileSync21 } from "node:fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync13, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
-import { dirname as dirname21, join as join27 } from "node:path";
+import { dirname as dirname22, join as join29 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join27(homedir14(), ".config", "olympus", "handles.json");
+  return join29(homedir14(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
   const path = connectedHandleGrantEpochPath(registryPath);
@@ -9539,15 +12638,15 @@ function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath(
     return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync21(path, "utf8"));
+    parsed = JSON.parse(readFileSync23(path, "utf8"));
   } catch {
     throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
   }
-  const record = parsed;
-  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
+  const record2 = parsed;
+  if (!record2 || typeof record2 !== "object" || Array.isArray(record2) || record2.version !== 1 || typeof record2.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record2.epoch)) {
     throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
   }
-  return record.epoch;
+  return record2.epoch;
 }
 async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
   try {
@@ -9579,18 +12678,18 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   if (!existsSync13(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync21(path, "utf8"));
+  const parsed = JSON.parse(readFileSync23(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
-  const record = parsed;
-  if (record.version !== 1 || !Array.isArray(record.handles)) {
+  const record2 = parsed;
+  if (record2.version !== 1 || !Array.isArray(record2.handles)) {
     throw new Error("Olympus handle registry has an unsupported format.");
   }
   const handles = [];
   const dropped = [];
   const preservedUnknownHandles = [];
-  for (const [index, value] of record.handles.entries()) {
+  for (const [index, value] of record2.handles.entries()) {
     const normalized = normalizeConnectedHandle(value);
     if (normalized.ok) {
       handles.push(normalized.handle);
@@ -9607,7 +12706,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync13(dirname21(path), { recursive: true, mode: 448 });
+  mkdirSync13(dirname22(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -9721,10 +12820,10 @@ function handleRegistryPathFromEnv(env, useDefault) {
 function normalizeConnectedHandle(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     return { ok: false, reason: "entry_not_object" };
-  const record = value;
-  const handle = optionalSafeLabel(record.handle);
-  const providerLabel = optionalSafeLabel(record.provider);
-  const connectedAt = typeof record.connectedAt === "string" ? record.connectedAt : undefined;
+  const record2 = value;
+  const handle = optionalSafeLabel(record2.handle);
+  const providerLabel = optionalSafeLabel(record2.provider);
+  const connectedAt = typeof record2.connectedAt === "string" ? record2.connectedAt : undefined;
   if (!handle)
     return { ok: false, reason: "invalid_handle" };
   if (!providerLabel)
@@ -9734,14 +12833,14 @@ function normalizeConnectedHandle(value) {
   const provider = providerLabel;
   if (!connectedAt)
     return { ok: false, reason: "invalid_connected_at" };
-  const allowedCapabilities = stringArray(record.allowedCapabilities);
-  const scopes = stringArray(record.scopes);
+  const allowedCapabilities = stringArray(record2.allowedCapabilities);
+  const scopes = stringArray(record2.scopes);
   if (allowedCapabilities.length === 0)
     return { ok: false, reason: "missing_allowed_capabilities" };
-  const tokenSecretRefsResult = normalizeTokenSecretRefs(record.tokenSecretRefs);
+  const tokenSecretRefsResult = normalizeTokenSecretRefs(record2.tokenSecretRefs);
   if (!tokenSecretRefsResult.ok)
     return { ok: false, reason: tokenSecretRefsResult.reason };
-  const oauth2Result = normalizeOAuth2(record.oauth2Refresh);
+  const oauth2Result = normalizeOAuth2(record2.oauth2Refresh);
   if (!oauth2Result.ok)
     return { ok: false, reason: oauth2Result.reason };
   const normalized = {
@@ -9750,10 +12849,10 @@ function normalizeConnectedHandle(value) {
     allowedCapabilities,
     scopes,
     connectedAt,
-    ...optionalLabelObject(record, "sessionKind"),
-    ...optionalLabelObject(record, "accountRole"),
-    ...optionalLabelObject(record, "trustDomain"),
-    ...optionalLabelObject(record, "providerAccountId")
+    ...optionalLabelObject(record2, "sessionKind"),
+    ...optionalLabelObject(record2, "accountRole"),
+    ...optionalLabelObject(record2, "trustDomain"),
+    ...optionalLabelObject(record2, "providerAccountId")
   };
   const tokenSecretRefs = tokenSecretRefsResult.tokenSecretRefs;
   if (tokenSecretRefs.length > 0)
@@ -9761,8 +12860,8 @@ function normalizeConnectedHandle(value) {
   const oauth2 = oauth2Result.oauth2Refresh;
   if (oauth2)
     normalized.oauth2Refresh = oauth2;
-  if (record.backendState && typeof record.backendState === "object" && !Array.isArray(record.backendState)) {
-    normalized.backendState = record.backendState;
+  if (record2.backendState && typeof record2.backendState === "object" && !Array.isArray(record2.backendState)) {
+    normalized.backendState = record2.backendState;
   }
   return { ok: true, handle: normalized };
 }
@@ -9782,15 +12881,15 @@ function normalizeOAuth2(value) {
     return { ok: true };
   if (!value || typeof value !== "object" || Array.isArray(value))
     return { ok: false, reason: "invalid_oauth2_refresh" };
-  const record = value;
-  const tokenUrl = typeof record.tokenUrl === "string" && /^https?:\/\//.test(record.tokenUrl) ? record.tokenUrl : undefined;
-  const clientIdSecretRef = typeof record.clientIdSecretRef === "string" && isStoreRef(record.clientIdSecretRef) ? record.clientIdSecretRef : undefined;
-  const refreshTokenSecretRef = typeof record.refreshTokenSecretRef === "string" && isStoreRef(record.refreshTokenSecretRef) ? record.refreshTokenSecretRef : undefined;
+  const record2 = value;
+  const tokenUrl = typeof record2.tokenUrl === "string" && /^https?:\/\//.test(record2.tokenUrl) ? record2.tokenUrl : undefined;
+  const clientIdSecretRef = typeof record2.clientIdSecretRef === "string" && isStoreRef(record2.clientIdSecretRef) ? record2.clientIdSecretRef : undefined;
+  const refreshTokenSecretRef = typeof record2.refreshTokenSecretRef === "string" && isStoreRef(record2.refreshTokenSecretRef) ? record2.refreshTokenSecretRef : undefined;
   if (!tokenUrl || !clientIdSecretRef || !refreshTokenSecretRef) {
     return { ok: false, reason: "invalid_oauth2_refresh" };
   }
-  const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
-  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
+  const clientSecretSecretRef = typeof record2.clientSecretSecretRef === "string" && isStoreRef(record2.clientSecretSecretRef) ? record2.clientSecretSecretRef : undefined;
+  const exchangeVia = record2.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
   return {
     ok: true,
     oauth2Refresh: {
@@ -9798,7 +12897,7 @@ function normalizeOAuth2(value) {
       clientIdSecretRef,
       ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
       refreshTokenSecretRef,
-      scopes: stringArray(record.scopes),
+      scopes: stringArray(record2.scopes),
       ...exchangeVia ? { exchangeVia } : {}
     }
   };
@@ -9822,8 +12921,8 @@ function redactConnectedHandleForDisk(handle) {
     } : {}
   };
 }
-function optionalLabelObject(record, key) {
-  const value = optionalSafeLabel(record[key]);
+function optionalLabelObject(record2, key) {
+  const value = optionalSafeLabel(record2[key]);
   return value ? { [key]: value } : {};
 }
 function optionalSafeLabel(value) {
@@ -10673,29 +13772,29 @@ function validDomain(raw) {
 }
 function scanHeader(value) {
   let out = "";
-  let depth = 0;
+  let depth2 = 0;
   let quoted = false;
   let angleOpens = 0;
   let comma = false;
   for (let index = 0;index < value.length; index += 1) {
     const char = value[index];
     if (char === "\\" && index + 1 < value.length) {
-      if (depth === 0)
+      if (depth2 === 0)
         out += char + value[index + 1];
       index += 1;
       continue;
     }
-    if (depth === 0 && char === '"')
+    if (depth2 === 0 && char === '"')
       quoted = !quoted;
     if (!quoted && char === "(") {
-      depth += 1;
+      depth2 += 1;
       continue;
     }
-    if (!quoted && char === ")" && depth > 0) {
-      depth -= 1;
+    if (!quoted && char === ")" && depth2 > 0) {
+      depth2 -= 1;
       continue;
     }
-    if (depth > 0)
+    if (depth2 > 0)
       continue;
     if (!quoted && char === "<")
       angleOpens += 1;
@@ -10861,7 +13960,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -11237,14 +14336,14 @@ class RestGmailApiClient {
     for (const labelId of request.labelIds ?? [])
       params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord13(json, "Gmail messages list response");
+    const record2 = asRecord13(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord13(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record2.messages) ? record2.messages.map((item) => asRecord13(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
-      ...optionalStringProp(record, "nextPageToken"),
-      ...typeof record.resultSizeEstimate === "number" && Number.isFinite(record.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) } : {}
+      ...optionalStringProp(record2, "nextPageToken"),
+      ...typeof record2.resultSizeEstimate === "number" && Number.isFinite(record2.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record2.resultSizeEstimate)) } : {}
     };
   }
   async getMessage(id, options = {}) {
@@ -11257,8 +14356,8 @@ class RestGmailApiClient {
     return json;
   }
   async listLabels() {
-    const record = asRecord13(await this.getJson("users/me/labels"), "Gmail labels list response");
-    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord13(item, "Gmail label"))).filter((label) => label.id) : [];
+    const record2 = asRecord13(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record2.labels) ? record2.labels.map((item) => gmailLabelFromJson(asRecord13(item, "Gmail label"))).filter((label) => label.id) : [];
   }
   async getLabel(id) {
     return gmailLabelFromJson(asRecord13(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
@@ -11302,13 +14401,13 @@ function gmailRetryDelayMs(response, attempt) {
   }
   return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
 }
-function gmailLabelFromJson(record) {
-  const type = record.type === "system" || record.type === "user" ? record.type : undefined;
+function gmailLabelFromJson(record2) {
+  const type = record2.type === "system" || record2.type === "user" ? record2.type : undefined;
   return {
-    id: stringValue(record.id),
-    name: stringValue(record.name),
+    id: stringValue(record2.id),
+    name: stringValue(record2.name),
     ...type ? { type } : {},
-    ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
+    ...typeof record2.messagesTotal === "number" && Number.isFinite(record2.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record2.messagesTotal)) } : {}
   };
 }
 function rawItemFromGmailMessage(message, account, options = {}) {
@@ -11460,15 +14559,15 @@ function asRecord13(value, label) {
 function stringValue(value) {
   return typeof value === "string" ? value : "";
 }
-function optionalStringProp(record, key) {
-  const value = stringValue(record[key]).trim();
+function optionalStringProp(record2, key) {
+  const value = stringValue(record2[key]).trim();
   return value ? { [key]: value } : {};
 }
 function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString(value) {
-  return createHash6("sha256").update(value).digest("hex");
+  return createHash7("sha256").update(value).digest("hex");
 }
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
@@ -11482,7 +14581,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -11899,21 +14998,21 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord14(json, "Google Drive files list response");
+    const record2 = asRecord14(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord14(item, "Google Drive file"))).filter((file) => file.id) : [],
-      ...optionalStringProp2(record, "nextPageToken")
+      files: Array.isArray(record2.files) ? record2.files.map((item) => normalizeDriveFile(asRecord14(item, "Google Drive file"))).filter((file) => file.id) : [],
+      ...optionalStringProp2(record2, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord14(json, "Google Drive folder");
-    const id = typeof record.id === "string" ? record.id : folderId;
+    const record2 = asRecord14(json, "Google Drive folder");
+    const id = typeof record2.id === "string" ? record2.id : folderId;
     return {
       id,
-      ...optionalStringProp2(record, "name"),
-      ...Array.isArray(record.parents) ? { parents: record.parents.filter((entry) => typeof entry === "string") } : {}
+      ...optionalStringProp2(record2, "name"),
+      ...Array.isArray(record2.parents) ? { parents: record2.parents.filter((entry) => typeof entry === "string") } : {}
     };
   }
   async exportGoogleDocText(fileId, maxBytes) {
@@ -11990,20 +15089,20 @@ function driveRetryDelayMs(response, attempt) {
   }
   return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
 }
-function normalizeDriveFile(record) {
+function normalizeDriveFile(record2) {
   return {
-    id: stringValue2(record.id),
-    ...optionalStringProp2(record, "name"),
-    ...optionalStringProp2(record, "mimeType"),
-    ...optionalStringProp2(record, "createdTime"),
-    ...optionalStringProp2(record, "modifiedTime"),
-    ...optionalStringProp2(record, "version"),
-    ...optionalStringProp2(record, "driveId"),
-    ...optionalStringProp2(record, "webViewLink"),
-    ...optionalStringProp2(record, "size"),
-    ...optionalStringProp2(record, "md5Checksum"),
-    ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord14(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    id: stringValue2(record2.id),
+    ...optionalStringProp2(record2, "name"),
+    ...optionalStringProp2(record2, "mimeType"),
+    ...optionalStringProp2(record2, "createdTime"),
+    ...optionalStringProp2(record2, "modifiedTime"),
+    ...optionalStringProp2(record2, "version"),
+    ...optionalStringProp2(record2, "driveId"),
+    ...optionalStringProp2(record2, "webViewLink"),
+    ...optionalStringProp2(record2, "size"),
+    ...optionalStringProp2(record2, "md5Checksum"),
+    ...Array.isArray(record2.parents) ? { parents: record2.parents.map(stringValue2).filter(Boolean) } : {},
+    ...Array.isArray(record2.owners) ? { owners: record2.owners.map((owner) => asRecord14(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -12040,15 +15139,15 @@ function asRecord14(value, label) {
 function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
-function optionalStringProp2(record, key) {
-  const value = stringValue2(record[key]).trim();
+function optionalStringProp2(record2, key) {
+  const value = stringValue2(record2[key]).trim();
   return value ? { [key]: value } : {};
 }
 function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString2(value) {
-  return createHash7("sha256").update(value).digest("hex");
+  return createHash8("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -12635,7 +15734,7 @@ var init_sniffer_store = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
   const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
   const lines = items.map((item) => JSON.stringify(pass === "metadata" ? { i: item.i, names: item.material } : { i: item.i, document: item.material }));
@@ -12702,8 +15801,8 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
-  SNIFFER_PROMPT_VERSION = `p-${createHash8("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash8("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash9("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash9("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });
 
 // src/workers/file-extraction/job-names.ts
@@ -13079,7 +16178,7 @@ var init_tier_names_only_settle = __esm(() => {
 import { spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync15, statSync as statSync16 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
-import { delimiter as delimiter6, dirname as dirname23, isAbsolute as isAbsolute19, join as join29 } from "node:path";
+import { delimiter as delimiter6, dirname as dirname24, isAbsolute as isAbsolute19, join as join31 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 function helperEnvironment() {
@@ -13253,9 +16352,9 @@ class HelperProcess {
   }
 }
 function helperPath() {
-  const here = dirname23(fileURLToPath5(import.meta.url));
+  const here = dirname24(fileURLToPath5(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join29(here, name);
+    const candidate = join31(here, name);
     if (existsSync15(candidate))
       return candidate;
   }
@@ -13265,9 +16364,9 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join29(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join29(directory, bunName)),
-    join29(homedir16(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join31(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join31(directory, bunName)),
+    join31(homedir16(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute19(candidate))
@@ -13886,11 +16985,11 @@ class SecureAnalystPoolState {
     const health = this.health.get(`${poolId}\x00${memberId}`);
     return health !== undefined && health.consecutiveFailures >= this.failureThreshold && this.now() < health.cooldownUntilMs;
   }
-  recordSuccess(poolId, memberId, elapsedMs) {
+  recordSuccess(poolId, memberId, elapsedMs2) {
     const health = this.memberHealth(poolId, memberId);
     health.consecutiveFailures = 0;
     health.cooldownUntilMs = 0;
-    const latencyMs = nonNegativeInteger(elapsedMs, 0);
+    const latencyMs = nonNegativeInteger(elapsedMs2, 0);
     health.recentLatencyMs = health.recentLatencyMs === undefined ? latencyMs : Math.round(health.recentLatencyMs * 0.7 + latencyMs * 0.3);
   }
   recordFailure(poolId, memberId) {
@@ -14198,7 +17297,7 @@ var init_approved_scope_filter = __esm(() => {
 });
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join30 } from "node:path";
+import { join as join32 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -14244,7 +17343,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join30(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join32(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -14320,7 +17419,7 @@ var init_dropbox = __esm(() => {
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn as spawn4 } from "node:child_process";
 import { accessSync as accessSync8, constants as fsConstants5, statSync as statSync17 } from "node:fs";
-import { delimiter as delimiter7, join as join31 } from "node:path";
+import { delimiter as delimiter7, join as join33 } from "node:path";
 function errnoCode(error) {
   const code = error?.code;
   return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
@@ -14367,7 +17466,7 @@ function resolveExtractionCommand(command, options = {}) {
   const isExecutable = options.isExecutable ?? executableFile;
   const directories = [...path.split(delimiter7).filter(Boolean), ...fallbackDirs];
   for (const directory of directories) {
-    const candidate = join31(directory, command);
+    const candidate = join33(directory, command);
     if (isExecutable(candidate)) {
       if (cacheable)
         resolvedCommands.set(cacheKey, candidate);
@@ -14703,10 +17802,10 @@ var init_public_source_capabilities = __esm(() => {
 
 // src/workers/source-dashboard.ts
 import { homedir as homedir17 } from "node:os";
-import { dirname as dirname24, join as join32 } from "node:path";
+import { dirname as dirname25, join as join34 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join32(homedir17(), ".local", "share");
-  return join32(standaloneLinuxDataDir(env) ?? join32(dataHome, "openclaw", "olympus"), "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join34(homedir17(), ".local", "share");
+  return join34(standaloneLinuxDataDir(env) ?? join34(dataHome, "openclaw", "olympus"), "source-dashboard.sqlite");
 }
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
@@ -17501,7 +20600,7 @@ function asRecord6(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -20006,9 +23105,9 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/linux-engine-service.ts
 init_linux_desktop_entry();
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { chmodSync as chmodSync5, closeSync as closeSync5, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync8, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync20, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync6, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync15, symlinkSync as symlinkSync2 } from "node:fs";
-import { createRequire as createRequire2 } from "node:module";
-import { basename as basename5, dirname as dirname19, join as join26, relative as relative4, resolve as resolve5, sep as sep5 } from "node:path";
+import { chmodSync as chmodSync6, closeSync as closeSync5, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync9, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync22, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync7, statSync as statSync15, symlinkSync as symlinkSync2 } from "node:fs";
+import { createRequire as createRequire3 } from "node:module";
+import { basename as basename5, dirname as dirname20, join as join28, relative as relative4, resolve as resolve5, sep as sep5 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();
@@ -20020,9 +23119,9 @@ init_file_lease();
 init_linux_engine_layout();
 import { spawnSync as spawnSync5 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync10, lstatSync as lstatSync7, readdirSync as readdirSync4, readFileSync as readFileSync19, renameSync as renameSync4, statSync as statSync14 } from "node:fs";
+import { existsSync as existsSync10, lstatSync as lstatSync8, readdirSync as readdirSync6, readFileSync as readFileSync21, renameSync as renameSync4, statSync as statSync14 } from "node:fs";
 import { homedir as homedir13, platform as osPlatform } from "node:os";
-import { basename as basename4, dirname as dirname18, isAbsolute as isAbsolute18, join as join25, resolve as resolvePath2 } from "node:path";
+import { basename as basename4, dirname as dirname19, isAbsolute as isAbsolute18, join as join27, resolve as resolvePath2 } from "node:path";
 
 // src/core/engine-children.ts
 init_atomic_file();
@@ -20118,25 +23217,25 @@ var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
 function enginePaths(homeDir) {
   const home = absolute2(homeDir, "home directory");
-  const logDir = join25(home, "Library", "Logs", "Olympus");
-  const appSupportDir = join25(home, "Library", "Application Support", "Olympus");
+  const logDir = join27(home, "Library", "Logs", "Olympus");
+  const appSupportDir = join27(home, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home };
   return {
     label: ENGINE_LABEL,
-    plistPath: join25(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join27(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join25(logDir, "engine.log"),
-    errorLogPath: join25(logDir, "engine.err"),
-    configPath: join25(home, ".olympus", "engine.json"),
-    sovereigntyPath: join25(home, ".olympus", "sovereignty.json"),
+    logPath: join27(logDir, "engine.log"),
+    errorLogPath: join27(logDir, "engine.err"),
+    configPath: join27(home, ".olympus", "engine.json"),
+    sovereigntyPath: join27(home, ".olympus", "sovereignty.json"),
     appSupportDir,
-    appDir: join25(appSupportDir, "app"),
-    previousAppDir: join25(appSupportDir, "app.previous"),
-    runtimeDir: join25(appSupportDir, "runtime"),
-    workerEnvPath: join25(home, ".config", "olympus", "worker.env"),
+    appDir: join27(appSupportDir, "app"),
+    previousAppDir: join27(appSupportDir, "app.previous"),
+    runtimeDir: join27(appSupportDir, "runtime"),
+    workerEnvPath: join27(home, ".config", "olympus", "worker.env"),
     statusPath: engineStatusPath(dataEnv),
     childrenPath: engineChildrenPath(dataEnv),
-    modelsDir: join25(olympusDataDir(dataEnv), "models"),
+    modelsDir: join27(olympusDataDir(dataEnv), "models"),
     remoteAccessDir: remoteAccessDir(dataEnv)
   };
 }
@@ -20150,30 +23249,30 @@ function engineServicePaths(options = {}) {
     label: "olympus-engine.service",
     plistPath: l.unitPath,
     logDir: l.stateDir,
-    logPath: join25(l.stateDir, "engine.log"),
-    errorLogPath: join25(l.stateDir, "engine.err"),
+    logPath: join27(l.stateDir, "engine.log"),
+    errorLogPath: join27(l.stateDir, "engine.err"),
     configPath: l.configPath,
     sovereigntyPath: l.sovereigntyPath,
     appSupportDir: l.packageDir,
-    appDir: join25(l.packageDir, "app"),
-    previousAppDir: join25(l.packageDir, "app.previous"),
-    runtimeDir: join25(l.packageDir, "runtime"),
+    appDir: join27(l.packageDir, "app"),
+    previousAppDir: join27(l.packageDir, "app.previous"),
+    runtimeDir: join27(l.packageDir, "runtime"),
     workerEnvPath: l.workerEnvPath,
-    statusPath: join25(l.dataDir, "engine/status.json"),
-    childrenPath: join25(l.dataDir, "engine/children.json"),
-    modelsDir: join25(l.dataDir, "models"),
-    remoteAccessDir: join25(l.dataDir, "connect-relay")
+    statusPath: join27(l.dataDir, "engine/status.json"),
+    childrenPath: join27(l.dataDir, "engine/children.json"),
+    modelsDir: join27(l.dataDir, "models"),
+    remoteAccessDir: join27(l.dataDir, "connect-relay")
   };
 }
 function engineStatusPath(env = process.env) {
-  return join25(olympusDataDir(env), "engine", "status.json");
+  return join27(olympusDataDir(env), "engine", "status.json");
 }
 function readEngineConfig(path) {
   if (!existsSync10(path))
     return;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync19(path, "utf8"));
+    parsed = JSON.parse(readFileSync21(path, "utf8"));
   } catch {
     throw new OperationError("config_error", `${path} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
   }
@@ -20214,7 +23313,7 @@ async function checkEngineHealthOnce(input, pidAlive, fetchImpl, deps) {
   const base = { ok: false, expected_build: input.expectedBuild, running_build: null, pid: null, worker: "not_ready" };
   let status;
   try {
-    status = JSON.parse(readFileSync19(input.paths.statusPath, "utf8"));
+    status = JSON.parse(readFileSync21(input.paths.statusPath, "utf8"));
   } catch {
     return { ...base, reason: "the engine has not written its status yet" };
   }
@@ -20395,7 +23494,7 @@ function inspectSystemdEngine(l, exec = linuxEngineExec) {
     return unknown;
   if (f.FragmentPath !== l.unitPath) {
     try {
-      if (!f.FragmentPath || realpathSync6(f.FragmentPath) !== l.unitPath)
+      if (!f.FragmentPath || realpathSync7(f.FragmentPath) !== l.unitPath)
         return { ...unknown, detail: `Conflicting unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}. Stop its custodian before retrying.` };
     } catch {
       return { ...unknown, detail: `Cannot verify unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}.` };
@@ -20427,27 +23526,27 @@ function systemdCgroupEmpty(group) {
   if (!group.startsWith("/user.slice/") || group.split("/").includes(".."))
     return;
   try {
-    return /^populated 0$/m.test(readFileSync20(join26("/sys/fs/cgroup", group, "cgroup.events"), "utf8"));
+    return /^populated 0$/m.test(readFileSync22(join28("/sys/fs/cgroup", group, "cgroup.events"), "utf8"));
   } catch (e) {
     return e.code === "ENOENT" ? true : undefined;
   }
 }
 function systemdPidInCgroup(pid, group) {
   try {
-    return readFileSync20(`/proc/${pid}/cgroup`, "utf8").split(`
+    return readFileSync22(`/proc/${pid}/cgroup`, "utf8").split(`
 `).some((line) => line === `0::${group}`);
   } catch {
     return false;
   }
 }
-var runtimeRequire2 = createRequire2(import.meta.url);
+var runtimeRequire2 = createRequire3(import.meta.url);
 var heldLifecycleLocks = new Set;
 function linuxLayoutFor(options) {
   return resolveLinuxEngineLayout({ ...options.env ?? process.env, HOME: options.homeDir ?? options.env?.HOME ?? process.env.HOME });
 }
 function currentProgram(l) {
   try {
-    return JSON.parse(readFileSync20(join26(l.stateDir, "service-current.json"), "utf8")).program;
+    return JSON.parse(readFileSync22(join28(l.stateDir, "service-current.json"), "utf8")).program;
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -20464,9 +23563,9 @@ function linuxEngineCustody(l, facts, options = {}) {
     return "unknown";
   if (facts.control_group && (options.cgroupEmpty ?? systemdCgroupEmpty)(facts.control_group) !== true)
     return "unknown";
-  const childrenPath = join26(l.dataDir, "engine/children.json");
-  const record = readEngineChildren(childrenPath);
-  if (existsSync11(childrenPath) && (!record || record.children.length > 0))
+  const childrenPath = join28(l.dataDir, "engine/children.json");
+  const record2 = readEngineChildren(childrenPath);
+  if (existsSync11(childrenPath) && (!record2 || record2.children.length > 0))
     return "unknown";
   if (!existsSync11(l.receiptPath) && !existsSync11(l.unitPath))
     return "none";
@@ -20478,8 +23577,8 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync17, mkdirSync as mkdirSync15, readFileSync as readFileSync24, writeFileSync as writeFileSync8 } from "node:fs";
-import { dirname as dirname26, join as join35 } from "node:path";
+import { existsSync as existsSync17, mkdirSync as mkdirSync15, readFileSync as readFileSync26, writeFileSync as writeFileSync9 } from "node:fs";
+import { dirname as dirname27, join as join37 } from "node:path";
 import { homedir as homedir19 } from "node:os";
 init_openclaw_executable();
 init_worker_auth();
@@ -20590,7 +23689,7 @@ function storeSecretRemedy(key) {
 }
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -20602,7 +23701,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash4("sha256").update(material, "utf8").digest("hex");
+  return createHash5("sha256").update(material, "utf8").digest("hex");
 }
 var DEFAULT_MAX_ATTEMPTS = 3;
 var DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
@@ -20663,34 +23762,34 @@ class WorkerBootSecretResolver {
     }));
   }
   status() {
-    return [...this.failures.values()].map((failure) => {
+    return [...this.failures.values()].map((failure2) => {
       const item = {
         kind: "worker_credential_degraded",
-        display_name: failure.context.displayName,
-        state: failure.state,
+        display_name: failure2.context.displayName,
+        state: failure2.state,
         status_label: "Credential unavailable - needs your attention",
-        hint: failure.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
-        attempts: failure.attempts,
-        max_attempts: failure.maxAttempts
+        hint: failure2.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
+        attempts: failure2.attempts,
+        max_attempts: failure2.maxAttempts
       };
-      if (failure.nextRetryAt)
-        item.next_retry_at = failure.nextRetryAt;
-      if (failure.context.affectedProfiles?.length)
-        item.affected_profiles = [...failure.context.affectedProfiles];
-      if (failure.context.affectedCapabilities?.length)
-        item.affected_capabilities = [...failure.context.affectedCapabilities];
+      if (failure2.nextRetryAt)
+        item.next_retry_at = failure2.nextRetryAt;
+      if (failure2.context.affectedProfiles?.length)
+        item.affected_profiles = [...failure2.context.affectedProfiles];
+      if (failure2.context.affectedCapabilities?.length)
+        item.affected_capabilities = [...failure2.context.affectedCapabilities];
       return item;
     });
   }
   recheckNow() {
-    for (const failure of this.failures.values()) {
-      this.tryResolveFailure(failure);
+    for (const failure2 of this.failures.values()) {
+      this.tryResolveFailure(failure2);
     }
     return this.status();
   }
   recordFailure(secretRef, env, context2) {
     const existing = this.failures.get(secretRef);
-    const failure = existing ?? {
+    const failure2 = existing ?? {
       secretRef,
       env,
       context: context2,
@@ -20699,13 +23798,13 @@ class WorkerBootSecretResolver {
       state: "retrying",
       scheduled: false
     };
-    failure.context = mergeContext(failure.context, context2);
-    this.failures.set(secretRef, failure);
-    this.warn(`Olympus worker credential unavailable: ${failure.context.displayName}. The affected lane is disabled.`);
+    failure2.context = mergeContext(failure2.context, context2);
+    this.failures.set(secretRef, failure2);
+    this.warn(`Olympus worker credential unavailable: ${failure2.context.displayName}. The affected lane is disabled.`);
     if (existing)
       return;
-    failure.attempts += 1;
-    this.scheduleRetry(failure);
+    failure2.attempts += 1;
+    this.scheduleRetry(failure2);
   }
   recordResolved(secretRef, context2) {
     for (const binding of context2.profileBindings ?? []) {
@@ -20723,51 +23822,51 @@ class WorkerBootSecretResolver {
         this.resolved.delete(profileId);
     }
   }
-  scheduleRetry(failure) {
-    if (failure.attempts >= failure.maxAttempts) {
-      failure.state = "stopped";
-      delete failure.nextRetryAt;
-      failure.scheduled = false;
-      this.cancelScheduledRetry(failure);
+  scheduleRetry(failure2) {
+    if (failure2.attempts >= failure2.maxAttempts) {
+      failure2.state = "stopped";
+      delete failure2.nextRetryAt;
+      failure2.scheduled = false;
+      this.cancelScheduledRetry(failure2);
       return;
     }
-    if (failure.scheduled)
+    if (failure2.scheduled)
       return;
-    const delayMs = this.retryDelaysMs[Math.min(failure.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
+    const delayMs = this.retryDelaysMs[Math.min(failure2.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
     const nextRetryAt = new Date(this.now().getTime() + delayMs).toISOString();
-    failure.state = "retrying";
-    failure.nextRetryAt = nextRetryAt;
-    failure.scheduled = true;
-    failure.retryHandle = this.schedule(() => {
-      failure.scheduled = false;
-      delete failure.retryHandle;
-      this.tryResolveFailure(failure);
+    failure2.state = "retrying";
+    failure2.nextRetryAt = nextRetryAt;
+    failure2.scheduled = true;
+    failure2.retryHandle = this.schedule(() => {
+      failure2.scheduled = false;
+      delete failure2.retryHandle;
+      this.tryResolveFailure(failure2);
     }, delayMs);
   }
-  cancelScheduledRetry(failure) {
-    if (failure.retryHandle === undefined)
+  cancelScheduledRetry(failure2) {
+    if (failure2.retryHandle === undefined)
       return;
-    const handle = failure.retryHandle;
-    delete failure.retryHandle;
+    const handle = failure2.retryHandle;
+    delete failure2.retryHandle;
     this.cancel(handle);
   }
-  tryResolveFailure(failure) {
-    if (!this.failures.has(failure.secretRef))
+  tryResolveFailure(failure2) {
+    if (!this.failures.has(failure2.secretRef))
       return;
     try {
-      const value = this.resolveSecretRefValueSync(failure.secretRef, failure.env)?.trim();
-      failure.attempts += 1;
+      const value = this.resolveSecretRefValueSync(failure2.secretRef, failure2.env)?.trim();
+      failure2.attempts += 1;
       if (value) {
-        failure.state = "resolved_restart_required";
-        delete failure.nextRetryAt;
-        failure.scheduled = false;
-        this.clearResolved(failure.context, failure.secretRef);
+        failure2.state = "resolved_restart_required";
+        delete failure2.nextRetryAt;
+        failure2.scheduled = false;
+        this.clearResolved(failure2.context, failure2.secretRef);
         return;
       }
     } catch {
-      failure.attempts += 1;
+      failure2.attempts += 1;
     }
-    this.scheduleRetry(failure);
+    this.scheduleRetry(failure2);
   }
 }
 function mergeContext(existing, next) {
@@ -20806,9 +23905,9 @@ init_connected_handles();
 init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
-import { mkdirSync as mkdirSync14, readFileSync as readFileSync22, rmSync as rmSync7, writeFileSync as writeFileSync7 } from "node:fs";
+import { mkdirSync as mkdirSync14, readFileSync as readFileSync24, rmSync as rmSync8, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
-import { dirname as dirname22, join as join28 } from "node:path";
+import { dirname as dirname23, join as join30 } from "node:path";
 init_secret_store();
 init_http_timeout();
 init_oauth_relay();
@@ -20858,11 +23957,11 @@ var KNOWN_OAUTH_ERROR_CODES = new Set([
   "redirect_uri_mismatch"
 ]);
 function defaultDetachedOAuthStateDir() {
-  return join28(homedir15(), ".olympus", "pending-oauth");
+  return join30(homedir15(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync22(path, "utf8")));
+    return sanitizeDetachedOAuthState(JSON.parse(readFileSync24(path, "utf8")));
   } catch {
     return;
   }
@@ -20935,10 +24034,10 @@ init_secret_store();
 init_consult_transport_zkapi();
 
 // src/core/consult-gate.ts
-import { createHash as createHash9 } from "node:crypto";
-import { existsSync as existsSync16, readFileSync as readFileSync23, statSync as statSync18 } from "node:fs";
+import { createHash as createHash10 } from "node:crypto";
+import { existsSync as existsSync16, readFileSync as readFileSync25, statSync as statSync18 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
-import { basename as basename6, dirname as dirname25, join as join33 } from "node:path";
+import { basename as basename6, dirname as dirname26, join as join35 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 init_opsec();
 init_types();
@@ -21174,7 +24273,7 @@ var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
 var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join33(env.HOME?.trim() || homedir18(), ".olympus", "consult", "vocabulary");
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join35(env.HOME?.trim() || homedir18(), ".olympus", "consult", "vocabulary");
 }
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
@@ -21183,22 +24282,22 @@ function verifiedPackFile(path, sha256) {
       return "missing";
     if (statSync18(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
-    const gz = readFileSync23(path);
-    return createHash9("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    const gz = readFileSync25(path);
+    return createHash10("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname25(fileURLToPath6(moduleUrl));
-  const root = basename6(here) === "core" && basename6(dirname25(here)) === "src" ? dirname25(dirname25(here)) : basename6(here) === "dist" ? dirname25(here) : undefined;
-  return root !== undefined && existsSync16(join33(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname26(fileURLToPath6(moduleUrl));
+  const root = basename6(here) === "core" && basename6(dirname26(here)) === "src" ? dirname26(dirname26(here)) : basename6(here) === "dist" ? dirname26(here) : undefined;
+  return root !== undefined && existsSync16(join35(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join33(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join35(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -21206,7 +24305,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha256 = manifest.get(id);
-      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join33(userDir, `${id}.txt.gz`), sha256);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join35(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -21216,10 +24315,10 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join33(userDir, "manifest.json");
+    const path = join35(userDir, "manifest.json");
     if (!existsSync16(path) || statSync18(path).size > 1024 * 1024)
       return [];
-    const manifest = JSON.parse(readFileSync23(path, "utf8"));
+    const manifest = JSON.parse(readFileSync25(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
       return [];
     const packs = manifest.packs;
@@ -22373,7 +25472,7 @@ init_still_image_readiness();
 // src/core/consult-settings.ts
 init_secret_store();
 import { closeSync as closeSync6, constants as constants5, fstatSync as fstatSync2, openSync as openSync5, readSync } from "node:fs";
-import { join as join34 } from "node:path";
+import { join as join36 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
@@ -22407,7 +25506,7 @@ var OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
 function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
-  return home ? join34(home, ".olympus", "consult.json") : undefined;
+  return home ? join36(home, ".olympus", "consult.json") : undefined;
 }
 var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
@@ -22715,7 +25814,7 @@ async function photoSearchCheck(deps) {
 }
 function defaultOsRelease() {
   try {
-    return readFileSync24("/etc/os-release", "utf8");
+    return readFileSync26("/etc/os-release", "utf8");
   } catch {
     return;
   }
@@ -22723,12 +25822,12 @@ function defaultOsRelease() {
 async function sourceCapabilityCatalogCheck(deps) {
   const registry = deps.handleRegistry ?? readRegistrySafely(deps);
   const connectedProviders = new Set(registry.handles.filter((handle) => handle.backendState?.status !== "reauth_required").map((handle) => handle.provider));
-  const connected = V0_4_PUBLIC_SOURCE_CAPABILITIES.filter((source) => connectedProviders.has(source.doctor_lane.provider));
-  const dependencyLabels = [...new Set(connected.flatMap((source) => source.dependencies.map((dependency) => dependency.label)))].sort((a, b) => a.localeCompare(b));
+  const connected2 = V0_4_PUBLIC_SOURCE_CAPABILITIES.filter((source) => connectedProviders.has(source.doctor_lane.provider));
+  const dependencyLabels = [...new Set(connected2.flatMap((source) => source.dependencies.map((dependency) => dependency.label)))].sort((a, b) => a.localeCompare(b));
   return {
     name: "source_capability_catalog",
     ok: true,
-    detail: `Public source catalog declares ${V0_4_PUBLIC_SOURCE_CAPABILITIES.length} sources; ${connected.length} connected. Source-conditioned dependencies for connected sources: ${dependencyLabels.join(", ") || "none until a source is connected"}.`
+    detail: `Public source catalog declares ${V0_4_PUBLIC_SOURCE_CAPABILITIES.length} sources; ${connected2.length} connected. Source-conditioned dependencies for connected sources: ${dependencyLabels.join(", ") || "none until a source is connected"}.`
   };
 }
 function doctorDepsWithLayeredEnvironment(input, inputEnv) {
@@ -22763,7 +25862,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join35(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join37(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -23521,18 +26620,18 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord15(value);
-  if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
+  const record2 = asRecord15(value);
+  if (!("actionable_queued" in record2) || !("actionable_retryable_due" in record2))
     return;
   return {
-    actionable_queued: asCount(record.actionable_queued),
-    actionable_retryable_due: asCount(record.actionable_retryable_due),
-    ...typeof record.oldest_actionable_at === "string" ? { oldest_actionable_at: record.oldest_actionable_at } : {},
-    ...typeof record.newest_terminal_progress_at === "string" ? { newest_terminal_progress_at: record.newest_terminal_progress_at } : {}
+    actionable_queued: asCount(record2.actionable_queued),
+    actionable_retryable_due: asCount(record2.actionable_retryable_due),
+    ...typeof record2.oldest_actionable_at === "string" ? { oldest_actionable_at: record2.oldest_actionable_at } : {},
+    ...typeof record2.newest_terminal_progress_at === "string" ? { newest_terminal_progress_at: record2.newest_terminal_progress_at } : {}
   };
 }
-function degradedCredentialDetails(record, options = {}) {
-  const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
+function degradedCredentialDetails(record2, options = {}) {
+  const credentials = Array.isArray(record2.degraded_credentials) ? record2.degraded_credentials : [];
   return credentials.flatMap((entry) => {
     const credential = asRecord15(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
@@ -23793,7 +26892,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join35(dirname26(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join37(dirname27(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -23816,9 +26915,9 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync17(path))
       return;
-    const parsed = JSON.parse(readFileSync24(path, "utf8"));
-    const record = asRecord15(parsed);
-    const sources = asRecord15(record.sources);
+    const parsed = JSON.parse(readFileSync26(path, "utf8"));
+    const record2 = asRecord15(parsed);
+    const sources = asRecord15(record2.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
       const source = asRecord15(sourceValue);
@@ -23829,7 +26928,7 @@ function readIngestionHealthState(path) {
       };
     }
     return {
-      generated_at: typeof record.generated_at === "string" ? record.generated_at : new Date(0).toISOString(),
+      generated_at: typeof record2.generated_at === "string" ? record2.generated_at : new Date(0).toISOString(),
       sources: normalized
     };
   } catch {
@@ -23837,8 +26936,8 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync15(dirname26(path), { recursive: true, mode: 448 });
-  writeFileSync8(path, `${JSON.stringify(state, null, 2)}
+  mkdirSync15(dirname27(path), { recursive: true, mode: 448 });
+  writeFileSync9(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function ingestionHealthHint(ledger) {
@@ -24051,7 +27150,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync17(join35(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync17(join37(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync7(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -24068,11 +27167,11 @@ function errorDetail(error) {
 }
 
 // src/core/ocr-readiness.ts
-import { existsSync as existsSync19, readFileSync as readFileSync25 } from "node:fs";
+import { existsSync as existsSync19, readFileSync as readFileSync27 } from "node:fs";
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync18 } from "node:fs";
-import { dirname as dirname27, join as join36 } from "node:path";
+import { dirname as dirname28, join as join38 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 
 // src/workers/file-extraction/extractors/bounded-text.ts
@@ -24113,12 +27212,12 @@ var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js";
 var APPLE_VISION_OSASCRIPT = "/usr/bin/osascript";
 var OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
-  let directory = dirname27(fileURLToPath7(moduleUrl));
-  for (let depth = 0;depth < 6; depth += 1) {
-    const candidate = join36(directory, APPLE_VISION_OCR_SCRIPT);
+  let directory = dirname28(fileURLToPath7(moduleUrl));
+  for (let depth2 = 0;depth2 < 6; depth2 += 1) {
+    const candidate = join38(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname27(directory);
+    const parent = dirname28(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -24142,7 +27241,7 @@ function parseOcrEnginePreference(value) {
 init_command_runner();
 import { mkdtemp, readFile as readFile3, readdir, rm as rm2, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
-import { join as join37 } from "node:path";
+import { join as join39 } from "node:path";
 
 // src/workers/file-extraction/extractors/ocr-probe-fixture.ts
 var OCR_PROBE_WORD = "OLYMPUS";
@@ -24332,7 +27431,7 @@ async function probeTesseract(input) {
   }
 }
 async function probePdftoppm(input) {
-  const prefix = join37(input.directory, "render");
+  const prefix = join39(input.directory, "render");
   try {
     await input.runner({
       command: PDFTOPPM_COMMAND,
@@ -24347,20 +27446,20 @@ async function probePdftoppm(input) {
   if (!first)
     return "failed";
   if (input.tesseract === "ok") {
-    const read = await probeTesseract({ runner: input.runner, imagePath: join37(input.directory, first) });
+    const read = await probeTesseract({ runner: input.runner, imagePath: join39(input.directory, first) });
     if (read !== "ok")
       return "failed";
   }
   return "ok";
 }
 async function probeOcrmypdf(input) {
-  const sidecarPath = join37(input.directory, "probe-sidecar.txt");
+  const sidecarPath = join39(input.directory, "probe-sidecar.txt");
   try {
     await input.runner({
       command: OCRMYPDF_COMMAND,
       args: ocrmypdfArguments({
         inputPath: input.pdfPath,
-        outputPath: join37(input.directory, "probe-output.pdf"),
+        outputPath: join39(input.directory, "probe-output.pdf"),
         sidecarPath
       }),
       timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
@@ -24382,9 +27481,9 @@ async function probeOcrCapability(options = {}) {
   let ocrmypdf = "failed";
   let directory;
   try {
-    directory = await mkdtemp(join37(tmpdir4(), PROBE_TEMP_PREFIX));
-    const imagePath = join37(directory, "probe.jpg");
-    const pdfPath = join37(directory, "probe.pdf");
+    directory = await mkdtemp(join39(tmpdir4(), PROBE_TEMP_PREFIX));
+    const imagePath = join39(directory, "probe.jpg");
+    const pdfPath = join39(directory, "probe.pdf");
     await writeFile(imagePath, ocrProbeJpeg());
     await writeFile(pdfPath, buildOcrProbePdf());
     tesseract = await probeTesseract({ runner, imagePath });
@@ -24440,7 +27539,7 @@ function linuxFamilyFromOsRelease2(text2) {
 function readOsRelease() {
   for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
     try {
-      return readFileSync25(path, "utf8");
+      return readFileSync27(path, "utf8");
     } catch {}
   }
   return;
@@ -25354,34 +28453,34 @@ function optionalSourceAnswerSelectedItems(value, fallbackCorpusId) {
     if (forbiddenPath) {
       throw new OperationError("invalid_params", `selected_items.${index} must not include source content field ${forbiddenPath}.`);
     }
-    const record = selectedItemRecord(initialRecord, fallbackCorpusId);
+    const record2 = selectedItemRecord(initialRecord, fallbackCorpusId);
     return {
-      corpus_id: requiredSelectedItemString(record.corpus_id, `selected_items.${index}.corpus_id`),
-      family: requiredSelectedItemString(record.family, `selected_items.${index}.family`),
-      provider: requiredSelectedItemString(record.provider, `selected_items.${index}.provider`),
-      account_scope: requiredSelectedItemString(record.account_scope, `selected_items.${index}.account_scope`),
-      provider_item_id: requiredSelectedItemString(record.provider_item_id, `selected_items.${index}.provider_item_id`),
-      local_item_id: requiredSelectedItemString(record.local_item_id, `selected_items.${index}.local_item_id`),
-      ...optionalSelectedItemString(record.provider_thread_id, "provider_thread_id"),
-      ...optionalSelectedItemString(record.provider_conversation_id, "provider_conversation_id"),
-      ...optionalSelectedItemString(record.provider_file_id, "provider_file_id"),
-      ...optionalSelectedItemString(record.source_version, "source_version"),
-      ...optionalSelectedItemString(record.conversation_label, "conversation_label"),
-      ...optionalSelectedItemString(record.author_label, "author_label"),
-      ...optionalSelectedItemString(record.authored_at, "authored_at")
+      corpus_id: requiredSelectedItemString(record2.corpus_id, `selected_items.${index}.corpus_id`),
+      family: requiredSelectedItemString(record2.family, `selected_items.${index}.family`),
+      provider: requiredSelectedItemString(record2.provider, `selected_items.${index}.provider`),
+      account_scope: requiredSelectedItemString(record2.account_scope, `selected_items.${index}.account_scope`),
+      provider_item_id: requiredSelectedItemString(record2.provider_item_id, `selected_items.${index}.provider_item_id`),
+      local_item_id: requiredSelectedItemString(record2.local_item_id, `selected_items.${index}.local_item_id`),
+      ...optionalSelectedItemString(record2.provider_thread_id, "provider_thread_id"),
+      ...optionalSelectedItemString(record2.provider_conversation_id, "provider_conversation_id"),
+      ...optionalSelectedItemString(record2.provider_file_id, "provider_file_id"),
+      ...optionalSelectedItemString(record2.source_version, "source_version"),
+      ...optionalSelectedItemString(record2.conversation_label, "conversation_label"),
+      ...optionalSelectedItemString(record2.author_label, "author_label"),
+      ...optionalSelectedItemString(record2.authored_at, "authored_at")
     };
   });
 }
-function selectedItemRecord(record, fallbackCorpusId) {
-  const selectedItem = record.selected_item;
+function selectedItemRecord(record2, fallbackCorpusId) {
+  const selectedItem = record2.selected_item;
   if (selectedItem && typeof selectedItem === "object" && !Array.isArray(selectedItem)) {
     return selectedItem;
   }
-  const sourceItem = record.sourceItem;
+  const sourceItem = record2.sourceItem;
   if (sourceItem && typeof sourceItem === "object" && !Array.isArray(sourceItem)) {
     const source = sourceItem;
     return {
-      corpus_id: record.corpus_id ?? fallbackCorpusId,
+      corpus_id: record2.corpus_id ?? fallbackCorpusId,
       family: source.family,
       provider: source.provider,
       account_scope: source.accountScope,
@@ -25394,14 +28493,14 @@ function selectedItemRecord(record, fallbackCorpusId) {
     };
   }
   return {
-    ...record,
-    account_scope: record.account_scope ?? record.accountScope,
-    provider_item_id: record.provider_item_id ?? record.providerItemId,
-    local_item_id: record.local_item_id ?? record.localItemId,
-    provider_thread_id: record.provider_thread_id ?? record.providerThreadId,
-    provider_conversation_id: record.provider_conversation_id ?? record.providerConversationId,
-    provider_file_id: record.provider_file_id ?? record.providerFileId,
-    source_version: record.source_version ?? record.sourceVersion
+    ...record2,
+    account_scope: record2.account_scope ?? record2.accountScope,
+    provider_item_id: record2.provider_item_id ?? record2.providerItemId,
+    local_item_id: record2.local_item_id ?? record2.localItemId,
+    provider_thread_id: record2.provider_thread_id ?? record2.providerThreadId,
+    provider_conversation_id: record2.provider_conversation_id ?? record2.providerConversationId,
+    provider_file_id: record2.provider_file_id ?? record2.providerFileId,
+    source_version: record2.source_version ?? record2.sourceVersion
   };
 }
 function requiredSelectedItemString(value, name) {
@@ -25519,9 +28618,9 @@ function registerOlympusDashboardGateway(api, config, options = {}) {
   registerOAuthCallbackRoutes(api, config, fetchImpl);
 }
 function parseDashboardToolParams(value) {
-  const record = exactRecord(value, ["name", "arguments"]);
-  const name = enumValue(record.name, OLYMPUS_TAB_TOOL_NAMES, "name");
-  const args = record.arguments === undefined ? {} : record.arguments;
+  const record2 = exactRecord(value, ["name", "arguments"]);
+  const name = enumValue(record2.name, OLYMPUS_TAB_TOOL_NAMES, "name");
+  const args = record2.arguments === undefined ? {} : record2.arguments;
   if (!isRecord2(args))
     throw new DashboardGatewayInvalidRequestError("Dashboard tool arguments must be an object.");
   return { name, arguments: args };
@@ -25949,12 +29048,12 @@ async function readBoundedResponseText(response, maxBytes, signal) {
   }
 }
 function exactRecord(value, keys) {
-  const record = recordValue(value);
+  const record2 = recordValue(value);
   const allowed = new Set(keys);
-  if (Object.keys(record).some((key) => !allowed.has(key))) {
+  if (Object.keys(record2).some((key) => !allowed.has(key))) {
     throw new DashboardGatewayInvalidRequestError("Dashboard request contains an unknown field.");
   }
-  return record;
+  return record2;
 }
 function recordValue(value) {
   if (!isRecord2(value))
@@ -25985,10 +29084,10 @@ async function handleRemoteAccessConfigRequest(input) {
   let enabled;
   try {
     const parsed = JSON.parse(input.body);
-    const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
-    if (!record || Object.keys(record).length !== 1 || typeof record.enabled !== "boolean")
+    const record2 = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+    if (!record2 || Object.keys(record2).length !== 1 || typeof record2.enabled !== "boolean")
       throw new Error("shape");
-    enabled = record.enabled;
+    enabled = record2.enabled;
   } catch {
     return failed(400, "invalid_request", 'The request must be exactly {"enabled": true} or {"enabled": false}.');
   }
@@ -26036,10 +29135,10 @@ function objectAt(parent, key) {
     parent[key] = created;
     return created;
   }
-  const record = asRecord16(existing);
-  if (!record)
+  const record2 = asRecord16(existing);
+  if (!record2)
     throw new TypeError(`config ${key} is not an object`);
-  return record;
+  return record2;
 }
 function asRecord16(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -26118,13 +29217,13 @@ function sourceAnswerContentText(payload2) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord17(item);
-    if (!record)
+    const record2 = asRecord17(item);
+    if (!record2)
       return;
-    const label = firstString(record.source_label, record.title, record.corpus_id, "source");
-    const corpus = typeof record.corpus_id === "string" ? ` [${record.corpus_id}]` : "";
-    const date = firstString(record.authored_at, record.updated_at);
-    const uri = typeof record.uri === "string" ? ` ${record.uri}` : "";
+    const label = firstString(record2.source_label, record2.title, record2.corpus_id, "source");
+    const corpus = typeof record2.corpus_id === "string" ? ` [${record2.corpus_id}]` : "";
+    const date = firstString(record2.authored_at, record2.updated_at);
+    const uri = typeof record2.uri === "string" ? ` ${record2.uri}` : "";
     lines.push(`${index + 1}. ${label}${corpus}${date ? ` (${date})` : ""}${uri}`);
   });
   if (evidence.length > 8)
@@ -26403,16 +29502,16 @@ async function loadOpenClawDurableSend() {
   return sdk.sendDurableMessageBatch;
 }
 function parseSourceWatchDeliveryRequest(value) {
-  const record = exactRecord2(value, ["route", "downstream_idempotency_key", "payload"]);
-  const route = exactRecord2(record.route, ["ownerId", "kind", "targetId", "accountId"]);
+  const record2 = exactRecord2(value, ["route", "downstream_idempotency_key", "payload"]);
+  const route = exactRecord2(record2.route, ["ownerId", "kind", "targetId", "accountId"]);
   const kind = route.kind;
   if (kind !== "openclaw_channel" && kind !== "openclaw_task")
     throw new TypeError("Invalid route kind.");
   const targetId = boundedString(route.targetId, 256);
   if (kind === "openclaw_channel")
     splitChannelTarget(targetId);
-  const payload2 = parseEvidencePointerPayload(record.payload);
-  const downstreamIdempotencyKey = boundedString(record.downstream_idempotency_key, 64);
+  const payload2 = parseEvidencePointerPayload(record2.payload);
+  const downstreamIdempotencyKey = boundedString(record2.downstream_idempotency_key, 64);
   if (!/^[a-f0-9]{64}$/.test(downstreamIdempotencyKey))
     throw new TypeError("Invalid idempotency key.");
   return {
@@ -26426,7 +29525,7 @@ function parseSourceWatchDeliveryRequest(value) {
   };
 }
 function parseEvidencePointerPayload(value) {
-  const record = exactRecord2(value, [
+  const record2 = exactRecord2(value, [
     "headline",
     "watch_id",
     "corpus_id",
@@ -26435,16 +29534,16 @@ function parseEvidencePointerPayload(value) {
     "match_count",
     "items"
   ]);
-  if (record.headline !== SOURCE_WATCH_DELIVERY_HEADLINE || record.match_count !== 1) {
+  if (record2.headline !== SOURCE_WATCH_DELIVERY_HEADLINE || record2.match_count !== 1) {
     throw new TypeError("Invalid watch delivery headline or match count.");
   }
-  const watchMode = record.watch_mode;
+  const watchMode = record2.watch_mode;
   if (watchMode !== "one_shot" && watchMode !== "continuous") {
     throw new TypeError("Invalid watch delivery mode.");
   }
-  if (!Array.isArray(record.items) || record.items.length !== 1)
+  if (!Array.isArray(record2.items) || record2.items.length !== 1)
     throw new TypeError("Invalid watch delivery items.");
-  const item = exactRecord2(record.items[0], ["local_item_id", "source_version", "matched_at"]);
+  const item = exactRecord2(record2.items[0], ["local_item_id", "source_version", "matched_at"]);
   const sourceVersion = boundedString(item.source_version, 64);
   const matchedAt = boundedString(item.matched_at, 64);
   if (!Number.isFinite(Date.parse(sourceVersion)) || !Number.isFinite(Date.parse(matchedAt))) {
@@ -26452,9 +29551,9 @@ function parseEvidencePointerPayload(value) {
   }
   return {
     headline: SOURCE_WATCH_DELIVERY_HEADLINE,
-    watch_id: boundedString(record.watch_id, 256),
-    corpus_id: boundedString(record.corpus_id, 256),
-    query_text: boundedString(record.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
+    watch_id: boundedString(record2.watch_id, 256),
+    corpus_id: boundedString(record2.corpus_id, 256),
+    query_text: boundedString(record2.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
     watch_mode: watchMode,
     match_count: 1,
     items: [{
@@ -26471,11 +29570,11 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord2(value, allowed) {
-  const record = asRecord17(value);
-  if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
+  const record2 = asRecord17(value);
+  if (!record2 || Object.keys(record2).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }
-  return record;
+  return record2;
 }
 function boundedString(value, maximum) {
   if (typeof value !== "string" || value.length < 1 || value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value)) {
@@ -26507,7 +29606,7 @@ function sourceWatchRouteFromToolContext(context2) {
   const ownerSeed = context2.requesterSenderId?.trim() || context2.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId2 = `owner:${createHash10("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId2 = `owner:${createHash11("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context2.deliveryContext?.channel || context2.messageChannel)?.trim().toLowerCase();
   const target = context2.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

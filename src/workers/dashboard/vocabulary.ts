@@ -2351,7 +2351,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
  * The one line the card shows where zkAPI cannot run: no network confinement
  * on this platform (owner ruling 2026-10-12: no weaker mode).
  */
-const OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = 'Anonymous answers aren\'t available on Linux yet: they need network confinement, which this version of Olympus doesn\'t have on Linux. Nothing is ever sent without it.';
+const OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = 'Anonymous answers aren\'t available on this computer because its network isolation check hasn\'t passed. Nothing is sent without it.';
 
 export const DASHBOARD_OUTSIDE_HELP_COPY = {
   crumb: 'Anonymous answers',
@@ -2366,7 +2366,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     fence_held: 'Anonymous answers: paused · unfinished payment',
     needs_acceptance: 'Anonymous answers: paused · accept the updated statements',
     blocked: 'Anonymous answers: paused · needs a fix',
-    unavailable: 'Anonymous answers: not available on Linux yet',
+    unavailable: 'Anonymous answers: not available on this computer',
   },
   /** The route claim belongs to a verified, completed session, never the platform alone. */
   experimental: 'Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.',
@@ -2559,7 +2559,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     'Wait until the tool prints "Private inference balance activated".',
     'Run: {daemon} config --relay-url socks5://127.0.0.1:19050',
     'Run: {daemon} config --require-api-key',
-    'Run: {daemon} config --api-key <key>. Store the same key where the route\'s key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.',
+    'Run: {daemon} config --api-key. Pipe its output directly into an owner-only file; never paste it into chat or logs. Store that key where the route\'s key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.',
     'Run: {daemon} config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.',
   ],
   costTitle: 'Cost and risk',

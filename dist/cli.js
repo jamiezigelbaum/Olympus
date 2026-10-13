@@ -64142,8 +64142,11 @@ function linuxZkapiConfinement(deps = {}) {
     }
     return check;
   };
+  refresh();
   return {
-    level: "loopback_filtered",
+    get level() {
+      return check.ok ? "loopback_filtered" : "none";
+    },
     limit: "Linux network isolation is checked before each session.",
     wrap: () => {
       throw new Error("Linux requires a prepared session");
@@ -64156,7 +64159,7 @@ function linuxZkapiConfinement(deps = {}) {
           sysctls[p] = proc.read(p);
         } catch {}
       const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join62(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
-      return { ok: result.ok, line };
+      return { ok: result.ok, line, ...!result.ok && result.code === "launcher_missing_or_untrusted" ? { installRequired: true } : {} };
     },
     selfTest: async (dir, childEnv, ports) => Boolean(launcher && check.ok && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
     prepare: async (dir, ports) => {
@@ -64481,6 +64484,8 @@ function zkapiConfinementAvailable(confinement) {
 }
 function defaultZkapiConfinement(host = {}) {
   const platform2 = host.platform ?? process.platform;
+  if (platform2 === "linux")
+    return linuxZkapiConfinement(host);
   if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync40("/usr/bin/sandbox-exec"))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
@@ -65234,7 +65239,7 @@ async function zkapiConsultReadiness(options) {
   const now = (options.now ?? (() => new Date))();
   const env = options.env ?? process.env;
   const settings = options.settings;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
   const confinementCheck = await confinement.check?.();
@@ -65499,7 +65504,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
   let fetchImpl = options.fetchImpl ?? fetch;
   let confinementSession;
   const inspect = options.inspectListener ?? inspectLoopbackListener;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === "per_consult";
@@ -69897,7 +69902,7 @@ function degradedInput(degraded) {
 function unknownStatus(value2) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value2 };
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on Linux yet: they need network confinement, which this version of Olympus doesn't have on Linux. Nothing is ever sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -70715,7 +70720,7 @@ var init_vocabulary = __esm(() => {
       fence_held: "Anonymous answers: paused · unfinished payment",
       needs_acceptance: "Anonymous answers: paused · accept the updated statements",
       blocked: "Anonymous answers: paused · needs a fix",
-      unavailable: "Anonymous answers: not available on Linux yet"
+      unavailable: "Anonymous answers: not available on this computer"
     },
     experimental: "Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.",
     intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
@@ -70880,7 +70885,7 @@ var init_vocabulary = __esm(() => {
       'Wait until the tool prints "Private inference balance activated".',
       "Run: {daemon} config --relay-url socks5://127.0.0.1:19050",
       "Run: {daemon} config --require-api-key",
-      "Run: {daemon} config --api-key <key>. Store the same key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
+      "Run: {daemon} config --api-key. Pipe its output directly into an owner-only file; never paste it into chat or logs. Store that key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
       "Run: {daemon} config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
     ],
     costTitle: "Cost and risk",
@@ -118415,7 +118420,8 @@ function renderOutsideHelpTools(tools, input) {
     return "";
   const install = tools.install;
   const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
-  const missing = tools.tools.some(installable);
+  const launcher = input.requireLauncher ? tools.tools.find((entry) => entry.tool === "zkapi-clientd" && entry.offered === true) : undefined;
+  const missing = Boolean(launcher) || tools.tools.some(installable);
   const parts = [
     `<p class="pnote"><strong>${escapeHtml2(C.title)}</strong></p>`,
     `<p class="pnote">${escapeHtml2(C.intro)}</p>`,
@@ -118426,7 +118432,7 @@ function renderOutsideHelpTools(tools, input) {
     parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml2(C.done)}</p>`);
   if (!missing && install.state !== "running")
     parts.push(`<p class="pnote ohsmall">${escapeHtml2(C.allInstalled)}</p>`);
-  parts.push(installButton(tools, input.canEdit));
+  parts.push(installButton(tools, input.canEdit, launcher));
   return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml2(install.state)}">${parts.join("")}</div>`;
 }
 function renderOutsideHelpToolsFix(tools, input) {
@@ -118607,7 +118613,7 @@ function renderOutsideHelpCard(status, input) {
   const parts = [];
   if (input.untitled !== true)
     parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
-  if (canUnlock && (on || !unavailable2)) {
+  if (canUnlock && (on || !unavailable2 || status.confinementInstallRequired)) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
@@ -118615,8 +118621,11 @@ function renderOutsideHelpCard(status, input) {
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
   if (unavailable2) {
-    const script3 = (canEdit || canUnlock) && on ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}`;
+    if (status.confinementInstallRequired)
+      parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
+    const toolsScript2 = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
+    const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
   }
   parts.push(renderProblems(status, access));
   if (route.state === "configured" && !route.acknowledgements.complete)
@@ -153686,15 +153695,25 @@ function createDashboardConsultAdapter(options) {
   const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
   const location = options.settingsLocation ?? { env };
   const readiness = options.readiness ?? zkapiConsultReadiness;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
-  const confined = zkapiConfinementAvailable(confinement);
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
+  let confinementInstallRequired = false;
+  const confined = async () => {
+    confinementInstallRequired = false;
+    try {
+      const check = await confinement.check?.();
+      confinementInstallRequired = check?.installRequired === true;
+      return (!check || check.ok) && zkapiConfinementAvailable(confinement);
+    } catch {
+      return false;
+    }
+  };
   const toolsJob = options.toolsJob ?? createManagedToolsJob({ env });
   const toolsState = options.toolsState ?? (() => {
     const settings = transport()?.settings;
     return managedToolsState({ env }).map((entry) => {
       const explicit = entry.tool === "tor" ? settings?.torExecutable : settings?.daemonExecutable;
       if (explicit) {
-        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? "configured" : "configured_missing", path: explicit, version: entry.version };
+        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? "configured" : "configured_missing", path: explicit, version: entry.version, offered: entry.offered };
       }
       if (!entry.installed && entry.outdatedVersion && entry.offered) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
@@ -153880,7 +153899,7 @@ function createDashboardConsultAdapter(options) {
     },
     async status() {
       return {
-        ...confined ? {} : { unavailable: "confinement_unavailable" },
+        ...await confined() ? {} : { unavailable: "confinement_unavailable", ...confinementInstallRequired ? { confinementInstallRequired: true } : {} },
         settings: settingsView(),
         route: await routeView(),
         languages: languages(),
@@ -154062,7 +154081,7 @@ function createDashboardConsultAdapter(options) {
       const acknowledgementsComplete = () => acknowledgementsCurrent(zkapiProfile()?.profile.zkapi?.acknowledgements);
       const turningOn = enabled && !(current2.state === "valid" && current2.settings.enabled);
       if (turningOn) {
-        if (!confined)
+        if (!await confined())
           return confinementUnavailable();
         const route = zkapiProfile();
         if (!route)
@@ -154146,7 +154165,7 @@ function createDashboardConsultAdapter(options) {
       return { ok: true, status_message: restarting ? MESSAGES2.routeSavedRestart : MESSAGES2.routeSavedNoRestart, restarting };
     },
     async addRoute(update) {
-      if (!confined)
+      if (!await confined())
         return confinementUnavailable();
       if (update.confirm !== true)
         return invalid4(MESSAGES2.confirm, "confirmation_required");
@@ -154261,7 +154280,7 @@ var init_dashboard_consult = __esm(() => {
     conflict: "Anonymous answers were changed somewhere else since this page loaded. Reload the page to see the current setting.",
     invalidCurrent: "The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.",
     routeMissing: "Add zkAPI before turning anonymous answers on.",
-    confinementUnavailable: "Anonymous answers aren't available on Linux yet: they need network confinement, which this version of Olympus doesn't have on Linux. Nothing is ever sent without it.",
+    confinementUnavailable: "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.",
     acknowledgementsIncomplete: "Accept the statements on this page before turning anonymous answers on.",
     levelUnknown: "Choose what zkAPI may send: Standard or Strict.",
     levelSaved: "Saved.",

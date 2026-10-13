@@ -1,4 +1,4 @@
-/** Linux confinement remains dark: selected only through the injected transport seam. */
+/** Checked Linux confinement; no available launcher means no anonymous route. */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from 'node:fs';
@@ -154,7 +154,7 @@ export interface LinuxConfinementDependencies {
   selfTest?(launcher:string,dir:string,env:NodeJS.ProcessEnv,ports:ZkapiConfinementPorts):Promise<boolean>;
   proc?:LinuxProc;
 }
-/** Explicit injection only. The default selector never calls this factory. */
+/** Selection and each session require a trusted launcher and a passing host check. */
 export function linuxZkapiConfinement(deps:LinuxConfinementDependencies={}):ZkapiConfinement {
   const env=deps.env??process.env; const proc=deps.proc??realProc;
   let check:LinuxCheck={ok:false,code:'confinement_unavailable'};
@@ -167,14 +167,15 @@ export function linuxZkapiConfinement(deps:LinuxConfinementDependencies={}):Zkap
     catch(e) { try {check=linuxConfinementCheck(JSON.parse(String((e as {stdout?:unknown}).stdout)));}catch{check={ok:false,code:'no_status_event'};} }
     return check;
   };
+  refresh();
   return {
-    level:'loopback_filtered', limit:'Linux network isolation is checked before each session.',
+    get level() { return check.ok ? 'loopback_filtered' : 'none'; }, limit:'Linux network isolation is checked before each session.',
     wrap:()=>{throw new Error('Linux requires a prepared session');},
     check:async()=>{
       const result=refresh(); const sysctls:Record<string,string>={};
       for(const p of ['/proc/sys/kernel/apparmor_restrict_unprivileged_userns','/proc/sys/user/max_user_namespaces','/proc/sys/kernel/unprivileged_userns_clone'])try{sysctls[p]=proc.read(p);}catch{}
       const line=result.ok?`network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)`:`network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code,sysctls,launcher??join(managedToolsRoot({env,platform:'linux',arch:'x64'})??'/unavailable/olympus/tools','zkapi-clientd',MANAGED_TOOL_PINS['zkapi-clientd'].version,'bin','zkapi-confine'))}`;
-      return {ok:result.ok,line};
+      return {ok:result.ok,line, ...(!result.ok && result.code === 'launcher_missing_or_untrusted' ? {installRequired:true} : {})};
     },
     selfTest:async(dir,childEnv,ports)=> Boolean(launcher && check.ok && await (deps.selfTest??runLinuxConfinementSelfTest)(launcher,dir,childEnv,ports)),
     prepare:async(dir,ports)=>{

@@ -425,7 +425,8 @@ install in the worker and returns at once. The card re-reads its page every
 `jamiezigelbaum/zkapi`, built from fork commit
 `22fffc86ea0b09166530512dba7757bd84388dbc`. The managed route requires the
 fork's supervisor flags and companion custody. Linux x64 additionally
-requires the bundled confinement launcher; Linux activation remains dark.
+requires the bundled confinement launcher and passing host and per-session
+checks. Linux x64 is qualified on Omarchy; unsupported hosts refuse.
 Base URL: `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/`.
 
 | Platform | Asset | Bytes | SHA-256 |

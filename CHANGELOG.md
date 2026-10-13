@@ -7,7 +7,8 @@
   first): an installer and uninstaller, an Omarchy launcher and status
   widget, keys in the desktop keyring, and the same dashboard as on a Mac.
   On Omarchy the dashboard opens in its own app window, and the app launcher shows the Olympus mountain icon.
-  Anonymous answers (zkAPI) are not available on Linux yet.
+  Anonymous answers (zkAPI) work on supported Linux x64 computers after the
+  network isolation checks pass. Other Linux hosts stay unavailable.
 - **Linux full removal cleans up empty cache and state folders** when the
   installer recorded creating them. Pre-existing folders and other files stay.
 - **Linux install rollback removes the service link it created**, including

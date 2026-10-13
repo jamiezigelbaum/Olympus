@@ -1,7 +1,7 @@
 # Linux confinement for the zkAPI private lane (workstream W4)
 
-Status: revision 3 design; steps 3–4 implemented dark, 2026-10-13.
-The pin and injected transport exist, but Linux default selection still refuses.
+Status: revision 3 design; funded Omarchy qualification passed and Linux x64
+activation prepared on the task branch, 2026-10-13. Unsupported hosts refuse.
 The original feasibility prototype remains in `tools/zkapi-confine-prototype/`. Revision 2
 closed the eight findings of the independent design review of revision 1
 (commit `3bf77d51`); revision 3 closes the five findings of the review of
@@ -26,6 +26,45 @@ of 2026-10-12, all recorded as decided in section 10:
 Facts below are checked against `f542f660` and against runs on real hardware
 (appendix). Where a claim is not proven by a run it says so under
 "Unproven".
+
+### Funded qualification, 2026-10-13
+
+This supersedes the earlier unfunded attempts below. All four published
+`clientd-v0.1.6-olympus4` assets were downloaded and match the pinned hashes.
+On the existing owner-funded Omarchy wallet, the real managed daemon and
+companion reached `ready` under the launcher with Tor on port 19050.
+The authenticated transport reported `wallet_custody: connection_owner_verified`.
+Both authorized synthetic questions “What is 2 plus 2?” returned “4”; settlement was confirmed,
+the fence cleared, and the post-stop probe reported `route_lost`. The receipt
+reported `loopback_filtered`, self-test passed, and `linux_netns` / Landlock ABI
+10 with all applicable layers. The production-launcher full matrix passed with
+zero failures, namespace counts 3/3, and zero stray launchers. Fault-injection
+coverage remains in the fork's existing Go tests; production has no fault flags.
+
+Independent review of Olympus `99cb8a66` and fork `22fffc86` found no grounded
+P1/P2 boundary issues. The activation review caught a missing-launcher installer
+deadlock: the repair keeps installation/update visible while Add route and Enable
+remain refused. Activation tests first failed for default selection and dashboard
+refresh, and separate missing/outdated installer tests reproduced that finding.
+
+Linux x64 now selects confinement only after `check` passes. The doctor reports
+the live check and administrator remedy; no administrator command is executed.
+The dashboard rechecks availability and uses a plain unavailable line on refused
+hosts. Changed copy remains pending owner review. No launcher policy was widened.
+The installed Olympus and its service were not restarted; only the explicitly
+authorized API-key reference file was updated. No wallet was copied, funded,
+topped up, withdrawn, or created by this qualification.
+
+Redacted execution receipts are in the owner's `v1-night/logs/w4c-step5-*` and
+`w4c-step7-*` handoff. The first harness attempt used the old scratch API port
+28787 and was refused unsent; using the existing wallet's port 8787 fixed it.
+This was a harness correction, not a relaxed product check. The second paid
+run selected the default Linux factory and added only a scratch observer for
+numeric cost/balance log lines; no such settled-cost line arrived before teardown.
+Actual charges therefore remain unreported, not equated with the $1 reservation
+per answer. A subsequent no-send confined startup reported a remaining balance
+of 0.007979557 ETH and was cancelled at ready. The two paid-send budget is spent. Other Linux hosts
+and native macOS sandbox execution were not qualified by these runs.
 
 ## 1. Decisions
 

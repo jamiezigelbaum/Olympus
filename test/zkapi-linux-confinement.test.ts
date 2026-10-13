@@ -70,7 +70,24 @@ describe('4.7 check and remedies', () => {
     const text=linuxConfinementRemedy('namespace_unavailable',{'/proc/sys/kernel/apparmor_restrict_unprivileged_userns':'1'},'/managed/bin/zkapi-confine');
     expect(text).toContain('sudo install'); expect(text).toContain('-o root'); expect(text).toContain('sudo apparmor_parser'); expect(text).not.toContain('userns=0');
   });
-  test('default stays dark', () => expect(defaultZkapiConfinement({platform:'linux'}).level).toBe('none'));
+  test('Linux x64 selects confinement only when the pinned launcher check passes', async () => {
+    let permitted = true;
+    const selected = defaultZkapiConfinement({ platform: 'linux', arch: 'x64', resolveLauncher: () => '/fixture/zkapi-confine', check: () => permitted ? { ...ready, ok: true } : { ok: false, code: 'namespace_unavailable' }, proc: fixture().proc });
+    expect(selected.level).toBe('loopback_filtered');
+    expect((await selected.check!()).line).toContain('network confinement: ready');
+    permitted = false;
+    expect((await selected.check!()).ok).toBe(false);
+    expect(selected.level).toBe('none');
+    permitted = true;
+    expect((await selected.check!()).ok).toBe(true);
+    expect(selected.level).toBe('loopback_filtered');
+  });
+  test('unsupported Linux and failed host checks never select a weaker route', () => {
+    for (const mode of ['arm64', 'missing', 'refused'] as const) {
+      const selected = defaultZkapiConfinement({ platform: 'linux', arch: mode === 'arm64' ? 'arm64' : 'x64', resolveLauncher: () => mode === 'missing' ? undefined : '/fixture', check: () => ({ ok: false, code: 'namespace_unavailable' }) });
+      expect(selected.level).toBe('none');
+    }
+  });
 });
 describe('4.4 actual watchdog status descriptor', () => {
   test.skipIf(process.platform !== 'linux')('collecting an exited status supervisor cannot close a later listener', async () => {
