@@ -15244,6 +15244,25 @@ function createConnectorStoreMediaJudgments(db) {
   addColumnIfMissing(db, "media_judgments", "attempts", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "media_judgments", "tier_checked_at", "TEXT");
 }
+function createConnectorStoreItemTextVersions(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_text_versions (
+      item_pk INTEGER PRIMARY KEY,
+      source_version TEXT,
+      recorded_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_text_version_capture
+    AFTER UPDATE OF source_version ON items
+    WHEN OLD.source_version IS NOT NEW.source_version
+    BEGIN
+      INSERT INTO item_text_versions (item_pk, source_version, recorded_at)
+      SELECT OLD.item_pk, OLD.source_version, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE EXISTS (SELECT 1 FROM chunks WHERE item_pk = OLD.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
+    END;
+  `);
+}
 function createConnectorStoreChunkMediaReleases(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS chunk_media_releases (
@@ -16693,6 +16712,8 @@ function validateConnectorStoreSchema(db) {
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
   assertExactTableColumns(db, "media_judgments", [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, "v14");
   assertIndexColumns(db, "idx_connector_store_media_judgments_unapplied", ["media_sha256"], "v14");
+  assertExactTableColumns(db, "item_text_versions", ["item_pk", "source_version", "recorded_at"], false, "v14");
+  assertTriggerExists(db, "connector_store_item_text_version_capture", "v14");
 }
 function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
   validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
@@ -17276,6 +17297,7 @@ var init_local_index = __esm(() => {
     reactionsColumnPresent = false;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
+    itemTextVersionsPresent = false;
     mediaJudgmentsPresent = false;
     mediaHolder;
     stillImageFormatsRead;
@@ -17332,11 +17354,13 @@ var init_local_index = __esm(() => {
           runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
           createConnectorStoreChunkMediaReleases(this.db);
           createConnectorStoreMediaJudgments(this.db);
+          createConnectorStoreItemTextVersions(this.db);
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+        this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       } catch (error) {
@@ -18681,6 +18705,10 @@ var init_local_index = __esm(() => {
       const imagesWithoutPicture = readFormats.size > 0;
       const imageMimeSql = readFormats.size === STILL_IMAGE_FORMATS.length ? "LOWER(i.mime_type) LIKE 'image/%'" : `LOWER(i.mime_type) IN (${STILL_IMAGE_FORMATS.filter((format) => readFormats.has(format)).flatMap((format) => [...stillImageMimeTypes(format)]).map((mimeType) => `'${mimeType}'`).join(", ")})`;
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
+      const staleChunksSql = options.includeStaleChunks === true && this.itemTextVersionsPresent ? `OR EXISTS (
+            SELECT 1 FROM item_text_versions v
+            WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version
+          )` : "";
       const query = this.db.query(`
       SELECT
         i.item_pk, i.family, i.provider, i.account_scope, i.provider_item_id,
@@ -18694,6 +18722,7 @@ var init_local_index = __esm(() => {
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${staleChunksSql}
           ${imagesWithoutPicture ? `OR (
             ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
@@ -18742,6 +18771,21 @@ var init_local_index = __esm(() => {
         ...skippedByDisposition > 0 ? { skippedByDisposition } : {},
         ...exhausted ? {} : { nextCursor: String(lastExaminedPk) }
       };
+    }
+    itemTextIsStale(localItemId) {
+      if (!this.itemTextVersionsPresent)
+        return false;
+      const row = this.db.query(`
+      SELECT 1 AS stale
+      FROM items i
+      JOIN item_text_versions v ON v.item_pk = i.item_pk
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        AND v.source_version IS NOT i.source_version
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+      LIMIT 1
+    `).get(localItemId);
+      return row !== null;
     }
     imageFormatReadsPictures(mimeType) {
       const format = stillImageFormatForMimeType(mimeType);
@@ -19071,6 +19115,7 @@ var init_local_index = __esm(() => {
             if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
               this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
             }
+            this.clearItemTextVersion(existing.item_pk);
             itemsUnchanged += 1;
             continue;
           }
@@ -20690,6 +20735,7 @@ var init_local_index = __esm(() => {
       if (text2 === undefined || text2.trim() === "") {
         this.db.transaction(() => {
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
+          this.clearItemTextVersion(itemPk);
           this.refreshFtsForItem(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: true };
@@ -20733,6 +20779,7 @@ var init_local_index = __esm(() => {
           for (const chunk of desired) {
             update.run(chunk.embeddingHash, itemPk, chunk.index, chunk.embeddingHash);
           }
+          this.clearItemTextVersion(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: false };
       }
@@ -20757,9 +20804,15 @@ var init_local_index = __esm(() => {
             insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
           }
         }
+        this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
       })();
       return { chunksIndexed: chunks.length, ftsContentChanged: true };
+    }
+    clearItemTextVersion(itemPk) {
+      if (!this.itemTextVersionsPresent)
+        return;
+      this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(itemPk);
     }
     reseasonItemEmbeddingInputs(itemPk, seasoning) {
       const chunks = this.db.query(`
@@ -22270,7 +22323,9 @@ var init_local_index = __esm(() => {
     "chunk_media_failures",
     "image_media_reads",
     "media_judgments",
-    "idx_connector_store_media_judgments_unapplied"
+    "idx_connector_store_media_judgments_unapplied",
+    "item_text_versions",
+    "connector_store_item_text_version_capture"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -34167,7 +34222,8 @@ class DropboxExtractionSource {
       return { candidates: [], done: true };
     const readerOptions = {
       limit: options.limit,
-      withoutChunksOnly: true
+      withoutChunksOnly: true,
+      includeStaleChunks: true
     };
     if (options.cursor !== undefined)
       readerOptions.cursor = options.cursor;
@@ -34676,6 +34732,7 @@ var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 init_types();
 init_engine();
 init_tier_classifier();
+init_tier_ledger();
 init_tiered_store_set();
 
 // src/workers/connector-store/tiered-extraction.ts

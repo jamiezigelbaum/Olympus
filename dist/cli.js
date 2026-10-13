@@ -24045,6 +24045,25 @@ function createConnectorStoreMediaJudgments(db) {
   addColumnIfMissing(db, "media_judgments", "attempts", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "media_judgments", "tier_checked_at", "TEXT");
 }
+function createConnectorStoreItemTextVersions(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_text_versions (
+      item_pk INTEGER PRIMARY KEY,
+      source_version TEXT,
+      recorded_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_text_version_capture
+    AFTER UPDATE OF source_version ON items
+    WHEN OLD.source_version IS NOT NEW.source_version
+    BEGIN
+      INSERT INTO item_text_versions (item_pk, source_version, recorded_at)
+      SELECT OLD.item_pk, OLD.source_version, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE EXISTS (SELECT 1 FROM chunks WHERE item_pk = OLD.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
+    END;
+  `);
+}
 function createConnectorStoreChunkMediaReleases(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS chunk_media_releases (
@@ -26254,6 +26273,8 @@ function validateConnectorStoreSchema(db) {
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
   assertExactTableColumns(db, "media_judgments", [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, "v14");
   assertIndexColumns(db, "idx_connector_store_media_judgments_unapplied", ["media_sha256"], "v14");
+  assertExactTableColumns(db, "item_text_versions", ["item_pk", "source_version", "recorded_at"], false, "v14");
+  assertTriggerExists(db, "connector_store_item_text_version_capture", "v14");
 }
 function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
   validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
@@ -26837,6 +26858,7 @@ var init_local_index = __esm(() => {
     reactionsColumnPresent = false;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
+    itemTextVersionsPresent = false;
     mediaJudgmentsPresent = false;
     mediaHolder;
     stillImageFormatsRead;
@@ -26893,11 +26915,13 @@ var init_local_index = __esm(() => {
           runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
           createConnectorStoreChunkMediaReleases(this.db);
           createConnectorStoreMediaJudgments(this.db);
+          createConnectorStoreItemTextVersions(this.db);
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+        this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       } catch (error) {
@@ -28242,6 +28266,10 @@ var init_local_index = __esm(() => {
       const imagesWithoutPicture = readFormats.size > 0;
       const imageMimeSql = readFormats.size === STILL_IMAGE_FORMATS.length ? "LOWER(i.mime_type) LIKE 'image/%'" : `LOWER(i.mime_type) IN (${STILL_IMAGE_FORMATS.filter((format) => readFormats.has(format)).flatMap((format) => [...stillImageMimeTypes(format)]).map((mimeType) => `'${mimeType}'`).join(", ")})`;
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
+      const staleChunksSql = options.includeStaleChunks === true && this.itemTextVersionsPresent ? `OR EXISTS (
+            SELECT 1 FROM item_text_versions v
+            WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version
+          )` : "";
       const query = this.db.query(`
       SELECT
         i.item_pk, i.family, i.provider, i.account_scope, i.provider_item_id,
@@ -28255,6 +28283,7 @@ var init_local_index = __esm(() => {
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${staleChunksSql}
           ${imagesWithoutPicture ? `OR (
             ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
@@ -28303,6 +28332,21 @@ var init_local_index = __esm(() => {
         ...skippedByDisposition > 0 ? { skippedByDisposition } : {},
         ...exhausted ? {} : { nextCursor: String(lastExaminedPk) }
       };
+    }
+    itemTextIsStale(localItemId) {
+      if (!this.itemTextVersionsPresent)
+        return false;
+      const row = this.db.query(`
+      SELECT 1 AS stale
+      FROM items i
+      JOIN item_text_versions v ON v.item_pk = i.item_pk
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        AND v.source_version IS NOT i.source_version
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+      LIMIT 1
+    `).get(localItemId);
+      return row !== null;
     }
     imageFormatReadsPictures(mimeType) {
       const format = stillImageFormatForMimeType(mimeType);
@@ -28632,6 +28676,7 @@ var init_local_index = __esm(() => {
             if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
               this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
             }
+            this.clearItemTextVersion(existing.item_pk);
             itemsUnchanged += 1;
             continue;
           }
@@ -30251,6 +30296,7 @@ var init_local_index = __esm(() => {
       if (text2 === undefined || text2.trim() === "") {
         this.db.transaction(() => {
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
+          this.clearItemTextVersion(itemPk);
           this.refreshFtsForItem(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: true };
@@ -30294,6 +30340,7 @@ var init_local_index = __esm(() => {
           for (const chunk of desired) {
             update.run(chunk.embeddingHash, itemPk, chunk.index, chunk.embeddingHash);
           }
+          this.clearItemTextVersion(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: false };
       }
@@ -30318,9 +30365,15 @@ var init_local_index = __esm(() => {
             insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
           }
         }
+        this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
       })();
       return { chunksIndexed: chunks.length, ftsContentChanged: true };
+    }
+    clearItemTextVersion(itemPk) {
+      if (!this.itemTextVersionsPresent)
+        return;
+      this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(itemPk);
     }
     reseasonItemEmbeddingInputs(itemPk, seasoning) {
       const chunks = this.db.query(`
@@ -31831,7 +31884,9 @@ var init_local_index = __esm(() => {
     "chunk_media_failures",
     "image_media_reads",
     "media_judgments",
-    "idx_connector_store_media_judgments_unapplied"
+    "idx_connector_store_media_judgments_unapplied",
+    "item_text_versions",
+    "connector_store_item_text_version_capture"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -97260,7 +97315,8 @@ class DropboxExtractionSource {
       return { candidates: [], done: true };
     const readerOptions = {
       limit: options.limit,
-      withoutChunksOnly: true
+      withoutChunksOnly: true,
+      includeStaleChunks: true
     };
     if (options.cursor !== undefined)
       readerOptions.cursor = options.cursor;
@@ -104877,6 +104933,16 @@ function createTieredStoreExtractionSink(options) {
         return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
       if (record3.contentRead) {
         if (!samePlacement2(current2, placement)) {
+          if (!placementIsRaise(current2, placement.copies)) {
+            const resting = current2.find((copy) => copy.layers !== "metadata");
+            const restingDomain = resting ? set2.domainForCorpus(resting.corpusId) : undefined;
+            const restingStore = restingDomain ? set2.store(restingDomain) : undefined;
+            if (!restingStore)
+              return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+            const replaced = await sinkFor(restingStore, false, tierClassification, true).accept(request);
+            if (!replaced.accepted)
+              return replaced;
+          }
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
@@ -104998,6 +105064,7 @@ var init_tiered_store_sink = __esm(() => {
   init_types();
   init_engine();
   init_tier_classifier();
+  init_tier_ledger();
   init_tiered_store_set();
   init_store_sink();
 });
@@ -105019,14 +105086,26 @@ function tieredExtractionView(set2, options = {}) {
     const store = set2.store(domain);
     return store && store.activeLocalItemRow(localItemId) ? [store] : [];
   });
-  const keep = (domain, store, candidates) => {
+  const staleContentElsewhere = (corpusId, copies, localItemId) => {
+    const current2 = copies.filter((copy) => copy.state === "current");
+    const mine = current2.find((copy) => copy.corpusId === corpusId);
+    if (!mine || mine.layers === "content")
+      return false;
+    return current2.some((copy) => {
+      if (copy.corpusId === corpusId || copy.layers !== "content")
+        return false;
+      const domain = set2.domainForCorpus(copy.corpusId);
+      return domain !== undefined && set2.store(domain)?.itemTextIsStale(localItemId) === true;
+    });
+  };
+  const keep = (domain, store, candidates, includeStaleChunks) => {
     const copies = set2.ledger.copiesForMany(candidates.map((candidate) => candidate.identity));
     const legacyLeg = set2.legSpec(domain)?.legacy === true;
     return candidates.filter((candidate) => {
       const itemCopies = copies.get(tierLedgerIdentityKey(candidate.identity)) ?? [];
       if (itemCopies.length === 0)
         return legacyLeg && !set2.ledger.isRouted(candidate.identity);
-      return routedCandidate(store.corpusId, itemCopies) && set2.ledger.getCurrent(candidate.identity)?.state !== "moving";
+      return (routedCandidate(store.corpusId, itemCopies) || includeStaleChunks && staleContentElsewhere(store.corpusId, itemCopies, candidate.identity.localItemId)) && set2.ledger.getCurrent(candidate.identity)?.state !== "moving";
     });
   };
   return {
@@ -105055,7 +105134,7 @@ function tieredExtractionView(set2, options = {}) {
         }
         const { cursor: _ignored, ...rest } = options2;
         const page = store.extractionCandidates({ ...rest, ...cursor !== undefined ? { cursor } : {} });
-        const candidates = keep(domain, store, page.candidates);
+        const candidates = keep(domain, store, page.candidates, options2.includeStaleChunks === true);
         const last = index === domains.length - 1;
         if (!page.done) {
           return {
