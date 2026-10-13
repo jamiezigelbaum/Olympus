@@ -24238,20 +24238,22 @@ function settleUntrackedSecretsCopy(options) {
   return settled;
 }
 function forgetSecretJobNames(identity) {
-  let failed = 0;
+  let unsettled = 0;
   for (const jobsPath of extractionJobsDbPaths()) {
     try {
-      clearExtractionJobNames(jobsPath, {
+      const cleared = clearExtractionJobNames(jobsPath, {
         provider: identity.provider,
         accountScope: identity.accountScope,
         providerItemId: identity.providerItemId
       });
+      if (!cleared.durable)
+        unsettled += 1;
     } catch {
-      failed += 1;
+      unsettled += 1;
     }
   }
-  if (failed > 0)
-    console.warn(`[tier] secrets: ${failed} extraction job ledger(s) could not forget an item's name.`);
+  if (unsettled > 0)
+    console.warn(`[tier] secrets: ${unsettled} extraction job ledger(s) could not durably forget an item's name, and its store has no tier ledger to retry from.`);
 }
 var SECRETS_DISPOSITION = "tombstone_now";
 var init_secrets_disposition = __esm(() => {
