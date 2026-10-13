@@ -105,9 +105,10 @@ uninstall: <https://olympusplugin.ai/install/>.
 [Codex](https://olympusplugin.ai/install/codex/) ·
 [OpenClaw](https://olympusplugin.ai/install/openclaw/) ·
 [Hermes](https://olympusplugin.ai/install/hermes/) ·
-[any MCP app](https://olympusplugin.ai/install/other/). However you connect,
-you approve it with one click on a page Olympus opens on your own computer:
-there is no code to copy and no account to create.
+[any MCP app](https://olympusplugin.ai/install/other/). ChatGPT, Claude, Grok
+and Grok Bot are approved with one click on a page Olympus opens on your own
+computer: there is no code to copy and no account to create. Apps on your
+computer, such as Claude Code, Codex and Hermes, connect with one command.
 
 **3. Connect your sources and ask.** Open the dashboard (in ChatGPT, ask
 *"Show my Olympus dashboard"*; on your computer, run `olympus dashboard`),
@@ -239,12 +240,15 @@ on your computer, such as Claude Code, Codex and Hermes, connect there
 directly. Guides: <https://olympusplugin.ai/install/>.
 
 They search what is Personal, with citations, like ChatGPT. They never see
-the text of your Private items or your Secrets. A question that needs your
-Private items waits in Olympus on your computer instead, and **Needs you**
+the text of your Private items or your Secrets. For Private items they get
+only an answer that the private model on your computer (or Venice, if you set
+it up) writes from them, checked for secrets, with each item's title, path,
+source and author. ChatGPT is stricter: it gets no answer from Private items
+at all, and shows one only in its private answer panel. When no Private answer
+can be given, the question waits in Olympus on your computer and **Needs you**
 says so: open the dashboard's
 [Private answers](https://olympusplugin.ai/open/private/) page (under **On
-this computer**) to answer it there; the answer stays on your computer. The
-private answer panel is ChatGPT's only. More: [Connect other
+this computer**) to answer it there. More: [Connect other
 agents](#connect-other-agents).
 
 ## Stronger models, privately
