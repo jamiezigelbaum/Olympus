@@ -78,6 +78,8 @@ export interface ChatGptPickerKit {
   isDashboard(value: Any): boolean;
   /** The fixed sentence of a setup tool error the page shows inline (sign_in_failed, …), or ''. */
   errorText(result: Any): string;
+  /** Leave the picker for the dashboard's Models section, opened and focused (the route for models_not_ready). */
+  showModels(): void;
   /**
    * The page runs inside an Olympus host (the computer's /dashboard, the
    * OpenClaw Control UI tab): sign-in starts on the computer itself, so the
@@ -168,6 +170,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     kit.close(notice, refresh, key);
   }
 
+  function goToModels(): void {
+    stopTimer();
+    p = null;
+    session++;
+    kit.showModels();
+  }
+
   function start(fix: Any, sourceId: string, sourceLabel: string, returnKey: string): void {
     stopTimer();
     session++;
@@ -209,7 +218,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       if (!href) {
         p.phase = 'error';
         p.errorText = kit.errorText(result);
-        kit.render('picker:connect:retry');
+        p.errorCode = result && result.isError && result.structuredContent && typeof result.structuredContent.error === 'string'
+          ? result.structuredContent.error : '';
+        kit.render(p.errorCode === 'models_not_ready' ? 'picker:connect:models' : 'picker:connect:retry');
         return;
       }
       p.href = href;
@@ -222,6 +233,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       if (mine !== session || !p) return;
       p.phase = 'error';
       p.errorText = '';
+      p.errorCode = '';
       kit.render('picker:connect:retry');
     });
   }
@@ -322,8 +334,11 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     } else {
       const line = el('p', '', p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute('role', 'alert');
+      // Search isn't ready: the route is the Models section, where the setup shows.
+      const models = p.errorCode === 'models_not_ready';
       add(box, line, add(el('div', 'actions'),
-        kit.button(Q.tryAgain, 'picker:connect:retry', reopen, 'main'),
+        models ? kit.button(Q.goToModels, 'picker:connect:models', goToModels, 'main') : null,
+        kit.button(Q.tryAgain, 'picker:connect:retry', reopen, models ? 'plain' : 'main'),
         kit.button(Q.cancel, 'picker:connect:cancel', () => leave('', true), 'plain')));
     }
     add(page, box);
