@@ -378,23 +378,56 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
+      // THE DECIDING HALF of the fence. The grant travels into the store's
+      // write transaction, where it is compared against the newest one that
+      // corpus has accepted for this item and extractor — a comparison no
+      // race can get between, because it commits with the content itself.
+      //
+      // Scoped by extractor kind, so two extractors reading the same item
+      // order their own generations without ordering each other's. The
+      // lease token is hashed rather than copied: it is a capability in the
+      // queue, and the corpus needs only to tell two generations apart.
+      const writeClaim = request.claim
+        ? {
+          scope: request.extractorKind,
+          authority: request.claim.grantAuthority,
+          ordinal: request.claim.grantOrdinal,
+          holder: request.claim.jobId,
+          generation: connectorStoreHashString(request.claim.leaseToken),
+        }
+        : undefined;
+
       // THE SECRETS FLOOR, before anything is written. A Secret is stored
       // nowhere: the copy this store already holds (an earlier version's text)
       // goes, and only the location is kept, per the one Secrets policy
       // (connector-store/secrets-disposition.ts). An explicit per-item owner
       // override outranks the detector, as it does in the shared classifier.
-      // After the lease probe above, so a superseded worker changes nothing.
+      // The tombstone is fenced inside the store exactly as the write it
+      // replaces: an item another owner claims is left alone, and a superseded
+      // worker changes nothing.
       if (options.secretsFloor !== false && plan.item.content.kind === 'text'
         && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
-        if (options.recordContentTier !== false) {
+        const settled = settleUntrackedSecretsCopy({
+          store,
+          identity: plan.item.identity,
+          connectorId: options.syncConnectorId,
+          ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
+          ...(writeClaim ? { writeClaim } : {}),
+        });
+        if (settled === 'tombstoned' && options.recordContentTier !== false) {
           store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
         }
-        settleUntrackedSecretsCopy({ store, identity: plan.item.identity, connectorId: options.syncConnectorId });
+        const secretsSkip: Record<typeof settled, string> = {
+          tombstoned: EXTRACTION_SINK_SKIPPED_SECRETS,
+          missing: EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
+          owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
+          stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
+        };
         return {
           accepted: false,
           chunksIndexed: 0,
           chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_SECRETS,
+          skippedReason: secretsSkip[settled],
         };
       }
 
@@ -407,26 +440,8 @@ export function createConnectorStoreExtractionSink(
           ownershipKind: options.ownershipKind,
           classify: options.classify,
           ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
-          // THE DECIDING HALF. The grant travels into the store's write
-          // transaction, where it is compared against the newest one that
-          // corpus has accepted for this item and extractor — a comparison no
-          // race can get between, because it commits with the content itself.
-          //
-          // Scoped by extractor kind, so two extractors reading the same item
-          // order their own generations without ordering each other's. The
-          // lease token is hashed rather than copied: it is a capability in the
-          // queue, and the corpus needs only to tell two generations apart.
-          ...(request.claim
-            ? {
-              writeClaim: {
-                scope: request.extractorKind,
-                authority: request.claim.grantAuthority,
-                ordinal: request.claim.grantOrdinal,
-                holder: request.claim.jobId,
-                generation: connectorStoreHashString(request.claim.leaseToken),
-              },
-            }
-            : {}),
+          // The deciding half of the lease fence (above).
+          ...(writeClaim ? { writeClaim } : {}),
         });
       } catch (error) {
         // Only the two refusals a healthy sink can genuinely race into become

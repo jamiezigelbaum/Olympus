@@ -20,7 +20,7 @@
 
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
 import type { TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
-import type { LocalConnectorStore } from './local-index.ts';
+import type { ConnectorStoreItemWriteClaim, ConnectorStoreOwnershipKind, LocalConnectorStore } from './local-index.ts';
 
 export type SecretsDisposition = 'tombstone_now' | 'hide_until_purge';
 
@@ -77,16 +77,20 @@ export function settleSecretsCopies(options: {
  * for (a plain store, or a tiered set's legacy leg holding an unrouted item).
  * Hiding is a ledger copy row, and such a copy has none, so under either
  * disposition it cannot be kept hidden: it is tombstoned and keeps its
- * location only, exactly as the store's own sync treats an S5 item. Returns
- * the chunks deleted.
+ * location only, exactly as the store's own sync treats an S5 item. The
+ * store fences the tombstone like the write it replaces (owner skip, claim
+ * generation) and says which way it went.
  */
 export function settleUntrackedSecretsCopy(options: {
   store: LocalConnectorStore;
   identity: SourceItemIdentity;
   connectorId: string;
-}): number {
-  const chunks = options.store.itemStoredContent(options.identity)?.chunkCount ?? 0;
-  const trustTier: SourceTrustTier = 'S5';
-  options.store.tombstoneCopy(options.identity, { connectorId: options.connectorId, trustTier });
-  return chunks;
+  skipOwner?: { connectorId: string; ownershipKind: ConnectorStoreOwnershipKind };
+  writeClaim?: ConnectorStoreItemWriteClaim;
+}): ReturnType<LocalConnectorStore['tombstoneSecretsExtraction']> {
+  return options.store.tombstoneSecretsExtraction(options.identity, {
+    connectorId: options.connectorId,
+    ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
+    ...(options.writeClaim ? { writeClaim: options.writeClaim } : {}),
+  });
 }

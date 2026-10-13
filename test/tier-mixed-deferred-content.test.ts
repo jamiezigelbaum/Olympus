@@ -22,6 +22,7 @@ import {
   TieredStoreSet,
   tieredStoreSetLedgerPath,
 } from '../src/workers/connector-store/tiered-store-set.ts';
+import { EXTRACTION_SINK_SKIPPED_SECRETS } from '../src/workers/file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import type { ExtractionSinkRequest } from '../src/workers/file-extraction/types.ts';
 import {
@@ -229,6 +230,31 @@ describe('a lane where only pictures arrive later', () => {
     expect((await sink.accept(request(CORPORA.secure_local, 'photo-both', 'Photo\nBOARDING PASS'))).accepted).toBe(true);
     expect(chunkText(stores.secure_local, 'photo-both')).toContain('BOARDING PASS');
     expect(chunkText(stores.internal, 'photo-both')).not.toContain('BOARDING PASS');
+  });
+
+  test('an unrouted item held by both stores whose text is Secret is settled in both, location kept', async () => {
+    const { set, stores } = openSet();
+    const key = ['sk', '_live_', 'k9Xp2LmQ7vRt4WzY8bNc3HdF'].join('');
+    const both: FixtureSpec = { id: 'notes-both', name: 'deploy-notes.pdf', text: 'An older draft of the deploy notes.' };
+    MIME['notes-both'] = 'application/pdf';
+    await stores.internal!.syncFromConnector(lane([both]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    await stores.secure_local!.syncFromConnector(lane([{ id: both.id, name: both.name, legacyDomain: 'secure_local' }]), { fetchContent: false, placement: FIXTURE_PLACEMENT });
+    expect(chunkText(stores.internal, 'notes-both')).toContain('older draft');
+    const sink = createTieredStoreExtractionSink({
+      set,
+      home: 'secure_local',
+      syncConnectorId: 'extraction',
+      ownerConnectorId: 'fixture-connector',
+      ownershipKind: 'observed',
+    });
+    const result = await sink.accept(request(CORPORA.secure_local, 'notes-both', `Deploy notes\nSTRIPE_SECRET_KEY=${key}`));
+    expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+    // Neither store holds any of its text, the old or the new.
+    for (const store of [stores.internal, stores.secure_local]) {
+      expect(chunkText(store, 'notes-both')).toBe('');
+      expect(store!.activeLocalItemRow(localId('notes-both'))).toBeUndefined();
+    }
+    expect(set.secrets()!.get(identityOf('notes-both'))).toBeDefined();
   });
 
   test('without an item, a decision whose text has not landed is placed as one arriving later', () => {

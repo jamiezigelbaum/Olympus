@@ -35,6 +35,7 @@ import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-poli
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { dropboxCanonicalIngestionMatcher } from '../src/workers/dropbox-files/connector-store.ts';
 import {
+  EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
   EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
   EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
   EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
@@ -584,6 +585,44 @@ describe('extraction factory store sink: the Secrets floor', () => {
       expect(rows.chunks).toBe(0);
       expect(rows.ftsRows).toBe(0);
       expect(storedRows(store, STRIPE_LIVE_KEY).chunksWithNeedle).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a superseded generation cannot tombstone the current holder\'s content', async () => {
+    const store = await seededStore();
+    try {
+      const claim = (ordinal: number) => ({
+        jobId: `job-${ordinal}`,
+        leaseToken: `lease-${ordinal}`,
+        grantAuthority: 'queue-a',
+        grantOrdinal: ordinal,
+      });
+      const sink = sinkFor(store);
+      expect((await sink.accept(requestFor('The current holder\'s clean text.', { claim: claim(2) }))).accepted).toBe(true);
+      // A recycled lease: the older generation reaches the store after the
+      // newer one wrote, with text that is Secret.
+      const stale = await sink.accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, { claim: claim(1) }));
+      expect(stale.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED);
+      const rows = storedRows(store, 'current holder');
+      expect(rows.chunksWithNeedle).toBe(1);
+      expect(rows.item?.tombstoned).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('skipOwner leaves an item alone even when its text is Secret', async () => {
+    const store = await seededStore();
+    try {
+      const result = await sinkFor(store, {
+        skipOwner: { connectorId: 'fake-metadata-sync', ownershipKind: 'observed' },
+      }).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`));
+      expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE);
+      const item = storedRows(store, STRIPE_LIVE_KEY).item;
+      expect(item?.tombstoned).toBe(0);
+      expect(item?.title).toBe(SEEDED_TITLE);
     } finally {
       store.close();
     }

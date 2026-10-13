@@ -27513,6 +27513,50 @@ var init_local_index = __esm(() => {
           this.releaseUnreferencedChunkMedia();
       }
     }
+    tombstoneSecretsExtraction(identity, options) {
+      const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
+      try {
+        return this.db.transaction(() => {
+          const existing = this.db.query(`
+          SELECT item_pk FROM items
+          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+            AND tombstoned = 0
+        `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+          if (!existing)
+            return "missing";
+          if (options.skipOwner) {
+            const owned = this.db.query(`
+            SELECT 1 AS present FROM item_owners
+            WHERE item_pk = ? AND connector_id = ? AND ownership_kind = ?
+            LIMIT 1
+          `).get(existing.item_pk, options.skipOwner.connectorId, options.skipOwner.ownershipKind);
+            if (owned?.present === 1)
+              return "owned_elsewhere";
+          }
+          if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
+            return "stale_claim";
+          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const startedAt = nowIso2();
+          this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 1, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+          this.tombstoneItem({
+            identity,
+            mimeType: "application/octet-stream",
+            content: { kind: "metadata_only" },
+            metadata: {},
+            fetchedAt: startedAt
+          }, options.connectorId, "observed", syncRunId, "S5", true);
+          return "tombstoned";
+        })();
+      } finally {
+        if (!this.db.inTransaction)
+          this.releaseUnreferencedChunkMedia();
+      }
+    }
     exportItemCopy(identity) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.join(", ")}
@@ -32358,10 +32402,11 @@ function settleSecretsCopies(options) {
   return { disposition, chunks };
 }
 function settleUntrackedSecretsCopy(options) {
-  const chunks = options.store.itemStoredContent(options.identity)?.chunkCount ?? 0;
-  const trustTier = "S5";
-  options.store.tombstoneCopy(options.identity, { connectorId: options.connectorId, trustTier });
-  return chunks;
+  return options.store.tombstoneSecretsExtraction(options.identity, {
+    connectorId: options.connectorId,
+    ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
+    ...options.writeClaim ? { writeClaim: options.writeClaim } : {}
+  });
 }
 var SECRETS_DISPOSITION = "tombstone_now";
 
@@ -103918,16 +103963,35 @@ function createConnectorStoreExtractionSink(options) {
           skippedReason: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
         };
       }
+      const writeClaim = request.claim ? {
+        scope: request.extractorKind,
+        authority: request.claim.grantAuthority,
+        ordinal: request.claim.grantOrdinal,
+        holder: request.claim.jobId,
+        generation: hashString2(request.claim.leaseToken)
+      } : undefined;
       if (options.secretsFloor !== false && plan.item.content.kind === "text" && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
-        if (options.recordContentTier !== false) {
+        const settled = settleUntrackedSecretsCopy({
+          store,
+          identity: plan.item.identity,
+          connectorId: options.syncConnectorId,
+          ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
+          ...writeClaim ? { writeClaim } : {}
+        });
+        if (settled === "tombstoned" && options.recordContentTier !== false) {
           store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
         }
-        settleUntrackedSecretsCopy({ store, identity: plan.item.identity, connectorId: options.syncConnectorId });
+        const secretsSkip = {
+          tombstoned: EXTRACTION_SINK_SKIPPED_SECRETS,
+          missing: EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
+          owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
+          stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
+        };
         return {
           accepted: false,
           chunksIndexed: 0,
           chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_SECRETS
+          skippedReason: secretsSkip[settled]
         };
       }
       let summary;
@@ -103939,15 +104003,7 @@ function createConnectorStoreExtractionSink(options) {
           ownershipKind: options.ownershipKind,
           classify: options.classify,
           ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
-          ...request.claim ? {
-            writeClaim: {
-              scope: request.extractorKind,
-              authority: request.claim.grantAuthority,
-              ordinal: request.claim.grantOrdinal,
-              holder: request.claim.jobId,
-              generation: hashString2(request.claim.leaseToken)
-            }
-          } : {}
+          ...writeClaim ? { writeClaim } : {}
         });
       } catch (error2) {
         const skippedReason = racedRestoreSkipReason(error2);
@@ -104995,7 +105051,27 @@ function createTieredStoreExtractionSink(options) {
         const legacy = legacyStoreFor(set2, ref.localItemId, options.home);
         if (!legacy)
           return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        return sinkFor(legacy, true, classificationNow(), false).accept(request);
+        const legacyPlan = planExtractionSinkWrite(legacy, request);
+        const legacyScope = legacy.activeLocalItemRow(ref.localItemId)?.sourceScope;
+        const result2 = await sinkFor(legacy, true, classificationNow(), false).accept(request);
+        if (result2.skippedReason === EXTRACTION_SINK_SKIPPED_SECRETS && !("skippedReason" in legacyPlan)) {
+          for (const domain of TIER_DOMAIN_ORDER) {
+            const other = set2.legSpec(domain)?.legacy === true ? set2.store(domain) : undefined;
+            if (!other || other === legacy)
+              continue;
+            settleUntrackedSecretsCopy({
+              store: other,
+              identity: legacyPlan.item.identity,
+              connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID
+            });
+          }
+          const names = ledger.getCurrent(identity)?.metadataTier;
+          recordSecret(set2, legacyPlan.item, request.text, {
+            namesReleasable: names === "public" || names === "private",
+            sourceScope: legacyScope
+          });
+        }
+        return result2;
       }
       const record3 = ledger.getCurrent(identity);
       if (!record3 || record3.state === "moving")
