@@ -10319,8 +10319,392 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
+// src/core/secret-patterns.ts
+function isPlaceholderValue(value) {
+  const v = value.trim();
+  if (!v)
+    return true;
+  if (v.startsWith("<") || v.startsWith("(") || /^[[{].*[\]}]$/.test(v))
+    return true;
+  if (/\$\{|\{\{|<%|%\(|\$\(|^\$[A-Za-z_]|^%[A-Za-z_]+%$|^@/.test(v))
+    return true;
+  if (MASKED_RUN.test(v))
+    return true;
+  if (/^(.)\1+$/.test(v))
+    return true;
+  if (BARE_LITERALS.has(v.toLowerCase().replace(/[.,;]+$/, "")))
+    return true;
+  return PLACEHOLDER_WORDS.test(v);
+}
+function isNotLiteralCredential(value) {
+  return CODE_LOOKUP.test(value) || IDENTIFIER_NAME.test(value) && CREDENTIAL_WORD.test(value) || CALL_EXPRESSION.test(value) || MEMBER_CHAIN.test(value) || TYPE_ANNOTATION.test(value) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(value);
+}
+function trimValueEnd(value) {
+  return value.replace(/[;,)\]}]+$/, "").replace(/\.+$/, "");
+}
+function hasCredentialShape(value) {
+  return /[0-9]/.test(value) || /[^A-Za-z0-9_.\-\s]/.test(value);
+}
+function isPlausiblePassphrase(value) {
+  const v = value.trim();
+  if (v.length < 12 || v.length > 120)
+    return false;
+  if (/[?:]$/.test(v) || /\bhttps?:\/\//i.test(v))
+    return false;
+  if (isPlaceholderValue(v) || isNotLiteralCredential(v))
+    return false;
+  const words = v.split(/\s+/);
+  if (words.length < 2 || words.length > 10)
+    return false;
+  return !words.some((word) => PROSE_WORDS.has(word.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "")));
+}
+function assignmentAccepted(match) {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? "").toLowerCase();
+  const quotedValue = groups.dq ?? groups.sq ?? groups.bq;
+  const value = (quotedValue !== undefined ? quotedValue : trimValueEnd(groups.uv ?? "")).trim();
+  if (!value)
+    return false;
+  if (isPlaceholderValue(value) || isNotLiteralCredential(value))
+    return false;
+  const isPassword = keyword.startsWith("pass");
+  if (/\s/.test(value))
+    return isPassword && isPlausiblePassphrase(value);
+  let strong = true;
+  if (keyword === "secret" || keyword === "token") {
+    const start = match.index ?? 0;
+    const lead = (match.input ?? "").slice(Math.max(0, start - 48), start);
+    if (keyword === "token" && NON_CREDENTIAL_TOKEN_PREFIX.test(lead))
+      return false;
+    const attached = /[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(lead);
+    if (!attached) {
+      const previous = /([A-Za-z]+) $/.exec(lead)?.[1]?.toLowerCase();
+      strong = previous !== undefined && STRONG_QUALIFIERS.has(previous);
+      if (!strong && /[?&]$/.test(lead))
+        return false;
+    }
+  }
+  if (!strong)
+    return value.length >= 12 && hasCredentialShape(value);
+  if (value.length >= 12)
+    return true;
+  return value.length >= 8 && hasCredentialShape(value);
+}
+function maskedProviderToken(token) {
+  const body = token.replace(/^(?:github_pat_|[A-Za-z]+[_-])+/, "");
+  return !body || MASKED_RUN.test(body) || /^(.)\1+$/.test(body) || /example|your|placeholder/i.test(body);
+}
+var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, TYPE_ANNOTATION, CREDENTIAL_WORD, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, SHARED_SECRET_PATTERNS;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "a",
+    "about",
+    "above",
+    "after",
+    "again",
+    "all",
+    "also",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "because",
+    "been",
+    "before",
+    "below",
+    "by",
+    "can",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "could",
+    "do",
+    "does",
+    "enter",
+    "expired",
+    "expires",
+    "for",
+    "forgot",
+    "forgotten",
+    "from",
+    "get",
+    "has",
+    "have",
+    "here",
+    "hidden",
+    "how",
+    "if",
+    "in",
+    "incorrect",
+    "invalid",
+    "is",
+    "it",
+    "its",
+    "least",
+    "letters",
+    "link",
+    "long",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "my",
+    "need",
+    "needed",
+    "needs",
+    "new",
+    "no",
+    "not",
+    "number",
+    "numbers",
+    "of",
+    "on",
+    "only",
+    "optional",
+    "or",
+    "our",
+    "please",
+    "provide",
+    "provided",
+    "protected",
+    "required",
+    "requirements",
+    "reset",
+    "see",
+    "send",
+    "sent",
+    "set",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "so",
+    "symbols",
+    "that",
+    "the",
+    "their",
+    "then",
+    "these",
+    "this",
+    "those",
+    "to",
+    "type",
+    "unchanged",
+    "until",
+    "up",
+    "use",
+    "used",
+    "using",
+    "via",
+    "was",
+    "we",
+    "when",
+    "where",
+    "which",
+    "will",
+    "with",
+    "without",
+    "would",
+    "you",
+    "your"
+  ]);
+  MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_-]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme"
+  ]);
+  CODE_LOOKUP = /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|system\.getenv|deno\.env|getenv|environ|env|config|settings|secrets?|self|this|args|opts|options|params|req|request|ctx|vault|input)[.[(]/i;
+  CALL_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/;
+  MEMBER_CHAIN = /^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)+$/;
+  TYPE_ANNOTATION = /^(?:secretstr(?:ing)?|optional[[<]|option<|union[[<]|promise<|record<|array<|string\s*\||[a-z]+\s*\|\s*(?:undefined|null))/i;
+  CREDENTIAL_WORD = /pass(?:word|wd|phrase|code)|secret|token|api[_-]?key|credential/i;
+  IDENTIFIER_NAME = /^[A-Za-z]+(?:[_-][A-Za-z]+)+$/;
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  NON_CREDENTIAL_TOKEN_PREFIX = /(?:page|sync|cursor|continuation|resume|batch|delta|csrf|xsrf|nonce)[_ .-]?$/i;
+  KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?:\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\n\r]{12,160})$`, "gim");
+  URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
+  AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
+  SHARED_SECRET_PATTERNS = [
+    {
+      findingType: "private_key_material",
+      label: "private_key",
+      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
+      confidence: 1
+    },
+    {
+      findingType: "aws_access_key_id",
+      label: "aws_access_key_id",
+      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "slack_token",
+      label: "slack_token",
+      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "api_secret_token",
+      label: "openai_key",
+      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+      confidence: 0.95
+    },
+    {
+      findingType: "api_secret_token",
+      label: "github_token",
+      pattern: /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "stripe_key",
+      pattern: /(?<![A-Za-z0-9])(?:(?:sk|rk)_live_|whsec_)[A-Za-z0-9]{16,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_api_key",
+      pattern: /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_client_secret",
+      pattern: /(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_token",
+      pattern: /(?<![A-Za-z0-9/])(?:1\/\/0[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9_-]{20,})/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: CREDENTIAL_ASSIGNMENT,
+      confidence: 0.9,
+      accept: assignmentAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "password",
+      pattern: LABELLED_PASSPHRASE,
+      confidence: 0.85,
+      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "")
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_url",
+      pattern: URL_USERINFO,
+      confidence: 0.9,
+      accept: (match) => {
+        const password = match.groups?.pw ?? "";
+        return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
+      }
+    },
+    {
+      findingType: "credential_assignment",
+      label: "authorization_header",
+      pattern: AUTHORIZATION_HEADER,
+      confidence: 0.9,
+      accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    }
+  ];
+});
+
 // src/workers/dropbox-files/content-policy.ts
-var init_content_policy = () => {};
+var SECRET_PATTERNS;
+var init_content_policy = __esm(() => {
+  init_secret_patterns();
+  SECRET_PATTERNS = SHARED_SECRET_PATTERNS.map((shared) => ({
+    findingType: shared.findingType,
+    pattern: shared.pattern,
+    confidence: shared.confidence,
+    trustTier: "S5",
+    ...shared.accept ? { accept: shared.accept } : {}
+  }));
+});
 
 // src/workers/classification/engine.ts
 var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
@@ -11161,6 +11545,7 @@ var init_readwise = __esm(() => {
 });
 // src/core/opsec.ts
 var init_opsec = __esm(() => {
+  init_secret_patterns();
   init_types();
 });
 
