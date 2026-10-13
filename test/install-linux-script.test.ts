@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { uninstallEngine } from '../src/core/engine-service.ts';
 import { linuxMachineArtifactDigest } from '../src/core/linux-engine-service.ts';
 
 const REPO = resolve(import.meta.dir, '..');
@@ -181,6 +182,36 @@ esac
     return { path: receiptPath, bun, cli: installedCli, engine, generation, markerPath, unitPath, launcherPath, configDir, dataDir, stateDir, cacheDir };
   };
   return { root, home, runtime, bin, script, run, calls, uninstall, receipt, env, shell, tar, zip };
+}
+
+for (const changed of ['launcher', 'open handler', 'generation'] as const) {
+ test(`partial then full uninstall preserves a user-modified ${changed}`, () => {
+  const h = fixture(), installed = h.receipt();
+  const receipt = JSON.parse(text(installed.path));
+  // The TypeScript reader requires the generation's content-addressed name.
+  const tree = receipt.machineArtifacts.find((entry: any) => entry.kind === 'tree');
+  const generation = join(dirname(tree.path), tree.sha256);
+  renameSync(tree.path, generation);
+  tree.path = generation; tree.markerPath = join(generation, '.olympus-generation.json');
+  const handler = receipt.layout.openHandlerPath;
+  mkdirSync(dirname(handler), {recursive: true, mode: 0o700});
+  writeFileSync(handler, 'original handler', {mode: 0o600});
+  receipt.machineArtifacts.push({path: handler, kind: 'file', sha256: sha(text(handler))});
+  writeFileSync(installed.path, JSON.stringify(receipt));
+  const changedPath = changed === 'launcher' ? installed.launcherPath : changed === 'open handler' ? handler : tree.markerPath;
+  writeFileSync(changedPath, 'user replacement');
+  const result = uninstallEngine({platform: 'linux', homeDir: h.home, env: h.env(),
+   exec: (command, args) => {
+    const r = spawnSync(command, args, {env: h.env(), encoding: 'utf8'});
+    return {status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? ''};
+   }, consultInFlight: () => undefined, cgroupEmpty: () => true, workerStopped: () => true});
+  expect(result.removed_plist).toBe(true);
+  const after = JSON.parse(text(installed.path));
+  const full = h.uninstall();
+  expect(text(changedPath)).toBe('user replacement');
+  expect(full.status).not.toBe(0);
+  expect(after.machineArtifacts).toEqual(receipt.machineArtifacts.filter((entry: any) => entry.path !== installed.unitPath));
+ }, 30_000);
 }
 
 for (const shell of shells) {
