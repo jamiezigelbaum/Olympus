@@ -4261,6 +4261,85 @@ export class LocalConnectorStore {
     return this.activeIdentityForLocator(input);
   }
 
+  /**
+   * Every active item whose locator lies strictly UNDER a path-shaped locator
+   * (`/a/b` matches `/a/b/c` and `/a/b/c/d`, never `/a/b` itself and never the
+   * sibling `/a/bc`), compared case-insensitively exactly as
+   * {@link activeIdentityForLocator} compares, so one provider path always
+   * means the same rows.
+   *
+   * A provider that reports a deleted FOLDER as one entry has deleted the whole
+   * subtree, and the descendants' own paths are never listed. The source
+   * connector uses this read to expand that one event into the descendant
+   * identities before it emits their tombstones, so the descendants leave the
+   * index through the same deletion path a single-file event takes.
+   *
+   * Unlike the exact lookup there is no ambiguity to fail closed on: every row
+   * under a deleted folder is gone, so every match is returned. `limit` bounds
+   * the answer (a folder can hold far more files than one sync pass may emit);
+   * the next pass finds whatever is still active. Like
+   * {@link activeIdentityForLocatorIfIndexed}, an index that has not finished
+   * its bounded backfill answers with nothing instead of throwing, so a
+   * listing pass is never killed by a deletion it could not expand. Identity
+   * coordinates and the stored locator only — no title or text.
+   */
+  activeItemsUnderLocatorIfIndexed(input: {
+    provider: string;
+    accountScope: string;
+    locatorUri: string;
+    limit: number;
+  }): Array<{ identity: SourceItemIdentity; locatorUri: string }> {
+    if (!this.locatorIdentityIndexState().completed) return [];
+    const folder = input.locatorUri.replace(/\/+$/, '');
+    // The root is never "a folder that was deleted": refusing it keeps a
+    // malformed event from reading as a request to empty the whole account.
+    if (folder === '' || !Number.isSafeInteger(input.limit) || input.limit <= 0) return [];
+    // `/` sorts immediately before `0`, so [folder + '/', folder + '0') is
+    // exactly the set of strings that start with `folder + '/'`. A range on
+    // the projection's own index, not a LIKE scan, and no wildcard escaping.
+    const rows = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(
+      input.provider,
+      input.accountScope,
+      folder,
+      folder,
+      input.limit,
+    ) as Array<{
+      provider_item_id: string;
+      provider_file_id: string | null;
+      local_item_id: string;
+      source_version: string | null;
+      locator_uri: string | null;
+    }>;
+    return rows.flatMap((row) => row.locator_uri
+      ? [{
+          identity: {
+            family: this.family,
+            provider: input.provider,
+            accountScope: input.accountScope,
+            providerItemId: row.provider_item_id,
+            ...(row.provider_file_id ? { providerFileId: row.provider_file_id } : {}),
+            localItemId: row.local_item_id,
+            ...(row.source_version ? { sourceVersion: row.source_version } : {}),
+          },
+          locatorUri: row.locator_uri,
+        }]
+      : []);
+  }
+
   activeItemForLocator(input: {
     provider: string;
     accountScope: string;

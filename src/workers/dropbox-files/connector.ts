@@ -12,6 +12,11 @@
 // metadata.entryKind === 'deleted' and metadata.deleted === true so the shared
 // ingest spine can apply tombstone semantics. Skipping them would silently
 // resurrect removed files on incremental cursors.
+//
+// A deleted FOLDER arrives as one entry for the whole subtree; the provider
+// never lists the descendants' own paths. The connector expands that entry
+// into one deletion per indexed descendant (see expandDeletedFolder) so the
+// subtree leaves the index through the same deletion path a single file takes.
 
 import { createHash } from 'node:crypto';
 import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
@@ -78,6 +83,23 @@ export interface DropboxDeletedItemIdentityResolver {
     accountScope: string;
     locatorUri: string;
   }): SourceItemIdentity | undefined;
+  /**
+   * Every active item whose stored locator lies strictly under a deleted
+   * folder's path, at most `limit` of them, with the same non-throwing
+   * contract. Optional: a resolver without it still applies the folder's own
+   * deletion, exactly as before.
+   */
+  activeItemsUnderLocatorIfIndexed?(input: {
+    provider: typeof CONNECTOR_ID;
+    accountScope: string;
+    locatorUri: string;
+    limit: number;
+  }): ReadonlyArray<DropboxDeletedDescendant>;
+}
+
+export interface DropboxDeletedDescendant {
+  identity: SourceItemIdentity;
+  locatorUri: string;
 }
 
 export interface DropboxSourceConnectorOptions {
@@ -139,6 +161,43 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
     );
     return [item];
   });
+
+  /**
+   * The deletions for the indexed descendants of a deleted folder: at most
+   * `room` of them, none for an item the listing also reports as present or
+   * one this traversal already deletes. Never throws; a resolver that cannot
+   * answer yet (an index still converging) expands to nothing and the folder's
+   * own deletion stands alone, as it always has.
+   */
+  const expandDeletedFolder = (
+    entry: DropboxDeletedMetadataEntry,
+    room: number,
+    live: ReadonlySet<string>,
+    deleted: ReadonlySet<string>,
+    fetchedAt: string,
+  ): RawItem[] => {
+    const resolver = options.deletedItemIdentityResolver;
+    if (!resolver?.activeItemsUnderLocatorIfIndexed || room <= 0) return [];
+    // Rows the two guards discard still count against the resolver's limit,
+    // so ask for that many more than the pass can use.
+    const limit = room + live.size + deleted.size;
+    const found = new Map<string, DropboxDeletedDescendant>();
+    for (const folder of deletedFolderPaths(entry)) {
+      for (const descendant of resolver.activeItemsUnderLocatorIfIndexed({
+        provider: CONNECTOR_ID,
+        accountScope: account,
+        locatorUri: folder,
+        limit,
+      })) {
+        const id = descendant.identity.providerItemId;
+        if (live.has(id) || deleted.has(id) || found.has(id)) continue;
+        found.set(id, descendant);
+      }
+    }
+    return [...found.values()]
+      .slice(0, room)
+      .map((descendant) => rawItemFromDeletedDescendant(descendant, account, fetchedAt));
+  };
 
   const ensureSession = async (): Promise<CredentialSession> => {
     if (cachedSession) return cachedSession;
@@ -224,6 +283,15 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
         let hasMore = true;
         let remaining = limit;
         const requestedPages = new Set<string>();
+        // A deleted folder is one provider entry for its whole subtree. Its
+        // descendants are expanded into deletions of their own, with two
+        // guards that this one traversal can evaluate:
+        //  - an item the listing ALSO reports as present (a moved or renamed
+        //    folder arrives as a delete at the old path plus the files at the
+        //    new one, in no promised order) is never deleted, and
+        //  - an item this traversal already deletes is not deleted twice.
+        const liveItemIds = new Set<string>();
+        const deletedItemIds = new Set<string>();
         while (hasMore && remaining > 0) {
           const requestKey = cursor.providerCursor ?? '<initial>';
           if (requestedPages.has(requestKey)) {
@@ -257,28 +325,84 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
             throw new Error('Dropbox metadata resume offset is past the provider page.');
           }
           const available = page.entries.slice(offset);
-          const accepted = available.slice(0, remaining);
-          remaining -= accepted.length;
-          if (accepted.length < available.length) {
-            const resumeCursor = encodeDropboxPageCursor({
-              ...(cursor.providerCursor ? { providerCursor: cursor.providerCursor } : {}),
-              itemOffset: offset + accepted.length,
-              pageDigest: metadataPageDigest(page),
-            });
+          // Every id the whole page reports as present, ahead of consuming
+          // any of it: a delete may precede or follow the entries it races.
+          for (const entry of page.entries) {
+            if (entry.tag !== 'deleted') liveItemIds.add(entry.id);
+          }
+          const fetchedAt = nowIso();
+          const items: RawItem[] = [];
+          let consumed = 0;
+          let expandedDeletedFolder = false;
+          for (const entry of available) {
+            if (remaining <= 0) break;
+            if (entry.tag !== 'deleted') {
+              items.push(...scopedItems([entry], fetchedAt));
+              remaining -= 1;
+              consumed += 1;
+              continue;
+            }
+            const deletion = scopedItems([entry], fetchedAt);
+            // Out of scope: the event is not this lane's, and neither is its subtree.
+            const descendants = deletion.length === 0
+              ? []
+              : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            if (descendants.length >= remaining) {
+              // The deleted folder's subtree does not fit in what is left of
+              // this pass's budget. Emit what fits and leave the entry itself
+              // unconsumed: the resume cursor points at it, the descendants
+              // just removed are no longer active, and the next pass finds the
+              // rest. The folder's own deletion goes last, so a resume can
+              // still resolve it.
+              for (const descendant of descendants.slice(0, remaining)) {
+                deletedItemIds.add(descendant.identity.providerItemId);
+                items.push(descendant);
+              }
+              remaining = 0;
+              break;
+            }
+            for (const descendant of descendants) {
+              deletedItemIds.add(descendant.identity.providerItemId);
+              items.push(descendant);
+            }
+            for (const item of deletion) {
+              if (item.metadata['deletedIdentityResolved'] === true) deletedItemIds.add(item.identity.providerItemId);
+              items.push(item);
+            }
+            if (descendants.length > 0) expandedDeletedFolder = true;
+            remaining -= descendants.length + 1;
+            consumed += 1;
+          }
+          if (consumed < available.length) {
+            const resumeOffset = offset + consumed;
+            // Offset zero is the start of the provider page itself, which the
+            // page's own cursor (absent for the first page) already names.
+            const resumeCursor = resumeOffset === 0
+              ? cursor.providerCursor
+              : encodeDropboxPageCursor({
+                  ...(cursor.providerCursor ? { providerCursor: cursor.providerCursor } : {}),
+                  itemOffset: resumeOffset,
+                  pageDigest: metadataPageDigest(page),
+                });
             yield {
-              items: scopedItems(accepted, nowIso()),
-              nextCursor: resumeCursor,
+              items,
+              ...(resumeCursor ? { nextCursor: resumeCursor } : {}),
               done: false,
               truncated: true,
             };
             return;
           }
           yield {
-            items: scopedItems(accepted, nowIso()),
+            items,
             ...(nextCursor ? { nextCursor } : {}),
             done: !hasMore,
           };
-          if (!hasMore || remaining === 0) return;
+          // A pass that expanded a deleted folder ends with its page. The
+          // shared router keeps ONE plan per item for a whole pass, so a moved
+          // file that this page deleted and a LATER page re-added would be
+          // routed by the delete. The re-add lands in the next pass, where the
+          // item is simply present again.
+          if (!hasMore || remaining === 0 || expandedDeletedFolder) return;
           cursor = { providerCursor: nextCursor! };
         }
       })();
@@ -472,6 +596,63 @@ function rawItemFromDeletedEntry(
       // and a miss here means another system's corpus lands in personal search.
       ...(entry.pathDisplay ? { pathDisplay: entry.pathDisplay } : {}),
       ...(entry.pathLower ? { pathLower: entry.pathLower } : {}),
+    }),
+    fetchedAt,
+  };
+}
+
+/**
+ * The paths a deleted entry may be known by in the index: the display path the
+ * rows were stored under and the provider's own lower-cased form. Both are
+ * rooted, have no trailing slash (the store matches `<path>/` so `/a/b` never
+ * claims `/a/bc`), and are deduplicated the way the store lower-cases them.
+ * A path that is not rooted (an id reference) has no descendants to find.
+ */
+function deletedFolderPaths(entry: DropboxDeletedMetadataEntry): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const candidate of [entry.pathDisplay, entry.pathLower]) {
+    const folder = candidate?.trim().replace(/\/+$/, '');
+    if (!folder || !folder.startsWith('/')) continue;
+    const key = folder.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+    if (seen.has(key)) continue;
+    seen.add(key);
+    paths.push(folder);
+  }
+  return paths;
+}
+
+/**
+ * One descendant of a deleted folder, as the deletion the folder's own entry
+ * implies. It carries the stored identity (so the shared spine and the tier
+ * router tombstone every copy of it, as for a single-file delete) and the
+ * stored path (so path-keyed policy sees the same facts as for a listed file).
+ */
+function rawItemFromDeletedDescendant(
+  descendant: DropboxDeletedDescendant,
+  account: string,
+  fetchedAt: string,
+): RawItem {
+  const { identity, locatorUri } = descendant;
+  return {
+    identity: {
+      family: 'file',
+      provider: CONNECTOR_ID,
+      accountScope: account,
+      providerItemId: identity.providerItemId,
+      ...(identity.providerFileId ? { providerFileId: identity.providerFileId } : {}),
+      localItemId: identity.localItemId,
+    },
+    mimeType: UNKNOWN_MIME_TYPE,
+    content: { kind: 'metadata_only' },
+    metadata: Object.freeze({
+      entryKind: 'deleted',
+      deleted: true,
+      deletedIdentityResolved: true,
+      deletedWithFolder: true,
+      name: locatorUri.slice(locatorUri.lastIndexOf('/') + 1),
+      pathDisplay: locatorUri,
+      pathLower: locatorUri.toLowerCase(),
     }),
     fetchedAt,
   };

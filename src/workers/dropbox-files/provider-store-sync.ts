@@ -27,6 +27,8 @@ import { DROPBOX_STORE_PLACEMENT } from './connector-store.ts';
 import {
   createDropboxSourceConnector,
   type DropboxContentScope,
+  type DropboxDeletedDescendant,
+  type DropboxDeletedItemIdentityResolver,
 } from './connector.ts';
 import {
   isDropboxCursorResetError,
@@ -126,7 +128,11 @@ export function createDropboxProviderStoreSyncHandler(
     throw new Error('The Dropbox tier set\'s secure leg must be the lane\'s own store.');
   }
   // A deleted entry names a path; the file's row may sit in any tier store.
-  const deletedItemIdentityResolver = tierSet
+  // A deleted FOLDER names a subtree whose items are spread over the same
+  // stores, one item possibly held by several of them (a names copy and a
+  // content copy): the union below lists each item once, and the deletion the
+  // connector emits for it reaches every store through the tier router.
+  const deletedItemIdentityResolver: DropboxDeletedItemIdentityResolver = tierSet
     ? {
         activeIdentityForLocatorIfIndexed(input: Parameters<LocalConnectorStore['activeIdentityForLocatorIfIndexed']>[0]) {
           for (const domain of ['secure_local', 'internal', 'public_safe'] as const) {
@@ -134,6 +140,15 @@ export function createDropboxProviderStoreSyncHandler(
             if (identity) return identity;
           }
           return undefined;
+        },
+        activeItemsUnderLocatorIfIndexed(input: Parameters<LocalConnectorStore['activeItemsUnderLocatorIfIndexed']>[0]) {
+          const union = new Map<string, DropboxDeletedDescendant>();
+          for (const domain of ['secure_local', 'internal', 'public_safe'] as const) {
+            for (const descendant of tierSet.store(domain)?.activeItemsUnderLocatorIfIndexed(input) ?? []) {
+              if (!union.has(descendant.identity.providerItemId)) union.set(descendant.identity.providerItemId, descendant);
+            }
+          }
+          return [...union.values()];
         },
       }
     : options.store;

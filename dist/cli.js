@@ -14933,6 +14933,27 @@ function createDropboxSourceConnector(options) {
     contentAllowedByLocalItemId.set(item.identity.localItemId, entry.tag === "file" && (!options.scope || options.scope.allowsContent(path)));
     return [item];
   });
+  const expandDeletedFolder = (entry, room, live, deleted, fetchedAt) => {
+    const resolver = options.deletedItemIdentityResolver;
+    if (!resolver?.activeItemsUnderLocatorIfIndexed || room <= 0)
+      return [];
+    const limit = room + live.size + deleted.size;
+    const found = new Map;
+    for (const folder of deletedFolderPaths(entry)) {
+      for (const descendant of resolver.activeItemsUnderLocatorIfIndexed({
+        provider: CONNECTOR_ID,
+        accountScope: account,
+        locatorUri: folder,
+        limit
+      })) {
+        const id = descendant.identity.providerItemId;
+        if (live.has(id) || deleted.has(id) || found.has(id))
+          continue;
+        found.set(id, descendant);
+      }
+    }
+    return [...found.values()].slice(0, room).map((descendant) => rawItemFromDeletedDescendant(descendant, account, fetchedAt));
+  };
   const ensureSession = async () => {
     if (cachedSession)
       return cachedSession;
@@ -14998,6 +15019,8 @@ function createDropboxSourceConnector(options) {
         let hasMore = true;
         let remaining = limit;
         const requestedPages = new Set;
+        const liveItemIds = new Set;
+        const deletedItemIds = new Set;
         while (hasMore && remaining > 0) {
           const requestKey = cursor.providerCursor ?? "<initial>";
           if (requestedPages.has(requestKey)) {
@@ -15029,28 +15052,68 @@ function createDropboxSourceConnector(options) {
             throw new Error("Dropbox metadata resume offset is past the provider page.");
           }
           const available = page.entries.slice(offset);
-          const accepted = available.slice(0, remaining);
-          remaining -= accepted.length;
-          if (accepted.length < available.length) {
-            const resumeCursor = encodeDropboxPageCursor({
+          for (const entry of page.entries) {
+            if (entry.tag !== "deleted")
+              liveItemIds.add(entry.id);
+          }
+          const fetchedAt = nowIso();
+          const items = [];
+          let consumed = 0;
+          let expandedDeletedFolder = false;
+          for (const entry of available) {
+            if (remaining <= 0)
+              break;
+            if (entry.tag !== "deleted") {
+              items.push(...scopedItems([entry], fetchedAt));
+              remaining -= 1;
+              consumed += 1;
+              continue;
+            }
+            const deletion = scopedItems([entry], fetchedAt);
+            const descendants = deletion.length === 0 ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            if (descendants.length >= remaining) {
+              for (const descendant of descendants.slice(0, remaining)) {
+                deletedItemIds.add(descendant.identity.providerItemId);
+                items.push(descendant);
+              }
+              remaining = 0;
+              break;
+            }
+            for (const descendant of descendants) {
+              deletedItemIds.add(descendant.identity.providerItemId);
+              items.push(descendant);
+            }
+            for (const item of deletion) {
+              if (item.metadata["deletedIdentityResolved"] === true)
+                deletedItemIds.add(item.identity.providerItemId);
+              items.push(item);
+            }
+            if (descendants.length > 0)
+              expandedDeletedFolder = true;
+            remaining -= descendants.length + 1;
+            consumed += 1;
+          }
+          if (consumed < available.length) {
+            const resumeOffset = offset + consumed;
+            const resumeCursor = resumeOffset === 0 ? cursor.providerCursor : encodeDropboxPageCursor({
               ...cursor.providerCursor ? { providerCursor: cursor.providerCursor } : {},
-              itemOffset: offset + accepted.length,
+              itemOffset: resumeOffset,
               pageDigest: metadataPageDigest(page)
             });
             yield {
-              items: scopedItems(accepted, nowIso()),
-              nextCursor: resumeCursor,
+              items,
+              ...resumeCursor ? { nextCursor: resumeCursor } : {},
               done: false,
               truncated: true
             };
             return;
           }
           yield {
-            items: scopedItems(accepted, nowIso()),
+            items,
             ...nextCursor ? { nextCursor } : {},
             done: !hasMore
           };
-          if (!hasMore || remaining === 0)
+          if (!hasMore || remaining === 0 || expandedDeletedFolder)
             return;
           cursor = { providerCursor: nextCursor };
         }
@@ -15211,6 +15274,46 @@ function rawItemFromDeletedEntry(entry, account, fetchedAt, deletedItemIdentityR
       name: entry.name,
       ...entry.pathDisplay ? { pathDisplay: entry.pathDisplay } : {},
       ...entry.pathLower ? { pathLower: entry.pathLower } : {}
+    }),
+    fetchedAt
+  };
+}
+function deletedFolderPaths(entry) {
+  const seen = new Set;
+  const paths = [];
+  for (const candidate of [entry.pathDisplay, entry.pathLower]) {
+    const folder = candidate?.trim().replace(/\/+$/, "");
+    if (!folder || !folder.startsWith("/"))
+      continue;
+    const key = folder.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    paths.push(folder);
+  }
+  return paths;
+}
+function rawItemFromDeletedDescendant(descendant, account, fetchedAt) {
+  const { identity, locatorUri } = descendant;
+  return {
+    identity: {
+      family: "file",
+      provider: CONNECTOR_ID,
+      accountScope: account,
+      providerItemId: identity.providerItemId,
+      ...identity.providerFileId ? { providerFileId: identity.providerFileId } : {},
+      localItemId: identity.localItemId
+    },
+    mimeType: UNKNOWN_MIME_TYPE,
+    content: { kind: "metadata_only" },
+    metadata: Object.freeze({
+      entryKind: "deleted",
+      deleted: true,
+      deletedIdentityResolved: true,
+      deletedWithFolder: true,
+      name: locatorUri.slice(locatorUri.lastIndexOf("/") + 1),
+      pathDisplay: locatorUri,
+      pathLower: locatorUri.toLowerCase()
     }),
     fetchedAt
   };
@@ -27436,6 +27539,40 @@ var init_local_index = __esm(() => {
         return;
       return this.activeIdentityForLocator(input);
     }
+    activeItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return [];
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return [];
+      const rows = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit);
+      return rows.flatMap((row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : []);
+    }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
       if (!identity)
@@ -35073,6 +35210,16 @@ function createDropboxProviderStoreSyncHandler(options) {
           return identity;
       }
       return;
+    },
+    activeItemsUnderLocatorIfIndexed(input) {
+      const union = new Map;
+      for (const domain of ["secure_local", "internal", "public_safe"]) {
+        for (const descendant of tierSet.store(domain)?.activeItemsUnderLocatorIfIndexed(input) ?? []) {
+          if (!union.has(descendant.identity.providerItemId))
+            union.set(descendant.identity.providerItemId, descendant);
+        }
+      }
+      return [...union.values()];
     }
   } : options.store;
   return {

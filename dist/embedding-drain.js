@@ -18027,6 +18027,40 @@ var init_local_index = __esm(() => {
         return;
       return this.activeIdentityForLocator(input);
     }
+    activeItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return [];
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return [];
+      const rows = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit);
+      return rows.flatMap((row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : []);
+    }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
       if (!identity)
