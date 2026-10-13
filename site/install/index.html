@@ -29,21 +29,33 @@
       <h1>Add Olympus to your AI</h1>
       <p class="lede">Two steps. Install Olympus on your computer, then connect the AI you use. Your files stay on your computer; your AI asks Olympus.</p>
 
-      <h2 id="install"><span class="step" aria-hidden="true">1</span>Install Olympus on your Mac</h2>
+      <h2 id="install"><span class="step" aria-hidden="true">1</span>Install Olympus on your computer</h2>
+      <p>Olympus runs on a Mac with Apple silicon, or on Linux with Omarchy. No administrator password, and no account to create.</p>
+
+      <h3 id="mac">On a Mac</h3>
       <ul>
         <li>A Mac with Apple silicon (M1 or later), on macOS 13 Ventura or later. Macs with an Intel processor are not supported.</li>
-        <li>No administrator password, and no account to create.</li>
       </ul>
       <p>Open <strong>Terminal</strong> (in Applications, then Utilities), paste this line, and press Return:</p>
       <pre><code>curl -fsSL https://olympusplugin.ai/install.sh | sh</code></pre>
-      <p>It takes a minute or two. When it says <strong>Olympus is installed and running</strong>, connect your AI. Running the same line again later updates Olympus, or repairs it if it stopped. You can <a href="/install.sh">read the installer</a> before you run it.</p>
+
+      <h3 id="linux">On Omarchy</h3>
+      <ul>
+        <li><a href="https://omarchy.org">Omarchy</a> (Arch Linux) on an x86_64 computer. Omarchy already has everything else Olympus needs (a processor with SSE4.2, glibc 2.17 or later, systemd, and curl, tar and unzip). Other Linux distributions and ARM computers are not supported yet.</li>
+      </ul>
+      <p>First install the tools Olympus uses to read scans, photos and voice notes:</p>
+      <pre><code>sudo pacman -S --needed tesseract tesseract-data-eng poppler libvips libheif ffmpeg</code></pre>
+      <p>Then, in a terminal:</p>
+      <pre><code>curl -fsSL https://olympusplugin.ai/install-linux.sh | sh</code></pre>
+
+      <p>It takes a minute or two. When it says <strong>Olympus is installed and running</strong> (on Omarchy, <strong>Installed for your user without an administrator password</strong>), connect your AI. On Omarchy it also adds <strong>Olympus</strong> to your app launcher (Super+Space), which opens the dashboard. Running the same line again later updates Olympus, or repairs it if it stopped. You can read the installer before you run it: <a href="/install.sh">Mac</a>, <a href="/install-linux.sh">Omarchy</a>.</p>
       <div class="note">
-        <p><strong>On Linux, a server, or already using OpenClaw?</strong> Olympus runs there as an OpenClaw plugin. <a href="/install/openclaw/">Install with OpenClaw</a>.</p>
+        <p><strong>On a server, or already using OpenClaw?</strong> Olympus runs there as an OpenClaw plugin. <a href="/install/openclaw/">Install with OpenClaw</a>.</p>
       </div>
 
       <h2 id="connect"><span class="step" aria-hidden="true">2</span>Connect your AI</h2>
       <ul class="apps">
-        <li><a href="/install/chatgpt/"><strong>ChatGPT</strong><span>Approve it once, on your Mac</span></a></li>
+        <li><a href="/install/chatgpt/"><strong>ChatGPT</strong><span>Approve it once, on your computer</span></a></li>
         <li><a href="/install/claude/"><strong>Claude</strong><span>Web, desktop and phone</span></a></li>
         <li><a href="/install/grok/"><strong>Grok</strong><span>On grok.com</span></a></li>
         <li><a href="/install/grok/#grok-bot"><strong>Grok Bot</strong><span>Uses your Grok connection</span></a></li>
@@ -56,22 +68,23 @@
       </ul>
 
       <h2 id="sources"><span class="step" aria-hidden="true">3</span>Connect your sources</h2>
-      <p>Open the Olympus dashboard: in ChatGPT, ask <em>Show my Olympus dashboard</em>; on your Mac, run <code>olympus dashboard</code>. Choose <strong>Connect</strong> next to Dropbox, Gmail or Google Drive and sign in with the accounts you already have. Pick which folders Olympus reads (<strong>Full</strong>, <strong>Names only</strong> or <strong>Skip</strong>), then <strong>Save and start</strong>. Other sources, such as X bookmarks or Readwise, are <a href="/help/on-your-computer/#connect">connected on your computer</a>.</p>
+      <p>Open the Olympus dashboard: in ChatGPT, ask <em>Show my Olympus dashboard</em>; on your computer, run <code>olympus dashboard</code>. Choose <strong>Connect</strong> next to Dropbox, Gmail or Google Drive and sign in with the accounts you already have. Pick which folders Olympus reads (<strong>Full</strong>, <strong>Names only</strong> or <strong>Skip</strong>), then <strong>Save and start</strong>. Other sources, such as X bookmarks or Readwise, are <a href="/help/on-your-computer/#connect">connected on your computer</a>.</p>
 
       <h2>What the installer does</h2>
       <ul>
-        <li>Installs Olympus for your macOS user only. It changes nothing outside your home folder.</li>
-        <li>Downloads two things over a secure connection, and checks each against a published checksum before using it: Bun, the runtime Olympus runs on (about 24 MB), and Olympus itself (about 5 MB). If either does not match, it stops and changes nothing.</li>
-        <li>Starts Olympus in the background as a per-user login item (a LaunchAgent), so it is running whenever you are logged in, and checks that it really started.</li>
-        <li>Adds the <code>olympus</code> command, and a line to your shell profile so Terminal finds it.</li>
+        <li>Installs Olympus for your user only. It changes nothing outside your home folder.</li>
+        <li>Downloads Olympus over a secure connection, with the runtime it needs, and checks each download against a published checksum before using it. If one does not match, it stops and changes nothing.</li>
+        <li>Starts Olympus in the background, so it keeps running, and checks that it really started. On a Mac that is a per-user login item (a LaunchAgent). On Omarchy it is a systemd user service that keeps running after you log out; if your system needs an administrator to allow that, the installer stops before changing anything and prints the one command to run (<code>sudo loginctl enable-linger</code> and your user name).</li>
+        <li>Adds the <code>olympus</code> command, and on a Mac a line to your shell profile so Terminal finds it. On Omarchy it also adds Olympus to the app launcher.</li>
         <li>If an update does not start, puts the previous version back.</li>
       </ul>
       <p>After that, Olympus downloads its built-in models in the background:</p>
       <ul>
-        <li>A model used to search your items on the Mac (about 225 MB).</li>
-        <li>A private answer model that stays on the Mac: about 1.3 GB with 8 GB of memory, about 2.7 GB with 16 GB or more. It downloads only while the disk has room for it plus 2 GB to spare.</li>
+        <li>A model used to search your items on your computer (EmbeddingGemma 2).</li>
+        <li>A private answer model that stays on your computer: about 1.3 GB on a computer with 8 GB of memory, about 2.7 GB with 16 GB or more. It downloads only while the disk has room for it plus 2 GB to spare.</li>
+        <li>A model that transcribes voice notes on your computer.</li>
       </ul>
-      <p>Nothing from your files leaves the Mac during install.</p>
+      <p>Nothing from your files leaves your computer during install.</p>
 
       <h2>Check that it is running</h2>
       <p>In a new Terminal window:</p>
@@ -79,6 +92,7 @@
       <p>Look for <code>"ok": true</code>. If something is missing, the <code>missing</code> list says what to do next. See also <a href="/help/mac-offline/">what to do when your AI says your computer is offline</a>.</p>
 
       <h2 id="where">Where Olympus keeps things</h2>
+      <h3>On a Mac</h3>
       <div class="table-scroll">
         <table>
           <thead>
@@ -90,16 +104,33 @@
             <tr><td><code>~/Library/LaunchAgents/ai.olympusplugin.engine.plist</code></td><td>The login item that keeps Olympus running</td></tr>
             <tr><td><code>~/.olympus</code></td><td>Olympus settings and your privacy choices</td></tr>
             <tr><td><code>~/.config/olympus</code></td><td>Settings for Olympus's background worker</td></tr>
-            <tr><td><code>~/.local/share/openclaw/olympus</code></td><td>Your index, the built-in models, and this Mac's connection keys</td></tr>
+            <tr><td><code>~/.local/share/openclaw/olympus</code></td><td>Your index, the built-in models, and this computer's connection keys</td></tr>
             <tr><td><code>~/Library/Logs/Olympus</code></td><td>Logs, including <code>install.log</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>On Omarchy</h3>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Folder</th><th scope="col">What is in it</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>~/.local/share/olympus/engine</code></td><td>Olympus, the previous version, and its runtime</td></tr>
+            <tr><td><code>~/.local/bin/olympus</code></td><td>The <code>olympus</code> command</td></tr>
+            <tr><td><code>~/.config/systemd/user/olympus-engine.service</code></td><td>The user service that keeps Olympus running</td></tr>
+            <tr><td><code>~/.config/olympus</code></td><td>Olympus settings, and its keys in an encrypted file</td></tr>
+            <tr><td><code>~/.local/share/openclaw/olympus</code></td><td>Your index, the built-in models, and this computer's connection keys (the folder name is historical; OpenClaw is not needed)</td></tr>
           </tbody>
         </table>
       </div>
 
       <h2 id="uninstall">Uninstall</h2>
-      <p>In Terminal:</p>
+      <p>On a Mac, in Terminal:</p>
       <pre><code>curl -fsSL https://olympusplugin.ai/uninstall.sh | sh</code></pre>
-      <p>This stops Olympus, removes its login item, and deletes the app, the runtime, the <code>olympus</code> command and the line the installer added to your shell profile. It keeps your data and settings, and lists where they are. To only stop Olympus and remove its login item, keeping the app, run <code>olympus engine uninstall</code> instead.</p>
+      <p>On Omarchy:</p>
+      <pre><code>curl -fsSL https://olympusplugin.ai/uninstall-linux.sh | sh</code></pre>
+      <p>On a Mac, this stops Olympus, removes its login item, and deletes the app, the runtime, the <code>olympus</code> command and the line the installer added to your shell profile. On Omarchy, it stops Olympus and removes its service, the app and the <code>olympus</code> command. Both keep your data and settings, and list where they are. To only stop Olympus and remove its login item, keeping the app, run <code>olympus engine uninstall</code> instead.</p>
       <p>To delete your data too, do this <strong>before</strong> uninstalling. It cannot be undone:</p>
       <pre><code>olympus engine stop
 olympus data delete --all</code></pre>

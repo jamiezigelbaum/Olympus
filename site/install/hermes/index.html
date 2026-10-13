@@ -28,11 +28,11 @@
     <div class="wrap">
       <p class="crumb"><a href="/install/">All apps</a></p>
       <h1>Connect Hermes</h1>
-      <p class="lede">Hermes Agent runs Olympus as a local MCP server and sees four tools: ask, collect a long answer, check which sources are ready, and ask anonymously. Anonymous answers stay off until you turn them on in Olympus on your computer, on its <a href="/open/private/">Private answers</a> page.</p>
+      <p class="lede">Hermes Agent runs Olympus as a local MCP server and sees four tools: ask, collect a long answer, check which sources are ready, and ask anonymously. Anonymous answers (Mac only for now) stay off until you turn them on in Olympus on your computer, on its <a href="/open/private/">Private answers</a> page.</p>
 
       <h2>Before you start</h2>
       <ul>
-        <li><strong>Olympus installed on your computer.</strong> On a Mac, that is <a href="/install/#install">one line in Terminal</a>; on Linux or a server, <a href="/install/openclaw/">install with OpenClaw</a>.</li>
+        <li><strong>Olympus installed on your computer.</strong> On a Mac or on Omarchy, that is <a href="/install/#install">one line in Terminal</a>; on a server or alongside OpenClaw, <a href="/install/openclaw/">install with OpenClaw</a>.</li>
       </ul>
 
       <h2>Connect</h2>
@@ -54,7 +54,7 @@ hermes mcp test olympus</code></pre>
         <li><strong>Reload.</strong> Restart Hermes or run <code>/reload-mcp</code>. The tools appear as <code>mcp_olympus_source_answer</code>, <code>mcp_olympus_source_answer_result</code>, <code>mcp_olympus_source_index_status</code> and <code>mcp_olympus_ask_anonymously</code>.</li>
         <li><strong>Add the skill (optional).</strong> Copy the <a href="https://github.com/jamiezigelbaum/Olympus/tree/main/integrations/hermes/ask-sources">ask-sources</a> folder to <code>~/.hermes/skills/ask-sources/</code>, so Hermes knows when to ask.</li>
       </ol>
-      <p class="meta">On a Mac you installed with the one line, the command is <code>~/.local/bin/olympus</code>. Under OpenClaw, it is <code>bin/olympus</code> inside the plugin folder: run <code>openclaw plugins inspect olympus --json</code> and use <code>plugin.rootDir</code>.</p>
+      <p class="meta">If you installed with the one line, on a Mac or on Omarchy, the command is <code>~/.local/bin/olympus</code>. Under OpenClaw, it is <code>bin/olympus</code> inside the plugin folder: run <code>openclaw plugins inspect olympus --json</code> and use <code>plugin.rootDir</code>.</p>
     </div>
   </main>
   <footer class="site-foot">

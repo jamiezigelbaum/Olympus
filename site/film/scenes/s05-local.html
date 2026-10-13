@@ -31,12 +31,12 @@
       const O = window.OLY, T = window.OLY_TL, C = T.scenes["s05-local"], B = C.beats;
       const $ = (id) => document.getElementById("s05-local-" + id);
       const shake = $("shake");
-      const P = O.page(shake, { header: ["Route: this Mac", "Built-in models · No account"] });
+      const P = O.page(shake, { header: ["Route: this computer", "Built-in models · No account"] });
       const S = P.sheet;
       S.insertAdjacentHTML("beforeend", `
-        <div class="s05-k" id="s05-local-head"><span class="ln">Your Mac</span><span class="ln"><em>answers first.</em></span></div>
-        <div class="s05-k" id="s05-local-foot">Small models · built in · run on your Mac</div>
-        <div id="s05-local-panel"><div class="lab">Private answer · from your Mac</div>
+        <div class="s05-k" id="s05-local-head"><span class="ln">Your computer</span><span class="ln"><em>answers first.</em></span></div>
+        <div class="s05-k" id="s05-local-foot">Small models · built in · run on your computer</div>
+        <div id="s05-local-panel"><div class="lab">Private answer · from your computer</div>
           <div class="ans" id="s05-local-ans">Your accountant flagged the $35,000 loss.</div>
           <div class="ns" id="s05-local-ns">Not sent to the cloud.</div></div>`);
       // FACTS.md: the four small models built in

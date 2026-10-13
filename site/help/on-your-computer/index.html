@@ -44,6 +44,12 @@
       <pre><code>olympus dashboard</code></pre>
       <p>It opens the Olympus dashboard in your computer's browser. The link works once, for 15 minutes; run the command again for a new one. If Terminal says Olympus is not running, see <a href="/help/mac-offline/">ChatGPT says your computer is offline</a>.</p>
 
+      <h3 id="headless">On a Linux computer without a screen</h3>
+      <p>If Olympus runs on an Omarchy computer you reach over SSH, only your own account there can open Olympus or approve an AI app. From the computer you sit at, open a secure tunnel to it (<code>olympus doctor</code> on that computer prints the exact path for your user; it looks like this):</p>
+      <pre><code>ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:/run/user/1000/olympus/worker.sock you@your-computer</code></pre>
+      <p>Then, on that computer, run <code>olympus dashboard --no-open</code> and open the link it prints on the computer you sit at.</p>
+      <p>Approving ChatGPT, Claude or Grok works the same way: the approval page opens through the tunnel.</p>
+
       <h2 id="connect">Connect a source ChatGPT can't connect</h2>
       <p>ChatGPT connects Gmail, Google Drive and Dropbox. These sources are connected on your computer instead:</p>
       <ul>
@@ -61,7 +67,7 @@
       <p>Both are on the <strong>Private answers</strong> page on your computer: <a href="/open/private/">open Private answers</a>, or <a href="#open-olympus">open Olympus on your computer</a> and choose <strong>Open</strong> next to <strong>Private answers</strong> under <strong>On this computer</strong>. Not under <strong>Models</strong>: that is only for changing models.</p>
       <ul>
         <li><strong>Waiting questions.</strong> When an agent asks something only your private things can answer, the question waits here, and <strong>Needs you</strong> on your computer says so. Choose <strong>Answer</strong> to answer it on this computer with the model built into Olympus, or <strong>Dismiss</strong>. You can also ask your own question in <strong>Ask privately</strong>. Nothing on this page leaves your computer.</li>
-        <li><strong>Anonymous answers</strong> are under <strong>Anonymous answers</strong> on the same page. They are off until you turn them on there; your agent can then send a question anonymously, through zkAPI and Tor, using your own zkAPI account.</li>
+        <li><strong>Anonymous answers</strong> are under <strong>Anonymous answers</strong> on the same page. They are on Mac only for now, and off until you turn them on there; your agent can then send a question anonymously, through zkAPI and Tor, using your own zkAPI account.</li>
       </ul>
       <p>In Olympus 1.0.0-rc.6 and earlier there is no Private answers page yet: <strong>Anonymous answers</strong> has its own row under <strong>On this computer</strong>.</p>
 

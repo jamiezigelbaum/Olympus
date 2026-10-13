@@ -55,10 +55,10 @@
       pg.style.cssText = `position:absolute;left:${-O.SHEET.x}px;top:${-O.SHEET.y}px;width:1920px;height:1080px`;
       pg.insertAdjacentHTML("beforeend", `
         <div class="s08-box" id="s08-zkq-q1">“I’m <span class="id" id="s08-zkq-i1">Sam Rivera</span>. I <span class="kp" id="s08-zkq-o-lost">lost</span> <span class="id" id="s08-zkq-i2">$35,000</span> on <span class="id" id="s08-zkq-i3">my brokerage account</span> this year. <span class="kp" id="s08-zkq-o-how">How</span> do I <span class="kp" id="s08-zkq-o-report">report</span> it <span class="kp" id="s08-zkq-o-on">on</span> my <span class="kp" id="s08-zkq-o-tax">taxes?</span>”</div>
-        <div class="s08-rl" id="s08-zkq-l2"><span class="arr">↓</span>Rewritten on your Mac</div>
+        <div class="s08-rl" id="s08-zkq-l2"><span class="arr">↓</span>Rewritten on your computer</div>
         <div class="s08-box" id="s08-zkq-q2">“<span class="kp" id="s08-zkq-n-how">How</span> are capital <span class="kp" id="s08-zkq-n-lost">losses</span> <span class="kp" id="s08-zkq-n-report">reported</span> <span class="kp" id="s08-zkq-n-on">on</span> a US <span class="kp" id="s08-zkq-n-tax">tax</span> return?”</div>
         <div id="s08-zkq-route">
-          <div class="s08-rl" id="s08-zkq-mac" style="left:346px;top:390px">Your Mac</div>
+          <div class="s08-rl" id="s08-zkq-mac" style="left:346px;top:390px">Your computer</div>
           <div class="s08-rl" id="s08-zkq-model" style="left:1574px;top:390px;transform:translateX(-100%)">Answering model</div>
           <div id="s08-zkq-wire"></div>
           <div class="s08-node end" style="left:420px;top:550px"></div>
@@ -105,7 +105,7 @@
         // 8b The three identifiers are redacted, one after another (the film's redaction style).
         ["i1", "i2", "i3"].forEach((id, i) => O.redact(tl, $(id), B["id" + (i + 1)], { shake }));
 
-        // Rewritten on your Mac: the meaning words detach from the old line, drop and re-slot into the new one
+        // Rewritten on your computer: the meaning words detach from the old line, drop and re-slot into the new one
         // (lost -> losses, report -> reported, taxes? -> tax) while the new words rise around them.
         const R = B.rewrite, MS = 0.12, FL = 0.45;  // MS: seconds between carried words; FL: each flight (v04: faster, Jamie)
 

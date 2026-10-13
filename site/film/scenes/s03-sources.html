@@ -25,7 +25,7 @@
     (function () {
       const O = window.OLY, T = window.OLY_TL, C = T.scenes["s03-sources"], B = C.beats;
       const $ = (id) => document.getElementById("s03-sources-" + id);
-      const P = O.page($("shake"), { header: ["Sources", "Indexed on your Mac"] });
+      const P = O.page($("shake"), { header: ["Sources", "Indexed on your computer"] });
       const S = P.sheet;
       // Two ledger columns (sheet coordinates); the eighth slot is Build your own, its box left open.
       const NAMES = ["Gmail", "Google Drive", "Dropbox", "Telegram", "WhatsApp", "X bookmarks", "Readwise"];
@@ -38,8 +38,8 @@
       const more = O.make("div", "s03-row", S, `<svg viewBox="0 0 46 46"><rect x="3" y="3" width="40" height="40" rx="6" /></svg><div class="rule"></div><div class="name">Build your own</div>`);
       more.id = "s03-sources-more";
       gsap.set(more, { left: 736, top: 150 + 3 * 128 });
-      // Stamped under the ledger: all of it is kept and searched on the Mac (Jamie, 2026-10-12).
-      const local = O.make("div", "stamp", S, "STORED ON YOUR MAC");
+      // Stamped under the ledger: all of it is kept and searched on the computer (Jamie, 2026-10-12).
+      const local = O.make("div", "stamp", S, "STORED ON YOUR COMPUTER");
       local.id = "s03-sources-local";
 
       O.ready(() => {

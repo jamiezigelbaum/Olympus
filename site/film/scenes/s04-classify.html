@@ -35,7 +35,7 @@
       const $ = (id) => document.getElementById("s04-classify-" + id);
       const shake = $("shake");
       const roll = (a, b, r) => `<span class="s04-roll${r ? " r" : ""}"><span class="o">${a}</span><span class="n">${b}</span></span>`;
-      const P = O.page(shake, { header: [roll("Sources", "Classification"), roll("Indexed on your Mac", "Every item judged", true)] });
+      const P = O.page(shake, { header: [roll("Sources", "Classification"), roll("Indexed on your computer", "Every item judged", true)] });
       const S = P.sheet;
       S.insertAdjacentHTML("beforeend", `<div id="s04-classify-win"><div id="s04-classify-list"></div></div>`);
       const list = $("list");
