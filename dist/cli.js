@@ -106891,7 +106891,7 @@ ${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${esca
 <p><strong>Connecting links Olympus on this Mac to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
 ${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this Mac or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
-<p>Olympus does not keep what it recognizes as a Secret, and never sends it to ${name}. Olympus labels items automatically, and labels can be wrong.</p>
+<p>Olympus never sends what it recognizes as a Secret to ${name}, and does not keep its contents. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
