@@ -11306,6 +11306,20 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
+// src/workers/classification/sniffer-store.ts
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+});
+
+// src/workers/file-extraction/job-names.ts
+var init_job_names = () => {};
+
+// src/workers/connector-store/secrets-disposition.ts
+var init_secrets_disposition = __esm(() => {
+  init_sniffer_store();
+  init_job_names();
+});
+
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
@@ -11682,6 +11696,7 @@ var init_tier_move = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_embedding_ledger();
+  init_secrets_disposition();
   init_tier_placement();
 });
 
@@ -11700,12 +11715,14 @@ var init_tier_row_rehome = __esm(() => {
 var init_tier_rejudge = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_secrets_disposition();
 });
 
 // src/workers/connector-store/tier-override-settle.ts
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_secrets_disposition();
   init_tier_rejudge();
 });
 
@@ -11736,6 +11753,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_tier_placement();
+  init_secrets_disposition();
   init_tier_names_only_settle();
   init_tier_row_rehome();
   init_tier_rules_sweep();

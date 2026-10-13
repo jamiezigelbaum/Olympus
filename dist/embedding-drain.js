@@ -22558,7 +22558,258 @@ function tierSetForLedger(ledgerPath) {
 }
 var tierSets;
 
+// src/workers/classification/sniffer-store.ts
+import { Database as Database3 } from "bun:sqlite";
+import { createHash as createHash7 } from "node:crypto";
+import { chmodSync as chmodSync4, existsSync as existsSync11, mkdirSync as mkdirSync10 } from "node:fs";
+import { dirname as dirname11 } from "node:path";
+function snifferMaterialHash(pass, material) {
+  return createHash7("sha256").update(`${pass}
+${material}`).digest("hex");
+}
+
+class TierSnifferStore {
+  dbPath;
+  db;
+  now;
+  readOnly;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database3(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk)
+      mkdirSync10(dirname11(this.dbPath), { recursive: true, mode: 448 });
+    const previousUmask = onDisk ? process.umask(63) : undefined;
+    let db;
+    try {
+      db = new Database3(this.dbPath, { create: true });
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      if (onDisk)
+        restrictFiles(this.dbPath);
+    } catch (error) {
+      if (db)
+        closeSqliteStore(db);
+      throw error;
+    } finally {
+      if (previousUmask !== undefined)
+        process.umask(previousUmask);
+    }
+    this.db = db;
+  }
+  close() {
+    try {
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
+    } finally {
+      if (this.dbPath !== ":memory:" && !this.readOnly)
+        restrictFiles(this.dbPath);
+    }
+  }
+  getVerdict(key2) {
+    const row = this.db.query(`
+      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
+    `).get(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision);
+    if (!row)
+      return;
+    return {
+      tier: row.tier,
+      category: row.category,
+      confidence: row.confidence,
+      failSafe: row.fail_safe === 1,
+      decidedAt: row.decided_at
+    };
+  }
+  putVerdict(key2, verdict) {
+    this.db.query(`
+      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
+        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
+        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
+    `).run(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
+  }
+  enqueue(question) {
+    const materialHash = snifferMaterialHash(question.pass, question.material);
+    this.db.query(`
+      INSERT INTO sniffer_questions (
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision
+          THEN sniffer_questions.attempts ELSE 0 END,
+        material_hash = excluded.material_hash,
+        map_revision = excluded.map_revision,
+        material = excluded.material,
+        flags_json = excluded.flags_json
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
+  }
+  questionFor(subject, pass) {
+    const row = this.db.query(`
+      SELECT * FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).get(...subjectParams(subject), pass);
+    return row ? questionFromRow(row) : undefined;
+  }
+  listQuestions(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+    const rows = options.pass ? this.db.query("SELECT * FROM sniffer_questions WHERE pass = ? ORDER BY question_pk LIMIT ?").all(options.pass, limit) : this.db.query("SELECT * FROM sniffer_questions ORDER BY question_pk LIMIT ?").all(limit);
+    return rows.map(questionFromRow);
+  }
+  deleteQuestion(subject, pass) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass).changes > 0;
+  }
+  deleteItemQuestions(subject) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
+  }
+  rekey(subject, pass, mapRevision) {
+    this.db.query(`
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(mapRevision, ...subjectParams(subject), pass);
+  }
+  recordAttemptFailure(subject, pass) {
+    this.db.query(`
+      UPDATE sniffer_questions SET attempts = attempts + 1
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass);
+    return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+  counts() {
+    const byPass = { metadata: 0, content: 0 };
+    let questions = 0;
+    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
+      byPass[row.pass] = row.n;
+      questions += row.n;
+    }
+    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get().n;
+    return { questions, items, byPass, verdicts };
+  }
+}
+function questionFromRow(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+    pass: row.pass,
+    materialHash: row.material_hash,
+    mapRevision: row.map_revision,
+    material: row.material,
+    flags: JSON.parse(row.flags_json),
+    attempts: row.attempts,
+    queuedAt: row.queued_at
+  };
+}
+function subjectParams(subject) {
+  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
+}
+function restrictFiles(dbPath) {
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync11(path))
+      chmodSync4(path, 384);
+  }
+}
+function snifferMigrations() {
+  return [
+    {
+      version: TIER_SNIFFER_SCHEMA_VERSION,
+      name: "create_tier_sniffer",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
+            material_hash TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
+            category TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
+          );
+          CREATE TABLE IF NOT EXISTS sniffer_questions (
+            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
+            material_hash TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            material TEXT NOT NULL,
+            flags_json TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            queued_at TEXT NOT NULL,
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
+          );
+        `);
+      }
+    }
+  ];
+}
+var TIER_SNIFFER_SCHEMA_VERSION = 1;
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+});
+
+// src/workers/file-extraction/job-names.ts
+import { existsSync as existsSync12 } from "node:fs";
+import { homedir as homedir8 } from "node:os";
+import { join as join11 } from "node:path";
+import { Database as Database4 } from "bun:sqlite";
+function defaultFileExtractionJobsDbPath(env = process.env) {
+  const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
+  if (override)
+    return override;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir8(), ".local", "share");
+  return join11(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+}
+function clearExtractionJobNames(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync12(dbPath))
+    return 0;
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
+    if (!table)
+      return 0;
+    return item.localItemId !== undefined ? db.query(`
+          UPDATE extraction_jobs SET name = NULL
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
+        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
+          UPDATE extraction_jobs SET name = NULL
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
+        `).run(item.provider, item.accountScope, item.providerItemId).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4;
+var init_job_names = () => {};
+
 // src/workers/connector-store/secrets-disposition.ts
+import { existsSync as existsSync13 } from "node:fs";
 function secretsDisposition() {
   return SECRETS_DISPOSITION;
 }
@@ -22583,11 +22834,51 @@ function settleSecretsCopies(options) {
       store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
     }
   }
+  const sideStores = forgetSecretInSideStores({ ledgerPath: options.ledger.dbPath, identity });
   if (disposition === "tombstone_now")
     options.ledger.removeCopies(options.identity);
-  return { disposition, chunks };
+  return { disposition, chunks, sideStores };
+}
+function forgetSecretInSideStores(options) {
+  const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0 };
+  const { identity } = options;
+  const snifferPath = tierSnifferPathForLedger(options.ledgerPath);
+  if (snifferPath !== ":memory:" && existsSync13(snifferPath)) {
+    try {
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      try {
+        result.snifferQuestions = sniffer.deleteItemQuestions({
+          provider: identity.provider,
+          accountScope: identity.accountScope,
+          providerItemId: identity.providerItemId,
+          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+        });
+      } finally {
+        sniffer.close();
+      }
+    } catch {
+      result.failed += 1;
+    }
+  }
+  try {
+    result.extractionJobNames = clearExtractionJobNames(defaultFileExtractionJobsDbPath(process.env), {
+      provider: identity.provider,
+      accountScope: identity.accountScope,
+      providerItemId: identity.providerItemId,
+      ...identity.localItemId ? { localItemId: identity.localItemId } : {}
+    });
+  } catch {
+    result.failed += 1;
+  }
+  if (result.failed > 0)
+    console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at its next listing.`);
+  return result;
 }
 var SECRETS_DISPOSITION = "tombstone_now";
+var init_secrets_disposition = __esm(() => {
+  init_sniffer_store();
+  init_job_names();
+});
 
 // src/workers/connector-store/tier-names-only-settle.ts
 function settleNamesOnlyItems(options) {
@@ -22673,9 +22964,9 @@ var init_tier_names_only_settle = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync11, statSync as statSync8 } from "node:fs";
-import { homedir as homedir8 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname11, isAbsolute as isAbsolute4, join as join11 } from "node:path";
+import { existsSync as existsSync14, statSync as statSync8 } from "node:fs";
+import { homedir as homedir9 } from "node:os";
+import { delimiter as delimiter2, dirname as dirname12, isAbsolute as isAbsolute4, join as join12 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 function helperEnvironment() {
@@ -22687,7 +22978,7 @@ function helperEnvironment() {
       env[name] = value;
     }
   }
-  env.HOME ??= homedir8();
+  env.HOME ??= homedir9();
   return env;
 }
 
@@ -22889,10 +23180,10 @@ async function startLiteRtEmbedder(options) {
   };
 }
 function helperPath() {
-  const here = dirname11(fileURLToPath(import.meta.url));
+  const here = dirname12(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join11(here, name);
-    if (existsSync11(candidate))
+    const candidate = join12(here, name);
+    if (existsSync14(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -22901,9 +23192,9 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join11(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join11(directory, bunName)),
-    join11(homedir8(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join12(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join12(directory, bunName)),
+    join12(homedir9(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute4(candidate))
@@ -22936,11 +23227,11 @@ var init_litert_runtime = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire3(join12(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire3(join13(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -23122,10 +23413,10 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 import { readFileSync as readFileSync12 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname12, join as join13 } from "node:path";
+import { dirname as dirname13, join as join14 } from "node:path";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -23171,7 +23462,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash7("sha256").update(JSON.stringify({
+    this.configHash = createHash8("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -23298,7 +23589,7 @@ class BuiltInSourceEmbeddingProvider {
         const embedder = await this.liteRtFactory({
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join13(dirname12(installed.modelPath), "cache"),
+          cacheDir: join14(dirname13(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -23647,20 +23938,20 @@ var init_provider = __esm(() => {
 });
 
 // src/workers/embedding-ledger.ts
-import { homedir as homedir9 } from "node:os";
+import { homedir as homedir10 } from "node:os";
 import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
-import { dirname as dirname13, join as join14 } from "node:path";
+import { dirname as dirname14, join as join15 } from "node:path";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir9(), ".local", "share");
-  return join14(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir10(), ".local", "share");
+  return join15(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
 }
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
 `;
-  await mkdir3(dirname13(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname14(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -24151,6 +24442,7 @@ var init_tier_move = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_embedding_ledger();
+  init_secrets_disposition();
   init_tier_placement();
   TierMoveRefusedError = class TierMoveRefusedError extends Error {
     constructor(message) {
@@ -24362,6 +24654,7 @@ var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_ti
 var init_tier_rejudge = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_secrets_disposition();
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -24412,8 +24705,10 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
         report.secrets += 1;
       return;
     }
-    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === "secrets")
+    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === "secrets") {
+      forgetSecretInSideStores({ ledgerPath: ledger.dbPath, identity });
       report.secrets += 1;
+    }
     return;
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard });
@@ -24464,11 +24759,12 @@ function identityOf3(record) {
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_secrets_disposition();
   init_tier_rejudge();
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -24622,7 +24918,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash9("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function storedSignals(copy) {
   const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -24874,6 +25170,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_tier_placement();
+  init_secrets_disposition();
   init_tier_names_only_settle();
   init_tier_row_rehome();
   init_tier_rules_sweep();
@@ -24977,14 +25274,14 @@ var init_corpus_adapter = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector-store.ts
-import { homedir as homedir10 } from "node:os";
-import { join as join15 } from "node:path";
+import { homedir as homedir11 } from "node:os";
+import { join as join16 } from "node:path";
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir10(), ".local", "share");
-  return join15(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir11(), ".local", "share");
+  return join16(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
@@ -25106,7 +25403,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -25152,7 +25449,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join16(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join17(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -25213,14 +25510,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash9("sha256").update(block).digest());
+    blockDigests.push(createHash10("sha256").update(block).digest());
   }
-  return createHash9("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash10("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -25949,9 +26246,9 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash11 } from "node:crypto";
-import { homedir as homedir11 } from "node:os";
-import { join as join17 } from "node:path";
+import { createHash as createHash12 } from "node:crypto";
+import { homedir as homedir12 } from "node:os";
+import { join as join18 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -26343,8 +26640,8 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir11(), ".local", "share");
-  return join17(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir12(), ".local", "share");
+  return join18(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -26524,7 +26821,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash11("sha256").update(value).digest("hex");
+  return createHash12("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -26559,14 +26856,14 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/store-sync.ts
-import { homedir as homedir12 } from "node:os";
-import { join as join18 } from "node:path";
+import { homedir as homedir13 } from "node:os";
+import { join as join19 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join18(env.HOME?.trim() || homedir12(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join18(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(env.HOME?.trim() || homedir13(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join19(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join18(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join19(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync = __esm(() => {
@@ -27010,9 +27307,9 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash12 } from "node:crypto";
-import { homedir as homedir14 } from "node:os";
-import { join as join20 } from "node:path";
+import { createHash as createHash13 } from "node:crypto";
+import { homedir as homedir15 } from "node:os";
+import { join as join21 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -27362,8 +27659,8 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join20(homedir14(), ".local", "share");
-  return join20(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join21(homedir15(), ".local", "share");
+  return join21(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -27626,7 +27923,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash12("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
@@ -27656,14 +27953,14 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { homedir as homedir15 } from "node:os";
-import { dirname as dirname15, join as join21 } from "node:path";
+import { homedir as homedir16 } from "node:os";
+import { dirname as dirname16, join as join22 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join21(homedir15(), ".local", "share");
-  return join21(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir16(), ".local", "share");
+  return join22(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
@@ -27766,14 +28063,14 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { homedir as homedir16 } from "node:os";
-import { join as join22 } from "node:path";
+import { homedir as homedir17 } from "node:os";
+import { join as join23 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir16(), ".local", "share");
-  return join22(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir17(), ".local", "share");
+  return join23(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
@@ -27878,13 +28175,13 @@ var init_x_bookmarks = __esm(() => {
 });
 
 // src/workers/telegram-messages/corpus-adapter.ts
-import { homedir as homedir17 } from "node:os";
-import { join as join23 } from "node:path";
+import { homedir as homedir18 } from "node:os";
+import { join as join24 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join23(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join24(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join23(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join24(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
@@ -33300,9 +33597,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 });
 
 // src/workers/chatgpt/dashboard-resource.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash13("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash14("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
 var init_dashboard_resource = __esm(() => {
@@ -33319,7 +33616,7 @@ var init_request_peer = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash14, randomBytes as randomBytes2 } from "node:crypto";
+import { createHash as createHash15, randomBytes as randomBytes2 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -33382,7 +33679,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash14("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash15("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -33740,7 +34037,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -33752,7 +34049,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash16("sha256").update(material, "utf8").digest("hex");
+  return createHash17("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -33997,10 +34294,10 @@ function ownedByThisUser(stat3) {
 var init_owner_config_read = () => {};
 
 // src/workers/classification/tier-rules.ts
-import { homedir as homedir18 } from "node:os";
-import { dirname as dirname17, join as join24 } from "node:path";
+import { homedir as homedir19 } from "node:os";
+import { dirname as dirname17, join as join25 } from "node:path";
 function defaultTierRulesPath() {
-  return join24(homedir18(), ".olympus", "tier-rules.json");
+  return join25(homedir19(), ".olympus", "tier-rules.json");
 }
 function resolveTierRulesPath(options = {}) {
   const env = options.env ?? process.env;
@@ -34136,7 +34433,7 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash20 } from "node:crypto";
-import { existsSync as existsSync15, lstatSync as lstatSync4, mkdirSync as mkdirSync13, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync17, lstatSync as lstatSync4, mkdirSync as mkdirSync13, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname20, isAbsolute as isAbsolute6 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -34178,7 +34475,7 @@ init_credential_broker();
 init_types();
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
   source_item_not_found: "failed_terminal",
   source_permission_denied: "failed_terminal",
@@ -34206,7 +34503,7 @@ class FileExtractionSourceError extends Error {
     this.errorKind = errorKind;
     this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
     this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash10("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+    const errorHash = options.detailForHash === undefined ? undefined : createHash11("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
   }
@@ -34608,6 +34905,7 @@ init_store_sync();
 
 // src/workers/file-extraction/job-store.ts
 init_sqlite_migrations();
+init_job_names();
 var NETWORK_ERROR_KINDS = new Set([
   "network_unreachable",
   "network_socket_closed"
@@ -34780,6 +35078,7 @@ init_types();
 init_engine();
 init_tier_classifier();
 init_tier_ledger();
+init_secrets_disposition();
 init_tiered_store_set();
 
 // src/workers/connector-store/tiered-extraction.ts
@@ -34804,16 +35103,16 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync12,
-  mkdirSync as mkdirSync10,
+  existsSync as existsSync15,
+  mkdirSync as mkdirSync11,
   readFileSync as readFileSync13,
   renameSync as renameSync4,
   rmSync as rmSync5,
   writeFileSync as writeFileSync6
 } from "node:fs";
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { homedir as homedir13 } from "node:os";
-import { dirname as dirname14, isAbsolute as isAbsolute5, join as join19 } from "node:path";
+import { homedir as homedir14 } from "node:os";
+import { dirname as dirname15, isAbsolute as isAbsolute5, join as join20 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -34821,15 +35120,15 @@ var CACHE_SCHEMA_VERSION = 1;
 var MAX_CATALOG_TIMEOUT_MS = 30000;
 var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir13(), type = "text") {
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir14(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute5(configuredRoot) ? configuredRoot : join19(homeDir, ".cache");
-  return join19(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute5(configuredRoot) ? configuredRoot : join20(homeDir, ".cache");
+  return join20(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
   const type = options.type ?? "text";
-  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir13(), type);
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir14(), type);
   const cacheKey = `${cachePath}
 ${type}`;
   const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
@@ -34994,7 +35293,7 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync12(path))
+  if (!existsSync15(path))
     return;
   let payload2;
   try {
@@ -35030,7 +35329,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID7()}.tmp`;
   try {
-    mkdirSync10(dirname14(path), { recursive: true, mode: 448 });
+    mkdirSync11(dirname15(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync6(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -35728,7 +36027,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -35812,7 +36111,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash15("sha256").update(value).digest("hex");
+  return createHash16("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -35962,7 +36261,7 @@ init_config();
 init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
@@ -36768,7 +37067,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash17("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash18("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -37005,214 +37304,8 @@ function stripCodeFences(text2) {
   return withoutOpen.replace(/\n?```\s*$/, "").trim();
 }
 
-// src/workers/classification/sniffer-store.ts
-init_sqlite_migrations();
-import { Database as Database3 } from "bun:sqlite";
-import { createHash as createHash18 } from "node:crypto";
-import { chmodSync as chmodSync4, existsSync as existsSync13, mkdirSync as mkdirSync11 } from "node:fs";
-import { dirname as dirname16 } from "node:path";
-var TIER_SNIFFER_SCHEMA_VERSION = 1;
-function snifferMaterialHash(pass, material) {
-  return createHash18("sha256").update(`${pass}
-${material}`).digest("hex");
-}
-
-class TierSnifferStore {
-  dbPath;
-  db;
-  now;
-  readOnly;
-  constructor(options) {
-    this.dbPath = options.dbPath;
-    this.now = options.now ?? (() => new Date);
-    if (options.readOnly === true) {
-      this.db = new Database3(this.dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      this.readOnly = true;
-      return;
-    }
-    this.readOnly = false;
-    const onDisk = this.dbPath !== ":memory:";
-    if (onDisk)
-      mkdirSync11(dirname16(this.dbPath), { recursive: true, mode: 448 });
-    const previousUmask = onDisk ? process.umask(63) : undefined;
-    let db;
-    try {
-      db = new Database3(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
-      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
-      if (onDisk)
-        restrictFiles(this.dbPath);
-    } catch (error) {
-      if (db)
-        closeSqliteStore(db);
-      throw error;
-    } finally {
-      if (previousUmask !== undefined)
-        process.umask(previousUmask);
-    }
-    this.db = db;
-  }
-  close() {
-    try {
-      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
-    } finally {
-      if (this.dbPath !== ":memory:" && !this.readOnly)
-        restrictFiles(this.dbPath);
-    }
-  }
-  getVerdict(key2) {
-    const row = this.db.query(`
-      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
-      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
-    `).get(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision);
-    if (!row)
-      return;
-    return {
-      tier: row.tier,
-      category: row.category,
-      confidence: row.confidence,
-      failSafe: row.fail_safe === 1,
-      decidedAt: row.decided_at
-    };
-  }
-  putVerdict(key2, verdict) {
-    this.db.query(`
-      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
-        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
-        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
-    `).run(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
-  }
-  enqueue(question) {
-    const materialHash = snifferMaterialHash(question.pass, question.material);
-    this.db.query(`
-      INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
-        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
-          AND sniffer_questions.map_revision = excluded.map_revision
-          THEN sniffer_questions.attempts ELSE 0 END,
-        material_hash = excluded.material_hash,
-        map_revision = excluded.map_revision,
-        material = excluded.material,
-        flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
-  }
-  questionFor(subject, pass) {
-    const row = this.db.query(`
-      SELECT * FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).get(...subjectParams(subject), pass);
-    return row ? questionFromRow(row) : undefined;
-  }
-  listQuestions(options = {}) {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
-    const rows = options.pass ? this.db.query("SELECT * FROM sniffer_questions WHERE pass = ? ORDER BY question_pk LIMIT ?").all(options.pass, limit) : this.db.query("SELECT * FROM sniffer_questions ORDER BY question_pk LIMIT ?").all(limit);
-    return rows.map(questionFromRow);
-  }
-  deleteQuestion(subject, pass) {
-    return this.db.query(`
-      DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass).changes > 0;
-  }
-  rekey(subject, pass, mapRevision) {
-    this.db.query(`
-      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(mapRevision, ...subjectParams(subject), pass);
-  }
-  recordAttemptFailure(subject, pass) {
-    this.db.query(`
-      UPDATE sniffer_questions SET attempts = attempts + 1
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass);
-    return this.questionFor(subject, pass)?.attempts ?? 0;
-  }
-  counts() {
-    const byPass = { metadata: 0, content: 0 };
-    let questions = 0;
-    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
-      byPass[row.pass] = row.n;
-      questions += row.n;
-    }
-    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
-    const items = this.db.query(`
-      SELECT COUNT(*) AS n FROM (
-        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
-      )
-    `).get().n;
-    return { questions, items, byPass, verdicts };
-  }
-}
-function questionFromRow(row) {
-  return {
-    provider: row.provider,
-    accountScope: row.account_scope,
-    providerItemId: row.provider_item_id,
-    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
-    pass: row.pass,
-    materialHash: row.material_hash,
-    mapRevision: row.map_revision,
-    material: row.material,
-    flags: JSON.parse(row.flags_json),
-    attempts: row.attempts,
-    queuedAt: row.queued_at
-  };
-}
-function subjectParams(subject) {
-  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
-}
-function restrictFiles(dbPath) {
-  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync13(path))
-      chmodSync4(path, 384);
-  }
-}
-function snifferMigrations() {
-  return [
-    {
-      version: TIER_SNIFFER_SCHEMA_VERSION,
-      name: "create_tier_sniffer",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
-            material_hash TEXT NOT NULL,
-            model_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
-            category TEXT NOT NULL,
-            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
-            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
-            decided_at TEXT NOT NULL,
-            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
-          );
-          CREATE TABLE IF NOT EXISTS sniffer_questions (
-            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
-            material_hash TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            material TEXT NOT NULL,
-            flags_json TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            queued_at TEXT NOT NULL,
-            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
-          );
-        `);
-      }
-    }
-  ];
-}
-
 // src/workers/classification/sniffer.ts
+init_sniffer_store();
 var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
 var SNIFFER_MAX_ATTEMPTS = 3;
 var SNIFFER_CATEGORIES = [
@@ -37543,6 +37636,7 @@ class CachedTierSniffer {
 }
 
 // src/workers/classification/installed-tier-classification.ts
+init_sniffer_store();
 init_tier_rules();
 
 class InstalledTierClassification {
@@ -37622,7 +37716,7 @@ init_privacy_profile();
 
 // src/workers/classification-ledger.ts
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname18, join as join25 } from "node:path";
+import { dirname as dirname18, join as join26 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
@@ -38044,7 +38138,7 @@ function finish(report) {
 }
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync14 } from "node:fs";
+init_sniffer_store();
 init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
@@ -38052,6 +38146,7 @@ init_tier_override_settle();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
+import { existsSync as existsSync16 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
@@ -38109,7 +38204,7 @@ class TierSnifferService {
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync14(path))
+      if (path === ":memory:" || !existsSync16(path))
         continue;
       let store;
       try {
@@ -38280,11 +38375,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync14(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync16(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync14(own3))
+      if (existsSync16(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -38594,6 +38689,7 @@ function setEmbedsWithBuiltInOnly(set) {
 init_embedding_cost_estimates();
 init_operation_error();
 init_tier_move();
+init_secrets_disposition();
 init_embedding_ledger();
 init_engine();
 init_tier_classifier();
@@ -39481,7 +39577,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync15(config.dbPath))
+    if (!config.dbPath || !existsSync17(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
