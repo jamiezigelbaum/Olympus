@@ -4203,7 +4203,7 @@ export class LocalConnectorStore {
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
-  itemPresence(identity: SourceItemIdentity): ConnectorStoreItemPresence {
+  itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
     const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned
       FROM items

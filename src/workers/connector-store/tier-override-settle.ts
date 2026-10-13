@@ -138,7 +138,7 @@ function applyOne(
   // placement is recorded afresh (served once its next listing writes it).
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
     guard,
-    staleCopiesGone: set.routedCopiesGone(identity),
+    staleCopiesGone: set.routedWithoutAnyCopy(identity),
   });
   switch (recorded.outcome) {
     case 'queued_move':

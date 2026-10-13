@@ -61,6 +61,7 @@ export interface ExtractionJobItemKey {
 }
 
 export const SECRET_ITEM_REDACTIONS_TABLE = 'secret_item_redactions';
+export const SECRET_ITEM_REDACTION_CLAIMS_TABLE = 'secret_item_redaction_claims';
 
 const openLedgerPaths = new Map<string, number>();
 
@@ -112,7 +113,19 @@ export function itemNameRedacted(db: Database, item: ExtractionJobItemKey): bool
  * nothing yet stops an enqueue from writing them back, so the caller keeps
  * the item owed until it is.
  */
-export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemKey): { cleared: number; durable: boolean } {
+export function clearExtractionJobNames(
+  dbPath: string,
+  item: ExtractionJobItemKey,
+  options: {
+    /** The tier ledger that holds the item Secrets: recorded as a claim on the redaction. */
+    claimant?: string;
+    /**
+     * Asked inside this ledger's write lock; nothing is written when it says
+     * no (a retried clearing whose item has left Secrets since it was read).
+     */
+    proceed?: () => boolean;
+  } = {},
+): { cleared: number; durable: boolean } {
   if (dbPath === ':memory:' || !existsSync(dbPath)) return { cleared: 0, durable: true };
   const db = new Database(dbPath, { readwrite: true, create: false });
   try {
@@ -120,12 +133,21 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
     const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
     if (!table) return { cleared: 0, durable: true };
     return db.transaction(() => {
-      const durable = redactionsTableExists(db);
-      if (durable) {
+      if (options.proceed && !options.proceed()) return { cleared: 0, durable: true };
+      const claims = claimsTableExists(db);
+      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
+      const now = new Date().toISOString();
+      if (redactionsTableExists(db)) {
         db.query(`
           INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
           VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? '', new Date().toISOString());
+        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? '', now);
+      }
+      if (options.claimant !== undefined && claims) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
       }
       const artifactItems = item.localItemId !== undefined
         ? 'provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?'
@@ -157,9 +179,11 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
 
 /**
  * Retire an item's redaction markers in the ledger file at `dbPath`: the item
- * left Secrets, so its later jobs keep their names and artifacts again.
- * Every marker of the provider item goes (any local id: the caller has
- * checked no item with that provider item id is Secrets). `stillSecret` is
+ * left Secrets in the tier ledger `claimant`, so its later jobs keep their
+ * names and artifacts again. Only that ledger's claim goes while another
+ * tier ledger still claims the item; otherwise every marker of the provider
+ * item goes (any local id: the caller has checked no item with that provider
+ * item id is Secrets in its ledger). `stillSecret` is
  * asked again inside this ledger's write lock, and nothing is removed when it
  * says yes: an item that becomes Secrets writes its marker only after its
  * decision is recorded, and that write waits for this lock, so a marker is
@@ -170,6 +194,7 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
 export function retireExtractionJobRedaction(
   dbPath: string,
   item: Omit<ExtractionJobItemKey, 'localItemId'>,
+  claimant: string,
   stillSecret: () => boolean,
 ): { retired: number; stillSecret: boolean } {
   if (dbPath === ':memory:' || !existsSync(dbPath)) return { retired: 0, stillSecret: false };
@@ -179,6 +204,18 @@ export function retireExtractionJobRedaction(
     if (!redactionsTableExists(db)) return { retired: 0, stillSecret: false };
     return db.transaction(() => {
       if (stillSecret()) return { retired: 0, stillSecret: true };
+      if (claimsTableExists(db)) {
+        db.query(`
+          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
+        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
+        // Another tier ledger still holds the item Secrets: its redaction stays.
+        const heldElsewhere = db.query(`
+          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
+        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
+        if (heldElsewhere) return { retired: 0, stillSecret: false };
+      }
       const retired = db.query(`
         DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
         WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
@@ -205,6 +242,10 @@ export function retireExtractionJobRedaction(
 
 function artifactsTableExists(db: Database): boolean {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
+}
+
+function claimsTableExists(db: Database): boolean {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
 }
 
 function redactionsTableExists(db: Database): boolean {

@@ -42,6 +42,7 @@ import {
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   FILE_EXTRACTION_JOBS_DB_PATH_ENV,
+  SECRET_ITEM_REDACTION_CLAIMS_TABLE,
   SECRET_ITEM_REDACTIONS_TABLE,
   defaultFileExtractionJobsDbPath,
   itemNameRedacted,
@@ -57,7 +58,7 @@ import type {
 } from './types.ts';
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
-export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 4;
+export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 5;
 export { FILE_EXTRACTION_JOBS_DB_PATH_ENV, defaultFileExtractionJobsDbPath };
 
 /**
@@ -2162,6 +2163,23 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
           local_item_id TEXT NOT NULL DEFAULT '',
           redacted_at TEXT NOT NULL,
           PRIMARY KEY (provider, account_scope, provider_item_id, local_item_id)
+        );
+      `);
+    },
+  }, {
+    version: 5,
+    name: 'add_secret_item_redaction_claims',
+    up(db) {
+      // Which tier ledger holds each redaction: one ledger's item leaving
+      // Secrets retires only its own claim (job-names.ts).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (
+          provider TEXT NOT NULL,
+          account_scope TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          claimant TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          PRIMARY KEY (provider, account_scope, provider_item_id, claimant)
         );
       `);
     },

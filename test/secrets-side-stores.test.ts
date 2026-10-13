@@ -28,7 +28,7 @@ import { TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from '../src/wo
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
-import { retireSecretRedactions, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
 import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
@@ -532,6 +532,45 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     cleanups.push(() => reopened.close());
     const [job] = reopened.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
     expect(reopened.get(job!)?.ref.name).toBe(KEYS.name);
+  });
+
+  test('two tier ledgers share a job ledger: the item restored in one stays redacted while the other holds it Secret', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const jobs = jobStore(dir);
+    const first = fixture(workspace('olympus-secret-side-first-'));
+    const second = fixture(workspace('olympus-secret-side-second-'));
+    await first.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    await second.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    first.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await first.set.sync(fixtureConnector(() => [{ ...KEYS, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(first.ledger.itemIsSecret(identityOf('keys'))).toBe(false);
+    const named = () => {
+      const [job] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+      return jobs.get(job!)?.ref.name;
+    };
+    expect(named()).toBeUndefined();
+    second.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await second.set.sync(fixtureConnector(() => [{ ...KEYS, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(named()).toBe(KEYS.name);
+  });
+
+  test('a debt retry read before the item left Secrets writes no marker back', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    const jobs = jobStore(dir);
+    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    fx.ledger.recordSecretSideStoreDebt(identityOf('keys'));
+    const [owed] = fx.ledger.secretSideStoreDebts();
+    // Restored meanwhile: the debt is cancelled and the marker retired.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [{ ...KEYS, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+    // The retry that read the debt before carries on.
+    const { jobLedgerPaths, ...item } = owed!;
+    forgetSecretInSideStores({ ledger: fx.ledger, identity: item, jobLedgerPaths, onlyWhileOwed: true });
+    const [job] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    expect(jobs.get(job!)?.ref.name).toBe(KEYS.name);
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
   });
 
   test('a retirement is never carried out while the item is Secrets', async () => {

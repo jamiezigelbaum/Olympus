@@ -2428,12 +2428,18 @@ export class TierLedger {
    * `secretSideStoreDebts`), with the extraction job ledgers that were not
    * cleared, so a retry after a restart still reaches them.
    */
-  recordSecretSideStoreDebt(identity: TierLedgerIdentity & { localItemId?: string }, jobLedgerPaths: readonly string[] = []): void {
+  recordSecretSideStoreDebt(
+    identity: TierLedgerIdentity & { localItemId?: string },
+    jobLedgerPaths: readonly string[] = [],
+    options: { onlyIfOwed?: boolean } = {},
+  ): void {
     this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT job_ledger_paths_json FROM secret_side_store_debt
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).get(...idParams(identity)) as { job_ledger_paths_json: string } | null;
+      // A retry whose debt was cancelled meanwhile (the item left Secrets).
+      if (options.onlyIfOwed && !existing) return;
       const paths = [...new Set([...(existing ? JSON.parse(existing.job_ledger_paths_json) as string[] : []), ...jobLedgerPaths])].sort();
       this.db.query(`
         INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, job_ledger_paths_json, recorded_at)
@@ -2467,6 +2473,14 @@ export class TierLedger {
       ...(row.local_item_id ? { localItemId: row.local_item_id } : {}),
       jobLedgerPaths: JSON.parse(row.job_ledger_paths_json) as string[],
     }));
+  }
+
+  /** Whether a Secret's side-store clearing is still owed. */
+  hasSecretSideStoreDebt(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`
+      SELECT 1 FROM secret_side_store_debt
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) !== null;
   }
 
   /** The extraction job ledgers a Secret is still owed in (empty when it owes none). */

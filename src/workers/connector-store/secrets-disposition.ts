@@ -122,10 +122,32 @@ export function forgetSecretInSideStores(options: {
    * the item stays owed until the worker's next tier tick repeats this there.
    */
   confirmInWorker?: boolean;
+  /**
+   * A retry of an owed clearing: done only while the debt still stands. An
+   * item that left Secrets since the debt was read had it cancelled in that
+   * same write, and its markers retired; a marker written now would outlive
+   * the retirement.
+   */
+  onlyWhileOwed?: boolean;
 }): ForgottenSecretSideStores {
   const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
   const owedJobLedgers: string[] = [];
+  const stillOwed = () => ledger.hasSecretSideStoreDebt(identity);
+  if (options.onlyWhileOwed) {
+    try {
+      if (!stillOwed()) return result;
+    } catch {
+      result.failed += 1;
+      return result;
+    }
+  }
+  let claimant: string | undefined;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {
+    // Unclaimed: any ledger's retirement may lift it, as before claims.
+  }
   // Committed before the queue is cleared: a listing that read the item
   // before this point is fenced from queuing it again (tier-placement.ts).
   try {
@@ -168,6 +190,9 @@ export function forgetSecretInSideStores(options: {
         accountScope: identity.accountScope,
         providerItemId: identity.providerItemId,
         ...(identity.localItemId ? { localItemId: identity.localItemId } : {}),
+      }, {
+        ...(claimant !== undefined ? { claimant } : {}),
+        ...(options.onlyWhileOwed ? { proceed: stillOwed } : {}),
       });
       result.extractionJobNames += cleared.cleared;
       if (!cleared.durable) {
@@ -187,7 +212,7 @@ export function forgetSecretInSideStores(options: {
     // Best effort: the default path and open ledgers are always visited.
   }
   try {
-    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
     else ledger.clearSecretSideStoreDebt(identity, jobLedgers);
   } catch {
     // The ledger itself unreachable: the copies' own settlement fails loudly elsewhere.
@@ -201,7 +226,7 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
     const { jobLedgerPaths, ...item } = identity;
-    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths, onlyWhileOwed: true });
     if (result.failed === 0 && result.notDurable === 0) cleared += 1;
   }
   return cleared;
@@ -227,6 +252,12 @@ export function retireSecretRedactions(ledger: TierLedger, options: { identity?:
   } catch {
     return 0;
   }
+  let claimant: string;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {
+    return 0;
+  }
   let knownJobLedgers: string[] = [];
   try {
     knownJobLedgers = ledger.extractionJobLedgerPaths();
@@ -247,7 +278,7 @@ export function retireSecretRedactions(ledger: TierLedger, options: { identity?:
     if (!secret && failed === 0) {
       for (const jobsPath of new Set([...extractionJobsDbPaths(), ...knownJobLedgers, ...retirement.jobLedgerPaths])) {
         try {
-          if (retireExtractionJobRedaction(jobsPath, item, stillSecret).stillSecret) secret = true;
+          if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret) secret = true;
         } catch {
           failed += 1;
         }

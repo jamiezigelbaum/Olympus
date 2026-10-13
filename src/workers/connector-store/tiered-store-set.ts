@@ -70,6 +70,7 @@ import {
   type TierCopyPlan,
   TierLedger as TierLedgerClass,
   type TierLedger,
+  type TierLedgerIdentity,
   type TierPlacementPlan,
 } from '../classification/tier-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -638,11 +639,9 @@ export class TieredStoreSet {
    * new placement replace the ledger rows without a move: there is nothing
    * visible to move.
    */
-  routedCopiesGone(identity: SourceItemIdentity): boolean {
+  routedCopiesGone(identity: TierLedgerIdentity): boolean {
     const copies = this.ledger.copies(identity);
-    if (copies.length === 0) {
-      return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
-    }
+    if (copies.length === 0) return this.routedWithoutAnyCopy(identity);
     const current = copies.filter((copy) => copy.state === 'current');
     if (current.length === 0) return false;
     return current.every((copy) => {
@@ -650,6 +649,15 @@ export class TieredStoreSet {
       const store = domain ? this.store(domain) : undefined;
       return store !== undefined && !store.itemPresence(identity).active;
     });
+  }
+
+  /**
+   * @internal A routed item with no copy rows at all that no store serves (a
+   * Secret whose copies were tombstoned): nothing visible, nothing to move.
+   */
+  routedWithoutAnyCopy(identity: TierLedgerIdentity): boolean {
+    if (this.ledger.copies(identity).length > 0) return false;
+    return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
   }
 
   /** @internal Whether any store of the set has ever held a row for this item. */
