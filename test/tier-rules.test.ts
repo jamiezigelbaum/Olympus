@@ -301,7 +301,7 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     const laneRule: OwnerTierRule = { id: 'lane', match: { kind: 'pathPrefix', value: '/notes' }, tier: 'secure', strength: 'force' };
     const merged = resolveStoreTierClassification({ rules: [laneRule] }, dbPath)!;
     expect(merged.rules?.map((rule) => rule.id)).toEqual(['lane', 'published']);
-    expect(merged.sniffer?.id).toMatch(/^local:p-[0-9a-f]{12}$/);
+    expect(merged.sniffer?.id).toMatch(/^local:p-[0-9a-f]{12}\.m[0-9a-f]{16}$/);
     clearInstalledTierClassification();
     expect(resolveStoreTierClassification({ rules: [laneRule] }, dbPath)).toEqual({ rules: [laneRule] });
   });

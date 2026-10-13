@@ -1516,7 +1516,11 @@ export class TierLedger {
         outcome = 'secrets';
         return;
       }
-      if (existing.state === 'moving') {
+      // Recover only an impossible move with no copies at all. A staged,
+      // hidden or superseded copy still belongs to its move and must never
+      // be replaced by an ordinary sync.
+      const emptyMove = existing.state === 'moving' && options.staleCopiesGone === true && previousCopies.length === 0;
+      if (existing.state === 'moving' && !emptyMove) {
         outcome = 'held_moving';
         return;
       }
@@ -1527,7 +1531,7 @@ export class TierLedger {
         && !(options.stagedLandingAllowed === true && !existing.contentRead);
       const firstPlacement = !existing.routed || options.staleCopiesGone === true;
       if (secrets || firstPlacement || (samePlan(current, plan.copies) && !staged)) {
-        const generation = tiersChanged ? existing.generation + 1 : existing.generation;
+        const generation = tiersChanged || emptyMove ? existing.generation + 1 : existing.generation;
         const detailChanged = tiersChanged
           || firstPlacement
           || JSON.stringify(existing.reasons) !== reasonsJson
@@ -1541,6 +1545,7 @@ export class TierLedger {
               metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
               engine_version = ?, map_revision = ?,
               previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
+              target_metadata_tier = NULL, target_content_tier = NULL, move_attempts = 0,
               stored_trust_domain = COALESCE(?, stored_trust_domain),
               stored_trust_tier = COALESCE(?, stored_trust_tier),
               content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
