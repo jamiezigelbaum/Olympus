@@ -80050,6 +80050,7 @@ async function planTierMigration(options) {
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const decision = classifyItemTiers({
             signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
+            ...item.locatorUri ? { locators: [item.locatorUri] } : {},
             provider: item.identity.provider,
             text: item.chunks.map((chunk) => chunk.text).join(""),
             ...item.mimeType ? { mimeType: item.mimeType } : {},
