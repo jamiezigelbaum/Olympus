@@ -275,6 +275,11 @@ which stays supported and optional.
 
 ## How it works
 
+Olympus ingests your sources into local, trust-tiered indexes, then lets your
+frontier agent answer questions across all of them, with sensitive material
+handled only by lanes you approved: your own local models,
+privacy-approved private cloud inference, or not at all.
+
 Every item you ingest is judged on its own as Personal, Private, or Secrets
 (plus Public where the posture keeps it; internally S0-S5): its names are Personal unless something raises
 them, and its content is raised to Private or Secrets on evidence. Each tier
