@@ -13309,6 +13309,7 @@ var init_dropbox_files = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 var init_corpus_adapter4 = __esm(() => {
+  init_linux_engine_layout();
   init_source_corpus_registry();
   init_corpus();
 });

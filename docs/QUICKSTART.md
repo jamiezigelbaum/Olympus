@@ -3,9 +3,9 @@
 Install Olympus, connect the sources you want it to answer from, and verify a
 cited answer.
 
-This is the OpenClaw path. **Using ChatGPT?** Follow
-[Olympus for ChatGPT](../README.md#olympus-for-chatgpt) instead: it needs only
-a Mac and ChatGPT, with no OpenClaw and no API keys.
+This is the OpenClaw path. **Using ChatGPT, Claude or Grok?** Follow
+[Get started](../README.md#get-started) instead: it needs only a Mac or an
+Omarchy computer, with no OpenClaw and no API keys.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
@@ -604,16 +604,17 @@ then `olympus worker install`). A worker that simply is not running says so
 instead: `Email worker is not reachable at http://127.0.0.1:8010/v1:`
 followed by the underlying connection error.
 
-To let other agents ask Olympus (ChatGPT, or Claude Code and Codex on this
-computer), open the dashboard on this computer (`olympus dashboard`), choose
+To let other agents ask Olympus (ChatGPT, Claude, Grok, Grok Bot, or Claude
+Code and Codex on this computer), open the dashboard on this computer (`olympus dashboard`), choose
 **Open** next to **Agents** under **On this computer**, and press **Connect an
 agent** — see the README's "Connect other agents" section. Agents in the cloud
 also need remote access: press **Turn on remote access** on the same page, and
 Olympus connects through the Olympus relay (`mcp.olympusplugin.ai`) with no
-account, tunnel or certificate agreement to set up. The relay connects ChatGPT
-only; ChatGPT itself uses the Olympus plugin: see the README's
-[Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: Claude,
-Grok, the Grok API and other cloud agents need a tunnel of your own in
+account, tunnel or certificate agreement to set up. The relay connects
+ChatGPT, Claude, Grok (grok.com) and Grok Bot; ChatGPT itself uses the
+Olympus plugin: see the README's
+[Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: the Grok
+API and other cloud agents need a tunnel of your own in
 `remote.publicBaseUrl`, approved with a pairing code or a key.)
 
 ## Anytime

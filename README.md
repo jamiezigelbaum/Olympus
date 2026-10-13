@@ -4,9 +4,9 @@
 
 # ⛰️ Olympus
 
-**Your whole digital life, searchable by your AI — on your privacy terms.**
+**Your machine, your memory. Keep your private things private.**
 
-*A private knowledge engine on your Mac for ChatGPT, and a sovereignty-aware source brain for [OpenClaw](https://openclaw.ai) agents.*
+*A private second brain on your own computer, for ChatGPT, Claude, Grok and any AI app that speaks MCP. On a Mac, and on [Omarchy](https://omarchy.org) Linux. Free and open source.*
 
 [![version](https://img.shields.io/badge/version-1.0.0--rc.6-534AB7)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-0F6E56)](LICENSE)
@@ -14,8 +14,8 @@
 [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai)
 [![runtime](https://img.shields.io/badge/runtime-Bun%20%2B%20TypeScript-B45309)](https://bun.sh)
 
-[Olympus for ChatGPT](#olympus-for-chatgpt) · [OpenClaw quickstart](docs/QUICKSTART.md) · [Release status](docs/V0_4_RELEASE.md) · [Source capabilities](docs/SOURCE_CAPABILITIES.md) · [How it works](#how-it-works) ·
-[Sources](#supported-sources) · [Security model](#the-security-model) ·
+[olympusplugin.ai](https://olympusplugin.ai) · [Get started](#get-started) · [Olympus in ChatGPT](#olympus-for-chatgpt) · [Claude, Grok and other apps](#claude-grok-and-other-apps) · [How it works](#how-it-works) ·
+[Sources](#supported-sources) · [Security model](#the-security-model) · [OpenClaw quickstart](docs/QUICKSTART.md) ·
 [Commands](#command-reference)
 
 </div>
@@ -29,20 +29,42 @@
 > must end with the Step 1→2 invitation, never a bare status line). Managed
 > `git:`, `clawhub:`, and `npm-pack:` installs intentionally hide their internal
 > package path; use the installed `olympus` CLI and this packaged runbook rather
-> than searching OpenClaw's managed storage. **Setting up Olympus for ChatGPT
-> instead?** Follow [Olympus for ChatGPT](#olympus-for-chatgpt) and the
-> plugin's own setup skill, not this runbook.
+> than searching OpenClaw's managed storage. **Setting up Olympus for ChatGPT,
+> Claude or Grok instead?** Follow [Get started](#get-started), not this
+> runbook.
 
 ---
 
-Personal AI becomes genuinely useful when it can reason across your whole
-life — email, messages, files, notes, reading. It becomes **trustworthy**
-when *you* decide which models are allowed to see which parts of it.
+Frontier AI models are the smartest, but using them means sending your life to
+someone else's cloud. Local models keep it home, but they are a step behind,
+and the best ones need an expensive computer under your desk. Olympus gives
+you both, on the laptop you already have.
 
-Olympus is both. It ingests your sources into local, trust-tiered indexes,
-then lets your frontier agent answer questions across all of them — with
-sensitive material handled only by lanes you approved: your own local models,
-privacy-approved private cloud inference, or not at all.
+Every email, file and message is judged, one by one, as **Personal**,
+**Private** or **Secret**: on your own computer by default, or by Venice's
+private models if you choose a Venice-only setup.
+
+- **Personal:** ChatGPT, Claude or Grok can read the parts that answer your
+  question, and cite them.
+- **Private:** only a model on your computer reads it (or Venice, if you turn
+  it on); your AI app never gets the item itself. In ChatGPT, only you see the
+  answer; other apps get an answer written from it, which can repeat what it
+  says.
+- **Secret:** passwords, recovery codes and keys. Once Olympus recognizes a
+  Secret, it is never sent or answered from.
+
+Labels are automatic and can be wrong.
+
+Everything is stored and searched on your computer: the search index is built
+there, by a model small enough for a computer with 8 GB of memory. There is no
+hosted copy of your things, no account and no subscription. Olympus's
+publisher runs only a relay that passes your AI app's requests to your
+computer without storing them. Google sign-in happens on your computer,
+directly with Google. For hard private
+questions you can reach stronger models: [Venice](https://venice.ai) runs
+private models that, under Venice's own terms, keep nothing you send, and
+zkAPI, from OpenAnonymity and the Ethereum Foundation, hides who is asking
+(see [Stronger models, privately](#stronger-models-privately)).
 
 ```text
 you › "What did I commit to this week, across email and Telegram?"
@@ -55,47 +77,91 @@ agent › Three commitments: the tax documents to Maria by Friday
 Your agent saw a bounded, cited, policy-gated answer. It never saw your
 mailbox.
 
+## Get started
+
+You need a Mac with Apple silicon (M1 or later) on macOS 13 Ventura or later,
+or an x86_64 computer running [Omarchy](https://omarchy.org). Intel Macs,
+other Linux distributions and ARM Linux are not supported yet. You do not need
+OpenClaw, Tailscale, an API key or a new account.
+
+**1. Install Olympus on your computer.** On a Mac, open **Terminal** and run:
+
+```bash
+curl -fsSL https://olympusplugin.ai/install.sh | sh
+```
+
+On Omarchy, first install the tools Olympus uses to read scans, photos and
+voice notes, then run the Linux installer:
+
+```bash
+sudo pacman -S --needed tesseract tesseract-data-eng poppler libvips libheif ffmpeg
+curl -fsSL https://olympusplugin.ai/install-linux.sh | sh
+```
+
+Either installs Olympus for your user only (the installer itself needs no
+administrator password; on Omarchy, the `pacman` line above does),
+checks every download against a pinned SHA-256 before using it, keeps Olympus
+running in the background (a LaunchAgent on a Mac, a systemd user service on
+Omarchy), adds the `olympus` command, and waits until the engine proves it is
+running. On Omarchy it also adds **Olympus** to the app launcher. Then Olympus
+downloads its built-in models once. Running it again updates or repairs the
+install; a failed update puts the previous version back. Details, folders and
+uninstall: <https://olympusplugin.ai/install/>.
+
+**2. Connect your AI.** Each app has a short guide:
+[ChatGPT](https://olympusplugin.ai/install/chatgpt/) ·
+[Claude](https://olympusplugin.ai/install/claude/) ·
+[Grok and Grok Bot](https://olympusplugin.ai/install/grok/) ·
+[Dots](https://olympusplugin.ai/install/dots/) ·
+[Claude Code](https://olympusplugin.ai/install/claude-code/) ·
+[Codex](https://olympusplugin.ai/install/codex/) ·
+[OpenClaw](https://olympusplugin.ai/install/openclaw/) ·
+[Hermes](https://olympusplugin.ai/install/hermes/) ·
+[any MCP app](https://olympusplugin.ai/install/other/). In ChatGPT, Claude
+and Grok you add Olympus's address as a connector (in ChatGPT, in Developer
+mode until Olympus is listed in its directory), then approve it with one
+click on a page Olympus opens on your own computer: there is no pairing code
+and no account to create. Grok Bot then uses the Grok connection. Apps on your
+computer, such as Claude Code, Codex and Hermes, connect with one command.
+
+**3. Connect your sources and ask.** Open the dashboard (in ChatGPT, ask
+*"Show my Olympus dashboard"*; on your computer, run `olympus dashboard`),
+connect Dropbox, Gmail or Google Drive, pick folders, and ask the way you
+normally would.
+
 ## Olympus for ChatGPT
 
-Olympus 1.0 is a ChatGPT plugin. The Olympus engine runs on your Mac and
+In ChatGPT, Olympus is a plugin. The Olympus engine runs on your computer and
 keeps your index there; ChatGPT asks it questions through one secure
-connection that you approve on the Mac. You need ChatGPT and a Mac with
-Apple silicon (M1 or later) on macOS 13 Ventura or later; Intel Macs are not
-supported. You do not need OpenClaw, Tailscale, an API key or a new account.
+connection that you approve on that computer.
 
-### 1. Install Olympus on your Mac, then add it in ChatGPT
+### 1. Add Olympus in ChatGPT
 
-1. Open **Terminal** and run:
+Install Olympus on your computer first ([Get started](#get-started)).
+Olympus is on its way to ChatGPT's app directory. Until it is listed, add it
+in Developer mode: in ChatGPT, open **Settings**, then **Apps**, and turn on
+**Developer mode** under **Advanced settings**. Then create a connector, name
+it Olympus, choose OAuth, and paste `https://mcp.olympusplugin.ai/mcp` as the
+URL. OpenAI decides which accounts have Developer mode; in a work or school
+workspace, an admin may need to allow it. Step by step:
+<https://olympusplugin.ai/install/chatgpt/>. On Omarchy,
+ChatGPT may still say Olympus needs a Mac; it works on Omarchy too.
 
-   ```bash
-   curl -fsSL https://olympusplugin.ai/install.sh | sh
-   ```
-
-   It installs Olympus for your macOS user only (no administrator password),
-   checks every download against a pinned SHA-256 before using it, runs
-   Olympus in the background as a login item (a LaunchAgent), adds the
-   `olympus` command, and waits until the engine proves it is running. Then
-   Olympus downloads its built-in models once. Running it again updates or
-   repairs the install; a failed update puts the previous version back.
-   Details, folders and uninstall: <https://olympusplugin.ai/install/>.
-2. In the ChatGPT desktop app, add **Olympus** from the plugin directory and
-   ask *"Connect Olympus"*. ChatGPT's setup skill shows the same install
-   command if Olympus is not on the Mac yet; it never runs commands itself.
-
-### 2. Approve ChatGPT on your Mac
+### 2. Approve ChatGPT on your computer
 
 The first time ChatGPT connects to Olympus, an Olympus page opens in your
-Mac's browser asking *Connect ChatGPT to Olympus?* Click **Connect**. (If a
+computer's browser asking *Connect ChatGPT to Olympus?* Click **Connect**. (If a
 page saying *Approve ChatGPT on your Mac* comes first, click **Continue on
-this Mac**.) Clicking Connect on your own Mac is how Olympus knows the Mac is
-yours: there is no code to copy and no account to create. To check on it later, run `olympus engine status` in Terminal.
+this Mac**; the page says Mac on Omarchy too.) Clicking Connect on your own
+computer is how Olympus knows the computer is yours: there is no code to copy and no account to create. To check on it later, run `olympus engine status` in a terminal.
 
 ### 3. Connect Dropbox and choose folders
 
 Open the **Olympus** dashboard in ChatGPT's sidebar (or ask *"Show my
 Olympus dashboard"*). Choose **Connect** next to Dropbox and sign in with
 your own Dropbox account; the sign-in link works once, for 10 minutes, from
-any device. Gmail and Google Drive connect the same way.
+any device. Gmail and Google Drive connect the same way, except that you open their
+sign-in link on the computer where Olympus runs, not on a phone.
 
 Then pick folders. For each folder choose:
 
@@ -106,7 +172,7 @@ Then pick folders. For each folder choose:
 
 A folder follows its parent's choice unless you change it; **Mixed** means
 some folders inside it are set differently. Choose **Save and start**, and
-indexing begins on your Mac.
+indexing begins on your computer.
 
 ### 4. Tell Olympus what's private
 
@@ -116,12 +182,15 @@ Olympus sorts every item, one by one, into one of three tiers:
   that answer your question, and cites them.
 - **Private**: things you keep to yourself, such as health, money or family
   matters. What they say is never sent to ChatGPT. Olympus answers from
-  them on your Mac, in the private answer panel (below).
-- **Secret**: passwords, recovery codes and keys. No model ever reads them,
-  and Olympus never answers from them.
+  them on your computer, in the private answer panel (below).
+- **Secret**: passwords, recovery codes and keys. What Olympus recognizes as a
+  Secret never reaches a model and is never answered from.
+  Recognition looks for common forms (private keys, API keys, labeled
+  passwords) and can miss others.
 
-Olympus decides on your Mac. Once its built-in private model is ready, it
-checks every item it reads before treating it as Personal. In the dashboard,
+Olympus decides on your computer. Once its built-in private model is ready, it
+checks every item it reads before treating it as Personal. Labels are
+automatic and can be wrong. In the dashboard,
 **Privacy** asks *"What's private for you?"*: answer in your own words. You
 can also mark folders, Gmail labels or senders as always Private.
 
@@ -135,23 +204,24 @@ citations.
 
 When some of the items that match your question are Private, a small Olympus
 panel appears on its own under ChatGPT's reply: **Private answer from your
-Mac**, marked **Not sent to ChatGPT**.
+computer**, marked **Not sent to ChatGPT**.
 
-- Your Mac writes the answer with its built-in private model (Qwen3.5 4B)
-  and sends it to the panel sealed, so only the panel can open it. It goes
+- Your computer writes the answer with its built-in private model (Qwen3.5,
+  sized to its memory: 2B under 16 GB, 4B with more) and sends it to the panel sealed, so only the panel can open it. It goes
   around the ChatGPT conversation, not through it, and the Olympus relay
   cannot read it.
-- It usually arrives within a minute. Ask for *"all the details"* and
+- On an Apple silicon Mac it usually arrives within a minute; on Omarchy it
+  depends on the computer's processor and can take a few minutes. Ask for *"all the details"* and
   Olympus reads the whole documents instead; that can take a few minutes.
 - **Sources** (closed at first) lists the items the answer used. Click one to
-  open it on your Mac, or in Dropbox on the web if it is not on this Mac
+  open it on your computer, or in Dropbox on the web if it is not on this computer
   (ChatGPT opens that web link for you, so it sees the address).
 - **Hide** folds the answer away and **Show** brings it back. An answer
   expires after 10 minutes; ask again for a new one.
 - Ask follow-up questions in the chat as usual; each private answer appears
   in a new panel.
 
-Your Mac needs to be awake and online. The panel runs inside ChatGPT's page,
+Your computer needs to be awake and online. The panel runs inside ChatGPT's page,
 so it relies on the panel code ChatGPT loads; the
 [design](docs/design/chatgpt-plugin.md#who-can-read-the-answer) states that
 limit plainly.
@@ -175,27 +245,75 @@ ChatGPT **can** see:
 ChatGPT **can't** see:
 
 - What your Private items say, or the private answers made from them.
-- Your Secret items, ever.
+- Secret items Olympus recognizes.
 - Folders you skip, or what the files in Names-only folders say.
 - API keys or passwords: you never enter one in ChatGPT. Optional extras such
-  as a Venice account are set up on your Mac.
+  as a Venice account are set up on your computer.
 
-The relay at `mcp.olympusplugin.ai` passes ChatGPT's requests to your Mac. It
+The relay at `mcp.olympusplugin.ai` passes ChatGPT's requests to your computer. It
 stores and logs no questions, answers or tokens, but like any HTTPS service
 it handles them in transit. Full details: the
 [ChatGPT design](docs/design/chatgpt-plugin.md) and the
 [trust model](docs/TRUST_MODEL.md).
 
-To uninstall, run `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`:
-it stops Olympus and removes the app, the runtime and the `olympus` command,
-and keeps your settings and data. To delete those too, first run
-`olympus engine stop` and `olympus data delete --all`. To only stop Olympus
-and remove its login item, run `olympus engine uninstall`.
+## Claude, Grok and other apps
 
-The rest of this README covers Olympus with OpenClaw, which stays supported
-and optional.
+Claude (web, desktop and phone) and Grok connect through the same Olympus
+relay as ChatGPT, with one click to approve on your computer, and Grok Bot
+uses the Grok connection; apps
+on your computer, such as Claude Code, Codex and Hermes, connect there
+directly. Guides: <https://olympusplugin.ai/install/>.
+
+They search what is Personal, with citations, like ChatGPT. They never get
+your Private items themselves or the Secrets Olympus recognizes. For Private
+items they get only an answer that the private model on your computer (or
+Venice, if you set it up) writes from them, checked for secrets, with each
+item's title, path, source and author. That answer can repeat what the items
+say. ChatGPT is stricter: it gets no answer from Private items
+at all, and shows one only in its private answer panel. When no Private answer
+can be given, the question waits in Olympus on your computer and **Needs you**
+says so: open the dashboard's
+[Private answers](https://olympusplugin.ai/open/private/) page (under **On
+this computer**) to answer it there. More: [Connect other
+agents](#connect-other-agents).
+
+## Stronger models, privately
+
+For hard private questions you can reach stronger models without giving
+yourself away. Both are off until you turn them on.
+
+- **[Venice](https://venice.ai)** runs private models that, under Venice's own
+  terms, keep nothing you send. Add your Venice key under **Keys**, on your
+  computer.
+- **zkAPI**, from OpenAnonymity and the Ethereum Foundation, hides who is
+  asking. It pays anonymously and sends the question over Tor (on unless you
+  turn it off; without Tor, your network address shows): no account, no card,
+  no name, just proof the question is paid for. In **Strict** mode your
+  computer first rewrites the question into general questions; **Standard**,
+  by default, takes out names, contact details and account numbers, or sends
+  your words as written if you choose that. What you ask can still identify
+  you. Turn on **Anonymous answers** on the
+  dashboard's [Private answers](https://olympusplugin.ai/open/private/) page.
+  Anonymous answers are on a Mac only, for now.
+
+## Uninstall
+
+On a Mac, run `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`; on
+Omarchy, `curl -fsSL https://olympusplugin.ai/uninstall-linux.sh | sh`. Both
+stop Olympus and remove the app, the runtime and the `olympus` command, and
+keep your settings and data. To delete those too, first run
+`olympus engine stop` and `olympus data delete --all`. To only stop Olympus
+and remove its login item or service, run `olympus engine uninstall`.
+
+The rest of this README covers how Olympus works and Olympus with OpenClaw,
+which stays supported and optional.
 
 ## How it works
+
+Olympus ingests your sources into local, trust-tiered indexes, then lets your
+frontier agent answer questions across all of them, with sensitive material
+handled only by lanes you approved: your own local models,
+privacy-approved private cloud inference, or not at all.
 
 Every item you ingest is judged on its own as Personal, Private, or Secrets
 (plus Public on installs made before 1.0; internally S0-S5): its names are Personal unless something raises
@@ -234,7 +352,7 @@ flowchart LR
 ```
 
 Olympus uses **Personal** (ordinary personal and work content), **Private**
-(sensitive material), and **Secrets** (never model input). There is no
+(sensitive material), and **Secrets** (once recognized, never model input). There is no
 Public tier on any new install, ChatGPT or OpenClaw, whichever posture you
 choose: anything that would have been Public is Personal. Installs made
 before 1.0 keep a **Public** tier. See the
@@ -261,11 +379,11 @@ questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private
 lane your posture approved answers it and your agent receives only the checked,
-cited answer. Secrets are never searched by content: Olympus can tell you where
+cited answer. Secrets Olympus recognizes are never searched by content: it can tell you where
 one lives, never what it says.
 
 Some rules are not configurable, by design: secure content never routes to
-ordinary cloud models, secrets are denied to every lane, and an
+ordinary cloud models, recognized secrets are denied to every lane, and an
 exhausted policy chain refuses rather than silently downgrading.
 
 ## Get started with OpenClaw
@@ -394,10 +512,13 @@ OpenClaw runtime config.
 Olympus is built on the assumption that the boundary *is* the product:
 
 - **Local-first ingestion.** Raw source content lands in local SQLite
-  indexes before any model sees anything. Classification happens at home.
-- **Sanitized handoffs.** Agents receive answer text, citations, and audit
-  counts — typed wire shapes with `raw_source_exposed: false`, re-validated
-  client-side. Raw documents, embeddings, cursors, and tokens never cross.
+  indexes before any model sees anything. Classification happens on your
+  computer unless you choose Venice for it.
+- **Sanitized handoffs.** Agents receive answer text, excerpts of Personal
+  items, citations, and audit counts — typed wire shapes with
+  `raw_source_exposed: false`, re-validated client-side. Embeddings, cursors,
+  and tokens never cross. Private items reach an agent only as answers
+  written from them, which can repeat what they say; ChatGPT's model gets none.
 - **A hard membrane.** Any evidence pack containing sensitive material is
   barred from standard cloud lanes by two independent checks — policy
   validation at config load, and a runtime re-check on every request.
@@ -471,17 +592,16 @@ computer**, choose **Open** next to **Agents**, then press **Connect an
 agent**. Pick the agent you use and follow its steps; every address and
 snippet has a copy button.
 
-- **ChatGPT**: add the Olympus plugin in ChatGPT (see
-  [Olympus for ChatGPT](#olympus-for-chatgpt)), then click **Connect** on the
+- **ChatGPT**: add Olympus in ChatGPT (Developer mode until it is listed;
+  see [Olympus for ChatGPT](#olympus-for-chatgpt)), then click **Connect** on the
   page that opens in this computer's browser.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
   `olympus serve` command) into the agent. This works without remote access.
 - **Claude** (web, desktop and phone) and **Grok** (grok.com): add Olympus
   as a connector with the address the panel shows, then click **Connect** on
   the page that opens in this computer's browser.
-- **Grok Bot**: add Olympus as a custom server in Grok Bot and click
-  **Connect** on the same page. Grok Bot signs in as Cursor's cloud agents
-  do, so the page names it **Grok Bot or Cursor**.
+- **Grok Bot**: nothing to add. Once Olympus is connected on grok.com,
+  Grok Bot uses that connection, with the same xAI account.
 - The **Grok API** and other agents in the cloud need a tunnel you run
   yourself (below); the panel says so until remote access runs through one.
 
@@ -507,9 +627,10 @@ pairing code from the Agents page, and the Grok API takes an address plus a
 key from **Create key** (shown once).
 
 Every connected agent gets the same privacy rules
-as your OpenClaw agent. It never sees Private source text or Secrets. For
-Private items it receives only answers that Venice or a local model reasoned
-out, with each item's title, path, source and author. The Agents page
+as your OpenClaw agent. It never gets Private items themselves or the Secrets
+Olympus recognizes. For Private items it receives only answers that Venice or
+a local model wrote from them, which can repeat what they say, with each
+item's title, path, source and author. The Agents page
 lists connected agents with when each was added and last used, and
 **Revoke** removes one. `olympus connections list|revoke|pair|add` does the
 same from a terminal.
@@ -530,7 +651,8 @@ supported Hermes configuration narrows that server to exactly `source_answer`,
 per-server tool allowlist.
 
 `ask_anonymously` sends one typed question to a frontier model through zkAPI
-(paid per question from the user's own balance; nothing identifies them). The
+(paid per question, anonymously, from the user's own balance; what the
+question says can still identify them). The
 first call with no `level` returns `needs_choice`: the agent asks the user once
 for Strict (their own model rewrites the question into general questions before
 it leaves) or Standard (their words, prepared as written, lightly cleaned up or
@@ -645,7 +767,7 @@ remain at input boundaries do not select another runtime or store.
 
 Olympus is TypeScript on Bun: one plugin package, stable versioned architecture
 contracts (`SourceConnector` / `EvidencePack` / `Analyst` — only the
-connector is per-source), and 1,400+ tests including an architecture guard
+connector is per-source), and 3,400+ tests including an architecture guard
 that keeps per-source answer logic out of the shared spine.
 
 ```bash
@@ -663,7 +785,12 @@ Deep-dive docs: [contracts and architecture](docs/CONTRACTS.md) ·
 
 ## License
 
-[MIT](LICENSE) — free for any use, including commercial.
+[MIT](LICENSE) — free for any use, including commercial. Olympus is provided
+as is, without warranty; keep your own backups. Olympus is published by Open
+Coordination Unlimited, Inc. Its hosted relay is governed by the
+[Terms of Service](https://olympusplugin.ai/terms/) and
+[Privacy Policy](https://olympusplugin.ai/privacy/). Third-party data notices:
+[docs/THIRD_PARTY_DATA.md](docs/THIRD_PARTY_DATA.md).
 
 Want to suggest a change? See [CONTRIBUTING.md](CONTRIBUTING.md): fork,
 branch, open a PR. Read access doesn't include direct pushes — everything
