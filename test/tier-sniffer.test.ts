@@ -87,10 +87,11 @@ function subject(n: number) {
 }
 
 /** Record a flagged, metadata-only item through the real classifier + cached sniffer. */
-function recordFlagged(ledger: TierLedger, store: TierSnifferStore, n: number, title: string): void {
+function recordFlagged(ledger: TierLedger, store: TierSnifferStore, n: number, title: string) {
   const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
   const decision = classifyItemTiers({ signals: { title, labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(n) }, { sniffer });
   ledger.recordDecision(subject(n), decision);
+  return decision;
 }
 
 describe('lane selection and refusal', () => {
@@ -1125,9 +1126,9 @@ test('a map revision changed during a model call keeps the old answer stale', as
   const ledger = new TierLedger({ dbPath: ':memory:' });
   const store = new TierSnifferStore({ dbPath: ':memory:' });
   try {
-    recordFlagged(ledger, store, 1, 'bank notice');
+    const decision = recordFlagged(ledger, store, 1, 'bank notice');
     const model = spyModel((_, items) => {
-      ledger.recordDecision(subject(1), { ...ledger.getCurrent(subject(1))!, mapRevision: 'new-map' });
+      ledger.recordDecision(subject(1), { ...decision, mapRevision: 'new-map' });
       return verdictsFor(items, { tier: 'personal', category: 'ordinary', confidence: 1 });
     });
     const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });

@@ -127640,6 +127640,8 @@ async function runSnifferPass(options) {
     return current2?.materialHash === question.materialHash && current2.mapRevision === question.mapRevision;
   };
   const apply = (item, verdict) => {
+    if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false) && !screenQuestion(item.target, item.question))
+      return;
     const tier = snifferTierKey(verdict);
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
@@ -127686,7 +127688,7 @@ async function runSnifferPass(options) {
     const row = target.ledger.getCurrent(question);
     return row !== undefined && row.state === "moving" && row.decidedBy !== "override" && openPasses(row).includes(question.pass);
   };
-  const stillOpen = (target, question) => {
+  const stillOpen = (target, question, rekey = true) => {
     const row = target.ledger.getCurrent(question);
     if (row === undefined || row.decidedBy === "override")
       return false;
@@ -127702,12 +127704,43 @@ async function runSnifferPass(options) {
       }
     }
     if (open7 && expectedMap !== question.mapRevision) {
+      if (!rekey)
+        return false;
       target.sniffer.rekey(question, question.pass, expectedMap);
       question.mapRevision = expectedMap;
       question.attempts = 0;
       report.staleRekeyed += 1;
     }
     return open7;
+  };
+  const screenQuestion = (target, question) => {
+    const screen = snifferMaterialCarriesSecret(question.material) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
+    if (screen === "unreadable") {
+      report.awaitingPlacement += 1;
+      return false;
+    }
+    if (screen === "clean")
+      return true;
+    const row = target.ledger.getCurrent(question);
+    const decision = {
+      ...row,
+      snifferId: id,
+      metadataTier: "secrets",
+      contentTier: "secrets",
+      state: "current",
+      decidedBy: "secret_detector",
+      reasons: ["metadata:secret:sniffer_refused"],
+      metadataPending: false,
+      contentPending: false,
+      contentRead: true
+    };
+    if (target.settleSecrets?.(question, decision) === true) {
+      target.sniffer.deleteQuestion(question, "metadata");
+      target.sniffer.deleteQuestion(question, "content");
+      report.secretRefused += 1;
+    } else
+      report.awaitingPlacement += 1;
+    return false;
   };
   const work = { metadata: [], content: [] };
   for (const target of options.targets) {
@@ -127716,7 +127749,7 @@ async function runSnifferPass(options) {
       if (midMove(target, question))
         return false;
       if (stillOpen(target, question))
-        return true;
+        return screenQuestion(target, question);
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
       return false;
@@ -127725,29 +127758,6 @@ async function runSnifferPass(options) {
       if (!stillOpen(target, question)) {
         target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
         report.staleDropped += 1;
-        continue;
-      }
-      if (snifferMaterialCarriesSecret(question.material)) {
-        const row = target.ledger.getCurrent(question);
-        const decision = {
-          ...row,
-          snifferId: id,
-          metadataTier: "secrets",
-          contentTier: "secrets",
-          state: "current",
-          decidedBy: "secret_detector",
-          reasons: ["metadata:secret:sniffer_refused"],
-          metadataPending: false,
-          contentPending: false,
-          contentRead: true
-        };
-        const settled = target.settleSecrets?.(question, decision) === true;
-        if (settled) {
-          target.sniffer.deleteQuestion(question, "metadata");
-          target.sniffer.deleteQuestion(question, "content");
-          report.secretRefused += 1;
-        } else
-          report.awaitingPlacement += 1;
         continue;
       }
       if (snifferMaterialLooksLikeInjection(question.material)) {
@@ -127787,10 +127797,12 @@ async function runSnifferPass(options) {
       }
       continue;
     }
+    if (!screenQuestion(next.target, next.question))
+      continue;
     const group = [next];
     for (let i = pending.length - 1;i >= 0; i--) {
       const item = pending[i];
-      if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)) {
+      if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
         group.push(item);
         pending.splice(i, 1);
       }
@@ -128265,6 +128277,44 @@ class TierSnifferService {
         ledger: ledger2,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...planner ? { placementFor: planner } : {},
+        screenStoredQuestion: (question) => {
+          const row = ledger2.getCurrent(question);
+          if (!row || row.routed || !row.contentRead)
+            return "clean";
+          const set2 = tierSetForLedger(ledgerPath);
+          const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
+          try {
+            const home2 = stores[0];
+            if (!home2)
+              return "unreadable";
+            const shared = set2?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home2.dbPath) });
+            try {
+              if (locations.get(question)?.findingKinds.includes("sniffer_secret_refusal"))
+                return "secrets";
+            } finally {
+              if (!shared)
+                locations.close();
+            }
+            let foundBody = false;
+            for (const store of stores) {
+              if (!store.exportItemCopy)
+                return "unreadable";
+              const copy = store.exportItemCopy(question);
+              if (!copy)
+                continue;
+              const body = copy.chunks.map((chunk) => chunk.boundedText).join("");
+              if (!body.trim())
+                continue;
+              foundBody = true;
+              if (snifferMaterialCarriesSecret(body))
+                return "secrets";
+            }
+            return foundBody ? "clean" : "unreadable";
+          } catch {
+            return "unreadable";
+          }
+        },
         settleSecrets: (question, decision) => {
           const set2 = tierSetForLedger(ledgerPath);
           if (!ledger2.getCurrent(question)?.routed) {
