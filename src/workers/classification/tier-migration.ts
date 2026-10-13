@@ -704,7 +704,14 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
             totals.notRead += 1;
             continue;
           }
+          // The sniffer fence's snapshot, then the copy re-checked: this page
+          // was read before it, and a Secrets tombstone (which precedes its
+          // side-store clearing) since then leaves nothing to judge.
           const read = ledger.classificationRead(item.identity);
+          if (!store.itemPresence(item.identity).active) {
+            totals.notRead += 1;
+            continue;
+          }
           const override = read.override;
           const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read) : undefined;
           // A photo's picture judgment, when the photo judge made one here.
