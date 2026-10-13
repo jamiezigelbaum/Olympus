@@ -6276,10 +6276,26 @@ function isGooglePublisherWebClientId(clientId, env = process.env) {
     return true;
   return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
 }
-var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS;
+function googleDesktopClientSecret(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return;
+  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret)
+      return overrideSecret;
+  }
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  return known?.secret.trim() || undefined;
+}
+var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
 var init_publisher_oauth_client = __esm(() => {
   GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
     DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
+  ];
+  GOOGLE_DESKTOP_CLIENTS = [
+    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
   ];
 });
 
@@ -6951,7 +6967,7 @@ class EnvCredentialBroker {
       storedState = resolved.state;
     }
     const clientId = await this.resolveFirstSecret(oauth2.clientIdEnvNames, oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : []);
-    const clientSecret = await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
+    const clientSecret = googleDesktopClientSecret(clientId, this.env) ?? await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
     const refreshToken = await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? storedState?.refreshToken?.trim();
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
@@ -9419,6 +9435,553 @@ var init_embeddings = __esm(() => {
   };
 });
 
+// src/core/secret-patterns.ts
+function trimValueEnd(value) {
+  let end = value.length;
+  while (end > 0 && ";,)]}".includes(value[end - 1]))
+    end -= 1;
+  while (end > 0 && value[end - 1] === ".")
+    end -= 1;
+  return value.slice(0, end);
+}
+function stripNonAlphanumeric(word) {
+  const isAlphanumeric = (code) => code >= 48 && code <= 57 || code >= 97 && code <= 122;
+  const lower = word.toLowerCase();
+  let start = 0;
+  let end = lower.length;
+  while (start < end && !isAlphanumeric(lower.charCodeAt(start)))
+    start += 1;
+  while (end > start && !isAlphanumeric(lower.charCodeAt(end - 1)))
+    end -= 1;
+  return lower.slice(start, end);
+}
+function isBareLiteral(value) {
+  if (value.length > 24)
+    return false;
+  let end = value.length;
+  while (end > 0 && ".,;".includes(value[end - 1]))
+    end -= 1;
+  return BARE_LITERALS.has(value.slice(0, end).toLowerCase());
+}
+function isVariableReference(value) {
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$/s.exec(value);
+  if (!match)
+    return false;
+  const name = match[1];
+  if (match[2])
+    return match[2].startsWith("/");
+  return name.includes("_") || name === name.toUpperCase() || !/[0-9]/.test(name) && name === name.toLowerCase();
+}
+function isPlaceholderValue(value, lineRest = "") {
+  const v = value.trim();
+  if (!v)
+    return true;
+  if (v.startsWith("<") && (v.includes(">") || lineRest.includes(">")))
+    return true;
+  if (v.startsWith("(") && (v.includes(")") || lineRest.includes(")")))
+    return true;
+  if (/^[[{].*[\]}]$/.test(v))
+    return true;
+  if (/\$\{|\{\{|<%|%\(|\$\(|^%[A-Za-z_]+%$/.test(v))
+    return true;
+  if (isVariableReference(v))
+    return true;
+  if (MASKED_RUN.test(v))
+    return true;
+  if (/^(.)\1+$/.test(v))
+    return true;
+  if (isBareLiteral(v))
+    return true;
+  return PLACEHOLDER_WORDS.test(v);
+}
+function isPropertyLookup(value) {
+  if (!MEMBER_CHAIN.test(value))
+    return false;
+  return value.split(".").some((segment) => CREDENTIAL_WORD.test(segment) || COMMON_OBJECTS.has(segment.toLowerCase()));
+}
+function isNotLiteralCredential(value) {
+  return CODE_LOOKUP.test(value) || IDENTIFIER_NAME.test(value) && CREDENTIAL_WORD.test(value) || CALL_EXPRESSION.test(value) || isPropertyLookup(value) || TYPE_ANNOTATION.test(value) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(value);
+}
+function hasCredentialShape(value) {
+  return /[0-9]/.test(value) || /[^A-Za-z0-9_.\-\s]/.test(value);
+}
+function isPlausiblePassphrase(value, minLength) {
+  const v = value.trim();
+  if (v.length < minLength || v.length > 160)
+    return false;
+  if (/[?:]$/.test(v) || /\bhttps?:\/\//i.test(v))
+    return false;
+  if (isPlaceholderValue(v) || isNotLiteralCredential(v))
+    return false;
+  const words = v.split(/\s+/);
+  if (words.length < 2 || words.length > 14)
+    return false;
+  if (CREDENTIAL_NOUN.test(stripNonAlphanumeric(words[words.length - 1])))
+    return false;
+  return !words.some((word) => PROSE_WORDS.has(stripNonAlphanumeric(word)));
+}
+function leadBefore(input, index, limit) {
+  const window2 = input.slice(Math.max(0, index - limit), index);
+  const newline = Math.max(window2.lastIndexOf(`
+`), window2.lastIndexOf("\r"));
+  return newline === -1 ? window2 : window2.slice(newline + 1);
+}
+function restOfLine(match) {
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const window2 = input.slice(end, end + 200);
+  const newline = window2.search(/[\r\n]/);
+  return newline === -1 ? window2 : window2.slice(0, newline);
+}
+function assignedValue(groups) {
+  const quotedValue = groups.dq ?? groups.sq ?? groups.bq;
+  if (quotedValue !== undefined)
+    return { value: quotedValue.trim(), quoted: true, tail: "" };
+  const raw = groups.uv ?? "";
+  const value = trimValueEnd(raw).trim();
+  return { value, quoted: false, tail: raw.slice(value.length) };
+}
+function isIdentifierHandOff(match, assigned) {
+  if (assigned.quoted || !BARE_IDENTIFIER.test(assigned.value))
+    return false;
+  if (CODE_LEAD.test(leadBefore(match.input ?? "", match.index ?? 0, 80)))
+    return true;
+  return /[;)]/.test(assigned.tail) && (assigned.value.includes("_") || /[a-z][A-Z]/.test(assigned.value));
+}
+function endsTheLine(match) {
+  const rest = restOfLine(match).trim();
+  return rest === "" || /^(?:#|\/\/|;|--)/.test(rest);
+}
+function assignmentAccepted(match) {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? "").toLowerCase();
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
+  if (!value)
+    return false;
+  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
+  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
+    return false;
+  const isPassword = keyword.startsWith("pass");
+  const isSecret = isPassword || keyword.startsWith("secret");
+  if (/\s/.test(value))
+    return isSecret && isPlausiblePassphrase(value, 6);
+  if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
+    return false;
+  if (quoted && isSecret)
+    return value.length >= 6;
+  if (isIdentifierHandOff(match, assigned))
+    return false;
+  let strong = true;
+  if (keyword === "secret" || keyword === "token") {
+    const start = match.index ?? 0;
+    const lead = (match.input ?? "").slice(Math.max(0, start - 48), start);
+    if (keyword === "token" && NON_CREDENTIAL_TOKEN_PREFIX.test(lead))
+      return false;
+    const attached = /[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(lead);
+    if (!attached) {
+      const previous = /([A-Za-z]+) $/.exec(lead)?.[1]?.toLowerCase();
+      strong = previous !== undefined && STRONG_QUALIFIERS.has(previous);
+      if (!strong && /[?&]$/.test(lead))
+        return false;
+    }
+  }
+  if (!strong)
+    return value.length >= 12 && hasCredentialShape(value);
+  if (value.length >= 12)
+    return true;
+  if (value.length >= 8 && hasCredentialShape(value))
+    return true;
+  return isPassword && !groups.nl && value.length >= 6 && endsTheLine(match);
+}
+function maskedProviderToken(token) {
+  const body = token.replace(/^(?:github_pat_|[A-Za-z]+[_-])+/, "");
+  return !body || MASKED_RUN.test(body) || /^(.)\1+$/.test(body) || /example|your|placeholder/i.test(body);
+}
+function envAssignmentAccepted(match) {
+  const groups = match.groups ?? {};
+  const key = groups.ek ?? "";
+  if (!ENV_CREDENTIAL_KEY.test(key))
+    return false;
+  if (NON_CREDENTIAL_KEY_TAIL.test(key) || NON_CREDENTIAL_CAMEL_TAIL.test(key))
+    return false;
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
+  if (value.replace(/\s+/g, "").length < 6)
+    return false;
+  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
+  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
+    return false;
+  if (/\s/.test(value) && !isPlausiblePassphrase(value, 6))
+    return false;
+  if (!/\s/.test(value) && PROSE_WORDS.has(stripNonAlphanumeric(value)))
+    return false;
+  return !isIdentifierHandOff(match, assigned);
+}
+function blockScalarLines(match, keyIndent) {
+  const lines = [(match.groups?.bv ?? "").trim()];
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const following = input.slice(end, end + BLOCK_SCALAR_WINDOW).split(/\r?\n/);
+  for (let i = 1;i < following.length && lines.length < BLOCK_SCALAR_MAX_LINES; i += 1) {
+    const line = following[i];
+    const text2 = line.trim();
+    if (!text2)
+      continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= keyIndent)
+      break;
+    lines.push(text2);
+  }
+  return lines.filter((line) => line && !COMMENT_LINE.test(line));
+}
+function blockScalarAccepted(match) {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? "").toLowerCase();
+  const keyLead = leadBefore(match.input ?? "", match.index ?? 0, 200);
+  const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? "").length;
+  if ((groups.ind ?? "").length <= keyIndent)
+    return false;
+  const isSecret = keyword.startsWith("pass") || keyword.startsWith("secret");
+  const judge = (value) => {
+    if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value))
+      return false;
+    if (/\s/.test(value))
+      return isSecret && isPlausiblePassphrase(value, 6);
+    if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
+      return false;
+    return value.length >= (isSecret ? 6 : 8);
+  };
+  const lines = blockScalarLines(match, keyIndent);
+  if (lines.length === 0)
+    return false;
+  if (judge(lines[0]))
+    return true;
+  return lines.length > 1 && judge(lines.join(" "));
+}
+var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "again",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "retry",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_ -]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  CODE_LOOKUP = /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|system\.getenv|deno\.env|getenv|environ|env|config|settings|secrets?|self|this|args|opts|options|params|req|request|ctx|vault|input)[.[(]/i;
+  CALL_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/;
+  MEMBER_CHAIN = /^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)+$/;
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  TYPE_ANNOTATION = /^(?:secretstr(?:ing)?|optional[[<]|option<|union[[<]|promise<|record<|array<|string\s*\||[a-z]+\s*\|\s*(?:undefined|null))/i;
+  BARE_IDENTIFIER = /^[A-Za-z_$][A-Za-z_$]*$/;
+  CREDENTIAL_WORD = /pass(?:word|wd|phrase|code)|secret|token|api[_-]?key|credential/i;
+  CREDENTIAL_NOUN = /^(?:pass(?:word|phrase|code)|passwd|secret|token|credential)s?$/;
+  IDENTIFIER_NAME = /^[A-Za-z]+(?:[_-][A-Za-z]+)+$/;
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  NON_CREDENTIAL_TOKEN_PREFIX = /(?:page|sync|cursor|continuation|resume|batch|delta|csrf|xsrf|nonce)[_ .-]?$/i;
+  CODE_LEAD = /(?:^|[^\w$])(?:const|let|var|val|final|static|public|private|protected|readonly|def)\s+[^=:\n]*$|[\w$]+\.[\w$]*$/;
+  ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  NON_CREDENTIAL_KEY_TAIL = /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
+  NON_CREDENTIAL_CAMEL_TAIL = /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
+  COMMENT_LINE = /^#(?:\s|$)/;
+  KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
+  AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
+  AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
+  AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+  LEGACY_CREDENTIAL_ASSIGNMENT = /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
+  SHARED_SECRET_PATTERNS = [
+    {
+      findingType: "private_key_material",
+      label: "private_key",
+      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
+      confidence: 1
+    },
+    {
+      findingType: "aws_access_key_id",
+      label: "aws_access_key_id",
+      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "slack_token",
+      label: "slack_token",
+      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "api_secret_token",
+      label: "openai_key",
+      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+      confidence: 0.95
+    },
+    {
+      findingType: "api_secret_token",
+      label: "github_token",
+      pattern: /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "stripe_key",
+      pattern: /(?<![A-Za-z0-9])(?:(?:sk|rk)_live_|whsec_)[A-Za-z0-9]{16,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_api_key",
+      pattern: /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_client_secret",
+      pattern: /(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_token",
+      pattern: /(?<![A-Za-z0-9/])(?:1\/\/0[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9_-]{20,})/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: LEGACY_CREDENTIAL_ASSIGNMENT,
+      confidence: 0.9
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: CREDENTIAL_ASSIGNMENT,
+      confidence: 0.9,
+      accept: assignmentAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: ENV_ASSIGNMENT,
+      confidence: 0.85,
+      accept: envAssignmentAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: BLOCK_SCALAR,
+      confidence: 0.85,
+      accept: blockScalarAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "password",
+      pattern: LABELLED_PASSPHRASE,
+      confidence: 0.85,
+      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 6)
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_url",
+      pattern: URL_USERINFO,
+      confidence: 0.9,
+      accept: (match) => {
+        const password = match.groups?.pw ?? "";
+        return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
+      }
+    },
+    {
+      findingType: "credential_assignment",
+      label: "authorization_header",
+      pattern: AUTHORIZATION_HEADER,
+      confidence: 0.9,
+      accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    },
+    {
+      findingType: "api_secret_token",
+      label: "azure_key",
+      pattern: AZURE_KEY,
+      confidence: 0.95,
+      accept: (match) => !isPlaceholderValue(match.groups?.key ?? "")
+    },
+    {
+      findingType: "api_secret_token",
+      label: "azure_sas_signature",
+      pattern: AZURE_SAS_SIGNATURE,
+      confidence: 0.9,
+      accept: (match) => !isPlaceholderValue(match.groups?.sig ?? "")
+    }
+  ];
+});
+
 // src/workers/dropbox-files/content-policy.ts
 import { createHash as createHash4 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
@@ -9458,6 +10021,8 @@ function scanPatterns(text2, patterns, structuralRefJson) {
       const matchedText = match[0]?.trim();
       if (!matchedText)
         continue;
+      if (pattern.accept && !pattern.accept(match))
+        continue;
       findings.push({
         finding_type: pattern.findingType,
         finding_hash: hashFinding(pattern.findingType, matchedText),
@@ -9483,40 +10048,16 @@ function dedupeFindings(findings) {
 function hashFinding(type, matchedText) {
   return createHash4("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
-var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
+var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
-  SECRET_PATTERNS = [
-    {
-      findingType: "private_key_material",
-      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
-      confidence: 1,
-      trustTier: "S5"
-    },
-    {
-      findingType: "aws_access_key_id",
-      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "slack_token",
-      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "api_secret_token",
-      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
-      confidence: 0.95,
-      trustTier: "S5"
-    },
-    {
-      findingType: "credential_assignment",
-      pattern: /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi,
-      confidence: 0.9,
-      trustTier: "S5"
-    }
-  ];
+  init_secret_patterns();
+  SECRET_PATTERNS = SHARED_SECRET_PATTERNS.map((shared) => ({
+    findingType: shared.findingType,
+    pattern: shared.pattern,
+    confidence: shared.confidence,
+    trustTier: "S5",
+    ...shared.accept ? { accept: shared.accept } : {}
+  }));
   REVIEW_PATTERNS = [
     {
       findingType: "hostile_instruction",
@@ -11440,6 +11981,22 @@ class TierLedger {
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
     return rows.map(recordFromRow);
   }
+  secretsIdentities() {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, metadata_tier FROM tier_items
+      WHERE metadata_tier = 'secrets' OR content_tier = 'secrets'
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all();
+    return rows.map((row) => ({
+      identity: {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+      },
+      names: row.metadata_tier === "secrets"
+    }));
+  }
   isRouted(identity) {
     return this.readRow(identity)?.routed === true;
   }
@@ -11584,8 +12141,8 @@ class TierLedger {
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
-    if (decision.decidedBy !== "override")
-      throw new Error("Only an owner override is queued this way.");
+    if (decision.decidedBy !== "override" && decision.decidedBy !== "owner_rule")
+      throw new Error("Only an owner override or owner rule is queued this way.");
     if (!(trustDomain in TRUST_DOMAIN_RANK))
       throw new Error(`Unknown trust domain "${trustDomain}".`);
     let result = "none";
@@ -14118,6 +14675,51 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
+// src/workers/classification/secret-locations.ts
+function screenedSecretLocator(locator) {
+  return locator?.trim() && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
+}
+var STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
 // src/workers/classification/installed-tier-classification-registry.ts
 function registeredInstalledTierClassification() {
   return registered;
@@ -14749,6 +15351,25 @@ function createConnectorStoreMediaJudgments(db) {
   `);
   addColumnIfMissing(db, "media_judgments", "attempts", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "media_judgments", "tier_checked_at", "TEXT");
+}
+function createConnectorStoreItemTextVersions(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_text_versions (
+      item_pk INTEGER PRIMARY KEY,
+      source_version TEXT,
+      recorded_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_text_version_capture
+    AFTER UPDATE OF source_version ON items
+    WHEN OLD.source_version IS NOT NEW.source_version
+    BEGIN
+      INSERT INTO item_text_versions (item_pk, source_version, recorded_at)
+      SELECT OLD.item_pk, OLD.source_version, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE EXISTS (SELECT 1 FROM chunks WHERE item_pk = OLD.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
+    END;
+  `);
 }
 function createConnectorStoreChunkMediaReleases(db) {
   db.exec(`
@@ -16199,6 +16820,8 @@ function validateConnectorStoreSchema(db) {
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
   assertExactTableColumns(db, "media_judgments", [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, "v14");
   assertIndexColumns(db, "idx_connector_store_media_judgments_unapplied", ["media_sha256"], "v14");
+  assertExactTableColumns(db, "item_text_versions", ["item_pk", "source_version", "recorded_at"], false, "v14");
+  assertTriggerExists(db, "connector_store_item_text_version_capture", "v14");
 }
 function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
   validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
@@ -16465,6 +17088,9 @@ function createConnectorStoreLocatorIdentityIndex(db) {
     END;
   `);
 }
+function foldLocator(locator) {
+  return locator.normalize("NFC").toLowerCase();
+}
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
@@ -16669,7 +17295,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -16683,6 +17309,7 @@ var init_local_index = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_tier_classifier();
+  init_secret_locations();
   init_tier_placement();
   init_source_ingestion_exclusions();
   init_fts();
@@ -16779,6 +17406,7 @@ var init_local_index = __esm(() => {
     reactionsColumnPresent = false;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
+    itemTextVersionsPresent = false;
     mediaJudgmentsPresent = false;
     mediaHolder;
     stillImageFormatsRead;
@@ -16835,11 +17463,13 @@ var init_local_index = __esm(() => {
           runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
           createConnectorStoreChunkMediaReleases(this.db);
           createConnectorStoreMediaJudgments(this.db);
+          createConnectorStoreItemTextVersions(this.db);
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+        this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       } catch (error) {
@@ -17142,6 +17772,64 @@ var init_local_index = __esm(() => {
             metadata: {},
             fetchedAt: startedAt
           }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+        })();
+      } finally {
+        if (!this.db.inTransaction)
+          this.releaseUnreferencedChunkMedia();
+      }
+    }
+    tombstoneSecretsExtraction(identity, options) {
+      const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
+      try {
+        return this.db.transaction(() => {
+          const disposition = this.exclusions.evaluateMetadata(options.metadata);
+          if (disposition.excluded)
+            return "excluded";
+          if (disposition.disposition === "metadata_only")
+            return "metadata_only";
+          const existing = this.db.query(`
+          SELECT
+            COUNT(*) AS matching_provider_id_rows,
+            SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
+            MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
+          FROM items
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        `).get(normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), identity.provider, identity.accountScope, identity.providerItemId);
+          if (existing.matching_provider_id_rows > 1)
+            return "ambiguous";
+          if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1)
+            return "missing";
+          if (identity.sourceVersion && existing.source_version !== null && existing.source_version !== identity.sourceVersion)
+            return "stale_version";
+          if (options.skipOwner) {
+            const owned = this.db.query(`
+            SELECT 1 AS present FROM item_owners
+            WHERE item_pk = ? AND connector_id = ? AND ownership_kind = ?
+            LIMIT 1
+          `).get(existing.item_pk, options.skipOwner.connectorId, options.skipOwner.ownershipKind);
+            if (owned?.present === 1)
+              return "owned_elsewhere";
+          }
+          if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
+            return "stale_claim";
+          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const startedAt = nowIso();
+          this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 1, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+          this.tombstoneItem({
+            identity,
+            mimeType: "application/octet-stream",
+            content: { kind: "metadata_only" },
+            metadata: {},
+            fetchedAt: startedAt
+          }, options.connectorId, "observed", syncRunId, "S5", true);
+          return "tombstoned";
         })();
       } finally {
         if (!this.db.inTransaction)
@@ -17895,6 +18583,9 @@ var init_local_index = __esm(() => {
         indexedItems: Number(indexed.count)
       };
     }
+    locatorIdentityIndexReady() {
+      return this.locatorIdentityIndexState().completed;
+    }
     locatorIdentityIndexState() {
       const state = this.db.query(`
       SELECT cursor_item_pk, completed
@@ -18027,6 +18718,77 @@ var init_local_index = __esm(() => {
         return;
       return this.activeIdentityForLocator(input);
     }
+    activeItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return [];
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return [];
+      const toRow = (row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : [];
+      const exact = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit).flatMap(toRow);
+      if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder))
+        return exact;
+      const folded = folder.normalize("NFC");
+      const cut = folded.search(/[^\u0000-\u007f]/);
+      const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      const range = head === "" ? { sql: "", params: [] } : {
+        sql: "AND locator.normalized_locator >= ? AND locator.normalized_locator < ?",
+        params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)]
+      };
+      const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+    `);
+      let examined = 0;
+      for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params)) {
+        examined += 1;
+        if (examined > maxCandidates)
+          return [];
+        if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
+          continue;
+        matches.push(...toRow(row));
+        if (matches.length >= input.limit)
+          break;
+      }
+      return matches;
+    }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
       if (!identity)
@@ -18110,6 +18872,10 @@ var init_local_index = __esm(() => {
       const imagesWithoutPicture = readFormats.size > 0;
       const imageMimeSql = readFormats.size === STILL_IMAGE_FORMATS.length ? "LOWER(i.mime_type) LIKE 'image/%'" : `LOWER(i.mime_type) IN (${STILL_IMAGE_FORMATS.filter((format) => readFormats.has(format)).flatMap((format) => [...stillImageMimeTypes(format)]).map((mimeType) => `'${mimeType}'`).join(", ")})`;
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
+      const staleChunksSql = options.includeStaleChunks === true && this.itemTextVersionsPresent ? `OR EXISTS (
+            SELECT 1 FROM item_text_versions v
+            WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version
+          )` : "";
       const query = this.db.query(`
       SELECT
         i.item_pk, i.family, i.provider, i.account_scope, i.provider_item_id,
@@ -18123,6 +18889,7 @@ var init_local_index = __esm(() => {
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${staleChunksSql}
           ${imagesWithoutPicture ? `OR (
             ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
@@ -18171,6 +18938,21 @@ var init_local_index = __esm(() => {
         ...skippedByDisposition > 0 ? { skippedByDisposition } : {},
         ...exhausted ? {} : { nextCursor: String(lastExaminedPk) }
       };
+    }
+    itemTextIsStale(localItemId) {
+      if (!this.itemTextVersionsPresent)
+        return false;
+      const row = this.db.query(`
+      SELECT 1 AS stale
+      FROM items i
+      JOIN item_text_versions v ON v.item_pk = i.item_pk
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        AND v.source_version IS NOT i.source_version
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+      LIMIT 1
+    `).get(localItemId);
+      return row !== null;
     }
     imageFormatReadsPictures(mimeType) {
       const format = stillImageFormatForMimeType(mimeType);
@@ -18500,6 +19282,7 @@ var init_local_index = __esm(() => {
             if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
               this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
             }
+            this.clearItemTextVersion(existing.item_pk);
             itemsUnchanged += 1;
             continue;
           }
@@ -20029,9 +20812,13 @@ var init_local_index = __esm(() => {
         `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(existing.item_pk);
           this.deleteFtsForItem(existing.item_pk);
+          if (tombstoneTrustTier === "S5")
+            this.keepSecretsLocationOnly(existing.item_pk);
           this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
           return true;
         }
+        if (existing && tombstoneTrustTier === "S5")
+          this.keepSecretsLocationOnly(existing.item_pk);
         if (activeOnly)
           return false;
         this.db.query(`
@@ -20047,6 +20834,15 @@ var init_local_index = __esm(() => {
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
         return true;
       })();
+    }
+    keepSecretsLocationOnly(itemPk) {
+      const row = this.db.query("SELECT locator_uri FROM items WHERE item_pk = ?").get(itemPk);
+      this.db.query(`
+      UPDATE items
+      SET title = NULL, search_text = NULL, locator_uri = ?, reactions_json = NULL,
+        sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, authored_at = NULL, updated_at = NULL
+      WHERE item_pk = ?
+    `).run(screenedSecretLocator(row.locator_uri), itemPk);
     }
     rememberItemOwner(itemPk, connectorId, ownershipKind, syncRunId, observedAt, observation) {
       this.db.query(`
@@ -20119,6 +20915,7 @@ var init_local_index = __esm(() => {
       if (text2 === undefined || text2.trim() === "") {
         this.db.transaction(() => {
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
+          this.clearItemTextVersion(itemPk);
           this.refreshFtsForItem(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: true };
@@ -20162,6 +20959,7 @@ var init_local_index = __esm(() => {
           for (const chunk of desired) {
             update.run(chunk.embeddingHash, itemPk, chunk.index, chunk.embeddingHash);
           }
+          this.clearItemTextVersion(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: false };
       }
@@ -20186,9 +20984,15 @@ var init_local_index = __esm(() => {
             insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
           }
         }
+        this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
       })();
       return { chunksIndexed: chunks.length, ftsContentChanged: true };
+    }
+    clearItemTextVersion(itemPk) {
+      if (!this.itemTextVersionsPresent)
+        return;
+      this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(itemPk);
     }
     reseasonItemEmbeddingInputs(itemPk, seasoning) {
       const chunks = this.db.query(`
@@ -21699,7 +22503,9 @@ var init_local_index = __esm(() => {
     "chunk_media_failures",
     "image_media_reads",
     "media_judgments",
-    "idx_connector_store_media_judgments_unapplied"
+    "idx_connector_store_media_judgments_unapplied",
+    "item_text_versions",
+    "connector_store_item_text_version_capture"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -22487,7 +23293,7 @@ class BuiltInSourceEmbeddingProvider {
       return false;
     if (this.picturesHeld())
       return false;
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     const supported = model.kind === "litert" && model.embedder.vision;
     if (!supported && !this.imageSupportWarned) {
       this.imageSupportWarned = true;
@@ -22512,7 +23318,7 @@ class BuiltInSourceEmbeddingProvider {
         throw new BuiltInEmbeddingNotReadyError(this.status());
       }
     }
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     return this.embedLoaded(model, inputs, options.taskType);
   }
   loadedOnly() {
@@ -22532,6 +23338,15 @@ class BuiltInSourceEmbeddingProvider {
         return this.embedLoaded(model, inputs, options.taskType);
       }
     };
+  }
+  async ready() {
+    if (this.loaded)
+      return this.loaded;
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
+    }
   }
   load() {
     if (this.loading)
@@ -22645,7 +23460,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedWithImageVectors(inputs) {
     if (inputs.length === 0)
       return { vectors: [], imageVectors: [] };
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
         return;
@@ -22667,7 +23482,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedImageVectors(images) {
     if (images.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
     }
@@ -22687,7 +23502,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedPromptTexts(texts) {
     if (texts.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert")
       throw new Error("The photo judge needs the LiteRT model.");
     const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
@@ -22911,11 +23726,11 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status) {
+    constructor(status, cause) {
       super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
-      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : `The built-in search model is still being prepared (${status.percent}%).`;
+      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
       this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
     }
   };
@@ -23639,164 +24454,6 @@ var init_tier_rejudge = __esm(() => {
   init_tier_ledger();
 });
 
-// src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash8 } from "node:crypto";
-function sweepOwnerRuleRaises(options) {
-  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
-  const { set } = options;
-  const classification = set.classification();
-  if (!classification || classification.unavailableReason)
-    return report;
-  const ledger = set.ledger;
-  const raising = (classification.rules ?? []).filter(isRaisingRule);
-  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
-  const state = readState(ledger.readMeta(SWEEP_META_KEY));
-  const done = state.done.filter((key2) => keyed.has(key2));
-  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
-  if (pendingKeys.length === 0) {
-    if (done.length !== state.done.length || state.pending)
-      writeState(ledger, { done });
-    return report;
-  }
-  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
-  const resume = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending.after : undefined;
-  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
-  for (const record of rows) {
-    report.scanned += 1;
-    try {
-      raiseIfMatched(set, record, pendingRules, classification);
-    } catch {
-      continue;
-    }
-  }
-  if (rows.length < limit) {
-    writeState(ledger, { done: [...done, ...pendingKeys] });
-  } else {
-    report.complete = false;
-    writeState(ledger, { done, pending: { rules: pendingKeys, after: identityOf3(rows.at(-1)) } });
-  }
-  return report;
-  function raiseIfMatched(set2, record, rules, inputs) {
-    if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
-      return;
-    const identity = identityOf3(record);
-    if (set2.ledger.getOverride(identity))
-      return;
-    const current2 = set2.ledger.copies(identity).filter((copy) => copy.state === "current");
-    const names = copyServingLayer(current2, "metadata");
-    const domain = names ? set2.domainForCorpus(names.corpusId) : undefined;
-    const exported = domain ? set2.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      return;
-    const signals = storedSignals(exported);
-    const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
-    if (matched.length === 0)
-      return;
-    const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-    const metadataTier = maxTier(record.metadataTier, ruleTier);
-    if (tierRank(metadataTier) <= tierRank(record.metadataTier))
-      return;
-    const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
-      rules: [...inputs.rules ?? []],
-      ...inputs.retirePublic ? { retirePublic: true } : {}
-    });
-    const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-    const contentTier = maxTier(record.contentTier, metadataTier);
-    const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
-    const decision = {
-      metadataTier,
-      contentTier,
-      decidedBy: "owner_rule",
-      reasons: [
-        ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
-        ...record.reasons.filter((reason) => reason.startsWith("content:"))
-      ],
-      state: contentPending ? "pending" : "current",
-      contentRead: record.contentRead,
-      metadataPending: false,
-      contentPending,
-      metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
-      metadataFlagged: record.metadataFlagged,
-      engineVersion: record.engineVersion,
-      mapRevision: record.mapRevision,
-      snifferId: classified.snifferId
-    };
-    if (metadataTier === "secrets") {
-      if (settleRoutedSecrets(set2, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
-        report.secrets += 1;
-      return;
-    }
-    set2.ledger.recordRoutedPlacement(identity, decision, set2.placementFor(decision));
-    report.raised += 1;
-  }
-}
-function isRaisingRule(rule) {
-  return tierRank(rule.tier) > tierRank("private");
-}
-function ruleKey(rule) {
-  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
-}
-function storedSignals(copy) {
-  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-  const title = text2(copy.columns["title"]);
-  const locator = text2(copy.columns["locator_uri"]);
-  const path = locator?.startsWith("/") ? locator : undefined;
-  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
-  let folderKeys = [];
-  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson);
-      if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key2) => typeof key2 === "string");
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId)
-    folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...sender ? { sender } : {}
-  };
-}
-function readState(raw) {
-  if (!raw)
-    return { done: [] };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
-      ...parsed.pending && Array.isArray(parsed.pending.rules) ? { pending: parsed.pending } : {}
-    };
-  } catch {
-    return { done: [] };
-  }
-}
-function writeState(ledger, state) {
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
-}
-function sameKeys(left, right) {
-  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
-}
-function identityOf3(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep";
-var init_tier_rules_sweep = __esm(() => {
-  init_tier_classifier();
-  init_tier_ledger();
-  init_tier_rejudge();
-});
-
 // src/workers/connector-store/tier-override-settle.ts
 function applyOwnerOverrides(options) {
   const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
@@ -23820,7 +24477,7 @@ function applyOwnerOverrides(options) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
@@ -23886,7 +24543,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -23897,6 +24554,253 @@ function identityOf4(record) {
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_tier_rejudge();
+});
+
+// src/workers/connector-store/tier-rules-sweep.ts
+import { createHash as createHash8 } from "node:crypto";
+function sweepOwnerRuleRaises(options) {
+  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
+  const { set } = options;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return report;
+  const ledger = set.ledger;
+  const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
+  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
+  const state = readState(ledger.readMeta(SWEEP_META_KEY));
+  const done = state.done.filter((key2) => keyed.has(key2));
+  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
+  if (pendingKeys.length === 0) {
+    if (done.length !== state.done.length || state.pending)
+      writeState(ledger, { done });
+    return report;
+  }
+  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
+  const progress = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending : undefined;
+  const held = [...progress?.held ?? []];
+  let overflow = progress?.overflow === true;
+  const attempt = (record) => {
+    report.scanned += 1;
+    let raised;
+    try {
+      raised = raiseRoutedItem(set, record, pendingRules, classification);
+    } catch {
+      raised = "deferred";
+    }
+    if (raised === "raised")
+      report.raised += 1;
+    else if (raised === "secrets")
+      report.secrets += 1;
+    else if (raised === "deferred") {
+      if (held.length < MAX_HELD_ITEMS)
+        held.push(identityOf4(record));
+      else
+        overflow = true;
+    }
+  };
+  if (progress?.retry && !progress.overflow) {
+    const retrying = held.splice(0);
+    for (const identity of retrying) {
+      const record = ledger.getCurrent(identity);
+      if (record?.routed)
+        attempt(record);
+    }
+    if (held.length === 0) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+    return report;
+  }
+  const resume = progress?.after;
+  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
+  for (const record of rows)
+    attempt(record);
+  if (rows.length < limit) {
+    if (held.length === 0 && !overflow) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, overflow ? { done } : { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+  } else {
+    report.complete = false;
+    writeState(ledger, {
+      done,
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+    });
+  }
+  return report;
+}
+function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
+  if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return "unchanged";
+  const identity = identityOf4(record);
+  if (set.ledger.getOverride(identity))
+    return "unchanged";
+  const copies = set.ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
+  const signals = { ...exported ? storedSignals(exported) : {}, ...extraSignals };
+  const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
+  if (!exported) {
+    if (copies.length === 0)
+      return "unchanged";
+    return matched.length > 0 || rules.some((rule) => !isLabelRule(rule)) ? "deferred" : "unchanged";
+  }
+  if (matched.length === 0)
+    return "unchanged";
+  const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
+  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  const moving = record.state === "moving";
+  if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
+    return "unchanged";
+  const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
+    rules: [...inputs.rules ?? []],
+    ...inputs.retirePublic ? { retirePublic: true } : {}
+  });
+  const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
+  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
+  const decision = {
+    metadataTier,
+    contentTier,
+    decidedBy: "owner_rule",
+    reasons: [
+      ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...record.reasons.filter((reason) => reason.startsWith("content:"))
+    ],
+    state: contentPending ? "pending" : "current",
+    contentRead: record.contentRead,
+    metadataPending: false,
+    contentPending,
+    metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: classified.snifferId
+  };
+  if (metadataTier === "secrets") {
+    return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
+  }
+  if (moving) {
+    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === "none" ? "unchanged" : "raised";
+  }
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return "raised";
+}
+function storedCopyOf(set, identity, copies) {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+  const ordered = [
+    ...names ? [names] : [],
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported)
+      return exported;
+  }
+  return;
+}
+function isLabelRule(rule) {
+  return rule.match.kind === "label";
+}
+function isRaisingRule(rule) {
+  return tierRank(rule.tier) > tierRank("private");
+}
+function ruleKey(rule) {
+  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+}
+function storedSignals(copy) {
+  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text2(copy.columns["title"]);
+  const locator = text2(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
+function readState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const pending = parsePending(parsed.pending);
+    return {
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
+      ...pending ? { pending } : {}
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function parsePending(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const pending = value;
+  if (!Array.isArray(pending.rules) || !pending.rules.every((key2) => typeof key2 === "string"))
+    return;
+  if (pending.after !== undefined && !isIdentity(pending.after))
+    return;
+  if (pending.held !== undefined && (!Array.isArray(pending.held) || !pending.held.every(isIdentity)))
+    return;
+  if (pending.retry !== undefined && pending.retry !== true)
+    return;
+  if (pending.overflow !== undefined && pending.overflow !== true)
+    return;
+  if (pending.retry === true && (!Array.isArray(pending.held) || pending.held.length === 0))
+    return;
+  return {
+    rules: pending.rules,
+    ...pending.after ? { after: pending.after } : {},
+    ...pending.held ? { held: pending.held } : {},
+    ...pending.retry === true ? { retry: true } : {},
+    ...pending.overflow === true ? { overflow: true } : {}
+  };
+}
+function isIdentity(value) {
+  const record = value;
+  return typeof record === "object" && record !== null && typeof record.provider === "string" && typeof record.accountScope === "string" && typeof record.providerItemId === "string" && (record.providerConversationId === undefined || typeof record.providerConversationId === "string");
+}
+function writeState(ledger, state) {
+  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
+}
+function sameKeys(left, right) {
+  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", MAX_HELD_ITEMS = 200;
+var init_tier_rules_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_override_settle();
   init_tier_rejudge();
 });
 
@@ -24440,6 +25344,7 @@ var init_dropbox2 = __esm(() => {
 });
 // src/core/opsec.ts
 var init_opsec = __esm(() => {
+  init_secret_patterns();
   init_types();
 });
 
@@ -24451,7 +25356,7 @@ var init_evidence_versions = __esm(() => {
 
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -24526,7 +25431,7 @@ var init_analyst = __esm(() => {
 `);
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
   promptEncoder = new TextEncoder;
-  STOP_WORDS = new Set([
+  STOP_WORDS2 = new Set([
     "a",
     "about",
     "also",
@@ -25733,6 +26638,11 @@ var init_drive = __esm(() => {
   FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
 });
 
+// src/workers/connector-store/capture-spool-secrets.ts
+var init_capture_spool_secrets = __esm(() => {
+  init_engine();
+});
+
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
   init_reactions();
@@ -25740,6 +26650,7 @@ var init_reaction_index = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 var init_live_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_reaction_index();
 });
 
@@ -25757,6 +26668,7 @@ var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_P
 var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
@@ -26571,12 +27483,14 @@ class RestGmailApiClient {
   async listMessages(request) {
     const params = new URLSearchParams({
       maxResults: String(request.maxResults),
-      includeSpamTrash: "false"
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
     });
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     if (request.query)
       params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
     const record = asRecord7(json, "Gmail messages list response");
     return {
@@ -27076,6 +27990,7 @@ var init_corpus_adapter4 = __esm(() => {
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
 var init_capture_spool_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
@@ -27090,6 +28005,7 @@ var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync2 = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -27099,48 +28015,6 @@ var init_telegram_messages = __esm(() => {
   init_corpus_adapter4();
   init_capture_spool_connector();
   init_store_sync2();
-});
-
-// src/workers/classification/secret-locations.ts
-var STOP_WORDS2;
-var init_secret_locations = __esm(() => {
-  init_sqlite_migrations();
-  init_engine();
-  STOP_WORDS2 = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "put",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
 });
 
 // src/workers/source-index/status.ts
@@ -27194,7 +28068,6 @@ var init_source_watch = __esm(() => {
     now: () => new Date
   });
 });
-
 // src/workers/dashboard/scheduler-markers.ts
 var OPERATOR_PAUSED_SCHEDULER_MARKERS;
 var init_scheduler_markers = __esm(() => {
@@ -27324,7 +28197,10 @@ var init_vocabulary = __esm(() => {
     diskFreeUpUnknown: "Free up some space, then Try again.",
     fixOnMac: "Open Olympus on your computer to fix this.",
     privateMatches: "Some matching items are private and stay on your computer.",
-    changeModelsOnMac: "Change models in Olympus on your computer."
+    changeModelsOnMac: "Change models in Olympus on your computer.",
+    googleSigninMoved: "Google sign-in now happens on your computer. Reconnect once to switch.",
+    reconnectGoogle: "Reconnect Google",
+    googleConnectingOnServer: "Waiting for you to finish signing in… If Google ends on a page that does not load, copy its address and run olympus connect finish '<address>' on the server."
   };
   DASHBOARD_CHATGPT_CONNECTION_COPY = {
     not_connected: {
@@ -28010,6 +28886,7 @@ var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_P
 var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
   init_google_signin_full_copy();
+  init_publisher_oauth_client();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -32717,6 +33594,7 @@ var init_gmail_live_control = __esm(() => {
 var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_rules_sweep();
   init_embeddings();
   init_gmail();
   init_gmail_live_control();
@@ -33494,7 +34372,8 @@ class DropboxExtractionSource {
       return { candidates: [], done: true };
     const readerOptions = {
       limit: options.limit,
-      withoutChunksOnly: true
+      withoutChunksOnly: true,
+      includeStaleChunks: true
     };
     if (options.cursor !== undefined)
       readerOptions.cursor = options.cursor;
@@ -33895,6 +34774,7 @@ init_bounded_text();
 init_command_runner();
 init_pdf_render();
 init_zkapi_consult_settings();
+init_engine();
 var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
   "Extract concise evidence text from this secure-local document for private indexing.",
   "Return only visible or directly readable content.",
@@ -33959,6 +34839,7 @@ init_tier_classifier();
 init_bounded_text();
 
 // src/workers/file-extraction/store-sink.ts
+init_engine();
 init_tier_classifier();
 init_source_ingestion_exclusions();
 init_connector_store();
@@ -33970,12 +34851,14 @@ var EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous";
 var EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only";
 var EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued";
 var EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
+var EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale";
 var EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
 
 // src/workers/file-extraction/runner.ts
 var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
   [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
+  [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: "failed_terminal",
   [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
@@ -34003,6 +34886,7 @@ var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 init_types();
 init_engine();
 init_tier_classifier();
+init_tier_ledger();
 init_tiered_store_set();
 
 // src/workers/connector-store/tiered-extraction.ts

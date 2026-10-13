@@ -1,5 +1,6 @@
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { GOOGLE_SIGNIN_FULL_SENTENCE } from '../core/google-signin-full-copy.ts';
+import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
@@ -24,6 +25,7 @@ import type {
   SovereigntyProfileProvider,
 } from '../core/sovereignty.ts';
 import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './credential-broker/connected-handles.ts';
+import { WHATSAPP_UNOFFICIAL_CLIENT_NOTICE } from '../core/whatsapp-notice.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './dashboard/scheduler-markers.ts';
 import { sourceFailureKind, sourceFailureRef, type SourceFailureKind } from './dashboard/source-failure.ts';
 import {
@@ -372,7 +374,7 @@ export interface DashboardSourceRun {
   duration_seconds?: number;
   items_seen: number;
   items_indexed: number;
-  /** Provider traversal truth; false means this bounded pass did not finish the walk. */
+  /** Provider traversal truth; false means this bounded pass did not finish the walk. Absent when the source reports no walk (the card then settles on its other evidence). */
   traversal_complete?: boolean;
 }
 
@@ -917,6 +919,13 @@ export interface DashboardSourceCard {
      * chat sources) and for a card that is not connected at all.
      */
     connected_at?: string;
+    /**
+     * A working Google connection that still refreshes through Olympus's
+     * legacy token exchange, while new sign-ins run on this computer (owner,
+     * 2026-10-13). Nothing is forced: the panel offers Reconnect Google once,
+     * and the new connection uses the Desktop client.
+     */
+    google_signin_moved?: true;
     /** Present only for a locally connected broker-backed v0.4 source. */
     disconnect?: DashboardDisconnectAction;
     /** Present only for a paired-session source that currently reads paired. */
@@ -1692,6 +1701,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
       source: 'whatsapp',
       instructions: [
         'WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).',
+        WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
         'Ask your agent to start WhatsApp pairing; this card updates once the scan completes.',
       ],
     },
@@ -2448,6 +2458,8 @@ function sourceCardFromDefinition(
     baseConnection.state = 'reauth_required';
     baseConnection.label = 'Reconnect Google to continue syncing';
     if (baseConnection.action.kind === 'oauth') baseConnection.action.label = 'Reconnect Google';
+  } else if (googleSignInMoved(definition, registry, baseConnection.state)) {
+    baseConnection.google_signin_moved = true;
   }
   // Two custody controls, never both on one row. A paired session gets Unpair,
   // which removes the session this computer holds and is the only act that
@@ -4097,6 +4109,23 @@ function providerRefusalReason(
     : `${refusal} — check the redirect URI registered on the provider app, then try again`;
 }
 
+/**
+ * Whether a connected Gmail or Drive card should offer the move to sign-in on
+ * this computer: a Desktop client is configured, and a live handle still
+ * refreshes through the legacy publisher exchange.
+ */
+function googleSignInMoved(
+  definition: DashboardSupportedSourceDefinition,
+  registry: ConnectedHandleRegistry | undefined,
+  state: DashboardConnectionState,
+): boolean {
+  if (definition.provider !== 'gmail' && definition.provider !== 'google_drive') return false;
+  if (state === 'not_connected' || state === 'needs_setup' || state === 'reauth_required' || state === 'awaiting_consent') return false;
+  if (!googleDesktopClient()) return false;
+  return handlesForDefinition(definition, registry).some((handle) =>
+    !isRetiredGoogleHandle(handle) && handle.oauth2Refresh?.exchangeVia === 'publisher_endpoint');
+}
+
 function handlesForDefinition(
   definition: DashboardSupportedSourceDefinition,
   registry: ConnectedHandleRegistry | undefined,
@@ -4508,14 +4537,34 @@ function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined)
   return output;
 }
 
+/**
+ * Whether the metadata walk of this source finished, from what its sync tasks
+ * last reported; undefined when they say nothing either way.
+ *
+ * A task speaks through `traversal_complete`, or, for X bookmarks, whose
+ * reconcile walks the provider's whole list and reports no such counter,
+ * through its own `global_traversal_exhausted`. 1 means that walk finished and
+ * 0 means it did not. A task that has not reported at all has not finished a
+ * pass, so the answer is no. A task that reported but carries neither counter
+ * (Telegram's spool pull has no provider walk; X's head sync is not the walk)
+ * takes no part: a missing counter is "unknown", never "not finished", or the
+ * source would read as still listing for as long as it runs. The answer is
+ * derived on every read from the last counts, so a source whose counts were
+ * stored before this rule is not stuck on an old verdict.
+ */
 function metadataTraversalCompleteFromSchedulers(
   schedulers: readonly SourceSchedulerSourceStatus[],
 ): boolean | undefined {
   const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'sync'));
   if (tasks.length === 0) return undefined;
-  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
-  if (signals.some((value) => typeof value !== 'number' || !Number.isFinite(value))) return false;
-  return signals.every((value) => value === 1);
+  const walks: boolean[] = [];
+  for (const task of tasks) {
+    if (!task.last_result) return false;
+    const signal = [task.last_result.counts?.traversal_complete, task.last_result.counts?.global_traversal_exhausted]
+      .find((value): value is number => typeof value === 'number' && Number.isFinite(value));
+    if (signal !== undefined) walks.push(signal === 1);
+  }
+  return walks.length === 0 ? undefined : walks.every(Boolean);
 }
 
 function freshnessFrom(

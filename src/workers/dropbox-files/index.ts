@@ -1,5 +1,6 @@
 export {
   createDropboxSourceConnector,
+  type DropboxDeletedDescendant,
   type DropboxDeletedItemIdentityResolver,
   type DropboxSourceConnectorOptions,
 } from './connector.ts';

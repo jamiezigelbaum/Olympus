@@ -203,7 +203,7 @@ describe('pilot installation entry points', () => {
   test('the posture is never a pick-list before the explanation and privacy conversation', () => {
     const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const rule = document.indexOf('**No pick-list before the explanation — question tools included.**');
-    const explanation = document.indexOf('**Required user-facing four-tier explanation.**');
+    const explanation = document.indexOf('**Required user-facing tier explanation.**');
     expect(rule).toBeGreaterThan(0);
     expect(rule).toBeLessThan(explanation);
     const text = document.slice(rule, explanation).replace(/\s+/g, ' ');

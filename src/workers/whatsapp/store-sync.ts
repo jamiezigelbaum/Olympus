@@ -21,9 +21,15 @@ import {
 } from '../connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
+  clearCaptureSpoolSecrets,
+  type CaptureSpoolRedactionResult,
+} from '../connector-store/capture-spool-secrets.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import {
   WHATSAPP_LIVE_CONNECTOR_ID,
   createWhatsAppLiveSourceConnector,
   readWhatsAppLiveSpoolStatus,
+  redactWhatsAppLiveSpoolSecrets,
 } from './live-connector.ts';
 
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
@@ -50,6 +56,9 @@ export const WHATSAPP_MALFORMED_SPOOL_WARNING = 'whatsapp_malformed_spool_lines'
 export const WHATSAPP_UNRESOLVED_REACTIONS_WARNING = 'whatsapp_unresolved_reaction_targets';
 export const WHATSAPP_CAPTURE_STALE_WARNING = 'whatsapp_capture_spool_stale';
 export const WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = 'whatsapp_capture_freshness_unavailable';
+export const WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = 'whatsapp_spool_secret_redaction_failed';
+// Where the full-spool Secrets pass stands, kept in the set's tier ledger.
+export const WHATSAPP_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:whatsapp';
 const DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS = 64_800;
 
 export interface WhatsAppConnectorStoreSyncReceipt {
@@ -69,6 +78,11 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     capture_unavailable: number;
     capture_stale_threshold_seconds: number;
     capture_age_seconds?: number;
+    /**
+     * Spool lines whose message was judged Secrets and that this pull
+     * rewrote without their text (blanked ones included).
+     */
+    spool_records_redacted: number;
   } & TieredLaneReceiptCounts;
   capture: {
     status: 'fresh' | 'stale' | 'unavailable';
@@ -214,6 +228,8 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   spoolStaleThresholdSeconds?: number;
   now?: () => Date;
   env?: Record<string, string | undefined>;
+  /** Where the bridge saves audio, deleted for a Secret message. */
+  mediaDir?: string;
   /**
    * The lane's per-tier stores (createWhatsAppTierLane), whose secure leg is
    * `store`. Absent: the single-store lane exactly as before.
@@ -223,6 +239,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultWhatsAppSpoolDir(env);
   const account = options.account?.trim() || WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
+  const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
   const connector = {
     ...createWhatsAppLiveSourceConnector({ spoolDir, account }),
     // The private drain retains WHATSAPP_LIVE_CONNECTOR_ID until it is retired
@@ -262,10 +279,33 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
       };
       let run: ConnectorStoreSyncSummary;
       let tiered: TieredLaneReceiptCounts = {};
+      let redacted: CaptureSpoolRedactionResult | undefined;
+      let redactionFailed = false;
       if (tierSet) {
         const setRun = await tierSet.sync(connector, sync);
         run = mergedTieredLaneRun(setRun, 'secure_local').sync;
         tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
+        // Every line the set has now committed past was judged. Any whose
+        // message is Secrets loses its text and audio here, and a whole-spool
+        // pass runs when the set of Secrets changed. The stores already hold
+        // none of it; a failure is reported and retried on the next pull.
+        try {
+          redacted = clearWhatsAppSpoolSecrets({
+            spoolDir,
+            account,
+            mediaDir,
+            ledger: tierSet.ledger,
+            ...(cursor ? { from: cursor } : {}),
+            through: sanitizeWhatsAppLiveCursor(
+              tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined,
+            ),
+          });
+        } catch (error) {
+          redactionFailed = true;
+          console.error(
+            `[olympus:whatsapp] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
+          );
+        }
       } else {
         run = await options.store.syncFromConnector(connector, sync);
       }
@@ -275,6 +315,8 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
         now().getTime(),
         staleThresholdSeconds,
         tiered,
+        redacted,
+        redactionFailed,
       );
     },
 
@@ -284,12 +326,41 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   };
 }
 
+/**
+ * Clear the Secrets out of the spool lines the set has committed past
+ * (connector-store/capture-spool-secrets.ts), and the audio they saved.
+ */
+export function clearWhatsAppSpoolSecrets(options: {
+  spoolDir: string;
+  account: string;
+  mediaDir?: string;
+  ledger: TierLedger;
+  from?: string;
+  through: string | undefined;
+}): CaptureSpoolRedactionResult {
+  return clearCaptureSpoolSecrets({
+    ledger: options.ledger,
+    stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
+    ...(options.from ? { from: options.from } : {}),
+    through: options.through,
+    redact: (window, judge) => redactWhatsAppLiveSpoolSecrets({
+      spoolDir: options.spoolDir,
+      account: options.account,
+      ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
+      ...window,
+      judge,
+    }),
+  });
+}
+
 function whatsappSyncReceipt(
   run: ConnectorStoreSyncSummary,
   spool: ReturnType<typeof readWhatsAppLiveSpoolStatus>,
   nowMs: number,
   staleThresholdSeconds: number,
   tiered: TieredLaneReceiptCounts = {},
+  redacted?: CaptureSpoolRedactionResult,
+  redactionFailed = false,
 ): WhatsAppConnectorStoreSyncReceipt {
   const capture = whatsappCaptureFreshness(spool.newestMessageTimestamp, nowMs, staleThresholdSeconds);
   const warnings = [
@@ -297,6 +368,7 @@ function whatsappSyncReceipt(
     ...(spool.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : []),
     ...(capture.status === 'stale' ? [WHATSAPP_CAPTURE_STALE_WARNING] : []),
     ...(capture.status === 'unavailable' ? [WHATSAPP_CAPTURE_UNAVAILABLE_WARNING] : []),
+    ...(redactionFailed ? [WHATSAPP_SPOOL_REDACTION_FAILED_WARNING] : []),
   ];
   const progressed = run.itemsChanged > 0 || run.itemsTombstoned > 0;
   return {
@@ -316,6 +388,7 @@ function whatsappSyncReceipt(
       capture_unavailable: capture.status === 'unavailable' ? 1 : 0,
       capture_stale_threshold_seconds: capture.threshold_seconds,
       ...(capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {}),
+      spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered,
     },
     capture,

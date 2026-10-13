@@ -304,6 +304,26 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('connect finish is on the public surface and checks the pasted address before calling the engine', async () => {
+    const result = await runBinExit(['connect', 'finish', 'https://evil.example/oauth/callback/gmail?code=c&state=s']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).not.toContain('Unknown command:');
+    expect(`${result.stdout}${result.stderr}`).toContain('not an Olympus sign-in address');
+  }, 30_000);
+
+  test('connect finish sends the pasted callback to the port worker.env gives the engine', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-connect-finish-'));
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), 'OLYMPUS_EMAIL_SOURCE_PORT=1\n', { mode: 0o600 });
+      const result = await runBinExit(['connect', 'finish', 'http://127.0.0.1:8010/oauth/callback/gmail?code=c&state=s'], { HOME: home });
+      expect(result.code).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).toContain('Olympus did not answer at http://127.0.0.1:1');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('every declared public leaf command has non-executing help', async () => {
     for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
       const result = await runBinExit([...command.split(' '), '--help']);
@@ -1356,6 +1376,44 @@ describe('CLI tool surface', () => {
       expect(existsSync(path)).toBe(true);
       expect(JSON.parse(stdout)).toMatchObject({ ok: true, preset: 'no-sensitive', schemaVersion: 1 });
       expect(JSON.parse(readFileSync(path, 'utf8')).routes.secure_local.mode).toBe('disabled');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('sovereignty init --force keeps the Public tier of a policy written before 1.0', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-sovereignty-public-'));
+    const path = join(dir, 'sovereignty.json');
+    try {
+      const older = JSON.parse(readFileSync(join(process.cwd(), 'config/sovereignty/presets/local-first.json'), 'utf8'));
+      older.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+      older.retrieval.trustDomains.public_safe = {
+        minimumExecutionTrust: 'standard_cloud',
+        allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding',
+        allowCloudQuery: true,
+        activationMode: 'hybrid_shadow',
+      };
+      writeFileSync(path, JSON.stringify(older));
+      const proc = Bun.spawn([
+        process.execPath, 'src/cli.ts', 'sovereignty', 'init', '--preset', 'local-only', '--path', path, '--force',
+      ], {
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH ?? '' },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (code !== 0) throw new Error(stderr || stdout);
+
+      const written = JSON.parse(readFileSync(path, 'utf8'));
+      expect(written.routes.secure_local.pool.members).toEqual(['local-source-answer']);
+      expect(written.routes.public_safe).toEqual(written.routes.internal);
+      expect(written.retrieval.trustDomains.public_safe).toEqual(written.retrieval.trustDomains.internal);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

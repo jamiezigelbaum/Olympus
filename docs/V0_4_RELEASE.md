@@ -168,6 +168,19 @@ testers have exercised the normal product journey without custom engineering.
   uses that connection, with the same xAI account. Grok Bot's own sign-in (as
   Cursor's pinned client), Muse and the Grok API key path stay after 1.0.
 
+- **2026-10-13 — The launch release is `1.0.0`.** Owner decision: the next
+  release from `main`, planned as rc.7, ships as `1.0.0`. It is the version
+  the site serves when the launch post, video and website go out. There is no
+  `1.0.0-rc.7`. The ChatGPT directory listing under review carries
+  `1.0.0-rc.3` (submitted 2026-10-11) and stays as it is, because uploading a
+  new listing version cancels the review and starts another. The listing is
+  the connection settings, skills and icon, not the engine; users install
+  whatever version the site serves. The listing takes the then-current version
+  with its next upload (the logo change after approval). Version numbers after
+  `1.0.0` follow
+  [Version numbers and releases](ENGINEERING_PROCESS.md#version-numbers-and-releases).
+  Supersedes the directory sentence in the 2026-10-01 entry below.
+
 - **2026-10-12 — Linux parity, Omarchy first.** Owner decision: Olympus
   itself runs on Linux with the Mac's capabilities (scan and image text,
   photo content, transcription, built-in private model, confined zkAPI lane,
@@ -257,7 +270,9 @@ testers have exercised the normal product journey without custom engineering.
   standalone engine, the ChatGPT plugin, the relay and the Personal / Private
   / Secret privacy model ship as Olympus 1.0, not as further 0.4 betas. The
   0.4 beta line ends at beta.11. Test builds are `1.0.0-rc.N`; `1.0.0` is
-  the version submitted to the ChatGPT plugin directory. This plan becomes the
+  the version submitted to the ChatGPT plugin directory (superseded
+  2026-10-13: the directory got `1.0.0-rc.3`; `1.0.0` is the launch release
+  on the site). This plan becomes the
   v1 plan (file rename and AGENTS.md pointer to follow with the integration
   merge).
 

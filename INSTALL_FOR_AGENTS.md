@@ -527,7 +527,7 @@ what each posture means for THEIR data, what it requires, and its trade-off
 **No pick-list before the explanation — question tools included.** Never ask
 the posture as a multiple-choice question, a pick-list, or a choice in a
 question tool (OpenClaw's Ask User tool, a button prompt, or similar) until
-all three have happened in chat, in this order: the required four-tier
+all three have happened in chat, in this order: the required tier
 explanation below was delivered in full, the privacy conversation ran and
 the operator confirmed what you read back, and the four-option posture walkthrough was
 delivered in full. A question tool is a way to collect the answer after that,
@@ -536,7 +536,7 @@ plain-language description from the walkthrough (for example "Venice —
 Private content goes only to Venice"), never a bare preset id and never a
 compressed menu such as "Local, cloud, local only…".
 
-**Required user-facing four-tier explanation.** Deliver this entire block
+**Required user-facing tier explanation.** Deliver this entire block
 before asking any privacy or posture question. The point of each tier is
 what happens *differently* to data in it — never present a tier as a bare list of
 category examples. This message both explains the model and opens the
@@ -545,14 +545,12 @@ privacy conversation:
 > Here's how Olympus treats your data — then you'll tell me about your
 > preferences.
 >
-> Olympus sorts everything it indexes into four tiers:
->
-> **Public** — things that are public or meant to be: your published
-> writing, posts, public links. Any model can work with these.
+> Olympus sorts everything it indexes into three tiers:
 >
 > **Personal** — ordinary personal and work life: schedules, newsletters,
-> routine email, most projects. Your assistant's regular models can reason
-> over this — the same models you'd paste it into today.
+> routine email, most projects, and anything you've published. Your
+> assistant's regular models can reason over this — the same models you'd
+> paste it into today.
 >
 > **Private** — the things you'd only tell someone you trust: health, money,
 > legal matters, therapy, your family. This tier is the reason Olympus
@@ -600,9 +598,9 @@ which lane?"
 Reflect back what you heard before moving on — in sentences, in the
 operator's own words, never as a `tier: item, item, item` cram-list:
 
-> Here's what I heard. Your blog and anything you've published stays
-> Public. Day-to-day email, calendars, and work projects are Personal —
-> your regular assistant keeps working with those like it does now.
+> Here's what I heard. Day-to-day email, calendars, work projects, and
+> your blog and anything you've published are Personal — your regular
+> assistant keeps working with those like it does now.
 > Anything about your health, your finances, and your kids gets the
 > Private treatment we just talked about. And passwords or keys — no model
 > ever sees those. Did I get that right, and is there anything you'd move?
@@ -694,7 +692,7 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
->    nothing; Public and Personal content is indexed by the model built
+>    nothing; Personal content is indexed by the model built
 >    into Olympus.
 >    Trade-off: a real hole in what your assistant can do, in exchange for
 >    maximum caution.
@@ -741,7 +739,7 @@ Then, and only then:
 olympus setup --preset <chosen-preset> --cloud-lane subscription --yes
 ```
 
-`--cloud-lane subscription` answers Public and Personal questions with
+`--cloud-lane subscription` answers Personal questions with
 OpenClaw's own configured default model and its existing auth, through
 `openclaw infer`. It names no model and needs no extra key, and setup puts the
 `openclaw` directory on the worker's PATH. Do not pin a model the operator did
@@ -801,7 +799,7 @@ report "your keys are set up" after the fact.
 
 **Model readiness before keys.** Follow the packaged
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
-before this step. It separates Gemini Public and Personal embeddings, local Private
+before this step. It separates Gemini Personal embeddings, local Private
 embeddings, Venice Private reasoning, and the approved Venice Private embedding
 fallback when no local provider is configured.
 The worker uses registered dimensions for shipped models when there is no
@@ -1464,7 +1462,7 @@ model as Needs you or Not working; in the headless fallback, use the provider-sp
 readiness checks documented in Step 3. Then prove the worker consumes that wiring with the existing
 `olympus doctor` and `olympus worker status` checks. The receipt must name:
 
-- **Gemini — every posture.** Its wiring is for Public and Personal
+- **Gemini — every posture.** Its wiring is for Personal
   embeddings. Gemini is not the Private-answer provider and is never a Private
   embedding requirement.
 - **Venice — only when the posture uses it.** `local-first` uses Venice as
@@ -1502,7 +1500,7 @@ Give the operator this honest summary in the same final reply, immediately
 before the source handoff, adapting only the observed facts:
 
 > Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
-> for Public and Personal embeddings: `<verified or still open>`.
+> for Personal embeddings: `<verified or still open>`.
 > Venice Private-answer and Private-embedding wiring, reported separately:
 > `<verified, not required for this posture, or
 > still open>`. Privacy classifier: `<approved, declined, refused (reason),
@@ -1973,10 +1971,11 @@ finds Private evidence is answered by that private lane and only its checked,
 derived answer comes back. On `no-sensitive` the answer notes that Private
 sources were not searched. Answers also report breadth per source (for
 example "50+ items, 17 in evidence"); the evidence count is not the total.
-Evidence that is only Public or Personal goes to OpenClaw's default model. If
-that lane fails, the error and the worker log carry a readable reason
-(missing auth for the model, an unknown model, or the OpenClaw CLI not found
-on the worker PATH); fix that named cause rather than pinning another model.
+Evidence that is only Personal (or Public, on an install made before 1.0)
+goes to OpenClaw's default model. If that lane fails, the error and the
+worker log carry a readable reason (missing auth for the model, an unknown
+model, or the OpenClaw CLI not found on the worker PATH); fix that named
+cause rather than pinning another model.
 
 The private source worker lane is on by default, so a fresh install
 should not see `email_not_configured` at all. If it does, the lane was
@@ -2010,7 +2009,7 @@ the worker only if it reports `resolved_restart_required`);
 report semantic search skipped for `embedding_provider_unavailable`.
 The dashboard shows a credential alert for the same condition — it
 should be absent. Then show the operator Olympus in OpenClaw: source freshness
-and where Public, Personal, Private, and Secrets are allowed to go. Use
+and where Personal, Private, and Secrets are allowed to go. Use
 `olympus dashboard` when standalone access is needed.
 
 End with the required Step 6 dashboard link and connect/monitor instructions.
@@ -2060,7 +2059,7 @@ the step is DONE, not broken.
    a bare menu of preset names.** The plain-language walkthrough in Step 2
    is part of the gate; the operator decides only after hearing what each
    posture means for their data. A question tool or pick-list is allowed
-   only after the four-tier explanation, the privacy conversation and
+   only after the tier explanation, the privacy conversation and
    the posture walkthrough have all been delivered in chat, and its labels
    are the plain-language descriptions, never preset ids.
 2. **Never echo, log, or store secrets in plain text.** Keys go through

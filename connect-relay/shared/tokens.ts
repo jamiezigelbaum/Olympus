@@ -85,6 +85,12 @@ const PATTERN: Record<CredentialKind, RegExp> = {
 export const HANDOFF_PATH_PREFIX = '/go/';
 
 /**
+ * The relay's own page that takes a Google sign-in hand-off to the engine on
+ * the owner's computer (connect-relay/server/signin-bridge.ts).
+ */
+export const SIGNIN_BRIDGE_PATH = '/connect/signin';
+
+/**
  * The install a provider sign-in's bounced callback belongs to, when the
  * engine started it for ChatGPT: its signed `state` names a nonce of the form
  * `<installId>_<random>` (src/core/oauth-relay.ts). The relay reads only that

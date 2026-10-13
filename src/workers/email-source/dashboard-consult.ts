@@ -46,6 +46,7 @@
  *     returns at once; `status` carries where each program was found and the
  *     install's progress. It writes no setting and touches no wallet or key.
  */
+import { delimiter, dirname } from 'node:path';
 import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
   CONSULT_LEVEL_FOR_REPAIR,
@@ -285,12 +286,19 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         return { tool: entry.tool, label: entry.label, source: 'outdated', installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
+      // The Setup steps type this program in Terminal. Olympus's install is on
+      // no PATH, and a copy in a standard folder may not be either, so each
+      // names where it runs from; a copy on PATH is typed by its bare name.
+      const executable = entry.installed
+        ? entry.executable
+        : system && !(env.PATH ?? '').split(delimiter).includes(dirname(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
         source: entry.installed ? 'olympus' : system ? 'system' : entry.offered ? 'missing' : 'not_offered',
         version: entry.version,
         offered: entry.offered,
+        ...(executable ? { executable } : {}),
       };
     });
   });

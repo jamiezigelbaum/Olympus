@@ -30,11 +30,11 @@ import {
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
-import type { TierCopy, TierPlacementPlan } from '../classification/tier-ledger.ts';
+import { placementIsRaise, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
-import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
+import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
   TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
@@ -46,6 +46,7 @@ import {
   EXTRACTION_SINK_SKIPPED_SECRETS,
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
   createConnectorStoreExtractionSink,
+  extractionWriteClaim,
   planExtractionSinkWrite,
 } from './store-sink.ts';
 import type {
@@ -102,6 +103,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ...(options.claims ? { claims: options.claims } : {}),
       ...(tierClassification ? { tierClassification } : {}),
       ...(recordContentTier ? {} : { recordContentTier: false }),
+      // A routed landing has judged the text already (classifyContentTier)
+      // and settles Secrets through the ledger; a legacy one has not.
+      ...(contentRulesRan ? { secretsFloor: false } : {}),
       ...(contentRulesRan ? { mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256) } : {}),
     });
 
@@ -121,7 +125,36 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if (!ledger.isRouted(identity)) {
         const legacy = legacyStoreFor(set, ref.localItemId, options.home);
         if (!legacy) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        return sinkFor(legacy, true, classificationNow(), false).accept(request);
+        // Read before the landing: a Secret's row keeps no names afterwards.
+        const legacyPlan = planExtractionSinkWrite(legacy, request);
+        const legacyScope = legacy.activeLocalItemRow(ref.localItemId)?.sourceScope;
+        const result = await sinkFor(legacy, true, classificationNow(), false).accept(request);
+        if (result.skippedReason === EXTRACTION_SINK_SKIPPED_SECRETS && !('skippedReason' in legacyPlan)) {
+          // The plain sink settled its own store's copy. Another legacy leg
+          // may hold the same item, and no ledger row hides an unrouted copy,
+          // so every one of them is settled the same way, each fenced by its
+          // own store's accepted grant so an older generation never removes
+          // a newer one's copy; the location is recorded where the set keeps
+          // Secrets locations.
+          const writeClaim = extractionWriteClaim(request);
+          for (const domain of TIER_DOMAIN_ORDER) {
+            const other = set.legSpec(domain)?.legacy === true ? set.store(domain) : undefined;
+            if (!other || other === legacy) continue;
+            settleUntrackedSecretsCopy({
+              store: other,
+              identity: legacyPlan.item.identity,
+              connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+              metadata: legacyPlan.item.metadata,
+              ...(writeClaim ? { writeClaim } : {}),
+            });
+          }
+          const names = ledger.getCurrent(identity)?.metadataTier;
+          recordSecret(set, legacyPlan.item, request.text, {
+            namesReleasable: names === 'public' || names === 'private',
+            sourceScope: legacyScope,
+          });
+        }
+        return result;
       }
 
       const record = ledger.getCurrent(identity);
@@ -216,8 +249,25 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
 
       if (record.contentRead) {
         // Text already landed once: a re-judgment. Same stores: enrich the
-        // content copy in place. Different stores: queue the move, write nothing.
+        // content copy in place. Different stores: queue the move.
         if (!samePlacement(current, placement)) {
+          if (!placementIsRaise(current, placement.copies)) {
+            // A LOWERING move copies whatever the source store holds, and the
+            // verdict just reached judged THIS text. If the file was edited,
+            // the store still holds the older text, which the new verdict
+            // never judged (it may be Private and about to reach a store that
+            // may be shared). So the text in hand first replaces the old
+            // where the content already rests, which stays at least as
+            // private as the old; the queued move then carries the text the
+            // verdict is about. A raise needs no such step: it only moves
+            // content to a more private store.
+            const resting = current.find((copy) => copy.layers !== 'metadata');
+            const restingDomain = resting ? set.domainForCorpus(resting.corpusId) : undefined;
+            const restingStore = restingDomain ? set.store(restingDomain) : undefined;
+            if (!restingStore) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+            const replaced = await sinkFor(restingStore, false, tierClassification, true).accept(request);
+            if (!replaced.accepted) return replaced;
+          }
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
