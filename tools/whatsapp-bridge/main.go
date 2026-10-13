@@ -211,11 +211,61 @@ func configureDeviceIdentity() {
 }
 
 func main() {
-	pairOnly := flag.Bool("pair-only", false, "pair or verify the linked device, then exit without capturing messages")
-	captureApproved := flag.Bool("capture-approved", false, "require and enforce an explicitly approved chat scope")
-	flag.Parse()
+	if err := run(os.Args[1:], defaultBridgeDeps()); err != nil {
+		log.Fatalf("olympus-whatsapp-bridge: %v", err)
+	}
+}
+
+// bridgeDeps are the entry points run dispatches to. main wires the real ones;
+// tests substitute recorders so flag handling is provable without a provider
+// connection.
+type bridgeDeps struct {
+	pairOnly func(stateDir string, container *sqlstore.Container) error
+	native   func(stateDir, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error)
+	manual   func(stateDir, spoolDir string, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string)
+	wait     func(client *whatsmeow.Client, writer *spoolWriter, fatalEvents chan string)
+}
+
+func defaultBridgeDeps() bridgeDeps {
+	return bridgeDeps{
+		pairOnly: runPairOnlyMode,
+		native: func(stateDir, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error) {
+			return startNativeCapture(stateDir, spoolDir, native, allowed, container, newWhatsmeowClient)
+		},
+		manual: startManualPairing,
+		wait:   runUntilExit,
+	}
+}
+
+// run parses the command line and starts exactly one mode:
+//
+//	--pair-only         pair or verify the linked device, then exit; never captures
+//	--capture-approved  capture, but only for the chats named in the approved scope
+//	(no flags)          historic manual/native capture of every chat
+//
+// A failed scope load is returned before any state directory, session store, or
+// provider is touched.
+func run(args []string, deps bridgeDeps) error {
+	flags := flag.NewFlagSet("olympus-whatsapp-bridge", flag.ContinueOnError)
+	pairOnly := flags.Bool("pair-only", false, "pair or verify the linked device, then exit without capturing messages")
+	captureApproved := flags.Bool("capture-approved", false, "require and enforce an explicitly approved chat scope")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 	if *pairOnly && *captureApproved {
-		log.Fatal("olympus-whatsapp-bridge: incompatible_modes")
+		return errors.New("incompatible_modes")
+	}
+	var allowed map[string]struct{}
+	if *captureApproved {
+		var err error
+		if allowed, err = approvedCaptureChats(true); err != nil {
+			return err
+		}
+		if allowed == nil {
+			// chatCaptureAllowed treats a nil scope as "everything"; never let an
+			// approved-scope run reach capture without an explicit one.
+			return errors.New("approved_chat_scope_required")
+		}
 	}
 	// The linked-device store and every derivative written by this process are
 	// secret-bearing local state. Keep safe modes even when the daemon is run
@@ -223,40 +273,73 @@ func main() {
 	syscall.Umask(0o077)
 	configureDeviceIdentity()
 
+	if *pairOnly {
+		// Pairing never captures: it ignores the native-capture switch and
+		// creates no spool directory.
+		stateDir, err := resolveStateDir()
+		if err != nil {
+			return err
+		}
+		dbPath := filepath.Join(stateDir, sessionDBName)
+		container, err := openSessionContainer(dbPath)
+		if err != nil {
+			return fmt.Errorf("opening session store %s: %w", dbPath, err)
+		}
+		return deps.pairOnly(stateDir, container)
+	}
+
 	// Resolve the startup mode before touching the state dir, the session
 	// store, or the provider: an unusable native-mode request must fail without
 	// creating state or opening a session.
 	native, err := readNativeCaptureConfig()
 	if err != nil {
-		log.Fatalf("olympus-whatsapp-bridge: %v", err)
+		return err
 	}
 
 	stateDir, err := resolveStateDir()
 	if err != nil {
-		log.Fatalf("olympus-whatsapp-bridge: %v", err)
+		return err
 	}
 	spoolDir := filepath.Join(stateDir, spoolDirName)
 	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
-		log.Fatalf("olympus-whatsapp-bridge: creating spool dir %s: %v", spoolDir, err)
+		return fmt.Errorf("creating spool dir %s: %w", spoolDir, err)
 	}
 
 	dbPath := filepath.Join(stateDir, sessionDBName)
 	container, err := openSessionContainer(dbPath)
 	if err != nil {
-		log.Fatalf("olympus-whatsapp-bridge: opening session store %s: %v", dbPath, err)
+		return fmt.Errorf("opening session store %s: %w", dbPath, err)
 	}
 
 	if native.Active {
-		client, writer, fatalEvents, err := startNativeCapture(stateDir, spoolDir, native, container, newWhatsmeowClient)
+		client, writer, fatalEvents, err := deps.native(stateDir, spoolDir, native, allowed, container)
 		if err != nil {
-			log.Fatalf("olympus-whatsapp-bridge: %v", err)
+			return err
 		}
-		runUntilExit(client, writer, fatalEvents)
-		return
+		deps.wait(client, writer, fatalEvents)
+		return nil
 	}
 
-	client, writer, fatalEvents := startManualPairing(stateDir, spoolDir, container)
-	runUntilExit(client, writer, fatalEvents)
+	client, writer, fatalEvents := deps.manual(stateDir, spoolDir, allowed, container)
+	deps.wait(client, writer, fatalEvents)
+	return nil
+}
+
+// runPairOnlyMode is the --pair-only entry point: it builds a client whose
+// logger can emit only the fixed unsupported-step indicators and runs the
+// pairing flow under a signal-cancelled context, so SIGINT/SIGTERM end it as
+// pairing_cancelled instead of leaving a half-open session.
+func runPairOnlyMode(stateDir string, container *sqlstore.Container) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		writePairingStatus(stateDir, map[string]string{"status": "failed", "reason": "session_store_failed"})
+		return errors.New("session_store_failed")
+	}
+	unsupported := make(chan string, 1)
+	client := newWhatsmeowClient(device, &pairingDiagnosticLogger{stateDir: stateDir, unsupported: unsupported})
+	return runPairOnly(ctx, client, container, stateDir, unsupported)
 }
 
 // openSessionContainer opens (and migrates) the upstream session store. It is
@@ -274,7 +357,7 @@ func newWhatsmeowClient(device *store.Device, logger waLog.Logger) *whatsmeow.Cl
 // startManualPairing is the historic operator path: reuse a paired session, or
 // run QR pairing when the store has no device yet. It returns the fatal-exit
 // channel for the steady-state loop.
-func startManualPairing(stateDir string, spoolDir string, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string) {
+func startManualPairing(stateDir string, spoolDir string, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string) {
 	ctx := context.Background()
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
@@ -288,7 +371,7 @@ func startManualPairing(stateDir string, spoolDir string, container *sqlstore.Co
 
 	fatalEvents := make(chan string, 1)
 	client.AddEventHandler(func(evt any) {
-		handleEvent(ctx, client, audioStore, writer, fatalEvents, nil, evt)
+		handleEvent(ctx, client, audioStore, writer, fatalEvents, nil, allowed, evt)
 	})
 
 	if client.Store.ID == nil {
@@ -682,7 +765,7 @@ type sessionFactory func(device *store.Device, logger waLog.Logger) *whatsmeow.C
 // something to "fix" by starting a login flow a service must not drive. The
 // readiness receipt is published only after the provider has authenticated the
 // reused session and reported Connected.
-func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureConfig, container *sqlstore.Container, newSession sessionFactory) (*whatsmeow.Client, *spoolWriter, chan string, error) {
+func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container, newSession sessionFactory) (*whatsmeow.Client, *spoolWriter, chan string, error) {
 	ctx := context.Background()
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
@@ -705,7 +788,7 @@ func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureCo
 	fatalEvents := make(chan string, 1)
 	markReady := nativeReadinessPublisher(stateDir, native.InstanceID, client.IsLoggedIn, fatalEvents)
 	client.AddEventHandler(func(evt any) {
-		handleEvent(ctx, client, audioStore, writer, fatalEvents, markReady, evt)
+		handleEvent(ctx, client, audioStore, writer, fatalEvents, markReady, allowed, evt)
 	})
 
 	connectWithBackoff(client)
@@ -830,9 +913,16 @@ func connectWithBackoff(client *whatsmeow.Client) {
 
 // --- Event handling ----------------------------------------------------------
 
-func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audioMediaStore, writer *spoolWriter, fatalEvents chan<- string, markReady func(), evt any) {
+// handleEvent routes one provider event. A non-nil allowed scope limits capture
+// to those chats: messages AND reactions both arrive as *events.Message, and an
+// out-of-scope one is dropped before any other work, including the audio
+// download, so nothing about it reaches the spool or the media cache.
+func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audioMediaStore, writer *spoolWriter, fatalEvents chan<- string, markReady func(), allowed map[string]struct{}, evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
+		if !chatCaptureAllowed(v.Info.Chat.String(), allowed) {
+			return
+		}
 		if rec, ok := recordFromMessage(ctx, client, audioStore, v); ok {
 			writer.enqueue(rec)
 		}
