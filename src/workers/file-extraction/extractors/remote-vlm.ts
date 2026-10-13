@@ -33,6 +33,7 @@ import type {
   VlmClient,
 } from '../types.ts';
 import {
+  BOUNDED_TEXT_TRUNCATED_WARNING,
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   IMAGE_MIME_TYPES,
   PDF_MIME_TYPE,
@@ -258,6 +259,11 @@ async function checkPayloadLocally(
   }
   switch (local.status) {
     case 'indexed':
+      // A reading cut short at the text bound was not read whole: a secret
+      // past the cut (or across it) would go unseen, so it counts as unread.
+      if (readingTruncated(local)) {
+        return { kind: 'unread', output: { status: 'failed_terminal', errorKind: REMOTE_SECRET_CHECK_FAILED } };
+      }
       return detectSecretFindingKinds(local.text).length > 0
         ? { kind: 'secret', output: local }
         : { kind: 'clear' };
@@ -269,6 +275,11 @@ async function checkPayloadLocally(
     default:
       return { kind: 'unread', output: { status: 'failed_terminal', errorKind: REMOTE_SECRET_CHECK_FAILED } };
   }
+}
+
+function readingTruncated(output: ExtractorIndexedOutput): boolean {
+  return (output.warnings ?? []).includes(BOUNDED_TEXT_TRUNCATED_WARNING)
+    || (output.derivations ?? []).some((derivation) => (derivation.warnings ?? []).includes(BOUNDED_TEXT_TRUNCATED_WARNING));
 }
 
 function withWarnings(

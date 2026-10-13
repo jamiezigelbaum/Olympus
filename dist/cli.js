@@ -101494,6 +101494,9 @@ async function checkPayloadLocally(reader, input, payload2) {
   }
   switch (local.status) {
     case "indexed":
+      if (readingTruncated(local)) {
+        return { kind: "unread", output: { status: "failed_terminal", errorKind: REMOTE_SECRET_CHECK_FAILED } };
+      }
       return detectSecretFindingKinds(local.text).length > 0 ? { kind: "secret", output: local } : { kind: "clear" };
     case "empty_output":
     case "metadata_only":
@@ -101503,6 +101506,9 @@ async function checkPayloadLocally(reader, input, payload2) {
     default:
       return { kind: "unread", output: { status: "failed_terminal", errorKind: REMOTE_SECRET_CHECK_FAILED } };
   }
+}
+function readingTruncated(output) {
+  return (output.warnings ?? []).includes(BOUNDED_TEXT_TRUNCATED_WARNING) || (output.derivations ?? []).some((derivation) => (derivation.warnings ?? []).includes(BOUNDED_TEXT_TRUNCATED_WARNING));
 }
 function withWarnings(output, warnings) {
   return {

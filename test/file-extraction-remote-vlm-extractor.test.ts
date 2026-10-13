@@ -38,6 +38,7 @@ import {
 } from '../src/workers/file-extraction/extractors/remote-vlm.ts';
 import { createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import { createOcrCapabilityProbe } from '../src/workers/file-extraction/extractors/ocr-capability.ts';
+import { createOcrExtractor } from '../src/workers/file-extraction/extractors/ocr.ts';
 import {
   extractorInput,
   pdfImageOnly,
@@ -381,6 +382,57 @@ describe('remote vlm extractor: the pre-send Secrets check', () => {
     }));
     expect(client.requests).toHaveLength(0);
     expect(thrown).toEqual({ status: 'failed_retryable', errorKind: REMOTE_SECRET_CHECK_FAILED });
+  });
+
+  test('through the real OCR lane: a key the engine reads off the image stops the send', async () => {
+    // The production reader (createOcrExtractor, Vision off as on Linux) with
+    // only the tesseract command stubbed: it is handed the payload file and
+    // prints what it "sees". Everything between the payload and the detector
+    // (temp file, arguments, bounding, settlement) is the shipped code.
+    const seen: string[][] = [];
+    const tesseract = (printed: string): ExtractionCommandRunner => async (request) => {
+      seen.push([request.command, ...request.args]);
+      return { stdout: printed, stderr: '' };
+    };
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const reader = createOcrExtractor({
+      commandRunner: tesseract(`API key\n${STRIPE_LIVE_KEY}\n`),
+      engine: { platform: 'linux', preference: 'tesseract' },
+    });
+    const withheld = await createRemoteVlmExtractor({ client, localReader: reader }).extract(extractorInput({
+      bytes: textBytes('png pixels'),
+      mimeType: 'image/png',
+    }));
+    expect(seen[0]?.[0]).toBe('tesseract');
+    expect(client.requests).toHaveLength(0);
+    expect(withheld.status).toBe('indexed');
+    expect(withheld.warnings).toContain(REMOTE_WITHHELD_SECRET_WARNING);
+
+    // The same lane reading only ordinary text lets the payload go.
+    const clean = createOcrExtractor({
+      commandRunner: tesseract('Corner Cafe\nTotal 3.40\n'),
+      engine: { platform: 'linux', preference: 'tesseract' },
+    });
+    await createRemoteVlmExtractor({ client, localReader: clean }).extract(extractorInput({
+      bytes: textBytes('png pixels'),
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(1);
+  });
+
+  test('a local reading cut short at the text bound is not trusted: a key past the cut is never sent', async () => {
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const reader = createOcrExtractor({
+      commandRunner: async () => ({ stdout: `${'ordinary words '.repeat(20)}\n${STRIPE_LIVE_KEY}\n`, stderr: '' }),
+      engine: { platform: 'linux', preference: 'tesseract' },
+      maxBoundedTextChars: 64,
+    });
+    const result = await createRemoteVlmExtractor({ client, localReader: reader }).extract(extractorInput({
+      bytes: textBytes('png pixels'),
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(0);
+    expect(result).toEqual({ status: 'failed_terminal', errorKind: REMOTE_SECRET_CHECK_FAILED });
   });
 
   test('without a local reader nothing is sent', async () => {
