@@ -64133,10 +64133,15 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "sync"));
   if (tasks.length === 0)
     return;
-  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
-  if (signals.some((value) => typeof value !== "number" || !Number.isFinite(value)))
-    return false;
-  return signals.every((value) => value === 1);
+  const walks = [];
+  for (const task of tasks) {
+    if (!task.last_result)
+      return false;
+    const signal = [task.last_result.counts?.traversal_complete, task.last_result.counts?.global_traversal_exhausted].find((value) => typeof value === "number" && Number.isFinite(value));
+    if (signal !== undefined)
+      walks.push(signal === 1);
+  }
+  return walks.length === 0 ? undefined : walks.every(Boolean);
 }
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
