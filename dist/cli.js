@@ -23972,6 +23972,14 @@ function clearExtractionJobNames(dbPath, item) {
           VALUES (?, ?, ?, ?, ?)
         `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", new Date().toISOString());
       }
+      const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
+      const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
+      if (artifactsTableExists(db)) {
+        db.query(`
+          DELETE FROM extraction_artifacts
+          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
+        `).run(...itemParams);
+      }
       const cleared = item.localItemId !== undefined ? db.query(`
             UPDATE extraction_jobs SET name = NULL
             WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
@@ -23984,6 +23992,9 @@ function clearExtractionJobNames(dbPath, item) {
   } finally {
     closeSqliteStore(db);
   }
+}
+function artifactsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
 }
 function redactionsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
@@ -99045,6 +99056,14 @@ class LocalFileExtractionJobStore {
       return 0;
     this.db.query("DELETE FROM extraction_artifacts WHERE corpus_id = ? AND local_item_id = ?").run(row.corpus_id, row.local_item_id);
     if (derivations.length === 0)
+      return 0;
+    const item = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      localItemId: row.local_item_id
+    };
+    if (itemNameRedacted(this.db, item))
       return 0;
     const insert = this.db.query(`
       INSERT INTO extraction_artifacts (
