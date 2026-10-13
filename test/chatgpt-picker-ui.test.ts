@@ -226,6 +226,40 @@ describe('connect', () => {
     }
   });
 
+  test('a refusal with its own sentence shows it; models_not_ready routes to the opened, focused Models section', async () => {
+    const sentence = "Search isn't ready on your computer yet. Finish setting up models in Olympus on your computer, then try again.";
+    const refused: Result = { content: [{ type: 'text', text: sentence }], structuredContent: { error: 'models_not_ready' }, isError: true };
+    for (const openai of [{}, undefined]) {
+      const host = mount({ openai, serve: { [T.connectSource]: () => refused, olympus_dashboard: () => 'hang' } });
+      host.push({ structuredContent: offDropbox });
+      host.button('Connect').click();
+      await host.settle();
+      expect(host.text()).toContain(sentence);
+      expect(host.text()).not.toContain(Q.connectFailed.replace('{source}', 'Dropbox'));
+      expect(host.hasButton(Q.tryAgain)).toBe(true);
+      expect(host.win.document.activeElement?.getAttribute('data-key')).toBe('picker:connect:models');
+      host.button(Q.goToModels).click();
+      await host.settle();
+      const models = host.win.document.querySelector('details[data-open-key="models"]') as unknown as HTMLDetailsElement;
+      expect(models.open).toBe(true);
+      expect(host.win.document.activeElement?.getAttribute('data-key')).toBe('summary:models');
+      expect(host.text()).not.toContain(sentence);
+      // Leaving for Models is not a Cancel: no re-read was asked for.
+      expect(host.toolCalls('olympus_dashboard')).toEqual([]);
+    }
+  });
+
+  test('another refusal sentence (sign-in full) shows as is, with Try again and no Models route', async () => {
+    const sentence = 'Google sign-in is full right now.';
+    const host = mount({ openai: {}, serve: { [T.connectSource]: () => ({ content: [{ type: 'text', text: sentence }], structuredContent: { error: 'google_signin_full' }, isError: true }) } });
+    host.push({ structuredContent: offDropbox });
+    host.button('Connect').click();
+    await host.settle();
+    expect(host.text()).toContain(sentence);
+    expect(host.hasButton(Q.goToModels)).toBe(false);
+    expect(host.button(Q.tryAgain).disabled).toBe(false);
+  });
+
   test('Cancel stops waiting and returns to the dashboard', async () => {
     const host = mount({ openai: {}, pollMs: 20, serve: { [T.connectSource]: () => (connectResult('https://mcp.olympusplugin.ai/go/a')), olympus_dashboard: () => ({ structuredContent: offDropbox }) } });
     host.push({ structuredContent: offDropbox });

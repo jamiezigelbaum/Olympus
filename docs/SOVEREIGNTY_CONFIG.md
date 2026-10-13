@@ -50,11 +50,11 @@ An **embedding model** turns permitted material into vectors for semantic
 search. Buying a Venice account does not configure embeddings. A provider
 approved for Private answers is not automatically approved for Private vectors.
 
-Public data and classified **Personal** data may use ordinary cloud models
+Classified **Personal** data may use ordinary cloud models
 when you permit that processing. **Private** includes health, finance,
 legal, and similarly sensitive material. Secrets are denied to every model.
 
-| Preset | Public and Personal embeddings | Private search | Private answers | You supply |
+| Preset | Personal embeddings | Private search | Private answers | You supply |
 |---|---|---|---|---|
 | Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Built-in model | Built-in model | Approved Venice Private/TEE model | Venice account, usable API balance and key |
 | Local models (`local-only`) | Built-in model | Built-in model | Local answer model | Local answer server and its exact registered model ID |
@@ -297,20 +297,21 @@ Olympus should let each user define what data sovereignty means for them.
 
 The long-term product should not assume that Private always means local. A user
 may choose local MLX models for Private data, encrypted web models for Personal
-work, ordinary cloud models for Public material, or a mix.
+work, ordinary cloud models for everyday Personal material, or a mix.
 
 ## Configuration Concepts
 
 ### Data Classes
 
 A data class describes what kind of information is being handled. User-facing
-language is Public, Personal, Private, and Secrets; internally those map to the
-existing granular trust scale (`public_safe`, `internal`, `secure_local`, and
-S5) through the legacy stored keys shown below. A policy with no `public_safe`
-route and no `public_safe` retrieval policy has no Public class: the
-`no-sensitive` preset, which `olympus engine install` seeds for every ChatGPT
-install, is written that way, and Public verdicts become Personal (see
-[TRUST_MODEL.md](TRUST_MODEL.md#product-tier-names)).
+language is Personal, Private, and Secrets, plus Public on installs made
+before 1.0; internally those map to the existing granular trust scale
+(`public_safe`, `internal`, `secure_local`, and S5) through the legacy stored
+keys shown below. A policy with no `public_safe` route and no `public_safe`
+retrieval policy has no Public class. Every shipped preset is written that way
+(owner ruling 2026-10-13), so new ChatGPT and OpenClaw installs have no Public
+class and Public verdicts become Personal. A policy written before 1.0 keeps
+its Public class (see [TRUST_MODEL.md](TRUST_MODEL.md#product-tier-names)).
 
 | User-facing data class | Legacy stored key | Granular trust scale |
 |---|---|---|
@@ -400,8 +401,9 @@ Technical route keys:
   secure-custodian callers only.
 - `internal`: Personal corpora approved for ordinary assistant reasoning. Cloud
   embeddings are allowed by default once material is classified Personal.
-- `public_safe`: explicitly Public corpora. Cloud embeddings are allowed in
-  stores that never mix with Personal or Private material.
+- `public_safe`: explicitly Public corpora, on installs made before 1.0 only.
+  Cloud embeddings are allowed in stores that never mix with Personal or
+  Private material.
 
 Retrieval trust domains govern search, embedding, and model-context routing.
 They do not by themselves forbid approved cloud service providers from acting as
@@ -774,8 +776,7 @@ Minimal schema:
         "members": ["local-source-answer", "venice-private"]
       }
     },
-    "internal": { "analyst": ["cloud-openclaw-infer", "local-source-answer"] },
-    "public_safe": { "analyst": ["cloud-openclaw-infer"] }
+    "internal": { "analyst": ["cloud-openclaw-infer", "local-source-answer"] }
   },
   "retrieval": {
     "trustDomains": {
@@ -793,18 +794,15 @@ Minimal schema:
         "embeddingProfile": "gemini-source-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
-      },
-      "public_safe": {
-        "minimumExecutionTrust": "standard_cloud",
-        "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "gemini-source-embedding",
-        "allowCloudQuery": true,
-        "activationMode": "hybrid_shadow"
       }
     }
   }
 }
 ```
+
+A policy written before 1.0 also has a `public_safe` route and a
+`public_safe` retrieval policy, shaped like `internal`. It keeps them; a
+policy with only one of the two is refused.
 
 An `openclaw-infer` profile is the only kind whose `model` is optional.
 Absent means OpenClaw's configured default model: the worker runs

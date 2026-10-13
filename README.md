@@ -198,7 +198,7 @@ and optional.
 ## How it works
 
 Every item you ingest is judged on its own as Personal, Private, or Secrets
-(plus Public where the posture keeps it; internally S0-S5): its names are Personal unless something raises
+(plus Public on installs made before 1.0; internally S0-S5): its names are Personal unless something raises
 them, and its content is raised to Private or Secrets on evidence. Each tier
 has its own index and routes only to the model lanes your sovereignty policy
 allows:
@@ -234,17 +234,17 @@ flowchart LR
 ```
 
 Olympus uses **Personal** (ordinary personal and work content), **Private**
-(sensitive material), and **Secrets** (never model input). A ChatGPT
-install, and any install on the `no-sensitive` posture, has no Public tier:
-anything that would have been Public is Personal. The other OpenClaw
-postures, and installs made before 1.0, keep a **Public** tier too. See the
+(sensitive material), and **Secrets** (never model input). There is no
+Public tier on any new install, ChatGPT or OpenClaw, whichever posture you
+choose: anything that would have been Public is Personal. Installs made
+before 1.0 keep a **Public** tier. See the
 [tier mapping](docs/TRUST_MODEL.md#product-tier-names) for the unchanged
 storage identifiers.
 
 Four postures, chosen (and changeable) in setup — a config file, not a code
 fork:
 
-| Preset | Public/Personal content | Private content: health, finance, legal, therapy, family |
+| Preset | Personal content | Private content: health, finance, legal, therapy, family |
 |---|---|---|
 | **Local models and private cloud** (`local-first`) | frontier cloud | approved secure pool with explicit local → [Venice](https://venice.ai) Private order |
 | **Local models only** (`local-only`) | frontier cloud | your own local models only |
@@ -256,7 +256,7 @@ Private questions. Search indexing for every tier uses EmbeddingGemma 2,
 Google's small embedding model, built into Olympus: it downloads once, runs on
 your computer, needs no account or key, and sends nothing anywhere. On a Mac it
 also reads pictures, so photos are searchable by what is in them. Gemini, local, or Venice Private embeddings
-stay an opt-in choice, and Private content never goes to Gemini. Public and Personal
+stay an opt-in choice, and Private content never goes to Gemini. Personal
 questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private
@@ -339,7 +339,7 @@ when custom plugin UI is off, and for direct access when needed. See the
 
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
-It explains the separate Private and Public/Personal routes, registered embedding
+It explains the separate Private and Personal routes, registered embedding
 defaults, and custom-model requirements before you connect keys or restart.
 In the dashboard you paste each key into its **Models** card. For a headless
 setup, choose how to supply each key: paste it yourself from your password
