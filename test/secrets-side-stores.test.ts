@@ -503,7 +503,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.get(again!)?.ref.name).toBeUndefined();
   });
 
-  test('an unchanged file restored by a lower tier is read again: its indexed job is queued, keeps its name and stores artifacts', async () => {
+  test('an unchanged file restored by a lower tier is read again once its copy is back: its indexed job keeps its name and stores artifacts', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
     const jobs = jobStore(dir);
@@ -523,13 +523,16 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     applyOwnerOverrides({ set: fx.set });
     expect(fx.ledger.getCurrent(identityOf('keys'))).toMatchObject({ state: 'current', contentTier: 'private' });
     expect(fx.ledger.listMoving()).toEqual([]);
-    expect(jobs.get(job!)).toMatchObject({ status: 'queued' });
-    // The unchanged listing enqueues the same ref: the same job, named again.
+    // Not leasable yet: no restored copy exists for it to land in.
+    expect(jobs.get(job!)).toMatchObject({ status: 'indexed' });
+    expect(jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs).toEqual([]);
+    // The unchanged listing writes the copy; its plan pass enqueues the same
+    // ref: the same job, named again and queued to be read again.
     await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     expect(fx.stores.internal!.itemPresence(identityOf('keys')).active).toBe(true);
     const [same] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
     expect(same).toBe(job);
-    expect(jobs.get(job!)?.ref.name).toBe(KEYS.name);
+    expect(jobs.get(job!)).toMatchObject({ status: 'queued', ref: { name: KEYS.name } });
     const [lease] = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs;
     expect(lease?.jobId).toBe(job);
     expect(jobs.record({ jobId: job!, status: 'indexed', leaseToken: lease!.leaseToken, derivations: [sheet] }).artifactsRecorded).toBe(1);

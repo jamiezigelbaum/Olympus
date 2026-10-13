@@ -43,9 +43,11 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   FILE_EXTRACTION_JOBS_DB_PATH_ENV,
   SECRET_ITEM_REDACTION_CLAIMS_TABLE,
+  SECRET_RESTORED_REREADS_TABLE,
   SECRET_ITEM_REDACTIONS_TABLE,
   defaultFileExtractionJobsDbPath,
   itemNameRedacted,
+  takeRestoredReread,
   registerExtractionJobsDbPath,
 } from './job-names.ts';
 import type {
@@ -696,7 +698,10 @@ export class LocalFileExtractionJobStore {
         // An item that became Secrets keeps no name here, even when this pass
         // listed it before it did (job-names.ts).
         const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
-        const forceExisting = Boolean(existing) && force && status === 'queued';
+        // A job whose item left Secrets is read again, as if forced (its
+        // artifacts went with its name).
+        const reread = existing !== undefined && existing !== null && takeRestoredReread(this.db, existing.job_id);
+        const forceExisting = Boolean(existing) && (force || reread) && status === 'queued';
         const reset = forceExisting ? 1 : 0;
 
         this.db.query(`
@@ -2171,7 +2176,8 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
     name: 'add_secret_item_redaction_claims',
     up(db) {
       // Which tier ledger holds each redaction: one ledger's item leaving
-      // Secrets retires only its own claim (job-names.ts).
+      // Secrets retires only its own claim; and the jobs such an item owes
+      // a re-read at their next enqueue (job-names.ts).
       db.exec(`
         CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (
           provider TEXT NOT NULL,
@@ -2180,6 +2186,9 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
           claimant TEXT NOT NULL,
           claimed_at TEXT NOT NULL,
           PRIMARY KEY (provider, account_scope, provider_item_id, claimant)
+        );
+        CREATE TABLE IF NOT EXISTS ${SECRET_RESTORED_REREADS_TABLE} (
+          job_id TEXT PRIMARY KEY
         );
       `);
     },

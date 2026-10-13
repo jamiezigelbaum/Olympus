@@ -62,6 +62,7 @@ export interface ExtractionJobItemKey {
 
 export const SECRET_ITEM_REDACTIONS_TABLE = 'secret_item_redactions';
 export const SECRET_ITEM_REDACTION_CLAIMS_TABLE = 'secret_item_redaction_claims';
+export const SECRET_RESTORED_REREADS_TABLE = 'secret_restored_rereads';
 
 const openLedgerPaths = new Map<string, number>();
 
@@ -191,8 +192,9 @@ export function clearExtractionJobNames(
  * says yes: an item that becomes Secrets writes its marker only after its
  * decision is recorded, and that write waits for this lock, so a marker is
  * either never removed or written back. Names already cleared stay cleared
- * until the item's next enqueue; its indexed jobs are queued again, since
- * their artifacts were deleted with the names.
+ * until the item's next enqueue; its indexed jobs are read again at their
+ * next enqueue (`takeRestoredReread`), since their artifacts were deleted
+ * with the names.
  */
 export function retireExtractionJobRedaction(
   dbPath: string,
@@ -224,17 +226,15 @@ export function retireExtractionJobRedaction(
         WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       `).run(item.provider, item.accountScope, item.providerItemId).changes;
       // Its indexed jobs lost their artifacts (and its store copies their
-      // extracted text) when it became Secrets: queued again, exactly as a
-      // forced enqueue resets them, so an unchanged file is read once more.
-      if (retired > 0) {
+      // extracted text) when it became Secrets: each is read again at its
+      // next enqueue, which a plan pass makes only once the restored store
+      // copy exists (queued now, a worker could find no copy to land in).
+      if (retired > 0 && rereadsTableExists(db)) {
         db.query(`
-          UPDATE extraction_jobs SET
-            status = 'queued', attempts = 0,
-            leased_by_hash = NULL, leased_until = NULL, lease_token = NULL, lease_grant_ordinal = NULL,
-            last_error_hash = NULL, last_error_kind = NULL, next_retry_at = NULL,
-            temp_bytes_cleaned = 1, updated_at = ?
+          INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          SELECT job_id FROM extraction_jobs
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND status = 'indexed'
-        `).run(new Date().toISOString(), item.provider, item.accountScope, item.providerItemId);
+        `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };
     }).immediate();
@@ -245,6 +245,20 @@ export function retireExtractionJobRedaction(
 
 function artifactsTableExists(db: Database): boolean {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
+}
+
+/**
+ * Whether an existing job is owed a re-read because its item left Secrets
+ * (see `retireExtractionJobRedaction`), read and consumed on the caller's
+ * own connection inside its enqueue transaction.
+ */
+export function takeRestoredReread(db: Database, jobId: string): boolean {
+  if (!rereadsTableExists(db)) return false;
+  return db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
+}
+
+function rereadsTableExists(db: Database): boolean {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
 }
 
 function claimsTableExists(db: Database): boolean {
