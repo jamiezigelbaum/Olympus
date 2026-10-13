@@ -16,7 +16,7 @@ import { Window } from 'happy-dom';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, consultChatgptModelUnavailableMessage, readConsultSettings } from '../src/core/consult-settings.ts';
-import type { ZkapiConsultReadiness, ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
+import type { ZkapiConfinement, ZkapiConsultReadiness, ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
 import { zkapiFenceScope } from '../src/core/consult-transport-zkapi.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
@@ -25,9 +25,11 @@ import { dashboardHtmlRoutePage } from '../src/workers/dashboard/index.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_PATHS,
   outsideHelpBlockerWords,
+  renderOutsideHelpCard,
   summaryOf,
   type DashboardOutsideHelpStatus,
 } from '../src/workers/dashboard/outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_TOOLS_COPY } from '../src/workers/dashboard/outside-help-tools.ts';
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/email-source/dashboard-consult.ts';
@@ -836,6 +838,8 @@ function adapter(input: {
   source?: string;
   writerCheck?: Parameters<typeof createDashboardConsultAdapter>[0]['writerCheck'];
   chatgptModelProblem?: Parameters<typeof createDashboardConsultAdapter>[0]['chatgptModelProblem'];
+  /** This computer's network confinement; default: a confined platform (never the host's). */
+  confinement?: ZkapiConfinement;
 }) {
   const path = join(input.home, '.olympus', 'sovereignty.json');
   mkdirSync(join(input.home, '.olympus'), { recursive: true, mode: 0o700 });
@@ -857,9 +861,79 @@ function adapter(input: {
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
     ...(input.writerCheck ? { writerCheck: input.writerCheck } : {}),
     ...(input.chatgptModelProblem ? { chatgptModelProblem: input.chatgptModelProblem } : {}),
+    confinement: input.confinement ?? CONFINED,
   });
   return { backend, reloads, probes, recoveries, path, env };
 }
+
+/** A platform with network confinement (the Mac), and one without (Linux, until its launcher lands). */
+const CONFINED: ZkapiConfinement = { level: 'loopback_filtered', limit: 'test confinement', wrap: (argv) => [...argv], selfTest: async () => true };
+const UNCONFINED: ZkapiConfinement = { level: 'none', limit: 'no network confinement is implemented on this platform', wrap: (argv) => [...argv], selfTest: async () => false };
+
+// Owner ruling 2026-10-12: no weaker mode. Where confinement cannot run, the
+// card says so in one line and offers nothing to set up; the worker refuses
+// the same actions itself.
+describe('the adapter: a computer without network confinement', () => {
+  const offered = (html: string): void => {
+    expect(visibleText(html)).toContain(W.confinementUnavailable);
+    expect(html).not.toContain(W.addRoute);
+    expect(html).not.toContain('data-outside-form="add-route"');
+    expect(html).not.toContain(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.install);
+    expect(html).not.toContain(W.stepsTitle);
+    expect(html).not.toContain('worker.env');
+    expect(html).not.toContain(W.turnOn);
+    expect(html).not.toContain('data-outside-blockers');
+  };
+
+  test('no route yet: one plain line, no Add zkAPI and no install steps; Add zkAPI is refused by the worker', async () => {
+    const home = tempHome();
+    const { backend, reloads, path } = adapter({ home, zkapi: false, confinement: UNCONFINED });
+    const value = await backend.status();
+    expect(value.unavailable).toBe('confinement_unavailable');
+    expect(summaryOf(value)).toEqual({ state: 'unavailable' });
+    const card = renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true });
+    offered(card);
+    offered(page(value));
+    expect(visibleText(page(value))).toContain(W.row.unavailable.replace(/^[^:]*:\s*/, ''));
+    const before = readFileSync(path, 'utf8');
+    expect(await backend.addRoute({ confirm: true })).toEqual({ ok: false, httpStatus: 409, code: 'confinement_unavailable', message: W.confinementUnavailable });
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(reloads).toEqual([]);
+  });
+
+  test('a route already added (the Linux laptop) reads the same; turning on is refused, turning off is not', async () => {
+    const home = tempHome();
+    const { backend } = adapter({ home, secret: 'zk-local-key', confinement: UNCONFINED, readiness: { blockers: ['confinement_unavailable', 'daemon_api_key_missing'] } });
+    const value = await backend.status();
+    expect(value.unavailable).toBe('confinement_unavailable');
+    expect(value.route.state).toBe('configured');
+    expect(summaryOf(value)).toEqual({ state: 'unavailable' });
+    offered(renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true }));
+    expect(renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true })).not.toContain(W.blockers.daemon_api_key_missing);
+    expect(await backend.setEnabled({ enabled: true, revision: 0 })).toEqual({ ok: false, httpStatus: 409, code: 'confinement_unavailable', message: W.confinementUnavailable });
+    expect(readConsultSettings({ env: { HOME: home } }).state).toBe('absent');
+    expect(await backend.setEnabled({ enabled: false, revision: 0 })).toMatchObject({ ok: true });
+  });
+
+  test('the readiness probe is asked about the same confinement the card judged by', async () => {
+    const home = tempHome();
+    const { backend, probes } = adapter({ home, secret: 'zk-local-key', confinement: UNCONFINED });
+    await backend.status();
+    expect((probes[0] as { confinement?: ZkapiConfinement }).confinement?.level).toBe('none');
+  });
+
+  test('a confined computer (the Mac) is unchanged: no unavailable state, Add zkAPI offered and done', async () => {
+    const home = tempHome();
+    const { backend } = adapter({ home, zkapi: false, confinement: CONFINED });
+    const value = await backend.status();
+    expect(value.unavailable).toBeUndefined();
+    expect(summaryOf(value)).toEqual({ state: 'route_not_configured' });
+    const card = renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true });
+    expect(card).toContain(W.addRoute);
+    expect(visibleText(card)).not.toContain(W.confinementUnavailable);
+    expect(await backend.addRoute({ confirm: true })).toMatchObject({ ok: true });
+  });
+});
 
 describe('the adapter: status', () => {
   test('the summary word and status reflect the file, the route and the fence; the probe never sees the key', async () => {
@@ -1061,6 +1135,7 @@ describe('the adapter: turning outside help on and off', () => {
       statePath: join(tempHome(), 'state.json'),
       readiness: async () => readiness(),
       recoverSession: async () => { throw new Error('never'); },
+      confinement: CONFINED,
     });
     expect(await backend.setEnabled({ enabled: true, revision: 0 })).toMatchObject({ ok: false, httpStatus: 500, code: 'no_home' });
   });

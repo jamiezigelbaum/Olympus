@@ -1,8 +1,12 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { LINUX_SECRET_SERVICE_HELPER } from './linux-secret-service.ts';
 import { spawnSync } from 'node:child_process';
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, join } from 'node:path';
+import { assertLinuxSecretPath, readSecretFile, resolveLinuxSecretPaths, selectLinuxSecretBackend, SecretStoreError, secretStoreFailure } from './linux-secret-backend.ts';
+export { SecretStoreError } from './linux-secret-backend.ts';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
 
@@ -19,6 +23,7 @@ export interface CommandResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  errorCode?: string;
 }
 
 export type CommandRunner = (command: string, args: string[], input?: string) => CommandResult;
@@ -26,12 +31,14 @@ export type CommandRunner = (command: string, args: string[], input?: string) =>
 export interface SecretStorePaths {
   encryptedFilePath?: string;
   keyFilePath?: string;
+  backendFilePath?: string;
 }
 
 const DEFAULT_SERVICE = 'olympus';
 const STORE_VERSION = 1;
 
-export function defaultOlympusConfigDir(): string {
+export function defaultOlympusConfigDir(env: Record<string, string | undefined> = process.env, targetPlatform: string = process.platform): string {
+  if (targetPlatform === 'linux') return resolveLinuxEngineLayout(env).configDir;
   return join(homedir(), '.config', 'olympus');
 }
 
@@ -69,16 +76,19 @@ export function createDefaultSecretStore(options: {
   const env = options.env ?? process.env;
   const backend = env.OLYMPUS_SECRET_STORE_BACKEND?.trim() || 'auto';
   const runner = options.runner ?? runCommand;
+  const currentPlatform = options.platform ?? platform();
+  if (currentPlatform === 'linux') {
+    const paths = resolveLinuxSecretPaths(env, options.paths);
+    const selected = selectLinuxSecretBackend(paths, backend);
+    if (selected === 'libsecret') return new LinuxLibsecretSecretStore({ ...(options.runner ? { runner: options.runner } : {}) });
+    return new LinuxFileSecretStore({ ...paths, ...(env.OLYMPUS_SECRET_STORE_PASSPHRASE ? { passphrase: env.OLYMPUS_SECRET_STORE_PASSPHRASE } : {}), strictLinux: true });
+  }
   if (backend === 'file') return createFileSecretStore({ env, ...(options.paths ? { paths: options.paths } : {}) });
   if (backend === 'keychain') return new MacOSKeychainSecretStore({ runner });
   if (backend === 'libsecret') return new LinuxLibsecretSecretStore({ runner });
   if (backend !== 'auto') throw new Error('Unsupported Olympus secret store backend.');
 
-  const currentPlatform = options.platform ?? platform();
   if (currentPlatform === 'darwin') return createFileSecretStore({ env, ...(options.paths ? { paths: options.paths } : {}) });
-  if (currentPlatform === 'linux' && commandExists('secret-tool', runner)) {
-    return new LinuxLibsecretSecretStore({ runner });
-  }
   return createFileSecretStore({ env, ...(options.paths ? { paths: options.paths } : {}) });
 }
 
@@ -100,13 +110,15 @@ export class EncryptedFileSecretStore implements SecretStore {
   private readonly encryptedFilePath: string;
   private readonly keyFilePath: string;
   private readonly passphrase: string | undefined;
+  private readonly strictLinux: boolean;
 
-  constructor(options: { encryptedFilePath: string; keyFilePath: string; passphrase?: string }) {
+  constructor(options: { encryptedFilePath: string; keyFilePath: string; passphrase?: string; strictLinux?: boolean }) {
     if (!options.encryptedFilePath.trim()) throw new Error('Secret store path must be non-empty.');
     if (!options.keyFilePath.trim()) throw new Error('Secret store key path must be non-empty.');
     this.encryptedFilePath = options.encryptedFilePath;
     this.keyFilePath = options.keyFilePath;
     this.passphrase = options.passphrase?.trim() || undefined;
+    this.strictLinux = options.strictLinux ?? false;
   }
 
   async get(key: string): Promise<string | undefined> {
@@ -143,9 +155,17 @@ export class EncryptedFileSecretStore implements SecretStore {
   }
 
   private readStore(): FileSecretStorePayload {
-    if (!existsSync(this.encryptedFilePath)) return { version: STORE_VERSION, secrets: {} };
-    const encrypted = JSON.parse(readFileSync(this.encryptedFilePath, 'utf8')) as EncryptedFilePayload;
+    if (this.strictLinux) { assertLinuxSecretPath(this.encryptedFilePath); assertLinuxSecretPath(this.keyFilePath); }
+    const text = this.strictLinux ? readSecretFile(this.encryptedFilePath)
+      : (existsSync(this.encryptedFilePath) ? readFileSync(this.encryptedFilePath, 'utf8') : undefined);
+    if (text === undefined) return { version: STORE_VERSION, secrets: {} };
+    let encrypted: EncryptedFilePayload;
+    if (this.strictLinux) {
+      try { encrypted = JSON.parse(text); } catch { throw new SecretStoreError('corrupt', 'ciphertext is invalid.'); }
+      if (!encrypted || !['local-random-key', 'scrypt'].includes(encrypted.kdf)) throw new SecretStoreError('corrupt', 'unsupported key derivation.');
+    } else { encrypted = JSON.parse(text) as EncryptedFilePayload; }
     if (encrypted.version !== STORE_VERSION || encrypted.algorithm !== 'aes-256-gcm') {
+      if (this.strictLinux) throw new SecretStoreError('corrupt', 'format is unsupported.');
       throw new Error('Olympus secret store format is unsupported.');
     }
     const key = this.keyForPayload(encrypted);
@@ -165,12 +185,16 @@ export class EncryptedFileSecretStore implements SecretStore {
         throw new Error('Olympus secret store payload is invalid.');
       }
       return { version: STORE_VERSION, secrets: { ...parsed.secrets } };
+    } catch (error) {
+      if (this.strictLinux) throw new SecretStoreError('corrupt', 'ciphertext could not be authenticated or decoded.');
+      throw error;
     } finally {
       key.fill(0);
     }
   }
 
   private writeStore(store: FileSecretStorePayload): void {
+    if (this.strictLinux) { assertLinuxSecretPath(this.encryptedFilePath); assertLinuxSecretPath(this.keyFilePath); }
     const payload: FileSecretStorePayload = {
       version: STORE_VERSION,
       secrets: Object.fromEntries(Object.entries(store.secrets).sort(([a], [b]) => a.localeCompare(b))),
@@ -205,8 +229,14 @@ export class EncryptedFileSecretStore implements SecretStore {
 
   private keyForPayload(payload: EncryptedFilePayload): Buffer {
     if (payload.kdf === 'scrypt') {
-      if (!this.passphrase) throw new Error('Olympus secret store passphrase is required.');
-      if (!payload.salt) throw new Error('Olympus secret store salt is missing.');
+      if (!this.passphrase) {
+        if (this.strictLinux) throw new SecretStoreError('locked', 'passphrase unlock is required.');
+        throw new Error('Olympus secret store passphrase is required.');
+      }
+      if (!payload.salt) {
+        if (this.strictLinux) throw new SecretStoreError('corrupt', 'salt is missing.');
+        throw new Error('Olympus secret store salt is missing.');
+      }
       return scryptSync(this.passphrase, Buffer.from(payload.salt, 'base64'), 32);
     }
     return this.localRandomKey();
@@ -221,6 +251,9 @@ export class EncryptedFileSecretStore implements SecretStore {
   }
 
   private localRandomKey(): Buffer {
+    if (this.strictLinux && readSecretFile(this.keyFilePath) === undefined && readSecretFile(this.encryptedFilePath) !== undefined) {
+      throw new SecretStoreError('corrupt', 'wrapping key is lost; restore the original key. No replacement was generated.');
+    }
     mkdirSync(dirname(this.keyFilePath), { recursive: true, mode: 0o700 });
     if (!existsSync(this.keyFilePath)) {
       // Lose this and the ciphertext written under it is undecryptable, so it is
@@ -228,8 +261,31 @@ export class EncryptedFileSecretStore implements SecretStore {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString('base64'));
     }
     const key = Buffer.from(readFileSync(this.keyFilePath, 'utf8').trim(), 'base64');
-    if (key.length !== 32) throw new Error('Olympus secret store key is invalid.');
+    if (key.length !== 32) {
+      if (this.strictLinux) throw new SecretStoreError('corrupt', 'wrapping key is invalid.');
+      throw new Error('Olympus secret store key is invalid.');
+    }
     return key;
+  }
+}
+
+class LinuxFileSecretStore extends EncryptedFileSecretStore {
+  constructor(private readonly linuxOptions: { encryptedFilePath: string; keyFilePath: string; passphrase?: string; strictLinux: true }) { super(linuxOptions); }
+  private checkPaths(): void {
+    assertLinuxSecretPath(this.linuxOptions.encryptedFilePath);
+    assertLinuxSecretPath(this.linuxOptions.keyFilePath);
+  }
+  override getSync(key: string): string | undefined {
+    try { this.checkPaths(); return super.getSync(key); } catch (error) { throw secretStoreFailure(error); }
+  }
+  override async set(key: string, value: string): Promise<void> {
+    try { this.checkPaths(); await super.set(key, value); } catch (error) { throw secretStoreFailure(error); }
+  }
+  override async delete(key: string): Promise<void> {
+    try { this.checkPaths(); await super.delete(key); } catch (error) { throw secretStoreFailure(error); }
+  }
+  override async list(): Promise<string[]> {
+    try { this.checkPaths(); return await super.list(); } catch (error) { throw secretStoreFailure(error); }
   }
 }
 
@@ -268,48 +324,126 @@ export class MacOSKeychainSecretStore implements SecretStore {
   }
 }
 
+const SECRET_SERVICE_PATH = '/org/freedesktop/secrets';
+const SECRET_INTERFACE = 'org.freedesktop.Secret';
+
 export class LinuxLibsecretSecretStore implements SecretStore {
   readonly label = 'libsecret';
   private readonly runner: CommandRunner;
 
   constructor(options: { runner?: CommandRunner } = {}) {
-    this.runner = options.runner ?? runCommand;
+    this.runner = options.runner ?? runLinuxSecretCommand;
   }
 
-  async get(key: string): Promise<string | undefined> {
-    return this.getSync(key);
+  private command(command: string, args: string[], input?: string): string {
+    let result: CommandResult;
+    try { result = this.runner(command, args, input); } catch (error) { throw secretStoreFailure(error); }
+    if (result.status !== 0 || result.errorCode) {
+      // Provider text is classified, never returned (it may contain a secret).
+      const detail = result.stderr;
+      if (result.errorCode === 'ETIMEDOUT' || /TimedOut|NoReply|timed out|^timeout$/i.test(detail)) throw new SecretStoreError('timeout', 'libsecret call exceeded five seconds.');
+      if (result.errorCode === 'EACCES' || result.errorCode === 'EPERM' || /AccessDenied|PermissionDenied|permission denied|not permitted|^permission$/i.test(detail)) throw new SecretStoreError('permission', 'libsecret access denied.');
+      if (/IsLocked|is locked|^locked$/i.test(detail)) throw new SecretStoreError('locked', 'libsecret is locked; unlock it explicitly.');
+      if (detail === 'corrupt') throw new SecretStoreError('corrupt', 'invalid libsecret data.');
+      throw new SecretStoreError('unavailable', 'libsecret call failed; no alternate backend was used.');
+    }
+    return result.stdout;
   }
+
+  private access(action: 'lookup' | 'store' | 'clear', collection: string, key: string, value?: string, items?: string[]): string {
+    return this.command('/usr/bin/python3', ['-c', LINUX_SECRET_SERVICE_HELPER], JSON.stringify({ action, collection, key, value, items }));
+  }
+
+  private bus(request: { path: string; interface: string; method: string; signature: string; args: unknown[] }, signature: string): unknown[] {
+    const text = this.command('/usr/bin/python3', ['-c', LINUX_SECRET_SERVICE_HELPER], JSON.stringify({ action: 'bus', ...request }));
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed.type !== signature || !Array.isArray(parsed.data)) throw new Error();
+      return parsed.data;
+    } catch { throw new SecretStoreError('unavailable', 'invalid Secret Service reply.'); }
+  }
+
+  private unlocked(path: string, kind: 'Collection' | 'Item'): void {
+    const data = this.bus({ path, interface: 'org.freedesktop.DBus.Properties', method: 'Get', signature: '(ss)', args: [`${SECRET_INTERFACE}.${kind}`, 'Locked'] }, 'b');
+    if (data.length !== 1 || typeof data[0] !== 'boolean') throw new SecretStoreError('unavailable', 'invalid Locked property.');
+    if (data[0]) throw new SecretStoreError('locked', 'libsecret is locked; unlock it explicitly.');
+  }
+
+  private accessibleItems(key?: string): { collection: string; items: string[] } {
+    const alias = this.bus({ path: SECRET_SERVICE_PATH, interface: `${SECRET_INTERFACE}.Service`, method: 'ReadAlias', signature: '(s)', args: ['default'] }, 'o');
+    const collection = alias[0];
+    if (alias.length !== 1 || !isSecretObjectPath(collection) || collection === '/') throw new SecretStoreError('unavailable', 'default collection is unavailable.');
+    this.unlocked(collection, 'Collection');
+    const data = this.bus({ path: SECRET_SERVICE_PATH, interface: `${SECRET_INTERFACE}.Service`, method: 'SearchItems', signature: '(a{ss})', args: [{ application: DEFAULT_SERVICE, ...(key ? { key } : {}) }] }, 'aoao');
+    if (data.length !== 2 || !Array.isArray(data[0]) || !Array.isArray(data[1]) || ![...data[0], ...data[1]].every(isSecretObjectPath)) throw new SecretStoreError('unavailable', 'invalid search reply.');
+    if (data[1].length) throw new SecretStoreError('locked', 'matching libsecret items are locked.');
+    for (const item of data[0]) this.unlocked(item, 'Item');
+    return { collection, items: data[0] as string[] };
+  }
+
+  async get(key: string): Promise<string | undefined> { return this.getSync(key); }
 
   getSync(key: string): string | undefined {
     assertSafeKey(key);
-    const result = this.runner('secret-tool', ['lookup', 'application', DEFAULT_SERVICE, 'key', key]);
-    if (result.status !== 0) return undefined;
-    return result.stdout.trim() || undefined;
+    const { collection, items } = this.accessibleItems(key);
+    // Only an authoritative, successful empty SearchItems result means absent.
+    if (!items.length) return undefined;
+    if (items.length !== 1) throw new SecretStoreError('corrupt', 'multiple matching libsecret items.');
+    const value = this.access('lookup', collection, key);
+    if (!value) throw new SecretStoreError('corrupt', 'libsecret returned an empty value for an existing item.');
+    return value;
   }
 
   async set(key: string, value: string): Promise<void> {
     assertSafeKey(key);
     if (!value) throw new Error('Secret value must be non-empty.');
-    const result = this.runner('secret-tool', [
-      'store',
-      '--label',
-      `Olympus ${key}`,
-      'application',
-      DEFAULT_SERVICE,
-      'key',
-      key,
-    ], value);
-    if (result.status !== 0) throw new Error('libsecret secret write failed.');
+    const { collection, items } = this.accessibleItems(key);
+    if (items.some((item) => !item.startsWith(`${collection}/`)) || items.length > 1) throw new SecretStoreError('configuration', 'matching item is outside the selected collection or ambiguous; no migration is supported.');
+    this.access('store', collection, key, value);
   }
 
   async delete(key: string): Promise<void> {
     assertSafeKey(key);
-    this.runner('secret-tool', ['clear', 'application', DEFAULT_SERVICE, 'key', key]);
+    const { collection, items } = this.accessibleItems(key);
+    if (items.some((item) => !item.startsWith(`${collection}/`)) || items.length > 1) throw new SecretStoreError('configuration', 'matching item is outside the selected collection or ambiguous; no migration is supported.');
+    if (!items.length) return;
+    this.access('clear', collection, key, undefined, items);
+    if (this.accessibleItems(key).items.length) throw new SecretStoreError('unavailable', 'libsecret deletion was not confirmed.');
   }
 
   async list(): Promise<string[]> {
-    return [];
+    const { items } = this.accessibleItems();
+    const keys = items.map((item) => {
+      const data = this.bus({ path: item, interface: 'org.freedesktop.DBus.Properties', method: 'Get', signature: '(ss)', args: [`${SECRET_INTERFACE}.Item`, 'Attributes'] }, 'a{ss}');
+      const attrs = data[0] as Record<string, unknown> | undefined;
+      if (data.length !== 1 || !attrs || typeof attrs.key !== 'string' || !isSafeSecretKey(attrs.key)) throw new SecretStoreError('corrupt', 'invalid libsecret item attributes.');
+      return attrs.key;
+    });
+    return [...new Set(keys)].sort();
   }
+
+  /** Explicit readiness probe, never a claim of unattended unlock after reboot. */
+  async probe(): Promise<void> {
+    const key = `probe.${randomBytes(16).toString('hex')}`;
+    const value = randomBytes(32).toString('base64');
+    try {
+      await this.set(key, value);
+      if (await this.get(key) !== value) throw new SecretStoreError('corrupt', 'libsecret probe roundtrip failed.');
+    } finally {
+      try { await this.delete(key); }
+      catch { throw new SecretStoreError('cleanup', 'libsecret probe cleanup failed; a disposable probe item may remain.'); }
+    }
+  }
+}
+
+function isSecretObjectPath(value: unknown): value is string {
+  return typeof value === 'string' && /^\/(?:[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)*)?$/.test(value);
+}
+
+/** Kill, rather than wait for a SIGTERM-ignoring helper. No shell or value argv. */
+export function runLinuxSecretCommand(command: string, args: string[], input?: string): CommandResult {
+  const result = spawnSync(command, args, { input, encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 5_000, killSignal: 'SIGKILL', env: { ...process.env, LC_ALL: 'C' } });
+  return { status: result.status, stdout: result.stdout || '', stderr: result.stderr || '', ...(result.error ? { errorCode: (result.error as NodeJS.ErrnoException).code ?? 'UNKNOWN' } : {}) };
 }
 
 export async function resolveSecretRefValue(
@@ -349,10 +483,6 @@ export function resolveSecretRefValueSync(
 
 function assertSafeKey(key: string): void {
   if (!isSafeSecretKey(key)) throw new Error('Secret key must contain only safe label characters.');
-}
-
-function commandExists(command: string, runner: CommandRunner): boolean {
-  return runner(command, ['--version']).status === 0;
 }
 
 function runCommand(command: string, args: string[], input?: string): CommandResult {

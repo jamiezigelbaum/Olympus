@@ -4,14 +4,16 @@ import { SpawnCommandRunner } from '../src/workers/email-source/gogcli.ts';
 // A child that ignores SIGTERM stands in for the abnormal cases the budget
 // exists to cover: a wedged gog, or a grandchild that inherited the stdout
 // pipe and keeps it open after its parent is signalled.
-const IGNORES_SIGTERM = "process.on('SIGTERM', () => {}); setTimeout(() => {}, 3000);";
+// Ignore is installed by the shell and inherited across exec, before a JS
+// runtime can be delayed starting under the parallel suite's CPU contention.
+const IGNORES_SIGTERM = 'trap "" TERM; exec sleep 3';
 
 describe('gog command runner timeout', () => {
   test('settles inside the budget when the child ignores SIGTERM', async () => {
     const runner = new SpawnCommandRunner();
     const started = Date.now();
 
-    const result = await runner.run(process.execPath, ['-e', IGNORES_SIGTERM], { timeoutMs: 150 });
+    const result = await runner.run('/bin/sh', ['-c', IGNORES_SIGTERM], { timeoutMs: 150 });
     const elapsedMs = Date.now() - started;
 
     expect(elapsedMs).toBeLessThan(2_000);

@@ -256,6 +256,7 @@ function readStarts(path: string): Array<{ pid: number; args: string[]; env: Rec
 
 function fixtureEnvNames(): string[] {
   return [
+    'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'OLYMPUS_SOVEREIGNTY_CONFIG',
     'OLYMPUS_CONFIG',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_PROTECTED_TELEGRAM_DB_PATH',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED',
@@ -274,3 +275,13 @@ function fixtureEnvNames(): string[] {
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
+test('Linux embedding child retains resolved non-secret layout selectors without ambient credentials',async()=>{
+ const fixture=embeddingFixture();const keys=['XDG_CONFIG_HOME','XDG_STATE_HOME','XDG_CACHE_HOME','XDG_RUNTIME_DIR','OLYMPUS_SOVEREIGNTY_CONFIG'];const before=Object.fromEntries(keys.map(k=>[k,process.env[k]]));
+ try {
+  for(const k of keys)process.env[k]=join(fixture.workerEnvPath,'..',k);
+  const service=track(createNativeEmbeddingDrainService({initialPluginConfig:fixture.pluginConfig,moduleUrl:fixture.moduleUrl,workerEnvPath:fixture.workerEnvPath,startupTimeoutMs:5000,readinessPollMs:10}));
+  await service.start({config:{plugins:{entries:{olympus:{config:fixture.pluginConfig}}}}});const env=readStarts(fixture.startsPath)[0]!.env;
+  if(process.platform==='linux')for(const k of keys)expect(env[k]).toBe(process.env[k]);
+  expect(env.OP_CONNECT_TOKEN).toBeUndefined();expect(env.OLYMPUS_WORKER_AUTH_TOKEN).toBeUndefined();
+ } finally {for(const k of keys)if(before[k]===undefined)delete process.env[k];else process.env[k]=before[k];}
+});

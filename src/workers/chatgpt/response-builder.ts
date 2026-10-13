@@ -22,7 +22,7 @@
  * `_meta` reaches only the UI, never the model, but it still leaves the Mac
  * and passes through OpenAI, so it gets the same treatment.
  */
-import { isValidPort, isValidSshTarget } from '../../core/remote-open.ts';
+import { isValidPort, isValidSshTarget, isSshWorkerSocketPath } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE } from '../../core/google-signin-full-copy.ts';
@@ -225,10 +225,11 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     };
   }
   const remote = view.remote;
-  if (remote && isValidPort(remote.port)) {
+  if (remote && isValidPort(remote.port) && (remote.socketPath === undefined || isSshWorkerSocketPath(remote.socketPath))) {
     // The port and the owner's own SSH name, each checked; nothing else.
     out.remote = {
       port: remote.port,
+      ...(isSshWorkerSocketPath(remote.socketPath) ? { socketPath: remote.socketPath } : {}),
       ...(isValidSshTarget(remote.sshTarget) ? { sshTarget: remote.sshTarget.trim() } : {}),
       agent: remote.agent === true,
     };
@@ -595,7 +596,8 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     // Anonymous only when the network address was hidden (Tor, verified).
     // Visible (Tor off, or a bypass observed): the question was not
     // anonymous; not verified (Tor ran but the route could not be confirmed,
-    // e.g. no confinement on Linux) is told as what it is: the route says why.
+    // e.g. confinement that does not filter loopback ports) is told as what
+    // it is: the route says why. A computer with no confinement sends nothing.
     // The route reads without its money clauses inside ChatGPT (zkapi-copy.ts).
     const hidden = record.networkIdentity === 'hidden';
     const visible = record.networkIdentity === 'visible';

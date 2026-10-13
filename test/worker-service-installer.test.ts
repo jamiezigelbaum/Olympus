@@ -7,6 +7,23 @@ import {
 } from '../src/core/worker-service.ts';
 
 describe('generic Olympus worker installer', () => {
+  test('an explicit home never inherits another home\'s ambient XDG service paths', () => {
+    const keys = ['XDG_CONFIG_HOME', 'XDG_STATE_HOME'];
+    const saved = keys.map(key => process.env[key]);
+    try {
+      process.env.XDG_CONFIG_HOME = '/tmp/other-owner/config';
+      process.env.XDG_STATE_HOME = '/tmp/other-owner/state';
+      const paths = workerServicePaths('linux', '/home/friend');
+      expect(paths.unitPath).toBe('/home/friend/.config/systemd/user/olympus-worker.service');
+      expect(paths.envPath).toBe('/home/friend/.config/olympus/worker.env');
+      expect(paths.logPath).toBe('/home/friend/.local/state/olympus/worker/worker.log');
+    } finally {
+      keys.forEach((key, index) => {
+        if (saved[index] === undefined) delete process.env[key];
+        else process.env[key] = saved[index];
+      });
+    }
+  });
   test('generates a macOS launchd unit with login start, restart, env, and logs', () => {
     const result = installWorkerService({
       platform: 'darwin',
