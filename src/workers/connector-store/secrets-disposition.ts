@@ -27,6 +27,7 @@
 
 import { existsSync } from 'node:fs';
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
+import { snifferMaterialCarriesSecret } from '../classification/sniffer.ts';
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
 import type { SecretScrubMark, TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -216,7 +217,8 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
   }
   for (const { holdsCopies, ...identity } of unsettled) {
     // A settlement the sniffer retries from its queued question (a refused
-    // credential) needs that question: it clears the side stores itself.
+    // credential: sniffer-resolver.ts `stillOpen`) needs that question: it
+    // clears the side stores itself. Any other question is cleared here.
     if (holdsCopies && snifferRetriesSettlement(ledger, identity)) continue;
     const result = forgetSecretInSideStores({ ledger, identity });
     if (result.failed === 0 && result.notDurable === 0) cleared += 1;
@@ -225,6 +227,12 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
 }
 
 function snifferRetriesSettlement(ledger: TierLedger, identity: TierLedgerIdentity): boolean {
+  try {
+    const row = ledger.getCurrent(identity);
+    if (row?.contentTier !== 'secrets' || !row.reasons.includes('metadata:secret:sniffer_refused')) return false;
+  } catch {
+    return false;
+  }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath === ':memory:' || !existsSync(snifferPath)) return false;
   try {
@@ -236,7 +244,10 @@ function snifferRetriesSettlement(ledger: TierLedger, identity: TierLedgerIdenti
         providerItemId: identity.providerItemId,
         ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
       };
-      return sniffer.questionFor(subject, 'content') !== undefined || sniffer.questionFor(subject, 'metadata') !== undefined;
+      return (['content', 'metadata'] as const).some((pass) => {
+        const question = sniffer.questionFor(subject, pass);
+        return question !== undefined && snifferMaterialCarriesSecret(question.material);
+      });
     } finally {
       sniffer.close();
     }

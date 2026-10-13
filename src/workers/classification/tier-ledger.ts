@@ -1133,6 +1133,8 @@ export class TierLedger {
           WHERE d.provider = i.provider AND d.account_scope = i.account_scope
             AND d.conversation_key = i.conversation_key AND d.provider_item_id = i.provider_item_id
         )
+      -- Unordered pages could keep returning the same skipped items.
+      ORDER BY RANDOM()
       LIMIT ?
     `).all(Math.max(1, Math.min(limit, 1_000))) as Array<{
       provider: string;
