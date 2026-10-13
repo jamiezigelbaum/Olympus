@@ -526,7 +526,7 @@ what each posture means for THEIR data, what it requires, and its trade-off
 **No pick-list before the explanation — question tools included.** Never ask
 the posture as a multiple-choice question, a pick-list, or a choice in a
 question tool (OpenClaw's Ask User tool, a button prompt, or similar) until
-all three have happened in chat, in this order: the required four-tier
+all three have happened in chat, in this order: the required tier
 explanation below was delivered in full, the privacy conversation ran and
 the operator confirmed what you read back, and the four-option posture walkthrough was
 delivered in full. A question tool is a way to collect the answer after that,

@@ -371,7 +371,8 @@ export function isPublicTierRetired(config: Pick<SovereigntyConfig, 'routes' | '
  * defines Public (owner ruling 2026-10-13), but an install made before 1.0
  * keeps its Public tier through a forced re-setup, shaped as the presets then
  * shipped it: Public routes and embeds like Personal. Without an existing
- * Public tier (or a readable file) the preset is returned unchanged.
+ * file or Public tier the preset is returned unchanged; an unreadable file or
+ * a half-defined Public tier is refused rather than replaced.
  */
 export function presetKeepingPublicTier(preset: SovereigntyConfig, path: string): SovereigntyConfig {
   if (!isPublicTierRetired(preset) || !existsSync(path)) return preset;
@@ -379,15 +380,36 @@ export function presetKeepingPublicTier(preset: SovereigntyConfig, path: string)
   try {
     existing = JSON.parse(readFileSync(path, 'utf8')) as Partial<SovereigntyConfig>;
   } catch {
-    return preset;
+    // Unreadable or malformed: replacing it could silently drop a Public tier.
+    throw new OperationError(
+      'config_error',
+      `The sovereignty policy at ${path} cannot be read, so setup cannot tell whether it keeps a Public tier.`,
+      'Fix the file\'s permissions or contents, or move it aside to start from the preset alone.',
+    );
   }
-  if (existing.routes?.public_safe === undefined && existing.retrieval?.trustDomains?.public_safe === undefined) {
-    return preset;
+  const hasRoute = existing.routes?.public_safe !== undefined;
+  const hasRetrieval = existing.retrieval?.trustDomains?.public_safe !== undefined;
+  if (!hasRoute && !hasRetrieval) return preset;
+  if (hasRoute !== hasRetrieval) {
+    throw new OperationError(
+      'config_error',
+      `The sovereignty policy at ${path} defines only half of a Public tier (sovereignty.${hasRoute ? 'retrieval.trustDomains' : 'routes'}.public_safe is missing).`,
+      'Restore the missing half, or move the file aside to start from the preset alone.',
+    );
   }
-  const internalRoute = preset.routes.internal;
-  const internalRetrieval = preset.retrieval.trustDomains.internal;
-  if (!internalRoute || !internalRetrieval) return preset;
-  const next = structuredClone(preset);
+  return withPublicTierLikePersonal(preset);
+}
+
+/**
+ * The policy with a Public tier shaped like its Personal tier, as every preset
+ * defined Public before 1.0. Pure; a policy without a Personal tier is
+ * returned unchanged.
+ */
+export function withPublicTierLikePersonal(config: SovereigntyConfig): SovereigntyConfig {
+  const internalRoute = config.routes.internal;
+  const internalRetrieval = config.retrieval.trustDomains.internal;
+  if (!internalRoute || !internalRetrieval) return config;
+  const next = structuredClone(config);
   next.routes.public_safe = structuredClone(internalRoute);
   next.retrieval.trustDomains.public_safe = structuredClone(internalRetrieval);
   return next;

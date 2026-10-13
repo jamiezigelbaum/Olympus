@@ -5,6 +5,7 @@ import {
   loadSovereigntyEngine,
   isPublicTierRetired,
   loadSovereigntyPreset,
+  withPublicTierLikePersonal,
   type SovereigntyConfig,
   type SovereigntyPresetName,
 } from '../src/core/sovereignty.ts';
@@ -50,7 +51,9 @@ export interface SovereigntyDriftReport extends PresetComparison {
   /**
    * The live policy keeps the Public tier it was written with before 1.0.
    * No shipped preset defines one any more (owner ruling 2026-10-13), and an
-   * existing policy keeps it by design, so it is reported, never counted as drift.
+   * existing policy keeps it by design, so its presence is reported, never
+   * counted as drift; its fields are compared with a Public tier shaped like
+   * the preset's Personal tier, as presets defined it before 1.0.
    */
   keeps_public_tier: boolean;
 }
@@ -78,7 +81,13 @@ export function inspectSovereigntyConfigDrift(configPath: string): SovereigntyDr
 }
 
 function compareWithPreset(live: SovereigntyConfig, presetName: SovereigntyPresetName): PresetComparison {
-  const preset = loadSovereigntyPreset(presetName);
+  // A kept pre-1.0 Public tier is compared with the Public tier the preset
+  // would have had then (shaped like its Personal tier), so its presence is
+  // expected but a changed route or retrieval field still counts as drift.
+  const shipped = loadSovereigntyPreset(presetName);
+  const preset = !isPublicTierRetired(live) && isPublicTierRetired(shipped)
+    ? withPublicTierLikePersonal(shipped)
+    : shipped;
   const liveProfiles = Object.keys(live.modelProfiles).sort();
   const presetProfiles = Object.keys(preset.modelProfiles).sort();
   const liveProfileSet = new Set(liveProfiles);
@@ -88,9 +97,7 @@ function compareWithPreset(live: SovereigntyConfig, presetName: SovereigntyPrese
   const trustDomains: PresetComparison['trust_domains'] = {};
   let distance = presentOnlyInLive.length + absentFromLive.length;
 
-  const presetHasPublic = !isPublicTierRetired(preset);
   for (const domain of TRUST_DOMAINS) {
-    if (domain === 'public_safe' && !presetHasPublic) continue;
     const livePolicy = live.retrieval.trustDomains[domain];
     const presetPolicy = preset.retrieval.trustDomains[domain];
     const livePool = effectivePool(live, domain);

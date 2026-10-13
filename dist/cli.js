@@ -21198,16 +21198,23 @@ function presetKeepingPublicTier(preset, path) {
   try {
     existing = JSON.parse(readFileSync20(path, "utf8"));
   } catch {
-    return preset;
+    throw new OperationError("config_error", `The sovereignty policy at ${path} cannot be read, so setup cannot tell whether it keeps a Public tier.`, "Fix the file's permissions or contents, or move it aside to start from the preset alone.");
   }
-  if (existing.routes?.public_safe === undefined && existing.retrieval?.trustDomains?.public_safe === undefined) {
+  const hasRoute = existing.routes?.public_safe !== undefined;
+  const hasRetrieval = existing.retrieval?.trustDomains?.public_safe !== undefined;
+  if (!hasRoute && !hasRetrieval)
     return preset;
+  if (hasRoute !== hasRetrieval) {
+    throw new OperationError("config_error", `The sovereignty policy at ${path} defines only half of a Public tier (sovereignty.${hasRoute ? "retrieval.trustDomains" : "routes"}.public_safe is missing).`, "Restore the missing half, or move the file aside to start from the preset alone.");
   }
-  const internalRoute = preset.routes.internal;
-  const internalRetrieval = preset.retrieval.trustDomains.internal;
+  return withPublicTierLikePersonal(preset);
+}
+function withPublicTierLikePersonal(config) {
+  const internalRoute = config.routes.internal;
+  const internalRetrieval = config.retrieval.trustDomains.internal;
   if (!internalRoute || !internalRetrieval)
-    return preset;
-  const next = structuredClone(preset);
+    return config;
+  const next = structuredClone(config);
   next.routes.public_safe = structuredClone(internalRoute);
   next.retrieval.trustDomains.public_safe = structuredClone(internalRetrieval);
   return next;
