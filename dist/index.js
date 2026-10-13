@@ -1126,6 +1126,12 @@ var init_still_image_formats = __esm(() => {
   IMAGE_MAX_DECLARED_PIXELS = 16384 * 16384;
 });
 
+// src/workers/source-index/pinned-download.ts
+var REQUEST_BYTES;
+var init_pinned_download = __esm(() => {
+  REQUEST_BYTES = 256 * 1024 ** 2;
+});
+
 // src/workers/source-index/built-in-embedding/manifest.ts
 var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2_REVISION = "24d962e906c7d332c6428e71c9676855024569e2", EMBEDDINGGEMMA_2_BASE, EMBEDDINGGEMMA_2, BUILT_IN_EMBEDDING_MODEL, BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, ONNX_RUNTIME_PACK, LITERT_WHEELS = "https://files.pythonhosted.org/packages", LITERT_RUNTIME_PACK;
 var init_manifest = __esm(() => {
@@ -1274,6 +1280,7 @@ function readBuiltInEmbeddingVision(env = process.env, model = BUILT_IN_EMBEDDIN
 }
 var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS, DOWNLOAD_STALL_MS;
 var init_assets = __esm(() => {
+  init_pinned_download();
   init_linux_engine_layout();
   init_manifest();
   init_tar();
@@ -8871,13 +8878,13 @@ var init_vocabulary = __esm(() => {
     modelInstallFailed: {
       embedding: {
         disk_full: "Couldn't download the search model: the disk is full.",
-        network: "Couldn't download the search model: the network dropped.",
+        network: "Couldn't download the search model: the download stopped before it finished.",
         checksum: "Couldn't download the search model: the download was damaged.",
         unknown: "Couldn't download the search model."
       },
       answers: {
         disk_full: "Couldn't download the private model: the disk is full.",
-        network: "Couldn't download the private model: the network dropped.",
+        network: "Couldn't download the private model: the download stopped before it finished.",
         checksum: "Couldn't download the private model: the download was damaged.",
         unknown: "Couldn't download the private model."
       }

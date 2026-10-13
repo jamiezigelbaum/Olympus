@@ -472,6 +472,10 @@ describe('Private lane fallback', () => {
 });
 
 describe('installer', () => {
+  // The remote container's volume can be smaller than production headroom.
+  // Disk-policy tests below override this deterministic fixture explicitly.
+  const installFixture = (options: Parameters<typeof installBuiltInReasoning>[0]) =>
+    installBuiltInReasoning({ freeBytes: () => 20 * GIB, ...options });
   const runtimeBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
   const modelBytes = new Uint8Array(Array.from({ length: 4_096 }, (_, index) => index % 251));
 
@@ -515,7 +519,7 @@ describe('installer', () => {
           },
         }));
       }
-      return new Response(body, { status: range ? 206 : 200 });
+      return new Response(body, { status: range ? 206 : 200, headers: range ? { 'Content-Range': `bytes ${start}-${modelBytes.length - 1}/${modelBytes.length}` } : {} });
     }) as typeof fetch;
     return { fetchImpl, requests };
   }
@@ -530,13 +534,13 @@ describe('installer', () => {
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
     const { model, runtime } = specs();
     const { fetchImpl, requests } = server();
-    const installed = await installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
+    const installed = await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
     expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
     expect(installed.serverPath).toBe(join(dir, 'llama.cpp-b0-darwin-arm64', 'llama-b0', 'llama-server'));
     expect(installed.gpu).toBe(true);
     // A finished install says so: "verifying" left behind read as not ready forever.
     expect(readBuiltInReasoningStatus(model, env)).toMatchObject({ modelId: 'test-model', state: 'ready', percent: 100 });
-    await installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
+    await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
     expect(requests).toHaveLength(2);
   });
 
@@ -545,7 +549,7 @@ describe('installer', () => {
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
     const { model, runtime } = specs({ modelSha: '0'.repeat(64) });
     const { fetchImpl } = server();
-    const failure = await installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive })
+    const failure = await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive })
       .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(BuiltInReasoningInstallError);
     expect((failure as BuiltInReasoningInstallError).reason).toBe('checksum_mismatch');
@@ -559,11 +563,9 @@ describe('installer', () => {
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
     const { model, runtime } = specs();
     const { fetchImpl, requests } = server({ failModelAfter: 1_000 });
-    await expect(installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive }))
-      .rejects.toThrow('interrupted');
-    const installed = await installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
+    const installed = await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
     expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
-    expect(requests.at(-1)!.range).toBe('bytes=1000-');
+    expect(requests.at(-1)!.range).toBe('bytes=1000-4095');
   });
 
   test('a stale "verifying" status over files already on disk is re-checked and ends ready, with real byte progress', async () => {
@@ -571,7 +573,7 @@ describe('installer', () => {
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
     const { model, runtime } = specs();
     // A models directory copied from another install while it was mid-verify.
-    await installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined });
+    await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined });
     writeFileSync(join(dir, 'status.json'), JSON.stringify({
       state: 'verifying', modelId: 'test-model', percent: 99, label: 'Checking the built-in private model',
       bytesDone: 0, bytesTotal: 0, updatedAt: '2026-10-01T15:47:39.072Z',
@@ -580,7 +582,7 @@ describe('installer', () => {
     const { fetchImpl, requests } = server();
     const seen: Array<{ state: string; bytesDone: number; bytesTotal: number }> = [];
     const lines: string[] = [];
-    await installBuiltInReasoning({
+    await installFixture({
       model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive,
       onProgress: (status) => seen.push({ state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal }),
       log: (line) => lines.push(line),
@@ -605,7 +607,7 @@ describe('installer', () => {
     };
     const fetchImpl = (async (input: RequestInfo | URL) => new Response(String(input).endsWith('llama.tar.gz') ? runtimeBytes : bytes)) as typeof fetch;
     const seen: Array<{ state: string; bytesDone: number; bytesTotal: number }> = [];
-    await installBuiltInReasoning({
+    await installFixture({
       model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined,
       onProgress: (status) => seen.push({ state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal }),
     });
@@ -639,17 +641,13 @@ describe('installer', () => {
         }));
       }
       const start = range ? Number(/bytes=(\d+)-/.exec(range)![1]) : 0;
-      return new Response(modelBytes.slice(start), { status: range ? 206 : 200 });
+      return new Response(modelBytes.slice(start), { status: range ? 206 : 200, headers: range ? { 'Content-Range': `bytes ${start}-${modelBytes.length - 1}/${modelBytes.length}` } : {} });
     }) as typeof fetch;
     const lines: string[] = [];
     const options = { model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, downloadStallMs: 50, log: (line: string) => lines.push(line) };
-    const failure = await installBuiltInReasoning(options).catch((error: unknown) => error);
-    expect(failure).toMatchObject({ reason: 'download_failed' });
-    expect(readBuiltInReasoningStatus(model, env)).toMatchObject({ state: 'failed', failure: { reason: 'download_failed' } });
-    expect(lines.some((line) => line.includes('stage=download failed reason=download_failed'))).toBe(true);
-    const installed = await installBuiltInReasoning(options);
+    const installed = await installFixture(options);
     expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
-    expect(requests.at(-1)).toBe('bytes=1000-');
+    expect(requests.at(-1)).toBe('bytes=1000-4095');
     expect(readBuiltInReasoningStatus(model, env).state).toBe('ready');
   });
 
@@ -659,7 +657,7 @@ describe('installer', () => {
     const { model, runtime } = specs();
     const { fetchImpl, requests } = server();
     const free = 2 * GIB; // less than 2 GB headroom + the model
-    const failure = await installBuiltInReasoning({
+    const failure = await installFixture({
       model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined,
       freeBytes: () => free,
     }).catch((error: unknown) => error);
@@ -693,7 +691,7 @@ describe('installer', () => {
       freeBytes: () => 100 * GIB, now: () => now, spaceBackoffMs: 15 * 60_000,
     };
     const first = server();
-    const failure = await installBuiltInReasoning({ ...base, fetchImpl: first.fetchImpl, writeChunk: fullDisk }).catch((error: unknown) => error);
+    const failure = await installFixture({ ...base, fetchImpl: first.fetchImpl, writeChunk: fullDisk }).catch((error: unknown) => error);
     expect(failure).toMatchObject({ reason: 'insufficient_space' });
     expect(existsSync(join(dir, 'test-model', 'test.gguf.partial'))).toBe(false);
     expect(readBuiltInReasoningStatus(model, env).failure).toMatchObject({
@@ -704,15 +702,15 @@ describe('installer', () => {
     // Inside the backoff: no request at all, the same status.
     now = new Date('2026-10-02T12:10:00Z');
     const waiting = server();
-    await expect(installBuiltInReasoning({ ...base, fetchImpl: waiting.fetchImpl })).rejects.toMatchObject({ reason: 'insufficient_space' });
+    await expect(installFixture({ ...base, fetchImpl: waiting.fetchImpl })).rejects.toMatchObject({ reason: 'insufficient_space' });
     expect(waiting.requests).toHaveLength(0);
 
     // After it, with room again, the download starts over and finishes.
     now = new Date('2026-10-02T12:16:00Z');
     const later = server();
-    const installed = await installBuiltInReasoning({ ...base, fetchImpl: later.fetchImpl });
+    const installed = await installFixture({ ...base, fetchImpl: later.fetchImpl });
     expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
-    expect(later.requests.find((request) => request.url.endsWith('test.gguf'))?.range).toBeNull();
+    expect(later.requests.find((request) => request.url.endsWith('test.gguf'))?.range).toBe('bytes=0-4095');
     expect(readBuiltInReasoningStatus(model, env).state).toBe('ready');
   });
 
@@ -720,11 +718,13 @@ describe('installer', () => {
     const dir = tempDir();
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
     const { model, runtime } = specs();
-    const { fetchImpl } = server({ failModelAfter: 3_000 });
+    const { fetchImpl } = server();
     const options = { model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined };
-    await expect(installBuiltInReasoning(options)).rejects.toThrow('interrupted');
+    await installFixture(options);
+    rmSync(join(dir, model.modelId, model.file.name));
+    writeFileSync(join(dir, model.modelId, model.file.name + '.partial'), modelBytes.slice(0, 3_000));
     const seen: number[] = [];
-    const installed = await installBuiltInReasoning({
+    const installed = await installFixture({
       ...options,
       freeBytes: () => {
         seen.push(1);
@@ -757,7 +757,7 @@ describe('installer', () => {
       }));
     }) as typeof fetch;
     const lockPath = join(dir, 'install.lock');
-    const holder = installBuiltInReasoning({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined, lockRefreshMs: 20 });
+    const holder = installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined, lockRefreshMs: 20 });
     await waitFor(() => existsSync(lockPath));
     const firstAt = JSON.parse(readFileSync(lockPath, 'utf8')).at as number;
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -765,7 +765,7 @@ describe('installer', () => {
     expect(refreshed.pid).toBe(process.pid);
     expect(refreshed.at).toBeGreaterThan(firstAt);
     // Another installer waits for the live holder instead of taking the lock.
-    await expect(installBuiltInReasoning({
+    await expect(installFixture({
       model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined, lockWaitMs: 50,
     })).rejects.toThrow('still installing');
     release();
@@ -781,7 +781,7 @@ describe('installer', () => {
     await gone.exited;
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'install.lock'), JSON.stringify({ pid: gone.pid, at: Date.now() }));
-    const installed = await installBuiltInReasoning({
+    const installed = await installFixture({
       model, runtime, env, platform: 'darwin-arm64', fetchImpl: server().fetchImpl, extractArchive, log: () => undefined, lockWaitMs: 50,
     });
     expect(existsSync(installed.modelPath)).toBe(true);
@@ -790,7 +790,7 @@ describe('installer', () => {
   test('an unsupported platform fails with a reason the dashboard can show', async () => {
     const { model, runtime } = specs();
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: tempDir() };
-    await expect(installBuiltInReasoning({ model, runtime, env, platform: 'win32-x64', fetchImpl: server().fetchImpl }))
+    await expect(installFixture({ model, runtime, env, platform: 'win32-x64', fetchImpl: server().fetchImpl }))
       .rejects.toMatchObject({ reason: 'unsupported_platform' });
   });
 });

@@ -1,3 +1,4 @@
+import { downloadPinnedFile } from '../pinned-download.ts';
 import { standaloneLinuxDataDir } from '../../../core/linux-engine-layout.ts';
 // Fetches, verifies and installs the built-in embedding model and its runtime
 // into the Olympus data directory, once. Every file is checked against the
@@ -566,97 +567,17 @@ async function downloadVerified(
   label: string,
   stallMs: number,
 ): Promise<void> {
-  const partial = `${target}.partial-${process.pid}-${randomUUID()}`;
   const algorithm = expected.kind === 'sha256' ? 'sha256' : integrityAlgorithm(expected.expected);
-  const hash = createHash(algorithm);
-  let received = 0;
-  let response: Response;
-  // One controller covers the request and every read: a wait longer than
-  // `stallMs` for the next byte abandons the download instead of leaving the
-  // status on "downloading" forever with nothing moving.
-  const controller = new AbortController();
-  let stallTimer: ReturnType<typeof setTimeout> | undefined;
-  const armStall = (): void => {
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
-  };
-  const disarmStall = (): void => {
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = undefined;
-  };
-  armStall();
-  try {
-    response = await fetchImpl(url, { redirect: 'follow', signal: controller.signal });
-  } catch (error) {
-    disarmStall();
-    throw new BuiltInEmbeddingInstallError(
-      'download_failed',
-      `Could not reach the download server for the built-in search model (${error instanceof Error ? error.message : String(error)}).`,
-    );
-  }
-  if (!response.ok || !response.body) {
-    disarmStall();
-    await response.body?.cancel().catch(() => undefined);
-    throw new BuiltInEmbeddingInstallError(
-      'download_failed',
-      `The built-in search model download failed (HTTP ${response.status}).`,
-    );
-  }
-  reporter.set('downloading', label);
-  let fd: number;
-  try {
-    fd = openSync(partial, 'w', 0o644);
-  } catch (error) {
-    disarmStall();
-    await response.body.cancel().catch(() => undefined);
-    throw new BuiltInEmbeddingInstallError('disk_write_failed', `Could not write ${partial}: ${String(error)}`);
-  }
-  try {
-    const reader = response.body.getReader();
-    const aborted = new Promise<never>((_resolve, reject) => {
-      controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
-    });
-    aborted.catch(() => undefined);
-    for (;;) {
-      armStall();
-      const { done, value } = await Promise.race([reader.read(), aborted]);
-      if (done) break;
-      received += value.byteLength;
-      if (received > expectedBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new BuiltInEmbeddingInstallError('checksum_mismatch', `${url} is larger than its pinned size.`);
-      }
-      hash.update(value);
-      try {
-        writeSync(fd, value);
-      } catch (error) {
-        throw new BuiltInEmbeddingInstallError('disk_write_failed', `Could not write the download: ${String(error)}`);
-      }
-      reporter.advance(value.byteLength, label);
-    }
-  } catch (error) {
-    disarmStall();
-    closeSync(fd);
-    rmSync(partial, { force: true });
-    if (error instanceof BuiltInEmbeddingInstallError) throw error;
-    throw new BuiltInEmbeddingInstallError(
-      'download_failed',
-      `The built-in search model download was interrupted (${error instanceof Error ? error.message : String(error)}).`,
-    );
-  }
-  disarmStall();
-  closeSync(fd);
-  const digest = expected.kind === 'sha256'
-    ? hash.digest('hex')
-    : `${algorithm}-${hash.digest('base64')}`;
-  if (received !== expectedBytes || digest !== expected.expected) {
-    rmSync(partial, { force: true });
-    throw new BuiltInEmbeddingInstallError(
-      'checksum_mismatch',
-      `${url} did not match its pinned checksum; nothing was installed.`,
-    );
-  }
-  renameSync(partial, target);
+  await downloadPinnedFile({
+    fetchImpl, url, target, partial: `${target}.partial-${process.pid}-${randomUUID()}`, expectedBytes,
+    algorithm,
+    digest: expected.kind === 'sha256' ? expected.expected : expected.expected.slice(algorithm.length + 1),
+    encoding: expected.kind === 'sha256' ? 'hex' : 'base64',
+    noun: 'built-in search model', stallMs, verifyTimeoutMs: 10 * 60_000, keepPartial: false,
+    error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
+    onStart: () => reporter.set('downloading', label),
+    onProgress: (bytes) => reporter.advance(bytes, label),
+  });
 }
 
 function integrityAlgorithm(integrity: string): string {
