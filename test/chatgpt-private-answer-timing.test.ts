@@ -34,6 +34,8 @@ import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts'
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import { FIXTURE_PLACEMENT, fixtureConnector } from './helpers/tier-fixtures.ts';
 
 /** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
 const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
@@ -228,6 +230,13 @@ describe('2. the sniffer yields to a private answer', () => {
     const installed = new InstalledTierClassification({ env: {}, lane: LANE });
     cleanups.push(() => installed.close());
     const store = installed.snifferStoreForLedger(ledgerPath);
+    // Body questions now require a readable stored copy before model dispatch.
+    const contentStore = new LocalConnectorStore({ dbPath: join(dir, 'store.sqlite'),
+      corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal', tierLedger: ledger });
+    cleanups.push(() => contentStore.close());
+    await contentStore.syncFromConnector(fixtureConnector(() => Array.from({ length: 3 }, (_, n) => ({
+      id: `item-${n}`, name: `bank ${n}`, text: `Account holder: Morgan Example\nStatement ${n}`,
+    }))), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     for (let n = 0; n < 3; n += 1) {
       ledger.recordDecision(subject(n), classifyItemTiers({ signals: { title: `bank ${n}` }, text: `Account holder: Morgan Example\nStatement ${n}`, subject: subject(n) }, { sniffer: new CachedTierSniffer(store, LANE) }));
     }
@@ -266,7 +275,7 @@ describe('2. the sniffer yields to a private answer', () => {
       installed,
       lane: LANE,
       model: sniffer,
-      stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+      stores: () => [contentStore],
       classificationLedgerPath,
       shouldYield: () => activity.busy,
       answersInFlight: () => activity.busy,
