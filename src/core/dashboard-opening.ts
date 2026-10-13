@@ -1,3 +1,4 @@
+import { workerFetch } from './worker-transport.ts';
 /**
  * Minting the dashboard's one-time opening link (`/dashboard/launch#…`).
  *
@@ -118,7 +119,7 @@ export async function mintDashboardOpeningUrl(
       `Run ${hint} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
-  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  const fetchImpl = dependencies.fetchImpl ?? workerFetch;
   let response: Response;
   try {
     response = await fetchImpl(`${base}/dashboard/control/launch${dependencies.remote === true ? '?purpose=remote' : ''}`, {

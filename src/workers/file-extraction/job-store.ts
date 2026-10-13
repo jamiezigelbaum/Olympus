@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 /**
  * The generic extraction job side database.
  *
@@ -590,7 +591,7 @@ export function defaultFileExtractionJobsDbPath(
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override) return override;
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'file-extraction-jobs.sqlite');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'file-extraction-jobs.sqlite');
 }
 
 /**

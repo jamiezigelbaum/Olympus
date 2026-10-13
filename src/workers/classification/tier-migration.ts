@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Tier migration for EXISTING installs (design
 // docs/design/per-item-four-tier-classification.md, section 4.6, steps M0-M6).
 //
@@ -157,7 +158,7 @@ export function resolveTierMigrationPaths(
 ): TierMigrationPaths {
   const configured = env[TIER_MIGRATION_DIR_ENV]?.trim();
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  const dir = configured || join(dataHome, 'openclaw', 'olympus', 'tier-migration');
+  const dir = configured || join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'tier-migration');
   return { statePath: join(dir, 'state.json'), reportDir: join(dir, 'reports'), embeddingLedgerPath };
 }
 

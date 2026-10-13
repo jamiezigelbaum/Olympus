@@ -1,3 +1,4 @@
+import { removeReleasedWorkerSocket, workerFetch } from './worker-transport.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
@@ -81,7 +82,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
   let proofGeneration = 0;
   let lifecycleGeneration = 0;
   const invalidate = () => { proofGeneration += 1; readyChild = undefined; };
-  const fetchWorker = options.fetch ?? globalThis.fetch;
+  const fetchWorker = options.fetch ?? workerFetch;
   const service = createNativeProcessService<WorkerLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
@@ -159,12 +160,16 @@ async function prepareWorkerStart(
   // Mirror the kernel's precedence (explicit option, then per-start settings)
   // when bounding the individual readiness probe against the start deadline.
   const effectiveStartupTimeoutMs = worker.startupTimeoutMs ?? startupTimeoutMs;
+  const endpointOccupied=await workerEndpointIsOccupied(worker.fetchWorker,settings.readinessUrl);
+  if(process.platform==='linux'&&worker.fetchWorker===workerFetch&&!endpointOccupied&&input.previousChildReleased){
+    removeReleasedWorkerSocket({platform:'linux',env:settings.env},{previousWorkerReleased:true});
+  }
   return {
     ...settings,
     startupTimeoutMs,
     command: settings.runtimePath,
     args: ['--no-env-file', settings.executablePath, '__worker-service-run', settings.instanceId],
-    endpointOccupied: await workerEndpointIsOccupied(worker.fetchWorker, settings.readinessUrl),
+    endpointOccupied,
     readinessProbe: () => authenticatedReadinessProbe(
       worker.fetchWorker,
       settings.readinessUrl,

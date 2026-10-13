@@ -2347,6 +2347,12 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
  * configuration. "Daemon" is the program's own name for itself; the card
  * says "the zkapi-clientd program".
  */
+/**
+ * The one line the card shows where zkAPI cannot run: no network confinement
+ * on this platform (owner ruling 2026-10-12: no weaker mode).
+ */
+const OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = 'Anonymous answers aren\'t available on Linux yet: they need network confinement, which this version of Olympus doesn\'t have on Linux. Nothing is ever sent without it.';
+
 export const DASHBOARD_OUTSIDE_HELP_COPY = {
   crumb: 'Anonymous answers',
   title: 'Anonymous answers',
@@ -2360,6 +2366,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     fence_held: 'Anonymous answers: paused · unfinished payment',
     needs_acceptance: 'Anonymous answers: paused · accept the updated statements',
     blocked: 'Anonymous answers: paused · needs a fix',
+    unavailable: 'Anonymous answers: not available on Linux yet',
   },
   /** The route claim belongs to a verified, completed session, never the platform alone. */
   experimental: 'Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.',
@@ -2442,7 +2449,10 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     fence_held: 'Paused: an earlier question has not finished paying yet.',
     needs_acceptance: 'Paused until you accept the updated statements below.',
     blocked: 'Paused: fix the problem below.',
+    unavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE,
   },
+  /** Where zkAPI cannot run (the card's whole body, and the worker's refusal). */
+  confinementUnavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE,
   /** Said only when a saved change needs a restart this worker could not do itself. */
   restartPending: 'Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.',
   /** Said under the status line when Tor is off, in plain words (Details names Tor). */
@@ -2537,6 +2547,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     spend_cap_reached: 'Another question would pass today\'s spending limit.',
     state_unavailable: 'Olympus could not read its record of questions on this computer.',
     key_reuse_on: 'The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off (the last step).',
+    confinement_unavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE,
   },
   blockerOther: 'Not ready yet ({code}).',
   stepsTitle: 'Set up zkAPI',

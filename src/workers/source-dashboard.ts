@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { GOOGLE_SIGNIN_FULL_SENTENCE } from '../core/google-signin-full-copy.ts';
 import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
@@ -1753,7 +1754,7 @@ const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
 
 export function defaultSourceDashboardHistoryDbPath(env: Record<string, string | undefined> = process.env): string {
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'source-dashboard.sqlite');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'source-dashboard.sqlite');
 }
 
 /**

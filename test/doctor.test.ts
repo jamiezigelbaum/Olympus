@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
+import { SecretStoreError } from '../src/core/secret-store.ts';
 import { runDoctor } from '../src/core/doctor.ts';
 import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
@@ -179,6 +180,7 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
   const stateRoot = mkdtempSync(join(tmpdir(), 'olympus-doctor-ingestion-state-'));
   process.on('exit', () => rmSync(stateRoot, { recursive: true, force: true }));
   return {
+    runningBun: false,
     commandExists: async (command) => command === 'bun' || command === 'node',
     pythonModuleExists: async () => false,
     // Doctor tests must never inherit a live local worker from the host. Tests
@@ -197,6 +199,35 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
 }
 
 describe('runDoctor', () => {
+  test('Linux accepts its running managed Bun without a PATH bun and names its socket', async () => {
+    const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), platform: 'linux', runningBun: true,
+      commandExists: () => false, env: { HOME: '/tmp/doctor-linux', XDG_RUNTIME_DIR: '/run/user/1000' },
+      fetchImpl: fakeWorkerFetch({ '/v1/health': { status: 'ok' } }).fetchImpl }));
+    expect(checkByName(result.checks, 'dependencies').ok).toBe(true);
+    expect(checkByName(result.checks, 'email_worker').detail).toContain('/run/user/1000/olympus/worker.sock');
+    expect(checkByName(result.checks, 'email_worker').detail).not.toContain('127.0.0.1');
+  });
+  test('Linux desktop port collision is unhealthy with its remedy; Mac ignores Linux-only bridge facts', async () => {
+    for (const platform of ['linux', 'darwin'] as const) {
+      const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), platform,
+        fetchImpl: fakeWorkerFetch({ '/v1/health': { status: 'ok', desktop_bridge: { state: 'port_in_use', remedy: 'Free the port or use the owner SSH socket forward.' } } }).fetchImpl }));
+      const worker = checkByName(result.checks, 'email_worker');
+      expect(worker.ok).toBe(platform === 'darwin');
+      if (platform === 'linux') { expect(worker.detail).toContain('port_in_use'); expect(worker.hint).toContain('SSH socket forward'); }
+    }
+  });
+
+  test('Linux standalone host copy does not claim no private model runs; Mac wording is unchanged', async () => {
+    for (const platform of ['linux', 'darwin'] as const) {
+      const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(), platform,
+        sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+        hostProbe: () => ({ engine: { installed: true, state: 'running' }, legacyWorkerUnit: false }) }));
+      const detail = checkByName(result.checks, 'host').detail;
+      if (platform === 'linux') { expect(detail).not.toContain('Mac'); expect(detail).toContain('Private model readiness'); }
+      else expect(detail).toContain('No answer model runs on this Mac: ChatGPT answers from Olympus search.');
+    }
+  });
+
   test('does not probe the worker when an explicit credential remains unresolved', async () => {
     const config = enabledEmailConfig();
     config.worker.authTokenSecretRefUnresolved = true;
@@ -1140,7 +1171,8 @@ describe('runDoctor', () => {
     const result = await runDoctor(doctorDeps({
       config: defaultConfig(),
       delphi: healthyDelphi(),
-      commandExists: async (command) => command !== 'bun',
+      runningBun: false,
+    commandExists: async (command) => command !== 'bun',
     }));
 
     const dependencies = checkByName(result.checks, 'dependencies');
@@ -1194,7 +1226,7 @@ describe('runDoctor', () => {
     expect(prerequisites.hint).toContain('olympus connect venice --api-key-prompt');
   });
 
-  test('reads the sovereignty policy setup wrote at the default path, without an explicit config path', async () => {
+  for (const platform of ['darwin', 'linux'] as const) test(`${platform}: reads the default sovereignty policy without an explicit config path`, async () => {
     // Nothing sets config.sovereignty.policy or configPath by default, so
     // gating on them meant setup wrote ~/.olympus/sovereignty.json and doctor
     // then reported no posture: the prerequisite check went green by skipping
@@ -1202,13 +1234,15 @@ describe('runDoctor', () => {
     // setup they had just run (clean-install rehearsal, 2026-09-05).
     const home = mkdtempSync(join(tmpdir(), 'olympus-doctor-sovereignty-default-'));
     try {
+      const expectedPath = platform === 'linux' ? join(home, '.config', 'olympus', 'sovereignty.json') : join(home, '.olympus', 'sovereignty.json');
       const policyPath = writeSovereigntyConfigFile({
         config: loadPreBuiltInPreset('no-sensitive'),
-        path: join(home, '.olympus', 'sovereignty.json'),
+        path: expectedPath,
       });
-      expect(policyPath).toBe(join(home, '.olympus', 'sovereignty.json'));
+      expect(policyPath).toBe(expectedPath);
 
       const missingKey = await runDoctor(doctorDeps({
+        platform,
         config: defaultConfig(),
         delphi: healthyDelphi(),
         env: { HOME: home },
@@ -1227,6 +1261,7 @@ describe('runDoctor', () => {
       mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
       writeFileSync(join(home, '.config', 'olympus', 'worker.env'), '', { mode: 0o600 });
       const shellOnly = await runDoctor(doctorDeps({
+        platform,
         config: defaultConfig(),
         delphi: healthyDelphi(),
         env: { HOME: home, GEMINI_API_KEY: 'gemini-test-key' },
@@ -1237,6 +1272,7 @@ describe('runDoctor', () => {
       writeFileSync(join(home, '.config', 'olympus', 'worker.env'),
         'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY=stored-test-key\n', { mode: 0o600 });
       const withKey = await runDoctor(doctorDeps({
+        platform,
         config: defaultConfig(),
         delphi: healthyDelphi(),
         env: { HOME: home },
@@ -1378,6 +1414,29 @@ describe('runDoctor', () => {
     const prerequisites = checkByName(result.checks, 'sovereignty_prerequisites');
     expect(prerequisites.ok).toBe(true);
     expect(checkByName(result.checks, 'sovereignty_model_lanes').ok).toBe(true);
+  });
+
+  test('doctor reports typed backend failure instead of a missing zkAPI credential', async () => {
+    const policy = structuredClone(loadSovereigntyPreset('private-cloud-only'));
+    (policy.modelProfiles as Record<string, unknown>)['zkapi-consult'] = {
+      provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult',
+      baseUrl: 'http://localhost:8787/v1', model: 'openai/gpt-5-mini',
+      secretRef: 'store:fixture',
+      zkapi: { fundingDate: '2026-10-01', acknowledgements: { version: 0, accepted: [] } },
+    };
+    const result = await runDoctor(doctorDeps({
+      config: defaultConfig(),
+      delphi: healthyDelphi(),
+      sovereigntyEngine: createSovereigntyEngine(policy),
+      secretStore: {
+        getSync: () => { throw new SecretStoreError('locked', 'libsecret is locked.'); },
+        get: async () => { throw new SecretStoreError('locked', 'libsecret is locked.'); },
+      },
+    }));
+    const check = checkByName(result.checks, 'zkapi_consult_transport');
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('secret store locked');
+    expect(check.detail).not.toContain('missing');
   });
 
   test('an unreachable secret is still reported while the local lane is left to its own probe', async () => {

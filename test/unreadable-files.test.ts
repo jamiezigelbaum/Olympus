@@ -626,3 +626,21 @@ describe('tokens bind to the control session (P2b)', () => {
     expect(seen.at(-1)!.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBeNull();
   });
 });
+
+// The Linux MIME/session probes introduce awaits before dispatch. Recheck the
+// capability then; a failed local open must not release a now-forbidden URL.
+test('revocation during desktop preparation refuses dispatch and web fallback', async () => {
+  let allowed = true;
+  const { files } = filesOver(itemsOf(1), {
+    verdict: () => allowed ? 'unreadable' : 'blocked_policy',
+    openTarget: () => ({ localPath: '/fixture/source.pdf', url: 'https://www.dropbox.com/preview/source.pdf' }),
+    openFile: async (_path, eligible) => {
+      allowed = false;
+      expect(await eligible()).toBe(false);
+      throw new Error('revoked');
+    },
+  });
+  const [file] = files.computerList([LANE.corpusId], 1, AS_OPENER).files;
+  expect(await files.open(file!.token, OPENER)).toEqual({ status: 'gone' });
+  expect(await files.open(file!.token, OPENER)).toEqual({ status: 'gone' });
+});

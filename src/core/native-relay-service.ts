@@ -35,7 +35,7 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
  */
 const DEFAULT_STABLE_UPTIME_MS = 60_000;
 /** Only what the child needs: it handles internet traffic and gets no credentials. */
-const CHILD_ENV_PASSTHROUGH = ['HOME', 'XDG_DATA_HOME', 'PATH', 'TMPDIR', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS'] as const;
+const CHILD_ENV_PASSTHROUGH = ['HOME', 'XDG_DATA_HOME', 'PATH', 'TMPDIR', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', ...(process.platform === 'linux' ? ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'] : [])] as const;
 
 export interface NativeRelayServiceOptions {
   initialPluginConfig: unknown;

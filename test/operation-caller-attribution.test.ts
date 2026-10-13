@@ -4,7 +4,8 @@
 // (test/opsec.test.ts and the analyst-answer suites prove that unchanged).
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { prepareWorkerSocket } from '../src/core/worker-transport.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -197,19 +198,32 @@ describe('caller wire validation', () => {
 describe('attribution flows from each surface to the audit ledger', () => {
   test('native OpenClaw tools', async () => {
     const { worker, callers, v1, v2 } = workerWithLedger();
-    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
-      worker.fetch(new Request(input, init))) as typeof fetch;
-    const tools = new Map<string, { execute: (id: string, params: unknown) => Promise<unknown> }>();
-    plugin.register({
-      pluginConfig: { email: { enabled: true, baseUrl: 'http://source-worker.test/v1' }, worker: { authToken: 't' } },
-      registerTool(tool: { name: string; execute: (id: string, params: unknown) => Promise<unknown> }) {
-        tools.set(tool.name, tool);
-      },
-    } as never);
-    await tools.get('source_answer')!.execute('call-1', { question: 'q' });
-    expect(v1()?.caller).toEqual({ surface: 'native', display_name: 'OpenClaw' });
-    expect(v2()?.caller).toEqual({ surface: 'native', display_name: 'OpenClaw' });
-    expect(callers()).toHaveLength(2);
+    const runtime = mkdtempSync(join(tmpdir(), 'caller-native-'));
+    const savedRuntime = process.env.XDG_RUNTIME_DIR;
+    process.env.XDG_RUNTIME_DIR = runtime;
+    const socket = prepareWorkerSocket();
+    const server = socket ? Bun.serve({ unix: socket, fetch: request => worker.fetch(request) }) : undefined;
+    if (socket) chmodSync(socket, 0o600);
+    try {
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+        worker.fetch(new Request(input, init))) as typeof fetch;
+      const tools = new Map<string, { execute: (id: string, params: unknown) => Promise<unknown> }>();
+      plugin.register({
+        pluginConfig: { email: { enabled: true, baseUrl: 'http://127.0.0.1:8010/v1' }, worker: { authToken: 't' } },
+        registerTool(tool: { name: string; execute: (id: string, params: unknown) => Promise<unknown> }) {
+          tools.set(tool.name, tool);
+        },
+      } as never);
+      await tools.get('source_answer')!.execute('call-1', { question: 'q' });
+      expect(v1()?.caller).toEqual({ surface: 'native', display_name: 'OpenClaw' });
+      expect(v2()?.caller).toEqual({ surface: 'native', display_name: 'OpenClaw' });
+      expect(callers()).toHaveLength(2);
+    } finally {
+      server?.stop(true);
+      if (savedRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = savedRuntime;
+      rmSync(runtime, { recursive: true, force: true });
+    }
   });
 
   describe('subprocess surfaces', () => {
@@ -224,14 +238,17 @@ describe('attribution flows from each surface to the audit ledger', () => {
 
     function start() {
       const harness = workerWithLedger();
-      server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => harness.worker.fetch(request) });
       home = mkdtempSync(join(tmpdir(), 'olympus-caller-attribution-'));
+      const socket = prepareWorkerSocket({ env: { HOME: home, XDG_RUNTIME_DIR: home } });
+      server = Bun.serve({ ...(socket ? { unix: socket } : { hostname: '127.0.0.1', port: 0 }), fetch: (request) => harness.worker.fetch(request) });
+      if (socket) chmodSync(socket, 0o600);
       const env: Record<string, string> = {
         PATH: process.env.PATH ?? '',
         HOME: home,
+        XDG_RUNTIME_DIR: home,
         OLYMPUS_CONFIG: join(home, 'missing-config.json'),
         OLYMPUS_EMAIL_ENABLED: 'true',
-        OLYMPUS_EMAIL_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+        OLYMPUS_EMAIL_BASE_URL: `http://127.0.0.1:${server.port || 8010}/v1`,
         OLYMPUS_SOURCE_INDEX_ENABLED: 'true',
         OLYMPUS_WORKER_AUTH_TOKEN: 'test-token',
       };

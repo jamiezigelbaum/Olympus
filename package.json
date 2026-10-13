@@ -31,6 +31,10 @@
       "openclawVersion": "2026.7.1"
     }
   },
+  "olympus": {
+    "linuxApprovalTransport": "owner-unix-socket-v1",
+    "linuxStateCompatibility": 1
+  },
   "scripts": {
     "prepack": "bun scripts/standard-pack-guard.ts",
     "build": "bun build ./src/native-plugin.ts --target=node --format=esm --outfile=dist/index.js && bun build ./src/cli.ts --target=node --format=esm --outfile=dist/cli.js && bun build ./scripts/source-embedding-drain.ts --target=node --format=esm --outfile=dist/embedding-drain.js && bun build ./src/workers/source-index/built-in-embedding/litert-helper.ts --target=bun --format=esm --outfile=dist/litert-helper.js && bun build ./src/control-ui.ts --target=browser --format=esm --outfile=dist/control-ui/index.js && bun scripts/strip-generated-trailing-whitespace.ts dist/index.js dist/cli.js dist/embedding-drain.js dist/litert-helper.js dist/control-ui/index.js && bun scripts/build-chatgpt-relay-assets.ts",

@@ -54,7 +54,7 @@ import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search
 import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 import { remoteErrorOutput, remoteRetryAfterSeconds, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
-import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialInstallId } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 /** The ChatGPT plugin directory's endpoint. */
@@ -278,6 +278,14 @@ export function authenticateRemoteRequest(
   try {
     // Audience binding: only an OAuth token issued for this resource opens it.
     verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint!.resource) : store.verifyToken(token);
+    // A Linux owner-created API key uses the relay access-token envelope but
+    // remains a revocable bearer connection. It never opens the directory
+    // resource or bypasses an expired/revoked/wrong-audience OAuth grant.
+    if (oauthToken && !verification.ok && verification.reason === 'unknown'
+      && surface === 'default' && urls?.installId
+      && credentialInstallId('access', token) === urls.installId) {
+      verification = store.verifyToken(token);
+    }
   } catch {
     // A store that cannot be read (closed, locked, corrupt) refuses with a
     // fixed 503; the exception's text never reaches the caller.
