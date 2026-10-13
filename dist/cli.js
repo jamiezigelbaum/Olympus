@@ -3093,6 +3093,26 @@ function isGooglePublisherWebClientId(clientId, env = process.env) {
     return true;
   return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
 }
+function googleDesktopClient(env = process.env) {
+  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    return overrideSecret ? { clientId: overrideId, clientSecret: overrideSecret } : undefined;
+  }
+  const id = DEFAULT_GOOGLE_DESKTOP_CLIENT_ID.trim();
+  const secret = DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET.trim();
+  return id && secret ? { clientId: id, clientSecret: secret } : undefined;
+}
+function googleDesktopClientSecret(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return;
+  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId && candidate === overrideId)
+    return env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim() || undefined;
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  return known?.secret.trim() || undefined;
+}
 function dropboxPublisherAppKey(env = process.env) {
   return firstConfigured(env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY, DEFAULT_DROPBOX_PUBLISHER_APP_KEY);
 }
@@ -3107,10 +3127,13 @@ function firstConfigured(...candidates) {
   }
   return;
 }
-var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "1y1l05nqd24xaaw", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS;
+var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "1y1l05nqd24xaaw", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "", GOOGLE_DESKTOP_CLIENTS;
 var init_publisher_oauth_client = __esm(() => {
   GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
     DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
+  ];
+  GOOGLE_DESKTOP_CLIENTS = [
+    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
   ];
 });
 
@@ -3538,7 +3561,7 @@ class EnvCredentialBroker {
       storedState = resolved.state;
     }
     const clientId = await this.resolveFirstSecret(oauth2.clientIdEnvNames, oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : []);
-    const clientSecret = await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
+    const clientSecret = googleDesktopClientSecret(clientId, this.env) ?? await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
     const refreshToken = await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? storedState?.refreshToken?.trim();
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
@@ -6429,7 +6452,8 @@ function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPk
 }
 async function completeOAuthSourceConnection(prepared, code) {
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
-  const clientSecret = usesGooglePublisherExchange ? undefined : await resolveOAuthClientSecret(prepared);
+  const shippedDesktopSecret = isGoogleOAuthSource(prepared.options.source) ? googleDesktopClientSecret(prepared.clientId) : undefined;
+  const clientSecret = usesGooglePublisherExchange ? undefined : shippedDesktopSecret ?? await resolveOAuthClientSecret(prepared);
   const token = await exchangeAuthorizationCode({
     source: prepared.options.source,
     tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
@@ -6557,7 +6581,7 @@ async function completeOAuthSourceConnection(prepared, code) {
       secretRefs.push(`store:${clientIdSourceKey}`);
     }
     let clientSecretRef;
-    if (!usesGooglePublisherExchange && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
+    if (!usesGooglePublisherExchange && !shippedDesktopSecret && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
       const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
       secretWrites.push([clientSecretKey, clientSecret]);
       clientSecretRef = `store:${clientSecretKey}`;
@@ -13408,7 +13432,7 @@ function credentialInstallId(kind, value) {
   return PATTERN[kind].exec(value)?.[1];
 }
 var AUTHENTICATED_RESPONSE_HEADER = "x-olympus-authenticated", SURFACE_RESPONSE_HEADER = "x-olympus-surface", SURFACE_FINGERPRINT_DOMAIN = `olympus-relay/surface-fingerprint/v1
-`, PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN, HANDOFF_PATH_PREFIX = "/go/";
+`, PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN, HANDOFF_PATH_PREFIX = "/go/", SIGNIN_BRIDGE_PATH = "/connect/signin";
 var init_tokens = __esm(() => {
   PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c", handoff: "oly2g", private: "oly2p" };
   PATTERN = {
@@ -61516,7 +61540,10 @@ var init_vocabulary = __esm(() => {
     diskFreeUpUnknown: "Free up some space, then Try again.",
     fixOnMac: "Open Olympus on your computer to fix this.",
     privateMatches: "Some matching items are private and stay on your computer.",
-    changeModelsOnMac: "Change models in Olympus on your computer."
+    changeModelsOnMac: "Change models in Olympus on your computer.",
+    googleSigninMoved: "Google sign-in now happens on your computer. Reconnect once to switch.",
+    reconnectGoogle: "Reconnect Google",
+    googleConnectingOnServer: "Waiting for you to finish signing in… If Google ends on a page that does not load, copy its address and run olympus connect finish '<address>' on the server."
   };
   DASHBOARD_CHATGPT_REFUSAL_COPY = {
     line: {
@@ -64026,6 +64053,8 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     baseConnection.label = "Reconnect Google to continue syncing";
     if (baseConnection.action.kind === "oauth")
       baseConnection.action.label = "Reconnect Google";
+  } else if (googleSignInMoved(definition, registry, baseConnection.state)) {
+    baseConnection.google_signin_moved = true;
   }
   const pairedSession = definition.connect_action.kind === "guided_session";
   const unpairable = pairedSession && unpaired === undefined && (baseConnection.handles.length > 0 || baseConnection.state !== "not_connected");
@@ -64934,6 +64963,15 @@ function providerRefusalReason(error, redirectUri, settingLabel) {
   const refusal = `Provider refused: ${error.code}`;
   return redirectUri ? `${refusal} — register ${redirectUri} with the provider, then try again` : `${refusal} — check the redirect URI registered on the provider app, then try again`;
 }
+function googleSignInMoved(definition, registry, state) {
+  if (definition.provider !== "gmail" && definition.provider !== "google_drive")
+    return false;
+  if (state === "not_connected" || state === "needs_setup" || state === "reauth_required" || state === "awaiting_consent")
+    return false;
+  if (!googleDesktopClient())
+    return false;
+  return handlesForDefinition(definition, registry).some((handle) => !isRetiredGoogleHandle(handle) && handle.oauth2Refresh?.exchangeVia === "publisher_endpoint");
+}
 function handlesForDefinition(definition, registry) {
   if (!registry)
     return [];
@@ -65539,6 +65577,7 @@ var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOA
 var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
   init_google_signin_full_copy();
+  init_publisher_oauth_client();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -118543,7 +118582,8 @@ function createEmailSourceWorker(options = {}) {
         const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
         if (request.method === "GET" && oauthCallbackDone) {
           const source = parseDashboardOAuthSource(decodeURIComponent(oauthCallbackDone[1]));
-          return dashboardOAuthCompleteHtml({ source, returnTo: dashboardReturnTo() });
+          const returnTo = url.searchParams.get("return") === "chatgpt" ? CHATGPT_RETURN_TO : dashboardReturnTo();
+          return dashboardOAuthCompleteHtml({ source, returnTo });
         }
         if (request.method === "GET" && url.pathname.startsWith("/oauth/callback/")) {
           if (!sourceDashboard) {
@@ -118629,10 +118669,11 @@ function createEmailSourceWorker(options = {}) {
           if (attempt.relay?.handbackOrigin) {
             return dashboardOAuthCompleteHtml({ source, returnTo: CHATGPT_RETURN_TO });
           }
+          const chatgptDone = attempt.returnTo === CHATGPT_RETURN_TO ? "?return=chatgpt" : "";
           return new Response(null, {
             status: 303,
             headers: {
-              Location: `/oauth/callback/${encodeURIComponent(source)}/done`,
+              Location: `/oauth/callback/${encodeURIComponent(source)}/done${chatgptDone}`,
               "Referrer-Policy": "no-referrer"
             }
           });
@@ -118644,7 +118685,7 @@ function createEmailSourceWorker(options = {}) {
             }
             const record3 = await parseObjectBody(request);
             const source = parseDashboardOAuthSource(record3.source);
-            if (record3.handback !== "relay")
+            if (record3.handback !== "relay" && record3.handback !== "computer")
               assertDashboardModelsReady();
             const secretStore = dashboardSecretStore(sourceDashboard);
             const registry2 = readDashboardRegistry(sourceDashboard.registryPath);
@@ -118652,7 +118693,8 @@ function createEmailSourceWorker(options = {}) {
             const clientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
             const submittedClientId = asOptionalString(record3.client_id);
             const handback = record3.handback === "relay" ? sourceDashboard.oauthHandback?.() : undefined;
-            if (record3.handback !== undefined && !handback) {
+            const computerHandback = record3.handback === "computer";
+            if (record3.handback !== undefined && !handback && !computerHandback) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This sign-in cannot return through the relay on this install.");
             }
             const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
@@ -118662,6 +118704,9 @@ function createEmailSourceWorker(options = {}) {
             }
             if (handback && (submittedClientId || publisher?.relay !== true)) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This source uses your own app registration; connect it in Olympus on your Mac.");
+            }
+            if (computerHandback && (submittedClientId || publisher?.loopback !== true)) {
+              throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This source does not sign in on this computer; connect it in the Olympus dashboard.");
             }
             const clientId = submittedClientId ?? publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
             if (!clientId) {
@@ -118680,7 +118725,7 @@ function createEmailSourceWorker(options = {}) {
             if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
               await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
             }
-            const redirectUri = publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
+            const redirectUri = publisher?.loopback ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}` : publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
             const relayNonce = publisher?.relay === true ? handback ? `${handback.installId}_${createOAuthRelayNonce()}` : createOAuthRelayNonce() : undefined;
             const relayState = relayNonce === undefined ? undefined : signOAuthRelayState({
               origin: dashboardOrigin,
@@ -118716,7 +118761,7 @@ function createEmailSourceWorker(options = {}) {
             dashboardOAuthAttempts.set(source, {
               source,
               pending,
-              returnTo: handback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
+              returnTo: handback || computerHandback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
               startedAt: startedAtDate.toISOString(),
               expiresAt,
               ...relayNonce ? { relay: { nonce: relayNonce, ...handback ? { handbackOrigin: handback.origin } : {} } } : {}
@@ -121451,7 +121496,7 @@ function dashboardCurrentPublisherClientIds(source) {
   if (source === "x")
     return [];
   if (dashboardGoogleOAuthSource(source)) {
-    return [dashboardGooglePilotClientId(), googlePublisherWebClientId()].filter((id) => Boolean(id));
+    return [dashboardGooglePilotClientId(), googlePublisherWebClientId(), googleDesktopClient()?.clientId].filter((id) => Boolean(id));
   }
   const appKey = dropboxPublisherAppKey();
   return appKey ? [appKey] : [];
@@ -121465,6 +121510,9 @@ function dashboardPublisherOAuthFlow(source, ownClientId) {
   if (ownClientId)
     return;
   if (dashboardGoogleOAuthSource(source)) {
+    const desktop = googleDesktopClient();
+    if (desktop)
+      return { clientId: desktop.clientId, relay: false, loopback: true };
     const webClientId = googlePublisherWebClientId();
     return webClientId ? { clientId: webClientId, redirectUri: oauthRelayUrl(), relay: true } : undefined;
   }
@@ -121531,6 +121579,16 @@ async function dashboardGoogleOAuthClientSecret(source, secretStore, fallback, c
       return secret;
   }
   return;
+}
+function dashboardGoogleLoopbackOrigin(dashboardOrigin, enginePort) {
+  try {
+    const origin = new URL(dashboardOrigin);
+    const host = origin.hostname.toLowerCase();
+    const loopbackHost = host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host.endsWith(".localhost");
+    if (origin.protocol === "http:" && loopbackHost)
+      return `http://127.0.0.1:${origin.port || "80"}`;
+  } catch {}
+  return `http://127.0.0.1:${enginePort ?? DASHBOARD_DEFAULT_ENGINE_PORT}`;
 }
 function dashboardGooglePilotClientId() {
   return process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID?.trim() || packagedGooglePilotClientId();
@@ -121926,7 +121984,7 @@ function mostPrivateTrustDomain(domains) {
     return "internal";
   return "public_safe";
 }
-var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000;
+var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
   init_google_handle_compatibility();
   init_google_publisher_capacity();
@@ -127529,7 +127587,7 @@ function buildChatGptDashboardViewModel(view2, options = {}) {
     return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts, sync, googleFull };
   });
   const sources = rows.map(({ definition, card, status, actionKind, connecting, progress: progress2, sync, googleFull }, index) => ({
-    entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync, googleFull),
+    entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync, googleFull, options.remote !== undefined),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
   const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card, actionKind, connecting, progress: progress2, sync }) => attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync));
@@ -127610,17 +127668,19 @@ function sourceRank(source) {
 function sourceGroup(definition) {
   return definition.connect_kind === "local" ? "local" : "cloud";
 }
-function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, googleFull = false) {
+function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, googleFull = false, onServer = false) {
   const inFlight2 = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
-  const ownDetail = connecting ? CONNECTING_DETAIL : inFlight2 ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
+  const googleSource = definition.provider === "gmail" || definition.provider === "google_drive";
+  const ownDetail = connecting ? onServer && googleSource ? DASHBOARD_CHATGPT_VOCABULARY.googleConnectingOnServer : CONNECTING_DETAIL : inFlight2 ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
   const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
-  const detail = googleFull ? GOOGLE_SIGNIN_FULL_SENTENCE : manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : ownDetail;
+  const signinMoved = card.connection.google_signin_moved === true && status === "Fresh" && !connecting && !inFlight2;
+  const detail = googleFull ? GOOGLE_SIGNIN_FULL_SENTENCE : manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : googleFull ? helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, "connect")) : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : googleFull ? helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, "connect")) : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu = [];
   if (sync)
     menu.push(sync);
@@ -127711,6 +127771,10 @@ function connectingFor(definition, card, now) {
 function reconnectFix(definition, card) {
   const source = oauthSource(definition);
   return source ? { label: (source === "gmail" || source === "google-drive") && card.connection.label === "Reconnect Google to continue syncing" ? "Reconnect Google" : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, "reconnect"));
+}
+function googleSigninMovedFix(definition) {
+  const source = oauthSource(definition);
+  return source === "gmail" || source === "google-drive" ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnectGoogle, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : undefined;
 }
 function helpLinkFix(label, href) {
   return { label, tool: DASHBOARD_TOOL_NAME, args: {}, href, openHref: true };
@@ -128064,7 +128128,8 @@ function scrubCard(definition, card) {
       action: { kind: "none" },
       handles: [],
       ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {},
-      ...refusal2 ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal2.code) ? refusal2.code : "", reason: "" } } : {}
+      ...refusal2 ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal2.code) ? refusal2.code : "", reason: "" } } : {},
+      ...card.connection.google_signin_moved === true ? { google_signin_moved: true } : {}
     },
     ...card.progress && finite(card.progress.indexed_items_per_hour) ? {
       progress: {
@@ -131484,7 +131549,7 @@ function connectSourceToolResult(result, options = {}) {
   return {
     content: [{
       type: "text",
-      text: options.direct ? `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl}. Then choose what Olympus may read in the Olympus panel.` : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`
+      text: options.direct ? `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl}. Then choose what Olympus may read in the Olympus panel.` : options.onComputer ? `Open this link on the computer where Olympus runs to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.` : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`
     }],
     structuredContent: structured
   };
@@ -132092,10 +132157,10 @@ async function callSetupTool(name, args, backend) {
         if (backend.directSignIn) {
           return connectSourceToolResult({ status: "open_link", source, openUrl: started.authorizationUrl, expiresAt: started.expiresAt }, { direct: true });
         }
-        const link = backend.handoffLink({ kind: "redirect", location: started.authorizationUrl });
+        const link = started.onComputer && source !== "dropbox" ? backend.handoffLink({ kind: "computer", source, location: started.authorizationUrl }) : backend.handoffLink({ kind: "redirect", location: started.authorizationUrl });
         if (!link)
           throw new ChatGptSurfaceError("not_linked");
-        return connectSourceToolResult({ status: "open_link", source, openUrl: link.url, expiresAt: link.expiresAt });
+        return connectSourceToolResult({ status: "open_link", source, openUrl: link.url, expiresAt: link.expiresAt }, { onComputer: started.onComputer === true });
       }
       case SCOPE_LIST_TOOL_NAME:
         return scopeListToolResult(await scopeList(backend, args));
@@ -145067,6 +145132,12 @@ function createChatGptHandoffs(options = {}) {
       if (!link || link.expiresAt <= now())
         return;
       return link.target;
+    },
+    peek(id) {
+      const link = links.get(id);
+      if (!link || link.expiresAt <= now())
+        return;
+      return link.target;
     }
   };
 }
@@ -145076,14 +145147,24 @@ function isChatGptHandoffRequest(request) {
 function withChatGptHandoffRoutes(handoff, rest) {
   return (request) => isChatGptHandoffRequest(request) ? handoff(request) : rest(request);
 }
-function createChatGptHandoffHandler(handoffs) {
+function createChatGptHandoffHandler(handoffs, options = { isRelayed: () => false }) {
   return async (request) => {
     if (request.method !== "GET")
       return page(405, "This link opens in a browser.", { Allow: "GET" });
     const id = new URL(request.url).pathname.slice(HANDOFF_PATH_PREFIX.length);
-    const target = credentialInstallId("handoff", id) ? handoffs.take(id) : undefined;
+    const known = credentialInstallId("handoff", id) ? handoffs.peek(id) : undefined;
+    if (!known)
+      return page(404, EXPIRED);
+    if (known.kind === "computer" && options.isRelayed(request)) {
+      const bridge = `${SIGNIN_BRIDGE_PATH}?${new URLSearchParams({ go: id, source: known.source }).toString()}`;
+      return new Response(null, {
+        status: 302,
+        headers: { Location: bridge, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }
+      });
+    }
+    const target = handoffs.take(id);
     if (!target)
-      return page(404, "This Olympus link has expired or was already used. Go back to ChatGPT and try again.");
+      return page(404, EXPIRED);
     return new Response(null, {
       status: 302,
       headers: { Location: target.location, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }
@@ -145103,7 +145184,7 @@ function page(status, sentence, headers = {}) {
     }
   });
 }
-var HANDOFF_TTL_MS, MAX_LIVE = 64;
+var HANDOFF_TTL_MS, MAX_LIVE = 64, EXPIRED = "This Olympus link has expired or was already used. Go back to ChatGPT and try again.";
 var init_handoff = __esm(() => {
   init_tokens();
   HANDOFF_TTL_MS = 10 * 60000;
@@ -145167,10 +145248,11 @@ function createChatGptSetupBackend(options) {
   };
   return {
     async startOAuth(source) {
-      const result = await post2("/dashboard/connect/oauth/start", { source, handback: "relay" });
+      const onComputer = source !== "dropbox" && googleDesktopClient() !== undefined;
+      const result = await post2("/dashboard/connect/oauth/start", { source, handback: onComputer ? "computer" : "relay" });
       if (typeof result.authorization_url !== "string" || typeof result.expires_at !== "string")
         throw new SetupBackendError("internal");
-      return { authorizationUrl: result.authorization_url, expiresAt: result.expires_at };
+      return { authorizationUrl: result.authorization_url, expiresAt: result.expires_at, ...onComputer ? { onComputer: true } : {} };
     },
     handoffLink(target) {
       const urls = options.publicUrls();
@@ -145309,6 +145391,7 @@ var init_setup_backend = __esm(() => {
   init_mail_source_scope();
   init_sovereignty();
   init_tokens();
+  init_publisher_oauth_client();
   init_privacy_profile();
   init_model_choice();
   init_scope_privacy();
@@ -148987,6 +149070,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         ...sourceDashboardHistory ? { history: sourceDashboardHistory } : {},
         ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
         oauthHandback: () => chatgptOAuthHandback(),
+        loopbackPort: port,
         ...fileSourceScopes ? { fileSourceScopes } : {},
         enforceConnectedSourceReads: true,
         refreshSchedulerSources: (connectedHandlesOverride) => schedulerSourcesForHandles(activeLaneHandles(connectedHandlesOverride ?? readActiveConnectedHandles(process.env), process.env)).sources,
@@ -149559,7 +149643,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
       isRelayed: isRelayedRequest2
-    }), withChatGptHandoffRoutes2(createChatGptHandoffHandler2(chatgptHandoffs), withPrivateAnswerRoute2(createPrivateAnswerHandler2({
+    }), withChatGptHandoffRoutes2(createChatGptHandoffHandler2(chatgptHandoffs, { isRelayed: carriesRelayMarker2 }), withPrivateAnswerRoute2(createPrivateAnswerHandler2({
       jobs: privateAnswers,
       questions: privateQuestions,
       isRelayed: isRelayedRequest2,
@@ -150610,6 +150694,88 @@ ${prompt}`)) {
       finish(new SecretInputError("no_terminal", "could not write the terminal prompt"));
     }
   });
+}
+
+// src/core/oauth-callback-paste.ts
+var PASTE_SOURCES = ["gmail", "google-drive", "google", "dropbox", "x"];
+
+class PastedCallbackError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PastedCallbackError";
+  }
+}
+var LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+var MAX_ADDRESS_LENGTH = 8 * 1024;
+function parsePastedOAuthCallback(input) {
+  const text = input.trim().replace(/^['"<]+|['">]+$/g, "");
+  if (!text)
+    throw new PastedCallbackError("Paste the full address of the page your browser opened after you allowed access.");
+  if (text.length > MAX_ADDRESS_LENGTH)
+    throw new PastedCallbackError("That address is too long to be a sign-in address.");
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new PastedCallbackError("That is not a web address. Copy the whole address from the browser's address bar.");
+  }
+  if (url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname) || url.username || url.password) {
+    throw new PastedCallbackError("That address is not an Olympus sign-in address. It starts with http://127.0.0.1.");
+  }
+  const match = /^\/oauth\/callback\/([a-z-]+)$/.exec(url.pathname);
+  const source = match?.[1];
+  if (!source || !PASTE_SOURCES.includes(source)) {
+    throw new PastedCallbackError("That address is not an Olympus sign-in address. Its path starts with /oauth/callback/.");
+  }
+  const query = new URLSearchParams;
+  for (const name of ["code", "state", "error"]) {
+    const values = url.searchParams.getAll(name);
+    if (values.length > 1)
+      throw new PastedCallbackError("That address repeats a sign-in value. Copy it again from the address bar.");
+    if (values[0])
+      query.set(name, values[0]);
+  }
+  if (!query.has("state") || !query.has("code") && !query.has("error")) {
+    throw new PastedCallbackError("That address is missing part of the sign-in result. Copy the whole address from the address bar.");
+  }
+  return { source, query };
+}
+async function finishPastedOAuthCallback(input, options) {
+  const { source, query } = parsePastedOAuthCallback(input);
+  const root = options.workerRoot.replace(/\/+$/, "");
+  const fetchImpl = options.fetch ?? fetch;
+  let response;
+  try {
+    response = await fetchImpl(`${root}/oauth/callback/${source}?${query.toString()}`, {
+      method: "GET",
+      redirect: "manual",
+      headers: { Accept: "text/html" },
+      signal: AbortSignal.timeout(options.timeoutMs ?? 60000)
+    });
+  } catch {
+    throw new PastedCallbackError(`Olympus did not answer at ${root}. Run this on the computer where Olympus runs, while it is running.`);
+  }
+  const location = response.headers.get("location") ?? "";
+  if (response.status >= 300 && response.status < 400 && location.startsWith(`/oauth/callback/${source}/done`)) {
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    return {
+      ok: true,
+      source,
+      connected: true,
+      next: "Connected. Go back to the Olympus dashboard; it picks the connection up on its own."
+    };
+  }
+  const reason = engineReason(await response.text().catch(() => ""));
+  throw new PastedCallbackError(response.status === 410 ? "This sign-in is no longer active. Press Connect again in the Olympus dashboard, then paste the new address within 10 minutes." : reason ?? "The sign-in did not finish.");
+}
+function engineReason(html) {
+  const paragraphs = [...html.slice(0, 64 * 1024).matchAll(/<p>([^<]{1,500})<\/p>/g)].map((match) => match[1]);
+  const text = paragraphs[0];
+  if (!text)
+    return;
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").trim() || undefined;
 }
 
 // src/cli.ts
@@ -155134,6 +155300,7 @@ function printHelp() {
   console.log("  olympus connect venice|readwise --api-key-prompt");
   console.log("  olympus connect gemini --api-key-prompt");
   console.log("  olympus connect status [google|gmail|google-drive|dropbox]");
+  console.log("  olympus connect finish <address>");
   console.log("  olympus connections add <name>");
   console.log("  olympus connections pair");
   console.log("  olympus connections list");
@@ -155172,6 +155339,7 @@ var PUBLIC_LEAF_USAGE = {
   "connect readwise": "olympus connect readwise --api-key-prompt",
   "connect gemini": "olympus connect gemini --api-key-prompt",
   "connect status": "olympus connect status [google|gmail|google-drive|dropbox]",
+  "connect finish": "olympus connect finish <address>",
   "connections add": "olympus connections add <name>",
   "connections pair": "olympus connections pair",
   "connections list": "olympus connections list",
@@ -155935,9 +156103,20 @@ async function runConnect(args) {
         "olympus connect telegram|whatsapp --pair",
         "olympus connect venice|readwise --api-key-prompt",
         "olympus connect gemini --api-key-prompt",
-        "olympus connect status [google|gmail|google-drive|dropbox]"
+        "olympus connect status [google|gmail|google-drive|dropbox]",
+        "olympus connect finish <address>"
       ]
     };
+  }
+  if (rawSource === "finish") {
+    const address = args[1] && !args[1].startsWith("--") ? args[1] : await readApiKeyFromStdin();
+    try {
+      return await finishPastedOAuthCallback(address, { workerRoot: loadConfig().email.baseUrl.replace(/\/v1\/?$/, "") });
+    } catch (error2) {
+      if (error2 instanceof PastedCallbackError)
+        throw new OperationError("invalid_params", error2.message);
+      throw error2;
+    }
   }
   if (rawSource === "status") {
     const rawStatusSource = args[1] && !args[1].startsWith("--") ? args[1] : undefined;
