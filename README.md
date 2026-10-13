@@ -57,12 +57,13 @@ Labels are automatic and can be wrong.
 
 Everything is stored and searched on your computer: the search index is built
 there, by a model small enough for a computer with 8 GB of memory. There is no
-Olympus cloud holding your data, no account and no subscription; the one
-Olympus server is a relay that passes your AI app's requests to your computer
-without storing them. For hard private questions you
-can reach stronger models without giving yourself away: [Venice](https://venice.ai)
-hides what you ask, and zkAPI, from OpenAnonymity and the Ethereum Foundation,
-hides who is asking (see [Stronger models, privately](#stronger-models-privately)).
+hosted copy of your things, no account and no subscription. Olympus's
+publisher runs only a relay that passes your AI app's requests to your
+computer without storing them, and a Google sign-in service. For hard private
+questions you can reach stronger models: [Venice](https://venice.ai) runs
+private models that, under Venice's own terms, keep nothing you send, and
+zkAPI, from OpenAnonymity and the Ethereum Foundation, hides who is asking
+(see [Stronger models, privately](#stronger-models-privately)).
 
 ```text
 you › "What did I commit to this week, across email and Telegram?"
