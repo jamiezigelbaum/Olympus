@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 // Experimental zkAPI consult transport (design: docs/design/frontier-consult-lane.md,
 // track Z, tranche Z1).
 //
@@ -59,10 +60,13 @@ import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import {
   FileLeaseBusyError,
   processInstanceIdentity,
-  withFileLease,
   withFileLeaseSync,
   type ProcessInstanceIdentity,
 } from './file-lease.ts';
+import {
+  EngineMaintenanceInProgressError,
+  withEngineConsultAdmission,
+} from './engine-maintenance.ts';
 import { managedToolExecutable } from './managed-tools.ts';
 import {
   parseIsoDate,
@@ -143,6 +147,7 @@ export type ZkapiConsultErrorCode =
   | 'daemon_api_key_rejected'
   | 'session_process_exited'
   | 'confinement_self_test_failed'
+  | 'confinement_unavailable'
   | 'policy_unavailable'
   | 'model_unavailable'
   | 'daily_cap_reached'
@@ -190,7 +195,10 @@ export type ZkapiDaemonErrorCode = (typeof KNOWN_DAEMON_ERROR_CODES)[number] | '
 
 /**
  * How the daemon's network was confined for one session.
- * `none`: not confined. `non_loopback_blocked`: the OS denied every connection
+ * `none`: not confined. A platform at this level runs no session at all
+ * (`confinement_unavailable`); a session without Tor records it, since on a
+ * confined platform its daemon goes direct, unwrapped, by design.
+ * `non_loopback_blocked`: the OS denied every connection
  * except loopback, and DNS, to the daemon and its descendants, self-tested in
  * that session. `loopback_filtered`: additionally only the session's own Tor
  * and managed daemon/companion ports were reachable on loopback. Only the last
@@ -502,6 +510,7 @@ export const ZKAPI_CONSULT_ERROR_MESSAGES: Readonly<Record<ZkapiConsultErrorCode
   daemon_api_key_rejected: 'The daemon rejected the configured local API key.',
   session_process_exited: 'The Tor client or the daemon of this session stopped unexpectedly.',
   confinement_self_test_failed: 'The network confinement for this platform did not pass its self-test, so the session was refused.',
+  confinement_unavailable: 'Anonymous answers need network confinement, which this computer does not have yet. Nothing was sent.',
   policy_unavailable: 'The daemon could not load the model policy in time.',
   model_unavailable: 'The selected model is not in the daemon\'s live model list.',
   daily_cap_reached: 'The daily zkAPI request limit you set is reached.',
@@ -768,8 +777,26 @@ async function companionPorts(excluded: number[]): Promise<{ companionProxy: num
   }
 }
 
-export function defaultZkapiConfinement(): ZkapiConfinement {
-  if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
+/**
+ * Whether zkAPI may run here at all. Owner ruling 2026-10-12: zkAPI refuses
+ * wherever network confinement cannot run; there is no weaker mode. Level
+ * `none` therefore refuses every session, with or without Tor, before
+ * anything starts, and readiness reports it (`confinement_unavailable`).
+ */
+export function zkapiConfinementAvailable(confinement: Pick<ZkapiConfinement, 'level'>): boolean {
+  return confinement.level !== 'none';
+}
+
+/**
+ * This platform's confinement: the macOS sandbox, else none (Linux until its
+ * launcher lands, docs/design/linux-zkapi-confinement.md), which refuses.
+ * `host` is a seam for tests; it defaults to this process's platform.
+ */
+export function defaultZkapiConfinement(
+  host: { platform?: NodeJS.Platform; sandboxAvailable?: boolean } = {},
+): ZkapiConfinement {
+  const platform = host.platform ?? process.platform;
+  if (platform === 'darwin' && (host.sandboxAvailable ?? existsSync('/usr/bin/sandbox-exec'))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
       level,
@@ -848,6 +875,7 @@ interface ZkapiState {
 }
 
 export function defaultZkapiStatePath(home: string = homedir()): string {
+  if (process.platform === 'linux') return join(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, 'zkapi-consult-state.json');
   return join(home, '.olympus', 'zkapi-consult-state.json');
 }
 
@@ -1840,6 +1868,8 @@ export async function zkapiConsultReadiness(
   const confinement = options.confinement ?? defaultZkapiConfinement();
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
+  // No confinement here: nothing else could make a session run.
+  if (!zkapiConfinementAvailable(confinement)) blockers.unshift('confinement_unavailable');
   const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
   if (!apiKeyConfigured) blockers.push('daemon_api_key_missing');
   const daemonExecutable = resolveZkapiExecutable('zkapi-clientd', settings.daemonExecutable, env);
@@ -2150,8 +2180,6 @@ async function openSession(
   recovery: boolean,
 ): Promise<ZkapiOpenSessionResult> {
   const initialIdentity: ZkapiNetworkIdentity = options.settings.tor === 'off' ? 'visible' : 'not_verified';
-  if (zkapiConsultInFlight) return failure('busy', 'not_sent', initialIdentity);
-  zkapiConsultInFlight = true;
   const statePath = options.statePath ?? defaultZkapiStatePath();
   const sent = { dispatched: false };
   // Timing never throws and never changes control flow: a failed or
@@ -2178,13 +2206,19 @@ async function openSession(
     }, control.deadlineMs)
     : undefined;
   let leaseHeld = false;
+  let admissionHeld = false;
   const finished = (async (): Promise<ZkapiConsultResult> => {
     try {
       mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
-      const result = await withFileLease(
-        `${statePath}.session`,
+      const result = await withEngineConsultAdmission(
+        statePath,
         () => {
           leaseHeld = true;
+          // The cross-process admission and maintenance probe happen before
+          // this in-process fast path, closing the lifecycle/admission race.
+          if (zkapiConsultInFlight) return Promise.resolve(failure('busy', 'not_sent', initialIdentity));
+          zkapiConsultInFlight = true;
+          admissionHeld = true;
           return runSession(recovery, options, statePath, bridge, sent, clock, startedAt);
         },
         { acquireTimeoutMs: 50 },
@@ -2203,10 +2237,13 @@ async function openSession(
       if (!leaseHeld) stageMs = withTiming(stageMs, 'leaseAcquireMs', total);
       const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
       if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity, timed);
+      if (error instanceof EngineMaintenanceInProgressError) return failure('busy', 'not_sent', initialIdentity, timed);
       return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity, timed);
     } finally {
-      zkapiConsultInFlight = false;
-      activeSessionId = undefined;
+      if (admissionHeld) {
+        zkapiConsultInFlight = false;
+        activeSessionId = undefined;
+      }
     }
   })().then((result) => {
     // The lease is released by now. A send still waiting (the session ended
@@ -2352,6 +2389,10 @@ async function runSession(
     cleanupCallerSignals();
     return fail(code);
   };
+  // No network confinement on this platform: refused first, with or without
+  // Tor and for a recovery too, so neither Tor nor the daemon ever starts
+  // unconfined (owner ruling 2026-10-12: no weaker mode).
+  if (!zkapiConfinementAvailable(confinement)) return refuse('confinement_unavailable');
   // The cost-and-risk statements govern questions: what the owner's model
   // sends and what each one costs. A recovery session sends the fixed empty
   // request, nothing of the owner's, to settle money already held, so the
@@ -2449,8 +2490,8 @@ async function runSession(
       if (filtered) Object.assign(ports, await companionPorts([ports.tor, ports.daemon]));
       if (await confinement.selfTest(workDir, childEnv, ports)) {
         receipt.confinementSelfTest = 'passed';
-      } else if (confinement.level !== 'none') {
-        // Confinement that was requested but could not prove itself refuses.
+      } else {
+        // Confinement that could not prove itself refuses (level `none` never gets here).
         receipt.confinementSelfTest = 'failed';
         return (result = fail('confinement_self_test_failed'));
       }

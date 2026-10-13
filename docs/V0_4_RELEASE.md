@@ -158,6 +158,14 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-13 — Linux W5 PR preparation (local only).** Merge current main,
+  retain existing standalone data in place, and use XDG for fresh installs.
+  Program generations and personal data have separate removal roots on new
+  installs. The anchor must obtain owner acceptance of the changed dashboard
+  renders before updating their approval receipt. This branch is held unpushed;
+  relay deployment remains blocked without the anchor's go while OpenAI review
+  is open. Details: `docs/design/linux-engine-service.md`, “Linux PR preparation”.
+
 - **2026-10-13 — The launch release is `1.0.0`.** Owner decision: the next
   release from `main`, planned as rc.7, ships as `1.0.0`. It is the version
   the site serves when the launch post, video and website go out. There is no
@@ -170,6 +178,31 @@ testers have exercised the normal product journey without custom engineering.
   `1.0.0` follow
   [Version numbers and releases](ENGINEERING_PROCESS.md#version-numbers-and-releases).
   Supersedes the directory sentence in the 2026-10-01 entry below.
+- **2026-10-12 — First Omarchy install follow-up.** The owner proved per-user
+  install, linger, service and socket isolation, and relay operation. Local
+  follow-up fixes doctor runtime/socket wording and adds content-free Linux
+  model readiness to engine status and the local dashboard. The desktop
+  bridge origin decision is approved: a fresh random `.localhost` origin for
+  each engine/desktop session, with a redirect-only fixed entry and owner
+  cookie plus origin-storage proof. Implementation and the rebuilt local
+  acceptance bundle are scoped to W5 row 4; real Hyprland/login/logout and
+  second-UID qualification remain owner-run. See `docs/design/linux-engine-service.md`.
+  The listing and hosted plugin bundle remain frozen.
+
+
+- **2026-10-12 — W5 integration for rc.7.** The five local tracks are merged
+  in the integration worktree. Shared receipt paths, owner-only socket
+  transport, the outbound relay, Linux agent approval instructions and
+  Grok API key routing are integrated. Install recovery and Bun-free,
+  receipt-bound removal replace the track drafts. The local-tarball bundle
+  uses the real pinned installer; public Linux publication remains blocked
+  pending qualification. Local proof passed 820 focused tests, the three guards, build and typecheck,
+  with four platform/live skips and a rebuilt dist. The exact owner-run
+  laptop procedure and validation limits live in `docs/design/linux-engine-service.md`, under
+  “W5 integration handoff” and “Omarchy acceptance runbook”. Real systemd,
+  logout/reboot, second-UID isolation and Hyprland qualification remain
+  owner-run; no live install, publication or GitHub delivery is included.
+  Linux zkAPI stays off. The PID-1 CI harness remains deferred.
 
 - **2026-10-12 — Linux parity, Omarchy first.** Owner decision: Olympus
   itself runs on Linux with the Mac's capabilities (scan and image text,

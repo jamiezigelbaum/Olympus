@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -382,7 +383,7 @@ export function defaultSourceWatchDbPath(
   if (!isAbsolute(dataRoot)) {
     throw new TypeError('Source watch XDG_DATA_HOME must be an absolute private data root.');
   }
-  return join(dataRoot, 'openclaw', 'olympus', 'source-watches.sqlite');
+  return join(standaloneLinuxDataDir(env) ?? join(dataRoot, 'openclaw', 'olympus'), 'source-watches.sqlite');
 }
 
 export function createTrustedSourceWatchOwnerContext(

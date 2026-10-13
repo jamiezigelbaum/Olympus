@@ -29,7 +29,7 @@ import type {
   SourceDashboardViewModel,
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
-import { renderDashboardAgentsSection } from '../agents.ts';
+import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
   connectorSheet,
   dashboardControlGate,
@@ -63,6 +63,8 @@ export interface DashboardPageOptions {
   controlSessionCsrfToken?: string;
   /** Remote agent connections and remote access, for Agents. */
   agents?: DashboardAgentsView;
+  /** OPENER supplies the current desktop/headless approval handoff. */
+  agentConnectHost?: AgentConnectHost;
   /** The Outside help card's facts, for that page only, with the control session. */
   outsideHelp?: DashboardOutsideHelpStatus;
   /** True when the live control session was minted locally (the only grade the consult routes take). */
@@ -167,7 +169,7 @@ export function renderDashboardAgentsPage(options?: DashboardPageOptions): strin
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     options?.agents
-      ? renderDashboardAgentsSection({ view: options.agents, now })
+      ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now })
       : '<p class="foot">Agent connections are not available on this install.</p>',
   ].join('\n');
   return localShell({ crumb: W.agents.title, meta: '', body, styles: [AGENT_CONNECT_CSS], options });

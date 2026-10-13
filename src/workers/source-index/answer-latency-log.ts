@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Content-free source_answer latency ledger.
 //
 // Schema v1 remains additive for one release. Schema v2 records request-scoped
@@ -342,7 +343,7 @@ export function resolveSourceAnswerLatencyLogPath(
     return raw;
   }
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'source-answer-latency.jsonl');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'source-answer-latency.jsonl');
 }
 
 async function makeExistingLedgerPrivate(path: string): Promise<void> {

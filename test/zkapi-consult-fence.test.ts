@@ -28,7 +28,7 @@ import {
   completions,
   settings,
   transport,
-  NO_CONFINEMENT_LABEL,
+  UNFILTERED_LABEL,
   ledger,
   baseConfig,
   zkapiProfile,
@@ -42,7 +42,7 @@ describe('zkAPI consult transport: fence and recovery', () => {
     writePlan({ noSettlement: true });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
       ok: true,
-      routeLabel: `${NO_CONFINEMENT_LABEL}; lease settlement not confirmed`,
+      routeLabel: `${UNFILTERED_LABEL}; lease settlement not confirmed`,
       receipt: { settlement: 'not_confirmed', fence: 'held' },
     });
     expect(zkapiUnresolvedSession(statePath)).toBe(true);
@@ -113,7 +113,7 @@ describe('zkAPI consult transport: fence and recovery', () => {
   }, 60_000);
 
   test('the recovery script exits 0 only when settlement is confirmed and the fence cleared', async () => {
-    const olympusDir = join(root, '.olympus');
+    const olympusDir = join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus');
     mkdirSync(olympusDir, { recursive: true });
     const ledger = join(olympusDir, 'zkapi-consult-state.json');
     writePlan({ noSettlement: true, statePath: ledger });
@@ -137,7 +137,17 @@ describe('zkAPI consult transport: fence and recovery', () => {
     const script = join(import.meta.dir, '..', 'scripts', 'zkapi-consult-recover.ts');
     const env = { HOME: root, PATH: '/usr/bin:/bin', ZKAPI_CLIENTD_CONFIG_DIR: configDir, OLYMPUS_ZKAPI_LOCAL_API_KEY: API_KEY };
     expect(Bun.spawnSync([process.execPath, script], { env }).exitCode).toBe(2);
-    expect(Bun.spawnSync([process.execPath, script, '--yes'], { env }).exitCode).toBe(3);
+    const unsettled = Bun.spawnSync([process.execPath, script, '--yes'], { env });
+    if (process.platform !== 'darwin') {
+      // Production Linux has no qualified confinement yet. The script must
+      // refuse and preserve custody, even though injected transport tests run.
+      expect(unsettled.exitCode).toBe(1);
+      expect(unsettled.stdout.toString()).toContain('confinement_unavailable');
+      expect(zkapiUnresolvedSession(ledger)).toBe(true);
+      expect(completions()).toHaveLength(1);
+      return;
+    }
+    expect(unsettled.exitCode).toBe(3);
     expect(zkapiUnresolvedSession(ledger)).toBe(true);
     writePlan({ noSettlement: false });
     const recovered = Bun.spawnSync([process.execPath, script, '--yes'], { env });

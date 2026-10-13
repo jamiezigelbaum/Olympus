@@ -83,7 +83,7 @@ export interface LocalPrivateAnswersOptions {
   /** The live eligibility guard, re-asked before a cited file opens. */
   eligible?: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
   /** Opens a local file (macOS `open`, checked by the caller). Absent: local files do not open. */
-  openFile?: (path: string) => Promise<void>;
+  openFile?: (path: string, eligible: () => Promise<boolean>) => Promise<void>;
   now?: () => number;
 }
 
@@ -373,7 +373,11 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         }
         if (!isFile) return refused(410, 'gone', 'This file is no longer on this computer.');
         try {
-          await options.openFile(entry.path);
+          await options.openFile(entry.path, async () => {
+            const current = options.eligible ? await options.eligible(entry.read) : [];
+            sweep();
+            return opens.get(id) === entry && current.length === entry.read.length && current.every(value => value === true);
+          });
         } catch {
           return refused(500, 'failed', 'The file could not be opened.');
         }

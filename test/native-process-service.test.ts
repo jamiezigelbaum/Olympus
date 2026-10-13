@@ -49,6 +49,7 @@ interface Harness {
   logs: string[];
   warnings: string[];
   spawned: ChildProcess[];
+  released: boolean[];
   context: NativeProcessServiceContext;
 }
 
@@ -62,6 +63,7 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
   const logs: string[] = [];
   const warnings: string[] = [];
   const spawned: ChildProcess[] = [];
+  const released: boolean[]=[];
   let launchIndex = 0;
   const service = createNativeProcessService({
     id: 'fixture',
@@ -77,7 +79,8 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
       spawned.push(child);
       return child;
     }) as unknown as typeof spawnProcess,
-    async prepareStart() {
+    async prepareStart(input) {
+      released.push(input.previousChildReleased);
       const launch = scriptForLaunch(launchIndex);
       launchIndex += 1;
       const instance = randomUUID();
@@ -104,7 +107,7 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
       clearFailure: () => { health.push('clear'); },
     },
   };
-  return { service, health, logs, warnings, spawned, context };
+  return { service, health, logs, warnings, spawned, released, context };
 }
 
 async function waitUntil(condition: () => boolean, label: string, timeoutMs = 8_000): Promise<void> {
@@ -153,6 +156,7 @@ for (const [name, script] of [
       await waitUntil(() => readyCount(run) === 2, 'the replacement child to become ready');
       expect(run.spawned).toHaveLength(2);
       expect(run.spawned[0]!.pid).not.toBe(run.spawned[1]!.pid);
+      expect(run.released).toEqual([false,true]);
       expect(run.health).toEqual([
         'Olympus fixture is starting.',
         'clear',

@@ -1,3 +1,7 @@
+import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
+import { engineServicePaths, waitForEngineHealthy } from './engine-service.ts';
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { workerFetch } from './worker-transport.ts';
 // Olympus doctor: a read-only health walk across the chain the calling assistant depends on
 // (Argus local model lanes, the private email source worker, and the source
 // index), reported in plain language so an operator can see what is broken
@@ -57,12 +61,13 @@ import {
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
 import { createSourceCorpusRegistry } from './source-corpus-registry.ts';
-import { createDefaultSecretStore, normalizeSecretRef } from './secret-store.ts';
+import { createDefaultSecretStore, normalizeSecretRef, SecretStoreError } from './secret-store.ts';
 import {
   defaultZkapiStatePath,
   zkapiConsultReadiness,
   zkapiProcessExitMessage,
   zkapiStageRows,
+  type ZkapiConfinement,
   type ZkapiConsultReadiness,
 } from './consult-transport-zkapi.ts';
 import {
@@ -88,6 +93,8 @@ export interface DoctorDeps {
   config: OlympusConfig;
   delphi: Pick<DelphiClient, 'listModels' | 'listModelsForProfile' | 'complete'>;
   fetchImpl?: typeof fetch;
+  /** The running interpreter is a valid standalone runtime even when Bun is not on PATH. Test seam. */
+  runningBun?: boolean;
   commandExists?: (command: string) => boolean | Promise<boolean>;
   pythonModuleExists?: (pythonCommand: string, moduleName: string) => boolean | Promise<boolean>;
   handleRegistry?: ConnectedHandleRegistry;
@@ -107,6 +114,8 @@ export interface DoctorDeps {
   workerEnvPath?: string;
   /** The persistent zkAPI consult ledger; defaults beside sovereignty.json. */
   zkapiStatePath?: string;
+  /** This platform's zkAPI network confinement; defaults to `defaultZkapiConfinement()`. */
+  zkapiConfinement?: ZkapiConfinement;
   /** The consult vocabulary pack states; defaults to hashing the installed packs. */
   consultVocabularyStatus?: () => readonly ConsultVocabularyFileStatus[];
   /**
@@ -137,28 +146,29 @@ export interface DoctorHostFacts {
   /** Absolute `openclaw` executable, when one is installed. */
   openclawPath?: string;
   /** The standalone engine LaunchAgent (macOS). */
-  engine: { installed: boolean; state: string };
+  engine: { installed: boolean; state: string; healthy?: boolean; detail?: string; linger?: boolean | undefined };
   /** The legacy worker unit from `olympus worker install`. */
   legacyWorkerUnit: boolean;
   /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
   insideOpenClaw?: boolean;
 }
 
-export function defaultDoctorHostProbe(
+export async function defaultDoctorHostProbe(
   env: Record<string, string | undefined> = process.env,
   options: { insideOpenClaw?: boolean } = {},
-): DoctorHostFacts {
+): Promise<DoctorHostFacts> {
   const home = env.HOME?.trim() || homedir();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
-  const engine = process.platform === 'darwin'
-    ? inspectEngine({ homeDir: home })
+  const engine = (process.platform === 'darwin' || process.platform === 'linux')
+    ? inspectEngine({ homeDir: home, env })
     : { installed: false, state: 'not_loaded' };
   const legacyWorkerUnit = process.platform === 'darwin' || process.platform === 'linux'
     ? existsSync(workerServicePaths(process.platform, home).unitPath)
     : false;
+  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...(openclawPath ? { openclawPath } : {}),
-    engine: { installed: engine.installed, state: engine.state },
+    engine: { installed: engine.installed, state: engine.state, ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
     legacyWorkerUnit,
     ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
   };
@@ -351,7 +361,7 @@ function doctorSovereigntyConfigPath(deps: DoctorDeps): string | undefined {
   // install it never asked about.
   if (deps.env === undefined) return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join(home, '.olympus', 'sovereignty.json') : undefined;
+  return home ? ((deps.platform ?? process.platform) === 'linux' ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join(home, '.olympus', 'sovereignty.json')) : undefined;
 }
 
 async function safeCheck(name: string, run: () => Promise<DoctorCheck>): Promise<DoctorCheck> {
@@ -453,7 +463,7 @@ async function argusLaneCheck(deps: DoctorDeps, lane: ArgusLane): Promise<Doctor
 
 async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const commandExists = deps.commandExists ?? defaultCommandExists;
-  const bun = await commandExists('bun');
+  const bun = await commandExists('bun') || ((deps.platform ?? process.platform) === 'linux' && (deps.runningBun ?? typeof Bun !== 'undefined'));
   const node = await commandExists('node');
   // Node runs the plugin inside an OpenClaw host; the standalone engine and
   // the CLI run on Bun alone.
@@ -517,6 +527,7 @@ async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
  */
 async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const facts = await deps.hostProbe!();
+  if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false)) return { name: 'host', ok: false, detail: facts.engine.detail || 'The Linux engine has not proved healthy and persistent.', hint: 'Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start.' };
   const hosts: string[] = [];
   if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.state})`);
   if (facts.insideOpenClaw) hosts.push('OpenClaw (this Gateway)');
@@ -532,7 +543,7 @@ async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
       name: 'host',
       ok: false,
       detail: 'Nothing runs the Olympus engine on this machine: the standalone engine is not installed and OpenClaw is not installed.',
-      hint: 'On a Mac, run olympus engine install. With OpenClaw, install the Olympus plugin there instead.',
+      hint: (deps.platform ?? process.platform) === 'linux' ? 'Run olympus engine install from a Linux-enabled release in a working systemd user session.' : 'On a Mac, run olympus engine install. With OpenClaw, install the Olympus plugin there instead.',
     };
   }
   if (facts.engine.installed && facts.engine.state !== 'running' && !hasOpenClaw) {
@@ -550,7 +561,9 @@ async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     return {
       name: 'host',
       ok: true,
-      detail: `Hosted by ${hosts.join(', ')}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`,
+      detail: (deps.platform ?? process.platform) === 'linux'
+        ? `Hosted by ${hosts.join(', ')}. ${openclaw}. ChatGPT answers Personal questions from Olympus search. Built-in Private model readiness is reported separately in the dashboard.`
+        : `Hosted by ${hosts.join(', ')}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`,
     };
   }
   if (cloudViaOpenClaw && !hasOpenClaw) {
@@ -657,6 +670,7 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
       statePath,
       env,
       apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...(deps.zkapiConfinement ? { confinement: deps.zkapiConfinement } : {}),
       ...(deps.now ? { now: deps.now } : {}),
     });
     if (readiness.blockers.length > 0) ok = false;
@@ -670,6 +684,9 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
       ? {}
       : {
         hint: [
+          lines.some((line) => line.includes('confinement_unavailable'))
+            ? 'Anonymous answers are not available on this computer: they need network confinement, which this version of Olympus does not have here. Nothing is ever sent without it.'
+            : undefined,
           lines.some((line) => line.includes('UNRESOLVED SESSION'))
             ? 'An unfinished payment is held, so no anonymous answer can be sent until it is cleared. Open Anonymous answers in the dashboard and press Recover (one fixed request with no content, held at up to $6). If that wallet can no longer run, press Abandon instead; the unsettled request may then settle under another session\'s network identity.'
             : undefined,
@@ -810,7 +827,8 @@ function secretRefPresent(
   const store = deps.secretStore ?? createDefaultSecretStore({ env });
   try {
     return Boolean(store.getSync?.(ref.key)?.trim());
-  } catch {
+  } catch (error) {
+    if (error instanceof SecretStoreError) throw error;
     return false;
   }
 }
@@ -863,7 +881,7 @@ async function workerCredentialReadiness(
   deps: DoctorDeps,
 ): Promise<WorkerCredentialReadiness[] | undefined> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(
+    const response = await (deps.fetchImpl ?? workerFetch)(
       `${deps.config.email.baseUrl}/health/dependencies`,
       workerRequestInit(deps),
     );
@@ -920,6 +938,7 @@ function workerReadinessMatchesProfile(
 async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const name = 'email_worker';
   const baseUrl = deps.config.email.baseUrl;
+  const address = (deps.platform ?? process.platform) === 'linux' ? resolveLinuxEngineLayout(deps.env ?? process.env).workerSocketPath || 'the owner Unix socket (XDG_RUNTIME_DIR unavailable)' : baseUrl;
   if (!deps.config.email.enabled) {
     return {
       name,
@@ -930,12 +949,12 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/health`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/health`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
       ok: false,
-      detail: `Email worker is not reachable at ${baseUrl}: ${errorDetail(error)}`,
+      detail: `Email worker is not reachable at ${address}: ${errorDetail(error)}`,
       hint: EMAIL_WORKER_HINT,
     };
   }
@@ -943,12 +962,17 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     return {
       name,
       ok: false,
-      detail: `Email worker /health at ${baseUrl} returned HTTP ${response.status}.`,
+      detail: `Email worker /health at ${address} returned HTTP ${response.status}.`,
       hint: EMAIL_WORKER_HINT,
     };
   }
 
   const health = asRecord(await response.json());
+  const bridge = asRecord(health.desktop_bridge);
+  if ((deps.platform ?? process.platform) === 'linux' && ['port_in_use', 'unavailable'].includes(String(bridge.state))) {
+    return { name, ok: false, detail: `The owner socket is healthy, but the desktop owner bridge is ${bridge.state}.`,
+      hint: typeof bridge.remedy === 'string' ? bridge.remedy : 'Free the configured loopback port or use the owner SSH socket forward.' };
+  }
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -962,7 +986,7 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     return {
       name,
       ok: false,
-      detail: `Source worker at ${baseUrl} reported unhealthy /health (status=${typeof health.status === 'string' ? health.status : 'unknown'}, reachable=${health.reachable !== false}).`,
+      detail: `Source worker at ${address} reported unhealthy /health (status=${typeof health.status === 'string' ? health.status : 'unknown'}, reachable=${health.reachable !== false}).`,
       hint: EMAIL_WORKER_HINT,
     };
   }
@@ -971,7 +995,7 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   return {
     name,
     ok: true,
-    detail: `Source worker at ${baseUrl} answered /health; no worker health or credential failures reported.`,
+    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.`,
   };
 }
 
@@ -988,7 +1012,7 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
@@ -1184,7 +1208,7 @@ async function workerCredentialLanesCheck(deps: DoctorDeps): Promise<DoctorCheck
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
@@ -1232,7 +1256,7 @@ async function dropboxContentExtractionThroughputCheck(deps: DoctorDeps): Promis
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(
+    response = await (deps.fetchImpl ?? workerFetch)(
       `${baseUrl}/source/index/status?include_ingestion_ledger=true&include_readiness_ledger=true&include_items=false`,
       workerRequestInit(deps),
     );
@@ -1383,7 +1407,7 @@ async function sourceSchedulerStatusCheck(deps: DoctorDeps): Promise<DoctorCheck
   }
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
@@ -1590,7 +1614,7 @@ async function sourceIngestionHealthCheck(deps: DoctorDeps): Promise<DoctorCheck
 
 async function fetchSourceIndexStatusForIngestion(deps: DoctorDeps, baseUrl: string): Promise<Record<string, unknown> | undefined> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
+    const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok) return undefined;
     return asRecord(await response.json());
   } catch {
@@ -1600,7 +1624,7 @@ async function fetchSourceIndexStatusForIngestion(deps: DoctorDeps, baseUrl: str
 
 async function fetchSchedulerStatusForIngestion(deps: DoctorDeps, baseUrl: string): Promise<SourceSchedulerStatus | undefined> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
+    const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok) return undefined;
     const status = asRecord(await response.json());
     if (status.kind !== 'source_scheduler_status') return undefined;
@@ -1685,7 +1709,7 @@ function ingestionHealthHint(ledger: SourceIngestionLedgerSnapshot): string | un
 
 async function sourceIndexCorpusIdsForDoctor(deps: DoctorDeps, baseUrl: string): Promise<Set<string>> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
+    const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok) return new Set();
     const status = asRecord(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);

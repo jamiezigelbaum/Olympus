@@ -149,6 +149,21 @@ describe('the /private/<id>/open endpoint', () => {
     return { ...made, jobId: jobId!, token, file };
   }
 
+
+test('a private capability is rechecked after asynchronous desktop preparation', async () => {
+  let allowed = true;
+  const fixture = await sealedJob([], {
+    eligible: async items => items.map(() => allowed),
+    openFile: async (_path, eligible) => {
+      allowed = false;
+      expect(await eligible()).toBe(false);
+      throw new Error('revoked');
+    },
+  });
+  expect(await fixture.jobs.open(fixture.jobId, fixture.token)).toMatchObject({ body: { status: 'failed' } });
+  expect(await fixture.jobs.open(fixture.jobId, fixture.token)).toMatchObject({ status: 410 });
+});
+
   test('opens the mapped file for a relayed panel POST, and nothing for any other shape', async () => {
     const opened: string[] = [];
     const { jobs, jobId, token, file } = await sealedJob(opened);

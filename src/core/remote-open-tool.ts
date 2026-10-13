@@ -1,3 +1,4 @@
+import { workerSocketPath } from './worker-transport.ts';
 /**
  * `olympus_open_remote {target}`: the agent route for remote mode (owner
  * decision, 2026-10-10; docs/design/remote-access.md).
@@ -169,10 +170,11 @@ export async function openRemote(
     throw new OperationError('email_error', 'The Olympus engine returned an opening link in an unexpected shape.', 'Update Olympus, then try again.');
   }
   const sshTarget = mode.sshTarget ?? null;
-  const byHand = remoteOpenInstructions({ port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), target });
+  const socketPath = workerSocketPath({ env, ...(deps.platform ? { platform: deps.platform } : {}) });
+  const byHand = remoteOpenInstructions({ port, ...(socketPath ? { socketPath } : {}), ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), target });
   // One computer's commands only: the link appears exactly once in the
   // result, inside `open` (no separate link field, no other platforms).
-  const commands = remoteOpenNodeCommands({ port, sshTarget: sshTarget ?? SSH_TARGET_PLACEHOLDER, link })[computer];
+  const commands = remoteOpenNodeCommands({ port, ...(socketPath ? { socketPath } : {}), sshTarget: sshTarget ?? SSH_TARGET_PLACEHOLDER, link })[computer];
   return {
     ok: true,
     target: openTargetPath(target),

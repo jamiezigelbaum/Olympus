@@ -104,7 +104,7 @@ export interface UnreadableFilesOptions {
   /**
    * Opens a local path on this computer, re-checking it first. Absent: synced copies are not opened here.
    */
-  openFile?(path: string): Promise<void>;
+  openFile?(path: string, eligible: () => Promise<boolean>): Promise<void>;
   now?: () => number;
   /**
    * How long a token stays good from when it was issued (absolute: reading the list again never extends it).
@@ -428,14 +428,18 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
       if (!resolved) return { status: 'gone' };
       if (resolved.localPath && options.openFile) {
         try {
-          await options.openFile(resolved.localPath);
+          await options.openFile(resolved.localPath, async () => entry.expiresAt > now()
+            && verdictOf(entry.item) === 'unreadable' && target(entry.item)?.localPath === resolved.localPath);
           return { status: 'opened' };
         } catch {
           // The synced copy would not open (moved, or refused on the re-check): its web page, if it has one.
+          if (entry.expiresAt <= now() || verdictOf(entry.item) !== 'unreadable') return { status: 'gone' };
           if (!resolved.url) return { status: 'failed' };
         }
       }
-      return resolved.url ? { status: 'open_link', url: resolved.url } : { status: 'gone' };
+      if (entry.expiresAt <= now() || verdictOf(entry.item) !== 'unreadable') return { status: 'gone' };
+      const current = target(entry.item);
+      return current?.url ? { status: 'open_link', url: current.url } : { status: 'gone' };
     },
   };
 }

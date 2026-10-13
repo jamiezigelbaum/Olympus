@@ -173,6 +173,7 @@ ${TERMS_ASSENT}
 }
 
 export interface LoopbackConsentPageInput {
+  platform?: NodeJS.Platform;
   requestId: string;
   csrf: string;
   clientName: string;
@@ -197,6 +198,7 @@ export interface LoopbackConsentPageInput {
 export function renderLoopbackConsentPage(input: LoopbackConsentPageInput): { body: string; headers: Record<string, string> } {
   const nonce = randomBytes(16).toString('base64');
   const name = escapeHtml(input.clientName);
+  const computer = (input.platform ?? process.platform) === 'linux' ? 'computer' : 'Mac';
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -219,11 +221,11 @@ ${input.verifiedHost
 ${input.loopbackRedirect
     ? `<div class="warn">This app returns to <strong>${escapeHtml(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>`
     : ''}
-<p><strong>Connecting links Olympus on this Mac to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
+<p><strong>Connecting links Olympus on this ${computer} to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
 ${input.chatgpt
     ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>`
-    : `<p><strong>For Private items, ${name} gets answers written from them by a model on this Mac or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
+    : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
 <p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
@@ -235,7 +237,7 @@ ${TERMS_ASSENT}
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>
 </div>
 </form>
-<p class="small">This page is served by Olympus on this Mac, and only here.</p>
+<p class="small">This page is served by Olympus on this ${computer}, and only here.</p>
 </main>
 </body>
 </html>`;
