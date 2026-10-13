@@ -53815,6 +53815,7 @@ function redactWhatsAppLiveSpoolSecrets(options) {
         "preview_description",
         "preview_url",
         "mentions",
+        "media_path",
         "media_key",
         "media_direct_path",
         "media_file_sha256",

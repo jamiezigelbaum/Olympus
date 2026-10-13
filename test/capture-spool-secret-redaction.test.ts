@@ -405,8 +405,7 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
       })).toBeDefined();
     }
     const receipt = await whatsapp.sync.pull();
-    // V1 loses its re-download keys; V2 had nothing in its line to remove.
-    expect(receipt.counts.spool_records_redacted).toBe(1);
+    expect(receipt.counts.spool_records_redacted).toBe(2);
 
     expect(existsSync(audioPath)).toBe(false);
     expect(readFileSync(outside, 'utf8')).toBe('keep me');
@@ -414,6 +413,7 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
     const record = JSON.parse(voice!);
     expect(record).toMatchObject({ id: 'V1', secret_redacted: true });
     expect(record).not.toHaveProperty('media_key');
+    expect(record).not.toHaveProperty('media_path');
     expect(record).not.toHaveProperty('media_direct_path');
   });
   test('mentions go with the text, and audio another chat\'s message also names is kept', () => {
@@ -444,9 +444,7 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
       judge: (identity) => secret.has(identity.providerItemId)
         || secret.has(`${identity.providerConversationId} ${identity.providerItemId}`) ? 'content' : undefined,
     });
-    // The SAME voice note had nothing at all to remove; ALIAS gives up its
-    // media hash for the flag.
-    expect(result).toEqual({ recordsRedacted: 2, recordsBlanked: 0 });
+    expect(result).toEqual({ recordsRedacted: 3, recordsBlanked: 0 });
     const spool = readFileSync(file, 'utf8');
     expect(spool).not.toContain(STRIPE_LIVE_KEY);
     expect(JSON.parse(spool.split('\n')[0]!)).not.toHaveProperty('mentions');
@@ -454,5 +452,9 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
     expect(existsSync(shared)).toBe(true);
     expect(JSON.parse(spool.split('\n')[3]!)).toMatchObject({ id: 'ALIAS', secret_redacted: true });
     expect(JSON.parse(spool.split('\n')[3]!)).not.toHaveProperty('media_file_sha256');
+    // The Secret lines no longer name the shared file; the other chat's still does.
+    expect(JSON.parse(spool.split('\n')[1]!)).toMatchObject({ id: 'SAME', secret_redacted: true });
+    expect(JSON.parse(spool.split('\n')[1]!)).not.toHaveProperty('media_path');
+    expect(JSON.parse(spool.split('\n')[2]!)).toMatchObject({ id: 'SAME', media_path: shared });
   });
 });

@@ -43,7 +43,7 @@
 //   Each occurrence lists normally; downstream upserts collapse them, and
 //   fetchItem returns the LAST occurrence (the newest version).
 // - A line whose message was judged Secrets is rewritten in place without its
-//   text, preview, mentions, re-download keys or saved audio, and carries
+//   text, preview, mentions, media path, re-download keys or saved audio, and carries
 //   "secret_redacted": true (connector-store/capture-spool-secrets.ts). It
 //   reads back as a metadata_only item with a Secrets floor, so a replay or a
 //   reaction re-emit judges it Secrets again.
@@ -696,8 +696,8 @@ function spoolMessageText(message: SpoolMessage): string {
 
 /**
  * Rewrite, in place, every message line in `[from, through)` whose item the
- * judge says is Secrets: its text, link preview, mentions and media
- * re-download keys go (and the chat and sender names when the names
+ * judge says is Secrets: its text, link preview, mentions, media path and
+ * media re-download keys go (and the chat and sender names when the names
  * themselves were judged Secrets, also from a line whose text went earlier),
  * and the audio it saved under `mediaDir` is deleted. Its id, chat, time and
  * media type stay, and it is flagged so a replay judges it Secrets again.
@@ -748,18 +748,21 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
       const text = alreadyRedacted || message.mediaType !== undefined ? undefined : spoolMessageText(message);
       const redaction = options.judge(identity, text);
       if (!redaction) return undefined;
-      // Deleted again for an already-redacted line, in case an earlier pass
-      // could not.
+      // Deleted before the line loses its path; a failure here fails the
+      // window, which the next pull clears again.
       deleteOwnedMedia(message);
       const namesLeft = message.chatName !== '' || message.senderName !== '';
       if (alreadyRedacted && (redaction !== 'names' || !namesLeft)) return undefined;
       const record = JSON.parse(line) as Record<string, unknown>;
       // Mentions are display names copied into the text, so they go with it.
       // The media hashes and key time only serve a re-download, which a
-      // Secret message must never get; they also make room for the flag on a
-      // voice note whose audio was its only content.
+      // Secret message must never get. The media path goes too: the audio was
+      // deleted above, or is kept only for the other messages that name it,
+      // and a replay of this line must never read it again. Together they
+      // make room for the flag on a voice note whose audio was its only
+      // content.
       const removable = [
-        'preview_title', 'preview_description', 'preview_url', 'mentions',
+        'preview_title', 'preview_description', 'preview_url', 'mentions', 'media_path',
         'media_key', 'media_direct_path', 'media_file_sha256', 'media_file_enc_sha256', 'media_key_timestamp',
       ].filter((key) => key in record);
       // A line with nothing at all to remove is not rewritten: the flag alone
