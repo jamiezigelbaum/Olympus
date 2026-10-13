@@ -33,7 +33,9 @@ and return addresses, never fetched; `src/workers/remote-oauth/pinned-clients.ts
 and the relay's registration, `connect-relay/server/client-registration.ts`)
 and get the remote tool set (`source_answer`, `source_answer_result`,
 `source_index_status`, `ask_anonymously`), never the ChatGPT surface, the
-private answer panel or `/openai/mcp`. Muse, Grok Bot and the Grok API key
+private answer panel or `/openai/mcp`. Grok Bot needs no connector of its
+own: once Olympus is connected on grok.com, Grok Bot uses that connection.
+Grok Bot's own sign-in (as Cursor's pinned client), Muse and the Grok API key
 path stay after 1.0.
 
 ### Delivered (branch `claude/chatgpt-plugin`)
@@ -123,8 +125,9 @@ waits for a calendar slot.
   the relay-v1 terms panel, which nothing triggers since relay v2
   (`needsTerms`, `LETS_ENCRYPT_REPOSITORY_URL` in
   `src/workers/agent-connections.ts`); delete it with the dashboard lane.
-- **Hosted agents beyond ChatGPT, Claude and Grok** (Muse, Grok Bot, the Grok API key
-  path) stay out of scope. Claude and Grok moved into 1.0 on 2026-10-12.
+- **Hosted agents beyond ChatGPT, Claude and Grok** (Muse, Grok Bot's own
+  sign-in, the Grok API key path) stay out of scope. Claude and Grok moved into
+  1.0 on 2026-10-12; Grok Bot uses the grok.com connection.
 - **Authenticating the Mac's key to the panel.** A compromised relay could
   swap keys (a residual risk stated in the design); accepted for 1.0.
 - **Outside help on the private answer panel** (frontier consult over
