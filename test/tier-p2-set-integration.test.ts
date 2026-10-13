@@ -45,7 +45,7 @@ function model(answer: (material: string) => { tier: string; category: string; c
       requests.push(request);
       const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number; names?: string; excerpt?: string });
       return {
-        text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ...answer(item.names ?? item.excerpt ?? '') })) }),
+        text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ownRecord: false, privateKind: 'none', ...answer(item.names ?? item.excerpt ?? '') })) }),
         modelId: LANE.modelId,
       };
     },
@@ -81,7 +81,7 @@ describe('the sniffer settles routed items through the tiered store set', () => 
     expect(planner).toBeDefined();
     const answers = model((material) => /therapy/i.test(material)
       ? { tier: 'private', category: 'therapy', confidence: 0.95 }
-      : { tier: 'personal', category: 'ordinary', confidence: 0.96 });
+      : { tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.96 });
     const report = await runSnifferPass({ targets: [{ ledger: fixture.ledger, sniffer, placementFor: planner! }], lane: LANE, model: answers });
     expect(report.movesQueued).toBe(1);
 
@@ -109,7 +109,7 @@ describe('the sniffer settles routed items through the tiered store set', () => 
     const report = await runSnifferPass({
       targets: [{ ledger: fixture.ledger, sniffer }],
       lane: LANE,
-      model: model(() => ({ tier: 'personal', category: 'ordinary', confidence: 0.99 })),
+      model: model(() => ({ tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.99 })),
     });
     expect(report.awaitingPlacement).toBeGreaterThanOrEqual(1);
     expect(fixture.ledger.getCurrent(identityOf('bank-note'))?.state).toBe('pending');
@@ -136,7 +136,7 @@ describe('conversation-aware identity', () => {
       lane: LANE,
       model: model((material) => /therapy/.test(material)
         ? { tier: 'private', category: 'therapy', confidence: 0.95 }
-        : { tier: 'personal', category: 'ordinary', confidence: 0.95 }),
+        : { tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.95 }),
     });
     expect(ledger.getCurrent(family)?.metadataTier).toBe('secure');
     expect(ledger.getCurrent(work)?.metadataTier).toBe('private');

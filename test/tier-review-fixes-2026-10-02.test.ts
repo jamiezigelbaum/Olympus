@@ -100,7 +100,7 @@ const FILES = [
 ] as const;
 
 const PRIVATE_VERDICT = '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}';
-const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}';
+const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","ownRecord":false,"privateKind":"none","confidence":0.97}]}';
 
 let root: string;
 let env: Record<string, string>;
@@ -831,7 +831,7 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId).sort();
   const verdicts = (tier: string, category: string, confidence: number) =>
-    JSON.stringify({ verdicts: [1, 2, 3, 4, 5, 6].map((i) => ({ i, tier, category, confidence })) });
+    JSON.stringify({ verdicts: [1, 2, 3, 4, 5, 6].map((i) => ({ i, tier, category, confidence, ownRecord: tier === 'private', privateKind: tier === 'private' ? category : 'none' })) });
 
   test('an owner raise that needs no move: a lower read before it is refused, and no flip lands below the owner', async () => {
     const { dir, cleanup } = tempDir('olympus-tier-stale-lower-');

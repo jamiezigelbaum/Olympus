@@ -212,7 +212,7 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
         prompts.push(request);
         // Every read item is judged (p3): the orchard plan is ordinary, the bank letter is not.
         if (request.prompt.includes('pruning plan')) {
-          return { text: '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}', modelId: 'built_in' };
+          return { text: '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","ownRecord":false,"privateKind":"none","confidence":0.97}]}', modelId: 'built_in' };
         }
         return { text: '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}', modelId: 'built_in' };
       },
@@ -368,7 +368,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
   }
 
   const PRIVATE_VERDICT = '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}';
-  const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}';
+  const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","ownRecord":false,"privateKind":"none","confidence":0.97}]}';
 
   test('the built-in model judges at once with a default owner approval, re-approved for new owner words, never past a revocation', async () => {
     const { prompts, builtIn, runtime } = registeredBuiltIn(PRIVATE_VERDICT);

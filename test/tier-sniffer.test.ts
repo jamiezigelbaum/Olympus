@@ -77,7 +77,7 @@ function spyModel(respond: (request: AnalystModelRequest, items: Array<Record<st
 
 /** Answers every item with the same verdict. */
 function verdictsFor(items: Array<Record<string, unknown>>, verdict: { tier: string; category: string; confidence: number }): string {
-  return JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ...verdict })) });
+  return JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ownRecord: ['health', 'therapy', 'financial', 'legal', 'identity'].includes(verdict.category), privateKind: ['health', 'therapy', 'financial', 'legal', 'identity'].includes(verdict.category) ? verdict.category : 'none', ...verdict })) });
 }
 
 function subject(n: number) {
@@ -241,20 +241,19 @@ describe('batching, cache and threshold', () => {
     }
   });
 
-  test('Personal needs confidence >= 0.9 and never covers a hard category', () => {
+  test('Personal needs confidence >= 0.9; topic alone does not override it', () => {
     expect(snifferTierKey({ tier: 'personal', category: 'ordinary', confidence: 0.89 })).toBe('secure');
     expect(snifferTierKey({ tier: 'personal', category: 'ordinary', confidence: 0.9 })).toBe('private');
     for (const category of ['health', 'therapy', 'financial', 'legal', 'identity']) {
-      expect(snifferTierKey({ tier: 'personal', category, confidence: 0.99 })).toBe('secure');
+      expect(snifferTierKey({ tier: 'personal', category, confidence: 0.99 })).toBe('private');
     }
     expect(snifferTierKey({ tier: 'private', category: 'ordinary', confidence: 0.1 })).toBe('secure');
   });
 
-  test('a Private verdict with a non-private category is Personal; fail-safe and other stay Private', () => {
-    // Calibration 2026-10-05: the built-in model paired "private" with "work"
-    // on ordinary project notes. The category the prompt defines decides.
+  test('a Private verdict stays Private regardless of topic', () => {
+    // A work topic cannot release a private record or owner-protected work matter.
     for (const category of ['work', 'reference', 'ordinary']) {
-      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('private');
+      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('secure');
     }
     for (const category of ['other', 'intimate', 'family', 'health', 'financial']) {
       expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('secure');
@@ -274,7 +273,7 @@ describe('batching, cache and threshold', () => {
     ] }), expected);
     expect(parsed.size).toBe(0);
     expect(parseSnifferBatchResponse('not json', expected).size).toBe(0);
-    expect(parseSnifferBatchResponse('```json\n{"verdicts":[{"i":1,"tier":"private","category":"legal","confidence":0.8}]}\n```', expected).get(1)).toEqual({ tier: 'private', category: 'legal', confidence: 0.8 });
+    expect(parseSnifferBatchResponse('```json\n{"verdicts":[{"i":1,"tier":"private","category":"legal","confidence":0.8}]}\n```', expected).get(1)).toMatchObject({ tier: 'private', category: 'legal', confidence: 0.8 });
   });
 
   test('a Private answer in the model\'s own words is kept; a Personal one is not', () => {
@@ -284,8 +283,8 @@ describe('batching, cache and threshold', () => {
       { i: 2, tier: 'private', category: 'spiritual', confidence: 0.95 },
       { i: 3, tier: 'personal', category: 'spiritual', confidence: 0.95 },
     ] }), expected);
-    expect(parsed.get(1)).toEqual({ tier: 'private', category: 'financial', confidence: 0.95 });
-    expect(parsed.get(2)).toEqual({ tier: 'private', category: 'other', confidence: 0.95 });
+    expect(parsed.get(1)).toMatchObject({ tier: 'private', category: 'financial', confidence: 0.95 });
+    expect(parsed.get(2)).toMatchObject({ tier: 'private', category: 'other', confidence: 0.95 });
     expect(parsed.has(3)).toBe(false);
   });
 
@@ -741,7 +740,7 @@ describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
     expect(record).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
   });
 
-  test('a health category stays Private even when the model pairs it with personal', async () => {
+  test('an own health record stays Private even when the model pairs it with personal', async () => {
     const record = await judgedAs({ tier: 'personal', category: 'health', confidence: 0.95 });
     expect(record).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
   });
