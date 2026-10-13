@@ -14,6 +14,9 @@ import { join } from 'node:path';
 import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
+  loadSovereigntyPreset,
+  SOVEREIGNTY_PRESETS,
+  type SovereigntyEngine,
 } from '../src/core/sovereignty.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
@@ -67,6 +70,26 @@ describe('dashboard sensitivity section', () => {
     expect(byLabel.get('S4')).toMatchObject({ local: true, venice: true, frontier: false });
     expect(byLabel.get('S1–S3')).toMatchObject({ local: true, venice: true, frontier: true });
     expect(byLabel.get('S0')).toMatchObject({ local: true, venice: true, frontier: true });
+  });
+
+  test('an install without a Public tier shows no Public row or card; an older policy keeps both', () => {
+    const status = statusWithCorpora([emailCorpus('internal.email', 'internal', 10, {})]);
+    for (const preset of SOVEREIGNTY_PRESETS) {
+      // Every preset ships without Public from 1.0 on; strip it here as well
+      // so the check holds whether or not a preset still carries it.
+      const config = loadSovereigntyPreset(preset);
+      delete config.routes.public_safe;
+      delete config.retrieval.trustDomains.public_safe;
+      const view = buildView({ status, sovereigntyEngine: createSovereigntyEngine(config) });
+      expect({ preset, rows: view.sensitivity_tiers?.tiers.map((tier) => tier.tier_label) })
+        .toEqual({ preset, rows: ['S5', 'S4', 'S1–S3'] });
+      expect({ preset, cards: view.where_your_data_lives.map((card) => card.trust_domain) })
+        .toEqual({ preset, cards: ['secure_local', 'internal'] });
+    }
+    // The env-bridge fixture defines Public, as every policy before 1.0 does.
+    const older = buildView({ status });
+    expect(older.sensitivity_tiers?.tiers.map((tier) => tier.tier_label)).toEqual(['S5', 'S4', 'S1–S3', 'S0']);
+    expect(older.where_your_data_lives.map((card) => card.trust_domain)).toEqual(['secure_local', 'internal', 'public_safe']);
   });
 
   test('no per-tier item count is published anywhere on the page', () => {
@@ -516,11 +539,12 @@ describe('the /dashboard.json route wires both new inputs', () => {
 function buildView(input: {
   status: SourceIndexStatusResult;
   ledger?: SourceIngestionLedgerSnapshot;
+  sovereigntyEngine?: SovereigntyEngine;
 }) {
   return buildSourceDashboardViewModel({
     sourceIndexStatus: input.status,
     ...(input.ledger ? { ingestionLedger: input.ledger } : {}),
-    sovereigntyEngine: fixtureSovereigntyEngine(),
+    sovereigntyEngine: input.sovereigntyEngine ?? fixtureSovereigntyEngine(),
     now: NOW,
   });
 }

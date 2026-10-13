@@ -466,7 +466,7 @@ describe('claim-time evidence over a real local index', () => {
 
   test('a Private item re-tiered to Secret: the live guard refuses it, and no model ever reads it (claim or precompute)', async () => {
     const lane = await realPrivateLane([
-      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Account holder: Morgan Example. Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
     ]);
     // At search time the invoice's body is Private, found and eligible.
     const atSearch = await lane.privateSearch();
@@ -515,7 +515,7 @@ describe('claim-time evidence over a real local index', () => {
 
   test('the owner narrows the read scope: the live guard refuses the item at once', async () => {
     const lane = await realPrivateLane([
-      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Account holder: Morgan Example. Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
     ]);
     const atSearch = await lane.privateSearch();
     expect(await lane.eligible(atSearch)).toEqual([true]);
@@ -527,7 +527,7 @@ describe('claim-time evidence over a real local index', () => {
 
   test('a current Private copy that holds only the names: not eligible (its content is not served there)', async () => {
     const lane = await realPrivateLane([
-      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Account holder: Morgan Example. Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
     ]);
     const atSearch = await lane.privateSearch();
     expect(await lane.eligible(atSearch)).toEqual([true]);
@@ -552,7 +552,7 @@ describe('claim-time evidence over a real local index', () => {
 
   test('a deleted Private item: the live guard refuses it at once', async () => {
     const lane = await realPrivateLane([
-      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Account holder: Morgan Example. Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
     ]);
     const atSearch = await lane.privateSearch();
     expect(await lane.eligible(atSearch)).toEqual([true]);
@@ -716,7 +716,7 @@ describe('content held Private is answered in the panel, not listed as name-only
 
 describe('private evidence over a real local index', () => {
   test('each matched Private item carries its own passages, read locally; re-tiered to Secret, it is gone', async () => {
-    const passage = 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer of the orchard lease.';
+    const passage = 'Account holder: Morgan Example. Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer of the orchard lease.';
     const specs: FixtureSpec[] = [{ id: 'invoice', name: 'orchard-invoice.txt', text: passage }];
     const { dir, cleanup } = tempDir();
     const fixture = openTierFixture(dir, { embed: false });

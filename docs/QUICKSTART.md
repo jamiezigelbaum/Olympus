@@ -31,7 +31,7 @@ agent with a terminal:
 > Install Olympus by reading https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md and following it step by step. Walk me through setup and ask me about my data and privacy preferences.
 
 Before first setup, read the full
-[four-tier privacy explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
+[privacy tier explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
 then describe your privacy preferences and choose how to handle Private data.
 For the credentials and models that choice requires, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
@@ -67,7 +67,7 @@ Setup and `olympus doctor` print any missing preset prerequisites with the
 exact command or local-server action to take.
 
 Nothing in this guide sends your data anywhere until *you* describe what
-counts as Public, Personal, Private, and Secrets, then choose a privacy posture
+counts as Personal, Private, and Secrets, then choose a privacy posture
 in step 2. That choice is the heart of Olympus.
 
 ---
@@ -245,7 +245,7 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
 
 - **Your privacy posture** — the one decision that matters. Four presets:
 
-  | Preset | Public/Personal content | Private content: health, finance, legal, therapy, family |
+  | Preset | Personal content | Private content: health, finance, legal, therapy, family |
   |---|---|---|
   | `local-first` | frontier cloud | Private pool explicitly ordered local → Venice Private |
   | `local-only` | frontier cloud | your own local models only |
@@ -254,7 +254,7 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
 
   In `private-cloud-only`, Private answers are served by the approved Venice
   Private model, with no local-model prerequisite or fallback. The Venice
-  option handles Private data: Gemini still handles Public and Personal
+  option handles Private data: Gemini still handles Personal
   embeddings, while Private search uses an approved Venice Private embedding model.
   `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
@@ -267,7 +267,7 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   sees Private data.
   Turning Private data off is
   always an explicit preset choice, never a silent default.
-- **Your cloud lane** — by default Olympus answers Public and Personal
+- **Your cloud lane** — by default Olympus answers Personal
   questions with OpenClaw's own configured default model and auth, through
   `openclaw infer` (no model name or extra key needed); setup adds the
   `openclaw` directory to the worker's PATH. API-key providers are the

@@ -26,8 +26,9 @@ input, and approval boundaries live here and in [CONTRACTS.md](CONTRACTS.md).
 
 ## Product tier names
 
-The product uses **Public → Personal → Private → Secrets**. These display names
-have one compatibility mapping; the stored identifiers and enforcement have not
+The product uses **Personal → Private → Secrets**; installs made before 1.0
+also keep **Public**, below Personal. These display names have one
+compatibility mapping; the stored identifiers and enforcement have not
 changed:
 
 | Display name | Schema-v1 key | Trust tier | Routing domain |
@@ -47,15 +48,21 @@ values unchanged. The finer S1/S2/S3 levels below all display as Personal.
 Venice's own **Private** model category is a provider classification, distinct
 from Olympus's Private data tier.
 
-**No Public tier on fresh installs (owner ruling, 2026-10-01).** A policy that
-defines neither a `public_safe` route nor a `public_safe` retrieval policy has
-no Public tier (`isPublicTierRetired`). Every ChatGPT install (seeded with the
-`no-sensitive` preset by `olympus engine install`) and every install on that
-preset is such a policy: it shows **Personal → Private → Secrets** (Secret in
+**No Public tier on new installs (owner rulings, 2026-10-01 and 2026-10-13).**
+A policy that defines neither a `public_safe` route nor a `public_safe`
+retrieval policy has no Public tier (`isPublicTierRetired`). No shipped preset
+defines one, so every new install is such a policy: ChatGPT installs (seeded
+with the `no-sensitive` preset by `olympus engine install`) and OpenClaw
+installs on any preset. It shows **Personal → Private → Secrets** (Secret in
 ChatGPT copy), and the classifier lifts any Public verdict to Personal
-(reason `tier:public_retired`). Policies that define Public, including the
-other OpenClaw presets and every install made before the ruling, keep it
-unchanged.
+(reason `tier:public_retired`). Setup (`olympus setup`, `olympus sovereignty
+init`, `olympus engine install`) always writes a policy file; a worker that
+runs without one falls back to the environment-variable policy older hosts
+use, which defines Public and is left unchanged. A policy written before 1.0 defines Public and
+keeps it unchanged; Olympus never removes it. Re-running setup with `--force`
+on such an install keeps a Public tier, routed and embedded like the new
+posture's Personal tier, as presets were before 1.0. A policy that defines
+only one half of Public is refused.
 
 ## Sensitivity Tiers
 
@@ -391,8 +398,9 @@ Default trust domains:
 - `internal`: approved non-secure `S0-S3` corpora. Cloud embeddings are allowed
   by default after classification because this material is approved for
   ordinary cloud-model use.
-- `public_safe`: explicitly public-safe corpora. Cloud embeddings are allowed by
-  default in stores that never mix with `internal` or `secure_local`.
+- `public_safe`: explicitly public-safe corpora, on installs made before 1.0
+  only. Cloud embeddings are allowed by default in stores that never mix with
+  `internal` or `secure_local`.
 
 The `secure_local` trust-domain name describes Olympus retrieval, embeddings,
 query routing, and model-context defaults. It does not mean every upstream vault,

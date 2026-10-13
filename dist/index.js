@@ -72,13 +72,7 @@ function readWorkerSetupEnv(options = {}) {
     const stat = statSync2(path, { bigint: true });
     if (!stat.isFile() || (stat.mode & 0o077n) !== 0n)
       return;
-    const key = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.mode}`;
-    const cached = setupEnvCache.get(path);
-    if (cached?.key === key)
-      return { ...cached.env };
-    const env = parseWorkerSetupEnv(readFileSync(path, "utf8"));
-    setupEnvCache.set(path, { key, env });
-    return { ...env };
+    return parseWorkerSetupEnv(readFileSync(path, "utf8"));
   } catch {
     return;
   }
@@ -136,10 +130,7 @@ function unquoteEnvValue(value) {
   }
   return trimmed;
 }
-var setupEnvCache;
-var init_worker_auth = __esm(() => {
-  setupEnvCache = new Map;
-});
+var init_worker_auth = () => {};
 
 // src/core/source-index/types.ts
 function buildSourceSensitivity(input) {
@@ -8289,6 +8280,7 @@ var init_vocabulary = __esm(() => {
     connectReopen: "Open sign-in again",
     connectTimeout: "Olympus has not heard back from {source} yet. If you finished signing in, check again.",
     connectFailed: "Olympus could not start signing in to {source}. Try again.",
+    goToModels: "Go to Models",
     connected: "{source} is connected.",
     foldersTitle: "Choose folders",
     foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
@@ -10340,230 +10332,7 @@ var init_media_cache = __esm(() => {
 });
 
 // src/core/secret-patterns.ts
-function trimValueEnd(value) {
-  let end = value.length;
-  while (end > 0 && ";,)]}".includes(value[end - 1]))
-    end -= 1;
-  while (end > 0 && value[end - 1] === ".")
-    end -= 1;
-  return value.slice(0, end);
-}
-function stripNonAlphanumeric(word) {
-  const isAlphanumeric = (code) => code >= 48 && code <= 57 || code >= 97 && code <= 122;
-  const lower = word.toLowerCase();
-  let start = 0;
-  let end = lower.length;
-  while (start < end && !isAlphanumeric(lower.charCodeAt(start)))
-    start += 1;
-  while (end > start && !isAlphanumeric(lower.charCodeAt(end - 1)))
-    end -= 1;
-  return lower.slice(start, end);
-}
-function isBareLiteral(value) {
-  if (value.length > 24)
-    return false;
-  let end = value.length;
-  while (end > 0 && ".,;".includes(value[end - 1]))
-    end -= 1;
-  return BARE_LITERALS.has(value.slice(0, end).toLowerCase());
-}
-function isVariableReference(value) {
-  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$/s.exec(value);
-  if (!match)
-    return false;
-  const name = match[1];
-  if (match[2])
-    return match[2].startsWith("/");
-  return name.includes("_") || name === name.toUpperCase() || !/[0-9]/.test(name) && name === name.toLowerCase();
-}
-function isPlaceholderValue(value, lineRest = "") {
-  const v = value.trim();
-  if (!v)
-    return true;
-  if (v.startsWith("<") && (v.includes(">") || lineRest.includes(">")))
-    return true;
-  if (v.startsWith("(") && (v.includes(")") || lineRest.includes(")")))
-    return true;
-  if (/^[[{].*[\]}]$/.test(v))
-    return true;
-  if (/\$\{|\{\{|<%|%\(|\$\(|^%[A-Za-z_]+%$/.test(v))
-    return true;
-  if (isVariableReference(v))
-    return true;
-  if (MASKED_RUN.test(v))
-    return true;
-  if (/^(.)\1+$/.test(v))
-    return true;
-  if (isBareLiteral(v))
-    return true;
-  return PLACEHOLDER_WORDS.test(v);
-}
-function isPropertyLookup(value) {
-  if (!MEMBER_CHAIN.test(value))
-    return false;
-  return value.split(".").some((segment) => CREDENTIAL_WORD.test(segment) || COMMON_OBJECTS.has(segment.toLowerCase()));
-}
-function isNotLiteralCredential(value) {
-  return CODE_LOOKUP.test(value) || IDENTIFIER_NAME.test(value) && CREDENTIAL_WORD.test(value) || CALL_EXPRESSION.test(value) || isPropertyLookup(value) || TYPE_ANNOTATION.test(value) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(value);
-}
-function hasCredentialShape(value) {
-  return /[0-9]/.test(value) || /[^A-Za-z0-9_.\-\s]/.test(value);
-}
-function isPlausiblePassphrase(value, minLength) {
-  const v = value.trim();
-  if (v.length < minLength || v.length > 160)
-    return false;
-  if (/[?:]$/.test(v) || /\bhttps?:\/\//i.test(v))
-    return false;
-  if (isPlaceholderValue(v) || isNotLiteralCredential(v))
-    return false;
-  const words = v.split(/\s+/);
-  if (words.length < 2 || words.length > 14)
-    return false;
-  if (CREDENTIAL_NOUN.test(stripNonAlphanumeric(words[words.length - 1])))
-    return false;
-  return !words.some((word) => PROSE_WORDS.has(stripNonAlphanumeric(word)));
-}
-function leadBefore(input, index, limit) {
-  const window = input.slice(Math.max(0, index - limit), index);
-  const newline = Math.max(window.lastIndexOf(`
-`), window.lastIndexOf("\r"));
-  return newline === -1 ? window : window.slice(newline + 1);
-}
-function restOfLine(match) {
-  const input = match.input ?? "";
-  const end = (match.index ?? 0) + match[0].length;
-  const window = input.slice(end, end + 200);
-  const newline = window.search(/[\r\n]/);
-  return newline === -1 ? window : window.slice(0, newline);
-}
-function assignedValue(groups) {
-  const quotedValue = groups.dq ?? groups.sq ?? groups.bq;
-  if (quotedValue !== undefined)
-    return { value: quotedValue.trim(), quoted: true, tail: "" };
-  const raw = groups.uv ?? "";
-  const value = trimValueEnd(raw).trim();
-  return { value, quoted: false, tail: raw.slice(value.length) };
-}
-function isIdentifierHandOff(match, assigned) {
-  if (assigned.quoted || !BARE_IDENTIFIER.test(assigned.value))
-    return false;
-  if (CODE_LEAD.test(leadBefore(match.input ?? "", match.index ?? 0, 80)))
-    return true;
-  return /[;)]/.test(assigned.tail) && (assigned.value.includes("_") || /[a-z][A-Z]/.test(assigned.value));
-}
-function endsTheLine(match) {
-  const rest = restOfLine(match).trim();
-  return rest === "" || /^(?:#|\/\/|;|--)/.test(rest);
-}
-function assignmentAccepted(match) {
-  const groups = match.groups ?? {};
-  const keyword = (groups.kw ?? "").toLowerCase();
-  const assigned = assignedValue(groups);
-  const { value, quoted } = assigned;
-  if (!value)
-    return false;
-  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
-  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
-    return false;
-  const isPassword = keyword.startsWith("pass");
-  const isSecret = isPassword || keyword.startsWith("secret");
-  if (/\s/.test(value))
-    return isSecret && isPlausiblePassphrase(value, 6);
-  if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
-    return false;
-  if (quoted && isSecret)
-    return value.length >= 6;
-  if (isIdentifierHandOff(match, assigned))
-    return false;
-  let strong = true;
-  if (keyword === "secret" || keyword === "token") {
-    const start = match.index ?? 0;
-    const lead = (match.input ?? "").slice(Math.max(0, start - 48), start);
-    if (keyword === "token" && NON_CREDENTIAL_TOKEN_PREFIX.test(lead))
-      return false;
-    const attached = /[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(lead);
-    if (!attached) {
-      const previous = /([A-Za-z]+) $/.exec(lead)?.[1]?.toLowerCase();
-      strong = previous !== undefined && STRONG_QUALIFIERS.has(previous);
-      if (!strong && /[?&]$/.test(lead))
-        return false;
-    }
-  }
-  if (!strong)
-    return value.length >= 12 && hasCredentialShape(value);
-  if (value.length >= 12)
-    return true;
-  if (value.length >= 8 && hasCredentialShape(value))
-    return true;
-  return isPassword && !groups.nl && value.length >= 6 && endsTheLine(match);
-}
-function maskedProviderToken(token) {
-  const body = token.replace(/^(?:github_pat_|[A-Za-z]+[_-])+/, "");
-  return !body || MASKED_RUN.test(body) || /^(.)\1+$/.test(body) || /example|your|placeholder/i.test(body);
-}
-function envAssignmentAccepted(match) {
-  const groups = match.groups ?? {};
-  const key = groups.ek ?? "";
-  if (!ENV_CREDENTIAL_KEY.test(key))
-    return false;
-  if (NON_CREDENTIAL_KEY_TAIL.test(key) || NON_CREDENTIAL_CAMEL_TAIL.test(key))
-    return false;
-  const assigned = assignedValue(groups);
-  const { value, quoted } = assigned;
-  if (value.replace(/\s+/g, "").length < 6)
-    return false;
-  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
-  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
-    return false;
-  if (/\s/.test(value) && !isPlausiblePassphrase(value, 6))
-    return false;
-  if (!/\s/.test(value) && PROSE_WORDS.has(stripNonAlphanumeric(value)))
-    return false;
-  return !isIdentifierHandOff(match, assigned);
-}
-function blockScalarLines(match, keyIndent) {
-  const lines = [(match.groups?.bv ?? "").trim()];
-  const input = match.input ?? "";
-  const end = (match.index ?? 0) + match[0].length;
-  const following = input.slice(end, end + BLOCK_SCALAR_WINDOW).split(/\r?\n/);
-  for (let i = 1;i < following.length && lines.length < BLOCK_SCALAR_MAX_LINES; i += 1) {
-    const line = following[i];
-    const text2 = line.trim();
-    if (!text2)
-      continue;
-    const indent = line.length - line.trimStart().length;
-    if (indent <= keyIndent)
-      break;
-    lines.push(text2);
-  }
-  return lines.filter((line) => line && !COMMENT_LINE.test(line));
-}
-function blockScalarAccepted(match) {
-  const groups = match.groups ?? {};
-  const keyword = (groups.kw ?? "").toLowerCase();
-  const keyLead = leadBefore(match.input ?? "", match.index ?? 0, 200);
-  const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? "").length;
-  if ((groups.ind ?? "").length <= keyIndent)
-    return false;
-  const isSecret = keyword.startsWith("pass") || keyword.startsWith("secret");
-  const judge = (value) => {
-    if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value))
-      return false;
-    if (/\s/.test(value))
-      return isSecret && isPlausiblePassphrase(value, 6);
-    if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
-      return false;
-    return value.length >= (isSecret ? 6 : 8);
-  };
-  const lines = blockScalarLines(match, keyIndent);
-  if (lines.length === 0)
-    return false;
-  if (judge(lines[0]))
-    return true;
-  return lines.length > 1 && judge(lines.join(" "));
-}
-var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
   PROSE_WORDS = new Set([
     "above",
@@ -10630,7 +10399,22 @@ var init_secret_patterns = __esm(() => {
     "using",
     "via"
   ]);
-  MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
   PLACEHOLDER_WORDS = new RegExp([
     String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
     String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
@@ -10677,9 +10461,6 @@ var init_secret_patterns = __esm(() => {
     "pending",
     "missing"
   ]);
-  CODE_LOOKUP = /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|system\.getenv|deno\.env|getenv|environ|env|config|settings|secrets?|self|this|args|opts|options|params|req|request|ctx|vault|input)[.[(]/i;
-  CALL_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/;
-  MEMBER_CHAIN = /^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)+$/;
   COMMON_OBJECTS = new Set([
     "user",
     "users",
@@ -10704,11 +10485,6 @@ var init_secret_patterns = __esm(() => {
     "item",
     "model"
   ]);
-  TYPE_ANNOTATION = /^(?:secretstr(?:ing)?|optional[[<]|option<|union[[<]|promise<|record<|array<|string\s*\||[a-z]+\s*\|\s*(?:undefined|null))/i;
-  BARE_IDENTIFIER = /^[A-Za-z_$][A-Za-z_$]*$/;
-  CREDENTIAL_WORD = /pass(?:word|wd|phrase|code)|secret|token|api[_-]?key|credential/i;
-  CREDENTIAL_NOUN = /^(?:pass(?:word|phrase|code)|passwd|secret|token|credential)s?$/;
-  IDENTIFIER_NAME = /^[A-Za-z]+(?:[_-][A-Za-z]+)+$/;
   STRONG_QUALIFIERS = new Set([
     "client",
     "app",
@@ -10739,164 +10515,21 @@ var init_secret_patterns = __esm(() => {
     "email",
     "login"
   ]);
-  NON_CREDENTIAL_TOKEN_PREFIX = /(?:page|sync|cursor|continuation|resume|batch|delta|csrf|xsrf|nonce)[_ .-]?$/i;
-  CODE_LEAD = /(?:^|[^\w$])(?:const|let|var|val|final|static|public|private|protected|readonly|def)\s+[^=:\n]*$|[\w$]+\.[\w$]*$/;
-  ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
   ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  NON_CREDENTIAL_KEY_TAIL = /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
-  NON_CREDENTIAL_CAMEL_TAIL = /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
-  COMMENT_LINE = /^#(?:\s|$)/;
-  KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
   SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
   VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
   CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
   ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
   BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
   LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
-  AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
-  AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
-  AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
-  LEGACY_CREDENTIAL_ASSIGNMENT = /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
-  SHARED_SECRET_PATTERNS = [
-    {
-      findingType: "private_key_material",
-      label: "private_key",
-      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
-      confidence: 1
-    },
-    {
-      findingType: "aws_access_key_id",
-      label: "aws_access_key_id",
-      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
-      confidence: 0.98
-    },
-    {
-      findingType: "slack_token",
-      label: "slack_token",
-      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
-      confidence: 0.98
-    },
-    {
-      findingType: "api_secret_token",
-      label: "openai_key",
-      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
-      confidence: 0.95
-    },
-    {
-      findingType: "api_secret_token",
-      label: "github_token",
-      pattern: /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g,
-      confidence: 0.97,
-      accept: (match) => !maskedProviderToken(match[0])
-    },
-    {
-      findingType: "api_secret_token",
-      label: "stripe_key",
-      pattern: /(?<![A-Za-z0-9])(?:(?:sk|rk)_live_|whsec_)[A-Za-z0-9]{16,}/g,
-      confidence: 0.97,
-      accept: (match) => !maskedProviderToken(match[0])
-    },
-    {
-      findingType: "api_secret_token",
-      label: "google_api_key",
-      pattern: /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g,
-      confidence: 0.95,
-      accept: (match) => !maskedProviderToken(match[0])
-    },
-    {
-      findingType: "api_secret_token",
-      label: "google_oauth_client_secret",
-      pattern: /(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}/g,
-      confidence: 0.97,
-      accept: (match) => !maskedProviderToken(match[0])
-    },
-    {
-      findingType: "api_secret_token",
-      label: "google_oauth_token",
-      pattern: /(?<![A-Za-z0-9/])(?:1\/\/0[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9_-]{20,})/g,
-      confidence: 0.95,
-      accept: (match) => !maskedProviderToken(match[0])
-    },
-    {
-      findingType: "credential_assignment",
-      label: "credential_assignment",
-      pattern: LEGACY_CREDENTIAL_ASSIGNMENT,
-      confidence: 0.9
-    },
-    {
-      findingType: "credential_assignment",
-      label: "credential_assignment",
-      pattern: CREDENTIAL_ASSIGNMENT,
-      confidence: 0.9,
-      accept: assignmentAccepted
-    },
-    {
-      findingType: "credential_assignment",
-      label: "credential_assignment",
-      pattern: ENV_ASSIGNMENT,
-      confidence: 0.85,
-      accept: envAssignmentAccepted
-    },
-    {
-      findingType: "credential_assignment",
-      label: "credential_assignment",
-      pattern: BLOCK_SCALAR,
-      confidence: 0.85,
-      accept: blockScalarAccepted
-    },
-    {
-      findingType: "credential_assignment",
-      label: "password",
-      pattern: LABELLED_PASSPHRASE,
-      confidence: 0.85,
-      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 6)
-    },
-    {
-      findingType: "credential_assignment",
-      label: "credential_url",
-      pattern: URL_USERINFO,
-      confidence: 0.9,
-      accept: (match) => {
-        const password = match.groups?.pw ?? "";
-        return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
-      }
-    },
-    {
-      findingType: "credential_assignment",
-      label: "authorization_header",
-      pattern: AUTHORIZATION_HEADER,
-      confidence: 0.9,
-      accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
-    },
-    {
-      findingType: "api_secret_token",
-      label: "azure_key",
-      pattern: AZURE_KEY,
-      confidence: 0.95,
-      accept: (match) => !isPlaceholderValue(match.groups?.key ?? "")
-    },
-    {
-      findingType: "api_secret_token",
-      label: "azure_sas_signature",
-      pattern: AZURE_SAS_SIGNATURE,
-      confidence: 0.9,
-      accept: (match) => !isPlaceholderValue(match.groups?.sig ?? "")
-    }
-  ];
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
 });
 
 // src/workers/dropbox-files/content-policy.ts
-var SECRET_PATTERNS;
 var init_content_policy = __esm(() => {
   init_secret_patterns();
-  SECRET_PATTERNS = SHARED_SECRET_PATTERNS.map((shared) => ({
-    findingType: shared.findingType,
-    pattern: shared.pattern,
-    confidence: shared.confidence,
-    trustTier: "S5",
-    ...shared.accept ? { accept: shared.accept } : {}
-  }));
 });
 
 // src/workers/classification/engine.ts
@@ -10915,6 +10548,8 @@ var init_engine = __esm(() => {
 // src/workers/classification/tier-classifier.ts
 var UNDECIDED_TIER_SNIFFER;
 var init_tier_classifier = __esm(() => {
+  init_secret_patterns();
+  init_secret_patterns();
   init_engine();
   init_sender_rules();
   UNDECIDED_TIER_SNIFFER = Object.freeze({
@@ -10933,6 +10568,7 @@ var STOP_WORDS;
 var init_secret_locations = __esm(() => {
   init_sqlite_migrations();
   init_engine();
+  init_tier_classifier();
   STOP_WORDS = new Set([
     "a",
     "an",
@@ -11717,6 +11353,7 @@ var init_embedding_ledger = __esm(() => {
 // src/workers/connector-store/tier-move.ts
 var init_tier_move = __esm(() => {
   init_engine();
+  init_tier_classifier();
   init_tier_ledger();
   init_embedding_ledger();
   init_secrets_disposition();
@@ -13032,6 +12669,7 @@ var init_source_dashboard = __esm(() => {
   init_ingestion_throughput();
   init_source_corpus_registry();
   init_types();
+  init_sovereignty();
   init_scheduler_markers();
   init_source_failure();
   init_answer_ready_coverage();
@@ -14022,10 +13660,10 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
       signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
     });
   } catch {
-    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${hint} worker status) and run this again.`);
+    throw new OperationError("email_unreachable", `The Olympus worker at ${base} did not answer the opening request.`, `Start the worker (${hint} worker status) and run this again.`);
   }
   if (!response.ok) {
-    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
+    throw new OperationError("email_unreachable", `The Olympus worker at ${base} refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
   }
   let ticket;
   try {
@@ -17770,7 +17408,7 @@ function workerOrigin(config, env) {
   if (!config.worker.service.enabled) {
     const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
     if (port && /^\d{1,5}$/.test(port)) {
-      const host = env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
       return loopbackWorkerOrigin(`http://${host === "::1" ? "[::1]" : host}:${port}`);
     }
   }

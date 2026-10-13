@@ -288,11 +288,11 @@ describe('a lane where only pictures arrive later', () => {
     const base = { metadataTier: 'private', contentTier: 'private', state: 'current', metadataPending: false, contentPending: false } as const;
     expect(set.placementFor({ ...base, contentRead: false }).copies.map((copy) => copy.layers)).toEqual(['metadata']);
     expect(set.placementFor({ ...base, contentRead: true }).copies.map((copy) => copy.layers)).toEqual(['both']);
-    // Pending content: held in Private when the text arrived later, the whole item otherwise.
+    // Held content is split from cleared names whether it arrives now or later.
     const pending = { ...base, state: 'pending', contentPending: true, contentRead: true } as const;
     expect(set.placementFor(pending, { contentArrivesLater: true }).copies.map((copy) => copy.trustDomain).sort())
       .toEqual(['internal', 'secure_local']);
-    expect(set.placementFor(pending).copies.map((copy) => [copy.trustDomain, copy.layers])).toEqual([['secure_local', 'both']]);
+    expect(set.placementFor(pending).copies.map((copy) => [copy.trustDomain, copy.layers])).toEqual([['internal', 'metadata'], ['secure_local', 'content']]);
     // A plain item outside the lane's pictures is never read later.
     expect(set.readsContentLater(fixtureItem({ id: 'x', name: 'x.txt' }))).toBe(false);
     expect(set.readsContentLater()).toBe(true);

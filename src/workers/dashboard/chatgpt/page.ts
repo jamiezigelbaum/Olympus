@@ -65,9 +65,12 @@ export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
 /**
  * Setup tool errors whose fixed sentence (the result's text, from
  * response-builder.ts) is shown beside the control that ran the tool, instead
- * of reading as an unreachable Mac.
+ * of reading as an unreachable Mac or the Connect flow's generic failure.
  */
-export const CHATGPT_INLINE_ERROR_CODES = ['sign_in_failed', 'source_not_connected', 'source_busy', 'sync_unavailable', 'disconnect_incomplete'] as const;
+export const CHATGPT_INLINE_ERROR_CODES = [
+  'sign_in_failed', 'source_not_connected', 'source_busy', 'sync_unavailable', 'disconnect_incomplete',
+  'models_not_ready', 'connect_unavailable', 'google_signin_full', 'already_connected',
+] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;
 /** Visible-page refresh: often while something moves, rarely when settled, backing off on failure. */
 export const CHATGPT_DASHBOARD_REFRESH = {

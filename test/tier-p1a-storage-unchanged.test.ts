@@ -26,7 +26,7 @@ const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 const ACCOUNT = 'personal';
 const ITEMS: Array<{ id: string; name: string; text: string; sharing?: 'public_link' }> = [
   { id: 'benign', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden and the compost bins.' },
-  { id: 'health', name: 'biopsy results.txt', text: 'The lab results confirm the diagnosis; the patient starts treatment.' },
+  { id: 'health', name: 'biopsy results SSN 123-45-6789.txt', text: 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.' },
   { id: 'public', name: 'launch-post.txt', text: 'Our launch post, already on the blog.', sharing: 'public_link' },
   { id: 'secret', name: 'env.txt', text: `aws key ${FAKE_AWS_KEY} for the deploy` },
 ];

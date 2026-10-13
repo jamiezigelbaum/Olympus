@@ -27,6 +27,8 @@ export const BUILT_IN_SNIFFER_LANE: SnifferLane = Object.freeze({
 }) as SnifferLane;
 
 export interface BuiltInPrivateModel {
+  /** Actual pinned model/revision/weights digest, separate from the built_in approval identity. */
+  cacheModelId?: string;
   /** The local model, called through the one AnalystModel interface. */
   model: AnalystModel;
   /**
@@ -75,7 +77,9 @@ export function resolveTierSnifferRuntime(input: {
   } catch (error) {
     if (!(error instanceof SnifferLaneRefusedError)) throw error;
     if (error.reason === 'no_private_lane' && input.builtIn) {
-      return { source: 'built_in', lane: BUILT_IN_SNIFFER_LANE, builtIn: input.builtIn };
+      return { source: 'built_in', lane: { ...BUILT_IN_SNIFFER_LANE,
+        ...(input.builtIn.cacheModelId ? { cacheModelId: input.builtIn.cacheModelId } : {}),
+      }, builtIn: input.builtIn };
     }
     return { source: 'off', reason: error.reason };
   }
