@@ -177,8 +177,19 @@ test('legacy Secrets settlement resumes after tombstoning but before the ledger 
 });
 
 
-for (const afterTombstone of [false, true]) test(`routed secret cleanup retries after a tombstone failure (after=${afterTombstone}) and service restart`, async () => {
+for (const failure of ['before-tombstone', 'after-tombstone', 'record-safe-locator', 'record-credential-locator'])
+test(`routed secret cleanup retries after ${failure} and service restart`, async () => {
+  const afterTombstone = failure === 'after-tombstone';
+  const recordFailure = failure.startsWith('record-');
   const f = await storedPrivate();
+  const locator = failure === 'record-credential-locator'
+    ? 'postgres://alice:q7@db.internal/app' : 'https://example.test/notes';
+  for (const domain of ['internal', 'secure_local'] as const) {
+    const db = new Database(f.paths[domain]);
+    db.query('UPDATE items SET locator_uri = ?, source_scope_folder_keys_json = ?, source_scope_generation = ?, source_scope_revision = ?')
+      .run(locator, JSON.stringify(['notes-folder']), 'generation', 'revision');
+    db.close();
+  }
   const decision = { ...classifyItemTiers({ signals: { title: 'Notes' }, text }),
     metadataTier: 'secure' as const, contentTier: 'secure' as const, state: 'pending' as const,
     metadataPending: false, contentPending: true };
@@ -193,7 +204,9 @@ for (const afterTombstone of [false, true]) test(`routed secret cleanup retries 
   let service = makeService();
   const store = f.stores.secure_local!;
   const original = store.tombstoneCopy.bind(store);
-  store.tombstoneCopy = (...args) => {
+  const originalRecord = f.secrets.record.bind(f.secrets);
+  if (recordFailure) f.secrets.record = () => { throw new Error('transient receipt failure'); };
+  else store.tombstoneCopy = (...args) => {
     if (afterTombstone) original(...args);
     throw new Error('transient tombstone failure');
   };
@@ -203,13 +216,21 @@ for (const afterTombstone of [false, true]) test(`routed secret cleanup retries 
     expect(f.ledger.copies(identity).length).toBeGreaterThan(0);
     expect(store.itemStoredContent(identity)?.chunkCount ?? 0).toBe(afterTombstone ? 0 : 1);
     expect(queue().counts().questions).toBe(1);
+    expect(f.secrets.get(identity) === undefined).toBe(recordFailure);
+    expect(store.localContent(localId('record'))).toBeUndefined();
     service.stop(); installed.close();
     store.tombstoneCopy = original;
+    f.secrets.record = originalRecord;
     installed = new InstalledTierClassification({ env: {} }); service = makeService();
     expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
     expect(f.ledger.copies(identity)).toEqual([]);
     expect(store.itemStoredContent(identity)?.chunkCount ?? 0).toBe(0);
     expect(queue().counts().questions).toBe(0);
+    expect(f.secrets.get(identity)).toMatchObject({
+      locator: failure === 'record-credential-locator' ? null : locator,
+      title: null, findingKinds: ['sniffer_secret_refusal'],
+      folderKeys: ['notes-folder'], scopeGeneration: 'generation', scopeRevision: 'revision',
+    });
     expect(calls).toBe(0);
-  } finally { store.tombstoneCopy = original; service.stop(); installed.close(); }
+  } finally { store.tombstoneCopy = original; f.secrets.record = originalRecord; service.stop(); installed.close(); }
 });

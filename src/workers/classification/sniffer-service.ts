@@ -655,10 +655,10 @@ export class TierSnifferService {
           if (!set) return false;
           const row = ledger.getCurrent(question)!;
           if (row.contentTier === 'secrets' && row.reasons.includes('metadata:secret:sniffer_refused')) {
-            // Settlement may have hidden every copy before a tombstone threw.
-            // The location was recorded before deletion; no current/exportable
-            // copy is required to retry even after the last tombstone succeeded.
-            if (!set.secrets()?.get(question)?.findingKinds.includes('sniffer_secret_refusal')) return false;
+            // Settlement hides every copy before writing the location receipt
+            // or tombstoning. Either write may fail, so recover from any hidden
+            // copy, or from the receipt when all tombstones already landed.
+            const locations = set.secrets();
             const copies = ledger.copies(question);
             const stores = new Map(copies.map(copy => {
               const domain = set.domainForCorpus(copy.corpusId);
@@ -666,6 +666,12 @@ export class TierSnifferService {
             }));
             if ([...stores.values()].some(store => !store)) return false;
             const remaining = [...stores.values()].map(store => store!.exportItemCopy(question)).find(Boolean);
+            if (!locations?.get(question)?.findingKinds.includes('sniffer_secret_refusal')) {
+              if (!locations || !remaining) return false;
+              // Reuse settlement's screened, location-only receipt builder;
+              // a repeated record failure leaves copies hidden for retry.
+              return settleRoutedSecrets(set, question, decision, remaining, { findingKinds: ['sniffer_secret_refusal'] });
+            }
             if (remaining) {
               settleSecretsCopies({ ledger, identity: remaining.identity, copies,
                 storeFor: corpusId => stores.get(corpusId), connectorId: 'tier-sniffer' });

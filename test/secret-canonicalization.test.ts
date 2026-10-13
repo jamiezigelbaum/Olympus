@@ -31,6 +31,36 @@ function* cases(key: string, value: string) {
   }
 }
 const credential = ['q7R2s9T4', 'u6V8w1Y3'].join('');
+const schemes = ['http', 'https', 'postgres', 'postgresql', 'mysql', 'mongodb', 'mongodb+srv',
+  'redis', 'rediss', 'amqp', 'ftp', 'sftp', 'smtp', 'ldap', 'x', 'custom+database.v1'];
+for (const scheme of schemes) test(`generated ${scheme} credentials in prose use every shared screen`, () => {
+  for (const password of ['q', 'q7', credential, 'password', 'xxxx', '****', '<pass>']) {
+    const secret = ['q', 'q7', credential].includes(password);
+    for (const uri of [`${scheme}://user:${password}@db.internal/app`,
+      ...keys.map(key => `${scheme}://db.internal/app?${key}=${password}`)]) {
+      for (const wrap of wrappers) for (const encode of entityEncoders) {
+        const text = `Database URI: ${wrap(encode(uri))} (connection notes)`;
+        expect(hasCredentialUrl(text), text).toBe(secret);
+        expect(detectSecretFindingKinds(text).length > 0, text).toBe(secret);
+        expect(snifferMaterialCarriesSecret(text), text).toBe(secret);
+        expect(secretLabelsInText(text).length > 0, text).toBe(secret);
+        expect(screenedSecretLocator(text) === null, text).toBe(secret);
+        expect(classifyItemTiers({ signals: { title: 'Notes' }, text }).contentTier, text)
+          .toBe(secret ? 'secrets' : 'private');
+      }
+    }
+  }
+}, 120_000);
+
+test('userinfo fallback catches short passwords even when the host is a documentation placeholder', () => {
+  for (const scheme of schemes) for (const password of ['q', 'q7', 'password', 'xxxx', '****', '<pass>']) {
+    const text = `Database URI: ${scheme}://user:${password}@<host>/app`;
+    expect(detectSecretFindingKinds(text).length > 0, text).toBe(['q', 'q7'].includes(password));
+    expect(snifferMaterialCarriesSecret(text), text).toBe(['q', 'q7'].includes(password));
+    expect(screenedSecretLocator(text) === null, text).toBe(['q', 'q7'].includes(password));
+  }
+});
+
 for (const key of keys) test(`generated ${key}: 768 credential URLs caught at every screen`, () => {
   let count = 0;
   for (const text of cases(key, credential)) {

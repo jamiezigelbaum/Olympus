@@ -138,7 +138,7 @@ export function secretScreeningVariants(text: string): readonly string[] {
   return canonical === text ? [text] : [text, canonical];
 }
 
-const URL_SCHEME = /[a-z][a-z0-9+.-]{0,15}:\/\//gi;
+const URL_SCHEME = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//gi;
 
 /**
  * One forward walk: external wrappers end a URL, paired punctuation inside
@@ -593,7 +593,7 @@ const LABELLED_PASSPHRASE = new RegExp(
 );
 
 /** `scheme://user:password@host` connection strings. */
-const URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
+const URL_USERINFO = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]+)@/gi;
 
 /** `Authorization: Bearer <value>` (also Basic and Token). */
 const AUTHORIZATION_HEADER =

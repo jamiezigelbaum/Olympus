@@ -10230,7 +10230,7 @@ var init_secret_patterns = __esm(() => {
     "using",
     "via"
   ]);
-  URL_SCHEME = /[a-z][a-z0-9+.-]{0,15}:\/\//gi;
+  URL_SCHEME = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//gi;
   CREDENTIAL_QUERY_KEY = /^(?:access_token|refresh_token|api_key|client_secret|password|token|secret|sig)$/i;
   MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
   PLACEHOLDER_WORDS = new RegExp([
@@ -10355,7 +10355,7 @@ var init_secret_patterns = __esm(() => {
   ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
   BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
   LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
+  URL_USERINFO = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]+)@/gi;
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
   AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
@@ -39532,8 +39532,7 @@ class TierSnifferService {
             return false;
           const row = ledger2.getCurrent(question);
           if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused")) {
-            if (!set.secrets()?.get(question)?.findingKinds.includes("sniffer_secret_refusal"))
-              return false;
+            const locations = set.secrets();
             const copies = ledger2.copies(question);
             const stores = new Map(copies.map((copy) => {
               const domain2 = set.domainForCorpus(copy.corpusId);
@@ -39542,6 +39541,11 @@ class TierSnifferService {
             if ([...stores.values()].some((store) => !store))
               return false;
             const remaining = [...stores.values()].map((store) => store.exportItemCopy(question)).find(Boolean);
+            if (!locations?.get(question)?.findingKinds.includes("sniffer_secret_refusal")) {
+              if (!locations || !remaining)
+                return false;
+              return settleRoutedSecrets(set, question, decision, remaining, { findingKinds: ["sniffer_secret_refusal"] });
+            }
             if (remaining) {
               settleSecretsCopies({
                 ledger: ledger2,
