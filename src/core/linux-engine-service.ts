@@ -549,7 +549,7 @@ function shellQuote(value: string): string {
 }
 function writeLinuxLauncher(layout: LinuxEngineLayout, program: EngineProgram): void {
  createLinuxPrivateDirectory(dirname(layout.launcherPath));
- const environment=linuxEngineEnvironment(layout);
+ const environment={...linuxEngineEnvironment(layout),OLYMPUS_STANDALONE:'1'};
  const exports=Object.entries(environment).map(([key,value])=>`export ${key}=${shellQuote(value)}`).join('\n');
  writePrivateFileAtomicSync(layout.launcherPath, `#!/bin/sh\n${exports}\ncd ${shellQuote(program.workingDirectory)} || exit 78\nexec ${shellQuote(program.runtimePath)} --no-env-file ${shellQuote(program.entryPath)} "$@"\n`);
  chmodSync(layout.launcherPath, 0o700);

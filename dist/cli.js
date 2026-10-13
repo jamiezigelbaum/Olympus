@@ -6395,10 +6395,12 @@ function publishLinuxEngineReceipt(layout, updates = {}) {
 function standaloneLinuxDataDir(env = process.env) {
   if (process.platform !== "linux")
     return;
-  if (env.OLYMPUS_ENGINE_HOST !== "1" && (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted))
+  if (env.OLYMPUS_STANDALONE === "1" || env.OLYMPUS_ENGINE_HOST === "1")
+    return resolveLinuxEngineLayout(env).dataDir;
+  if (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted)
     return;
   const layout = resolveLinuxEngineLayout(env);
-  if (env.OLYMPUS_ENGINE_HOST === "1" || readLinuxEngineReceipt(layout.receiptPath))
+  if (readLinuxEngineReceipt(layout.receiptPath))
     return layout.dataDir;
   return;
 }
@@ -64244,7 +64246,7 @@ function shellQuote2(value2) {
 }
 function writeLinuxLauncher(layout, program) {
   createLinuxPrivateDirectory(dirname44(layout.launcherPath));
-  const environment = linuxEngineEnvironment(layout);
+  const environment = { ...linuxEngineEnvironment(layout), OLYMPUS_STANDALONE: "1" };
   const exports = Object.entries(environment).map(([key2, value2]) => `export ${key2}=${shellQuote2(value2)}`).join(`
 `);
   writePrivateFileAtomicSync(layout.launcherPath, `#!/bin/sh

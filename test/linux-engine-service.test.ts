@@ -129,6 +129,8 @@ test('install refuses a package without the Linux state compatibility declaratio
 });
 test('install copies scratch inputs into a durable generation, receipts the launcher, and commits only after health',async()=>{
  const l=layout(),checkout=packageAt(l.home,'v1');let linked=false,active=false,enabled=false;
+ // Exercise the installed shell launcher with the real shared data resolver.
+ writeFileSync(join(checkout,'dist/cli.js'), `import { resolveRemoteConnectionsDbPathForCli } from ${JSON.stringify(join(import.meta.dir,'../src/core/remote-connections.ts'))}; console.log(resolveRemoteConnectionsDbPathForCli());`);
  const exec:EngineExec=(command,args)=>{
   if(command==='systemctl'&&args[0]==='--version')return good('systemd 256');
   if(command==='loginctl')return good('yes');
@@ -148,6 +150,16 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  expect(readFileSync(l.launcherPath,'utf8')).toContain(`export XDG_CONFIG_HOME='${l.configHome}'`);
  const journalPath=join(l.stateDir,'install-transaction.json'),journal=readFileSync(journalPath,'utf8'),transaction=JSON.parse(journal);expect(journal).not.toContain('OLYMPUS_WORKER_AUTH_TOKEN');expect(transaction.backupDir).toContain('.install-backup-');expect(Object.values(transaction.before.files).every((snapshot:any)=>snapshot.present===false&&!('backupPath' in snapshot))).toBe(true);
  await settleLinuxEngineInstall(options,{ok:true,expected_build:installedResult.program.build??null,running_build:installedResult.program.build??null,pid:42,worker:'ok',waited_ms:0});
+ mkdirSync(join(l.home,'.openclaw'),{mode:0o700});
+ const openclawConfig=join(l.home,'.openclaw/openclaw.json');
+ for(const config of ['enabled','unreadable','malformed']){
+  if(config==='unreadable')mkdirSync(openclawConfig);
+  else writeFileSync(openclawConfig,config==='malformed'?'{broken':JSON.stringify({plugins:{entries:{olympus:{enabled:true}}}}));
+  const launched=Bun.spawnSync([l.launcherPath],{env:{PATH:process.env.PATH,HOME:l.home},stdout:'pipe',stderr:'pipe'});
+  expect(launched.exitCode).toBe(0);
+  expect(launched.stdout.toString().trim()).toBe(join(l.dataHome,'olympus/remote-connections.sqlite'));
+  rmSync(openclawConfig,{recursive:true});
+ }
  expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
  expect((await verifyEngine({...options,expectedBuild:'other'})).desktop_entry).toEqual({present:true,path:desktop});
  const receipt=JSON.parse(readFileSync(l.receiptPath,'utf8'));const generation=receipt.machineArtifacts.find((entry:any)=>entry.kind==='tree');

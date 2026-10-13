@@ -8,6 +8,7 @@ import { defaultSovereigntyConfigPath } from '../src/core/sovereignty.ts';
 import { workerSetupEnvPath } from '../src/core/worker-auth.ts';
 import { workerServicePaths } from '../src/core/worker-service.ts';
 import { olympusDataDir } from '../src/core/remote-access.ts';
+import { resolveRemoteConnectionsDbPath, resolveRemoteConnectionsDbPathForCli } from '../src/core/remote-connections.ts';
 import { enginePaths, engineServicePaths, renderEnginePlist } from '../src/core/engine-service.ts';
 const roots: string[] = [];
 function fixture() {
@@ -124,6 +125,41 @@ test('default OpenClaw config keeps hosted stores on the legacy namespace beside
   writeFileSync(join(home, '.openclaw/openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { enabled: true } } } }));
   expect(olympusDataDir(env)).toBe(join(env.XDG_DATA_HOME, 'openclaw/olympus'));
   expect(olympusDataDir({ ...env, OLYMPUS_ENGINE_HOST: '1' })).toBe(layout.dataDir);
+});
+for (const config of ['enabled', 'unreadable', 'malformed'] as const) {
+  test(`standalone CLI uses the daemon receipt with ${config} OpenClaw config`, () => {
+    const { home, env } = fixture();
+    const layout = resolveLinuxEngineLayout(env);
+    publishLinuxEngineReceipt(layout);
+    mkdirSync(join(home, '.openclaw'), { mode: 0o700 });
+    const configPath = join(home, '.openclaw/openclaw.json');
+    // EISDIR is a deterministic read failure even when the test runner is root.
+    if (config === 'unreadable') mkdirSync(configPath);
+    else writeFileSync(configPath, config === 'malformed' ? '{broken' : JSON.stringify({ plugins: { entries: { olympus: { enabled: true } } } }));
+    const driftedEnv = { ...env, XDG_DATA_HOME: join(home, 'other-data') };
+    const expected = join(env.XDG_DATA_HOME, 'olympus');
+    expect(olympusDataDir({ ...driftedEnv, OLYMPUS_ENGINE_HOST: '1' })).toBe(expected);
+    expect(resolveRemoteConnectionsDbPath({ ...driftedEnv, OLYMPUS_ENGINE_HOST: '1' })).toBe(join(expected, 'remote-connections.sqlite'));
+    // No standalone marker: genuine hosted processes still use their namespace.
+    expect(olympusDataDir(env)).toBe(join(env.XDG_DATA_HOME, 'openclaw/olympus'));
+    expect(resolveRemoteConnectionsDbPath(env)).toBe(join(env.XDG_DATA_HOME, 'openclaw/olympus/remote-connections.sqlite'));
+    expect(resolveRemoteConnectionsDbPathForCli({ ...driftedEnv, OLYMPUS_STANDALONE: '1' })).toBe(join(expected, 'remote-connections.sqlite'));
+    expect(olympusDataDir({ ...driftedEnv, OLYMPUS_STANDALONE: '1' })).toBe(expected);
+    expect(olympusDataDir({ ...driftedEnv, OLYMPUS_STANDALONE: '1', OPENCLAW_CONFIG_PATH: configPath })).toBe(expected);
+  });
+}
+test('standalone markers do not change Mac data or connection paths', () => {
+  const { env } = fixture();
+  publishLinuxEngineReceipt(resolveLinuxEngineLayout(env));
+  const probe = Bun.spawnSync([process.execPath, '--eval', `
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const { olympusDataDir } = await import('./src/core/remote-access.ts');
+    const { resolveRemoteConnectionsDbPath, resolveRemoteConnectionsDbPathForCli } = await import('./src/core/remote-connections.ts');
+    console.log(JSON.stringify([olympusDataDir(), resolveRemoteConnectionsDbPath(), resolveRemoteConnectionsDbPathForCli()]));
+  `], { env: { ...env, OLYMPUS_STANDALONE: '1', OLYMPUS_ENGINE_HOST: '1' }, stdout: 'pipe', stderr: 'pipe' });
+  expect(probe.exitCode).toBe(0);
+  const dataDir = join(env.XDG_DATA_HOME, 'openclaw/olympus');
+  expect(JSON.parse(probe.stdout.toString())).toEqual([dataDir, join(dataDir, 'remote-connections.sqlite'), join(dataDir, 'remote-connections.sqlite')]);
 });
 test('receipt discovery validates the recorded legacy layout before considering fresh-root overlap', () => {
   const { env } = fixture();

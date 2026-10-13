@@ -200,8 +200,11 @@ export function publishLinuxEngineReceipt(layout: LinuxEngineLayout, updates: Pa
  */
 export function standaloneLinuxDataDir(env: Env = process.env): string | undefined {
   if (process.platform !== 'linux') return undefined;
-  if (env.OLYMPUS_ENGINE_HOST !== '1' && (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted)) return undefined;
+  // The installed CLI and daemon select the receipt before consulting any
+  // unrelated (including unreadable) OpenClaw config in the same home.
+  if (env.OLYMPUS_STANDALONE === '1' || env.OLYMPUS_ENGINE_HOST === '1') return resolveLinuxEngineLayout(env).dataDir;
+  if (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted) return undefined;
   const layout = resolveLinuxEngineLayout(env);
-  if (env.OLYMPUS_ENGINE_HOST === '1' || readLinuxEngineReceipt(layout.receiptPath)) return layout.dataDir;
+  if (readLinuxEngineReceipt(layout.receiptPath)) return layout.dataDir;
   return undefined;
 }

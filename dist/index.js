@@ -4447,10 +4447,12 @@ function resolveLinuxEngineLayout(env = process.env) {
 function standaloneLinuxDataDir(env = process.env) {
   if (process.platform !== "linux")
     return;
-  if (env.OLYMPUS_ENGINE_HOST !== "1" && (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted))
+  if (env.OLYMPUS_STANDALONE === "1" || env.OLYMPUS_ENGINE_HOST === "1")
+    return resolveLinuxEngineLayout(env).dataDir;
+  if (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted)
     return;
   const layout = resolveLinuxEngineLayout(env);
-  if (env.OLYMPUS_ENGINE_HOST === "1" || readLinuxEngineReceipt(layout.receiptPath))
+  if (readLinuxEngineReceipt(layout.receiptPath))
     return layout.dataDir;
   return;
 }
