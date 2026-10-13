@@ -143,7 +143,7 @@ function applyOne(
 }
 
 /** The least private store the decision's placement uses: a current copy below it is unsafe. */
-function leastPrivateDomain(set: TieredStoreSet, decision: TierDecision): SourceTrustDomain {
+export function leastPrivateDomain(set: TieredStoreSet, decision: TierDecision): SourceTrustDomain {
   const copies = set.placementFor(decision).copies;
   return copies.reduce<SourceTrustDomain>(
     (lowest, copy) => (trustDomainRank(copy.trustDomain) < trustDomainRank(lowest) ? copy.trustDomain : lowest),
