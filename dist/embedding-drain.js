@@ -34654,6 +34654,7 @@ init_bounded_text();
 init_command_runner();
 init_pdf_render();
 init_zkapi_consult_settings();
+init_engine();
 var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
   "Extract concise evidence text from this secure-local document for private indexing.",
   "Return only visible or directly readable content.",

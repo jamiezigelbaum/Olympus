@@ -101423,6 +101423,9 @@ function createRemoteVlmExtractor(options = {}) {
       if (!mimeType || !IMAGE_MIME_TYPES.has(mimeType) && mimeType !== PDF_MIME_TYPE) {
         return { status: "skipped_unsupported" };
       }
+      if (!options.localReader) {
+        return { status: "failed_retryable", errorKind: REMOTE_SECRET_CHECK_NOT_CONFIGURED };
+      }
       const isImage = IMAGE_MIME_TYPES.has(mimeType);
       const renderedPdf = mimeType === PDF_MIME_TYPE ? await renderPdfFirstPageForVision({
         bytes,
@@ -101430,9 +101433,19 @@ function createRemoteVlmExtractor(options = {}) {
         commandRunner: pdfRenderCommandRunner,
         timeoutMs: pdfRenderTimeoutMs
       }) : undefined;
-      const described = await client.describe({
+      const payload2 = {
         bytes: renderedPdf?.bytes ?? bytes,
-        mimeType: renderedPdf?.mimeType ?? mimeType,
+        mimeType: renderedPdf?.mimeType ?? mimeType
+      };
+      const checked = await checkPayloadLocally(options.localReader, input, payload2);
+      if (checked.kind === "unread")
+        return checked.output;
+      if (checked.kind === "secret") {
+        return renderedPdf ? withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING, "pdf_rendered_first_page"]) : withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING]);
+      }
+      const described = await client.describe({
+        bytes: payload2.bytes,
+        mimeType: payload2.mimeType,
         prompt,
         maxOutputChars: maxBoundedTextChars
       });
@@ -101465,6 +101478,42 @@ function createRemoteVlmExtractor(options = {}) {
         ...described.egressDestination ? { egressDestination: described.egressDestination } : {}
       };
     }
+  };
+}
+async function checkPayloadLocally(reader, input, payload2) {
+  let local;
+  try {
+    local = await reader.extract({
+      ...input,
+      bytes: payload2.bytes,
+      mimeType: payload2.mimeType,
+      sizeBytes: payload2.bytes.byteLength
+    });
+  } catch {
+    return { kind: "unread", output: { status: "failed_retryable", errorKind: REMOTE_SECRET_CHECK_FAILED } };
+  }
+  switch (local.status) {
+    case "indexed":
+      return detectSecretFindingKinds(local.text).length > 0 ? { kind: "secret", output: local } : { kind: "clear" };
+    case "empty_output":
+    case "metadata_only":
+      return { kind: "clear" };
+    case "failed_retryable":
+      return { kind: "unread", output: { status: "failed_retryable", errorKind: REMOTE_SECRET_CHECK_FAILED } };
+    default:
+      return { kind: "unread", output: { status: "failed_terminal", errorKind: REMOTE_SECRET_CHECK_FAILED } };
+  }
+}
+function withWarnings(output, warnings) {
+  return {
+    ...output,
+    ...output.derivations ? {
+      derivations: output.derivations.map((derivation) => ({
+        ...derivation,
+        warnings: warnings.reduce((current2, warning) => appendWarning(current2, warning), derivation.warnings ?? [])
+      }))
+    } : {},
+    warnings: warnings.reduce((current2, warning) => appendWarning(current2, warning), output.warnings ?? [])
   };
 }
 function requireLocalHttpBaseUrl(value, label) {
@@ -101555,13 +101604,14 @@ function collectJsonMessages(value, messages) {
     collectJsonMessages(record3[key2], messages);
   }
 }
-var REMOTE_VLM_EXTRACTOR_VERSION = "venice-v1", APPROVED_REMOTE_EXTRACTION_HOST = "api.venice.ai", REMOTE_VLM_EXTRACTOR_KINDS, DEFAULT_REMOTE_EXTRACTION_PROMPT;
+var REMOTE_VLM_EXTRACTOR_VERSION = "venice-v1", APPROVED_REMOTE_EXTRACTION_HOST = "api.venice.ai", REMOTE_WITHHELD_SECRET_WARNING = "remote_withheld_secret", REMOTE_SECRET_CHECK_NOT_CONFIGURED = "remote_secret_check_not_configured", REMOTE_SECRET_CHECK_FAILED = "remote_secret_check_failed", REMOTE_VLM_EXTRACTOR_KINDS, DEFAULT_REMOTE_EXTRACTION_PROMPT;
 var init_remote_vlm = __esm(() => {
   init_bounded_text();
   init_command_runner();
   init_pdf_render();
   init_text();
   init_zkapi_consult_settings();
+  init_engine();
   REMOTE_VLM_EXTRACTOR_KINDS = [
     "venice_e2ee_document",
     "venice_grok43_document",
@@ -103621,9 +103671,11 @@ function createDefaultExtractorRegistry(config2 = {}) {
       ...config2.vlm?.prompt !== undefined ? { prompt: config2.vlm.prompt } : {}
     })
   ];
+  const remoteLocalReader = config2.remote?.localReader ?? createOcrExtractor(ocrShared);
   for (const kind of REMOTE_VLM_EXTRACTOR_KINDS) {
     extractors.push(createRemoteVlmExtractor({
       kind,
+      localReader: remoteLocalReader,
       ...config2.remote?.client ? { client: config2.remote.client } : {},
       ...config2.remote?.prompt !== undefined ? { prompt: config2.remote.prompt } : {},
       ...config2.remote?.model !== undefined ? { model: config2.remote.model } : {},
