@@ -1285,12 +1285,21 @@ function safeTarget(value) {
 function documentPolicy(policy) {
   const hash = "'sha256-" + createHash("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
-  const index = directives.findIndex((s) => /^script-src\s/.test(s));
-  if (index < 0)
-    directives.push("script-src " + hash);
-  else if (!directives[index].includes("'unsafe-inline'"))
-    directives[index] += " " + hash;
-  return directives.filter((s) => !/^worker-src\s/.test(s)).join("; ") + "; worker-src 'none'";
+  const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
+  const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
+  const index = directives.findIndex((s) => /^script-src(\s|$)/.test(s));
+  if (index >= 0) {
+    if (needsHash(directives[index]))
+      directives[index] = withHash(directives[index].slice("script-src".length));
+  } else {
+    const fallback = directives.find((s) => /^default-src(\s|$)/.test(s));
+    if (fallback && needsHash(fallback))
+      directives.push(withHash(fallback.slice("default-src".length)));
+  }
+  return directives.filter((s) => !/^worker-src(\s|$)/.test(s)).join("; ") + "; worker-src 'none'";
+}
+function metaPolicy(policy) {
+  return policy.split("; ").filter((s) => !/^(frame-ancestors|report-uri|report-to|sandbox)(\s|$)/.test(s)).join("; ");
 }
 function attribute(value) {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
@@ -1528,7 +1537,7 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
         return refusal(503);
       const htmlPolicy = documentPolicy(response.headers.get("content-security-policy"));
       outgoing.set("Content-Security-Policy", htmlPolicy);
-      return new Response(html.replace(/<head([^>]*)>/i, `<head$1><meta name="referrer" content="same-origin"><meta http-equiv="Content-Security-Policy" content="${attribute(htmlPolicy)}">${BOOTSTRAP}`), { status: response.status, headers: outgoing });
+      return new Response(html.replace(/<head([^>]*)>/i, `<head$1><meta name="referrer" content="same-origin"><meta http-equiv="Content-Security-Policy" content="${attribute(metaPolicy(htmlPolicy))}">${BOOTSTRAP}`), { status: response.status, headers: outgoing });
     }
     return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
   }

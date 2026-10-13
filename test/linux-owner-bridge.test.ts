@@ -202,3 +202,42 @@ test('only owner-proven requests can outlive the TCP idle deadline', async () =>
   const response = await fetch(entry + '/dashboard', { headers: { Host: host, Cookie: proved.headers.get('set-cookie')!.split(';')[0]!, 'X-Olympus-Owner-Proof': proof } });
   expect(await response.text()).toBe('completed owner operation'); expect(admitted).toBe(1);
 });
+
+// Independent of the bridge: which inline script a CSP list lets run.
+function allowsInline(policy: string, script: string): boolean {
+  const directives = policy.split(';').map(s => s.trim().split(/\s+/));
+  const list = (directives.find(d => d[0] === 'script-src') ?? directives.find(d => d[0] === 'default-src'))?.slice(1);
+  if (!list) return true;
+  const hash = `'sha256-${new Bun.CryptoHasher('sha256').update(script).digest('base64')}'`;
+  if (list.includes(hash)) return true;
+  if (list.some(s => /^'(sha256|sha384|sha512|nonce)-/.test(s))) return false;
+  return list.includes("'unsafe-inline'");
+}
+
+test('bridged pages keep every inline script the worker allowed, and the bootstrap always runs', async () => {
+  const pageScript = 'window.controls=1';
+  const pageHash = `'sha256-${new Bun.CryptoHasher('sha256').update(pageScript).digest('base64')}'`;
+  const cases: [string | undefined, boolean][] = [
+    ["frame-ancestors 'none'", true], // the Agents page: no script restriction at all
+    [undefined, true],
+    [`default-src 'none'; script-src ${pageHash}; frame-ancestors 'none'`, true],
+    ["default-src 'none'; script-src 'unsafe-inline'", true],
+    ["default-src 'self'", false],
+    ["default-src 'none'", false],
+  ];
+  for (const [upstream, pageAllowed] of cases) {
+    const f = fixture(async () => new Response(`<!doctype html><html><head><title>t</title></head><body><script>${pageScript}</script></body></html>`, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8', ...(upstream ? { 'Content-Security-Policy': upstream } : {}) } }));
+    const owner = await prove(f);
+    const response = await f.bridge.handle(f.request('/dashboard?agents', { headers: { Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof } }));
+    const html = await response.text();
+    const bootstrap = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+    const meta = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]*)">/)![1]!.replaceAll('&quot;', '"').replaceAll('&amp;', '&');
+    for (const policy of [response.headers.get('content-security-policy')!, meta]) {
+      expect([upstream, allowsInline(policy, pageScript)]).toEqual([upstream, pageAllowed]);
+      expect([upstream, allowsInline(policy, bootstrap)]).toEqual([upstream, true]);
+      expect(policy).toContain("worker-src 'none'");
+    }
+    expect(meta).not.toContain('frame-ancestors');
+  }
+});
