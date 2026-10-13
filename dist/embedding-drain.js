@@ -9229,9 +9229,20 @@ var init_connector = __esm(() => {
 // src/core/document-dispatch.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 function assertDocumentDispatchCurrent() {
-  const current2 = documentDispatch.getStore();
-  if (current2 && current2() !== true)
+  const context = documentDispatch.getStore();
+  if (context && !guardsEveryCurrent(context.guards)) {
     throw new Error("Document authorization changed; nothing further was sent.");
+  }
+}
+function observeDocumentDispatchRequest(url, init) {
+  documentDispatch.getStore()?.observer?.onRequest(url, init);
+}
+function guardsEveryCurrent(guards) {
+  try {
+    return guards.every((guard) => guard() === true);
+  } catch {
+    return false;
+  }
 }
 var documentDispatch;
 var init_document_dispatch = __esm(() => {
@@ -9247,6 +9258,7 @@ async function fetchModelEndpoint(fetchImpl, url, init) {
   let response;
   try {
     assertDocumentDispatchCurrent();
+    observeDocumentDispatchRequest(url, init);
     response = await fetchImpl(url, { ...init, redirect: "error" });
   } catch (error) {
     if (isFetchRedirectRefusal(error))
@@ -39650,13 +39662,19 @@ init_open_targets();
 // src/core/private-document-requests.ts
 init_consult_ask();
 
+// src/core/document-answer-receipt.ts
+init_document_dispatch();
+var MAX_RECORDED_BYTES = 256 * 1024;
+var encoder2 = new TextEncoder;
+
 // src/workers/email-source/server.ts
+init_document_dispatch();
 init_document_digest();
 
 // src/workers/source-index/document-digest.ts
 init_document_digest();
 var DOCUMENT_TRAVERSAL_BYTES = 1024 * 1024;
-var encoder2 = new TextEncoder;
+var encoder3 = new TextEncoder;
 
 // src/workers/source-index/document-consult.ts
 init_consult_gate();

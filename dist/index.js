@@ -5173,9 +5173,20 @@ var init_zkapi_consult_settings = __esm(() => {
 // src/core/document-dispatch.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 function assertDocumentDispatchCurrent() {
-  const current2 = documentDispatch.getStore();
-  if (current2 && current2() !== true)
+  const context = documentDispatch.getStore();
+  if (context && !guardsEveryCurrent(context.guards)) {
     throw new Error("Document authorization changed; nothing further was sent.");
+  }
+}
+function observeDocumentDispatchRequest(url, init) {
+  documentDispatch.getStore()?.observer?.onRequest(url, init);
+}
+function guardsEveryCurrent(guards) {
+  try {
+    return guards.every((guard) => guard() === true);
+  } catch {
+    return false;
+  }
 }
 var documentDispatch;
 var init_document_dispatch = __esm(() => {
@@ -5191,6 +5202,7 @@ async function fetchModelEndpoint(fetchImpl, url, init) {
   let response;
   try {
     assertDocumentDispatchCurrent();
+    observeDocumentDispatchRequest(url, init);
     response = await fetchImpl(url, { ...init, redirect: "error" });
   } catch (error) {
     if (isFetchRedirectRefusal(error))

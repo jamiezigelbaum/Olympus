@@ -24,7 +24,11 @@ surfaces:
   available and the caller did not provide `selected_items` or `max_results`.
   Explicit selection or limits retain the existing excerpt path. Successful
   digests are always used; only a request with `fits: false` takes the excerpt
-  fallback. The reviewer path is unchanged.
+  fallback. Progress, the exact dispatched Venice request bodies and the
+  answering model are also retained on the computer's Private answers page;
+  the caller's existing answer and release policy are unchanged. An attempted
+  Venice request followed by a local fallback is labeled as an attempt, not a
+  Venice answer. The reviewer path is unchanged.
 
 The provider reads the document facts Olympus sends. A local writer tries to
 omit identifiers and the Standard or Strict gate checks the outgoing text; this
@@ -51,6 +55,10 @@ and prove bounds, routing and revocation, not real-model writing quality.
 - The digest budget is exercised against a full-year fixture containing 1,200
   invented transactions; it is real fixture input, not a claim about live data.
 - The actual zkAPI send is capped at 8 KiB.
+- Ordinary Venice digest answers reserve private receipt capacity before work
+  begins. Receipts admit at most four Venice requests and 256 KiB of total
+  request bodies, checked before dispatch; headers and credentials are never
+  included. Their source and connection guards remain live at collection.
 - Private jobs expire after 30 minutes. They are in-memory only: an engine
   restart loses unfinished jobs and their resume state.
 - Document-derived results are checked against the exact source references and
@@ -131,8 +139,10 @@ the card, "How should your model prepare a question before it leaves?",
 offers three modes (`standardMode` in consult.json; a file without it reads
 as light cleanup):
 
-- **Exactly as written** (`as_written`): no model step; the question goes
-  out unchanged (from ChatGPT, the question as ChatGPT sent it).
+- **Exactly as written** (`as_written`): a question-only ask has no model
+  step and goes out unchanged (from ChatGPT, the question as ChatGPT sent it).
+  Document mode always uses the deciding writer over its digest or fallback
+  excerpts, including when this setting is selected.
 - **Lightly cleaned** (`light_cleanup`, the default): the writer follows a
   short preset instruction, shown in full on the card and editable
   (`CONSULT_LIGHT_CLEANUP_INSTRUCTION`, text in
@@ -147,19 +157,22 @@ request (`ConsultGateOptions.net = 'secrets'`). Names, places, figures and
 copied wording go out if the user's mode lets them; the size bound is the
 transport's own 8 KiB. The writer's reply is checked for shape only. The
 mode and instruction are bound to the job like the level and the writer: a
-change before the send refuses it. The owner's own writer also reads the
-bounded evidence at Standard (not as written); the built-in writer reads
-only the question, within its prompt-token bound. The full gate now runs only
-at Strict with the built-in writer.
+change before the send refuses it. In document mode either writer receives
+the digest or bounded fallback excerpts within its own prompt bound; a
+question-only ask supplies only the question. The full gate now runs only at
+Strict with the built-in writer.
 
 **Ask anonymously.** The user asks from inside their own agent: the
 `ask_anonymously` tool (`src/core/consult-ask.ts`) takes the question (at
 most 4,000 characters), prepares it by the chosen level and Standard's mode,
 checks it, and sends it through the zkAPI transport with its caps,
-acknowledgements and model check. The answer, the model that answered and
-exactly what was sent come back in the tool result. It involves no private
-evidence. The question is the secrets check's context, so a labelled secret
-in it stays refused even when the writer drops the label. The ask binds the
+acknowledgements and model check. Without `use_documents`, the answer, the
+model that answered and exactly what was sent come back in the tool result;
+that mode involves no private evidence. With `use_documents`, document
+content and derived results stay on the private surfaces described above.
+The question and, in document mode, the admitted source snapshot provide
+the secrets check's context, so a labelled secret stays refused even when
+the writer drops the label. The ask binds the
 settings revision, writer and Standard mode and instruction when it starts;
 the transport's final authorization refuses the send as stale if any changed.
 The dashboard's own question box was retired on 2026-10-10 (design step 3):
@@ -218,12 +231,11 @@ different zkAPI provider it exposes at most single Personal-tier words,
 never Private ones.
 
 Both are always selectable. Sending needs the six cost-and-risk statements
-(acknowledgement version 6) accepted, so while they are not, choosing Standard
+(acknowledgement version 8 on this branch) accepted, so while they are not, choosing Standard
 shows them inline with one "Accept and save", and outside help stays paused.
 
-Status: approved, not built. It needs a writer prompt for the new level, a
-re-identification eval beside the existing leak eval, and the setting on the
-card.
+Status: Standard, its writer prompt, re-identification eval and card setting
+are built. The document extension is built on this branch only.
 
 ## Writer: your own local model
 
@@ -344,8 +356,9 @@ https or a private network.
    1. *Install the parts:* Tor and zkAPI, one click (built in this change,
       below).
    2. *Add money:* one transfer, fee included.
-   3. *Confirm:* the six cost and risk statements (version 6), then turn it on:
-      questions go out when you ask your agent to; the provider reads each question; a
+   3. *Confirm:* the six cost and risk statements (version 8 on this branch), then turn it on:
+      questions go out when you ask your agent to; the provider reads each
+      question and any document facts sent with it; a
       question usually costs a few cents with up to $6 held while it runs;
       adding and taking out money each have a network fee; unused money can
       be claimed by the operator after about 30 days (the card shows the

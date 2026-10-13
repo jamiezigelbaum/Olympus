@@ -1,9 +1,11 @@
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { createPrivateDocumentRequests } from '../../core/private-document-requests.ts';
+import { withDocumentAnswerReceipt } from '../../core/document-answer-receipt.ts';
+import { reportDocumentDigestProgress } from '../../core/document-dispatch.ts';
 import { documentDigestAnalyst } from '../../core/document-digest.ts';
 import { prepareDocumentDigest } from '../source-index/document-digest.ts';
 import { runDocumentConsult, type DocumentConsultInput } from '../source-index/document-consult.ts';
-import { currentAnalystAbortSignal } from '../../core/analyst.ts';
+import { currentAnalystAbortSignal, runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import { sourceAnswerCorpusIds } from '../source-index/analyst-answer.ts';
 import { consultModelProvider } from '../../core/consult-settings.ts';
 import { FILE_SOURCE_SCOPE_IDS } from '../../core/source-scope-approval.ts';
@@ -3219,7 +3221,9 @@ export async function main(): Promise<void> {
     return answerActivity.run(() => prepareDocumentDigest({
       request: { question: request.question, ...(request.query ? { query: request.query } : {}), context: { allowedTrustDomains: domains, allowCloudQueries: false, ...(corpusIds ? { allowedCorpusIds: corpusIds } : {}) } },
       model: answerBuiltInModel,
-      authorized: () => !signal?.aborted && authorityIdentity() === admittedAuthority,
+      // Execution cancellation and receipt custody have different lifetimes.
+      // The source guard remains meaningful after the caller finishes.
+      authorized: () => authorityIdentity() === admittedAuthority,
       ...(signal ? { signal } : {}),
       ...(onProgress ? { onProgress } : {}),
       lanesFactory: () => {
@@ -3338,7 +3342,9 @@ export async function main(): Promise<void> {
           // retain their excerpt route. No provider substitutes for the local
           // summarizer. Unbounded document questions can use the whole scan.
           if (!workerBuiltInModel?.available() || request.selected_items?.length || request.max_results !== undefined) return undefined;
-          return prepareDocumentsForRequest(request, currentAnalystAbortSignal());
+          return prepareDocumentsForRequest(request, currentAnalystAbortSignal(), progress => {
+            reportDocumentDigestProgress({ state: 'summarizing', documentsRead: progress.documentsRead, documentsTotal: progress.documentsTotal });
+          });
         },
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
@@ -3421,6 +3427,20 @@ export async function main(): Promise<void> {
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
+          const requestedProvider = request.analyst_provider ?? (request.analyst_model ? 'venice' : 'default');
+          if (requestedProvider === 'venice' && workerBuiltInModel?.available() && !request.selected_items?.length && request.max_results === undefined) {
+            const connectionId = request.caller?.connection_id;
+            const active = () => !connectionId || remoteConnections()?.list().some(connection => connection.id === connectionId && connection.revokedAt === null) === true;
+            const signal = currentAnalystAbortSignal();
+            return withDocumentAnswerReceipt({
+              jobs: documentRequests,
+              question: request.question,
+              authorized: active,
+              ...(signal ? { signal } : {}),
+              work: signal => runWithAnalystAbortSignal(signal, () => answerActivity.run(() => analystSourceAnswer.answer(request), kind)),
+              describe: result => ({ reply: result.answer, answeredByVenice: result.audit.answer_synthesis?.analyst_backend === 'venice' }),
+            });
+          }
           return answerActivity.run(() => analystSourceAnswer.answer(request), kind);
         },
       }

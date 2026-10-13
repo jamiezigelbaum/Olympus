@@ -8341,13 +8341,52 @@ var init_zkapi_consult_settings = __esm(() => {
 
 // src/core/document-dispatch.ts
 import { AsyncLocalStorage } from "node:async_hooks";
-function runWithDocumentDispatch(current2, work) {
-  return documentDispatch.run(current2, work);
+function runWithDocumentDispatch(current2, work, observer) {
+  const parent = documentDispatch.getStore();
+  const guards = [...parent?.guards ?? [], current2];
+  const inheritedObserver = composeDocumentDispatchObservers(parent?.observer, observer);
+  const combinedCurrent = () => guardsEveryCurrent(guards);
+  inheritedObserver?.onGuard(combinedCurrent);
+  return documentDispatch.run({ guards, ...inheritedObserver ? { observer: inheritedObserver } : {} }, work);
 }
 function assertDocumentDispatchCurrent() {
-  const current2 = documentDispatch.getStore();
-  if (current2 && current2() !== true)
+  const context = documentDispatch.getStore();
+  if (context && !guardsEveryCurrent(context.guards)) {
     throw new Error("Document authorization changed; nothing further was sent.");
+  }
+}
+function observeDocumentDispatchRequest(url, init) {
+  documentDispatch.getStore()?.observer?.onRequest(url, init);
+}
+function reportDocumentDigestProgress(progress) {
+  documentDispatch.getStore()?.observer?.onProgress?.(progress);
+}
+function guardsEveryCurrent(guards) {
+  try {
+    return guards.every((guard) => guard() === true);
+  } catch {
+    return false;
+  }
+}
+function composeDocumentDispatchObservers(outer, inner) {
+  if (!outer)
+    return inner;
+  if (!inner || inner === outer)
+    return outer;
+  return {
+    onRequest(url, init) {
+      outer.onRequest(url, init);
+      inner.onRequest(url, init);
+    },
+    onGuard(current2) {
+      outer.onGuard(current2);
+      inner.onGuard(current2);
+    },
+    onProgress(progress) {
+      outer.onProgress?.(progress);
+      inner.onProgress?.(progress);
+    }
+  };
 }
 var documentDispatch;
 var init_document_dispatch = __esm(() => {
@@ -8366,6 +8405,7 @@ async function fetchModelEndpoint(fetchImpl, url, init) {
   let response;
   try {
     assertDocumentDispatchCurrent();
+    observeDocumentDispatchRequest(url, init);
     response = await fetchImpl(url, { ...init, redirect: "error" });
   } catch (error) {
     if (isFetchRedirectRefusal(error))
@@ -104259,6 +104299,188 @@ var init_private_document_requests = __esm(() => {
   init_consult_ask();
 });
 
+// src/core/document-answer-receipt.ts
+function withDocumentAnswerReceipt(options) {
+  let resolveCaller;
+  let rejectCaller;
+  const caller = new Promise((resolve12, reject) => {
+    resolveCaller = resolve12;
+    rejectCaller = reject;
+  });
+  let callerSettled = false;
+  const resolveOnce = (value2) => {
+    if (callerSettled)
+      return;
+    callerSettled = true;
+    resolveCaller(value2);
+  };
+  const rejectOnce = (error2) => {
+    if (callerSettled)
+      return;
+    callerSettled = true;
+    rejectCaller(error2);
+  };
+  const notice = options.jobs.start(options.question, async (control) => {
+    const requests = [];
+    let recordedBytes = 0;
+    const liveGuards = new Set([options.authorized]);
+    const liveGuard = () => [...liveGuards].every(safeCurrent);
+    let lastProgress = {
+      state: "reading",
+      documentsRead: 0,
+      documentsTotal: 0
+    };
+    const observer = {
+      onGuard(current2) {
+        liveGuards.add(current2);
+        control.registerDocumentGuard(async () => liveGuard());
+      },
+      onProgress(progress) {
+        lastProgress = progress;
+        control.onProgress(progress);
+      },
+      onRequest(url, init) {
+        if (!isVeniceChatCompletion(url, init))
+          return;
+        const captured = captureVeniceRequest(init, requests.length, recordedBytes);
+        requests.push(captured);
+        recordedBytes += encoder2.encode(captured.body).length;
+        lastProgress = { ...lastProgress, state: "answering" };
+        control.onProgress(lastProgress);
+      }
+    };
+    const executionSignal = combineAbortSignals(control.signal, options.signal);
+    try {
+      if (!options.authorized() || executionSignal.aborted) {
+        throw documentAuthorizationChangedError(executionSignal);
+      }
+      const result = await runWithDocumentDispatch(options.authorized, () => options.work(executionSignal), observer);
+      if (executionSignal.aborted || liveGuard() !== true || !options.authorized()) {
+        throw documentAuthorizationChangedError(executionSignal);
+      }
+      const description = options.describe(result);
+      if (liveGuard() !== true || !options.authorized()) {
+        throw documentAuthorizationChangedError(executionSignal);
+      }
+      resolveOnce(result);
+      if (description.answeredByVenice && requests.length > 0) {
+        const last = requests.at(-1);
+        return {
+          ok: true,
+          privateDocuments: true,
+          reply: description.reply,
+          sent: renderRecordedRequests(requests),
+          route: "Venice Private",
+          networkIdentity: "not_verified",
+          level: "standard",
+          cleanup: "as_written",
+          rewritten: false,
+          remembered: false,
+          model: last.model
+        };
+      }
+      return {
+        ok: false,
+        privateDocuments: true,
+        code: "documents_no_venice_answer",
+        message: "Venice did not answer this document request. The caller used its local fallback.",
+        ...requests.length > 0 ? { sent: renderRecordedRequests(requests) } : {}
+      };
+    } catch (error2) {
+      rejectOnce(error2);
+      if (!safeCurrent(liveGuard) || !safeCurrent(options.authorized)) {
+        return {
+          ok: false,
+          privateDocuments: true,
+          code: "documents_changed",
+          message: "The documents or their privacy settings changed. Ask again."
+        };
+      }
+      return {
+        ok: false,
+        privateDocuments: true,
+        code: "documents_answer_failed",
+        message: "The document answer failed after it started. Review the attempted request and ask again.",
+        ...requests.length > 0 ? { sent: renderRecordedRequests(requests) } : {}
+      };
+    }
+  }, options.authorized);
+  if (!(notice.ok === false && notice.code === "private_documents_pending")) {
+    rejectOnce(new DocumentAnswerReceiptStartError(notice.ok === false ? notice.code : "documents_unavailable"));
+  }
+  return caller;
+}
+function isVeniceChatCompletion(url, init) {
+  if ((init.method ?? "GET").toUpperCase() !== "POST")
+    return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === VENICE_HOST && parsed.pathname.endsWith(VENICE_CHAT_PATH);
+  } catch {
+    return false;
+  }
+}
+function captureVeniceRequest(init, capturedCount, capturedBytes) {
+  if (capturedCount >= MAX_RECORDED_REQUESTS) {
+    throw new Error("Document answer exceeded the four-request private receipt limit; nothing further was sent.");
+  }
+  if (typeof init.body !== "string") {
+    throw new Error("Document answer could not record the Venice request body; nothing was sent.");
+  }
+  const bytes = encoder2.encode(init.body).length;
+  if (capturedBytes + bytes > MAX_RECORDED_BYTES) {
+    throw new Error("Document answer exceeded the private receipt byte limit; nothing further was sent.");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(init.body);
+  } catch {
+    throw new Error("Document answer could not identify the Venice model; nothing was sent.");
+  }
+  const model = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed.model : undefined;
+  if (typeof model !== "string" || !model.trim()) {
+    throw new Error("Document answer could not identify the Venice model; nothing was sent.");
+  }
+  return { body: init.body, model };
+}
+function renderRecordedRequests(requests) {
+  if (requests.length === 1)
+    return requests[0].body;
+  return requests.map((request, index) => `[Request ${index + 1}]
+${request.body}`).join(`
+
+`);
+}
+function combineAbortSignals(job, caller) {
+  return caller ? AbortSignal.any([job, caller]) : job;
+}
+function safeCurrent(current2) {
+  try {
+    return current2() === true;
+  } catch {
+    return false;
+  }
+}
+function documentAuthorizationChangedError(signal) {
+  if (signal.aborted && signal.reason instanceof Error)
+    return signal.reason;
+  return new Error("Document answer authorization changed; nothing further was sent.");
+}
+var MAX_RECORDED_REQUESTS = 4, MAX_RECORDED_BYTES, VENICE_HOST = "api.venice.ai", VENICE_CHAT_PATH = "/chat/completions", encoder2, DocumentAnswerReceiptStartError;
+var init_document_answer_receipt = __esm(() => {
+  init_document_dispatch();
+  MAX_RECORDED_BYTES = 256 * 1024;
+  encoder2 = new TextEncoder;
+  DocumentAnswerReceiptStartError = class DocumentAnswerReceiptStartError extends Error {
+    code;
+    constructor(code) {
+      super(code);
+      this.name = "DocumentAnswerReceiptStartError";
+      this.code = code;
+    }
+  };
+});
+
 // src/workers/source-index/document-digest.ts
 async function prepareDocumentDigest(options) {
   const refs = [];
@@ -104361,7 +104583,7 @@ async function prepareDocumentDigest(options) {
       }
       const piece = window2.content.chunks.join("");
       text2 += piece;
-      totalBytes += encoder2.encode(piece).length;
+      totalBytes += encoder3.encode(piece).length;
       if (text2.length > DOCUMENT_DIGEST_LIMITS.documentChars)
         return refused("document_limit");
       if (totalBytes > DOCUMENT_TRAVERSAL_BYTES)
@@ -104460,11 +104682,11 @@ function normalizeDocumentLimit(value2) {
 function referenceKey(corpusId, localItemId) {
   return `${corpusId}\x00${localItemId}`;
 }
-var DOCUMENT_TRAVERSAL_PAGE_SIZE = 64, DOCUMENT_TRAVERSAL_BYTES, DOCUMENT_TRAVERSAL_MS = 60000, encoder2;
+var DOCUMENT_TRAVERSAL_PAGE_SIZE = 64, DOCUMENT_TRAVERSAL_BYTES, DOCUMENT_TRAVERSAL_MS = 60000, encoder3;
 var init_document_digest2 = __esm(() => {
   init_document_digest();
   DOCUMENT_TRAVERSAL_BYTES = 1024 * 1024;
-  encoder2 = new TextEncoder;
+  encoder3 = new TextEncoder;
 });
 
 // src/workers/source-index/document-consult.ts
@@ -135051,7 +135273,7 @@ class WebStandardStreamableHTTPServerTransport {
         return this.handleUnsupportedRequest();
     }
   }
-  async writePrimingEvent(controller, encoder3, streamId2, protocolVersion) {
+  async writePrimingEvent(controller, encoder4, streamId2, protocolVersion) {
     if (!this._eventStore) {
       return;
     }
@@ -135070,7 +135292,7 @@ data:
 
 `;
     }
-    controller.enqueue(encoder3.encode(primingEvent));
+    controller.enqueue(encoder4.encode(primingEvent));
   }
   async handleGetRequest(req) {
     const acceptHeader = req.headers.get("accept");
@@ -135096,7 +135318,7 @@ data:
       this.onerror?.(new Error("Conflict: Only one SSE stream is allowed per session"));
       return this.createJsonErrorResponse(409, -32000, "Conflict: Only one SSE stream is allowed per session");
     }
-    const encoder3 = new TextEncoder;
+    const encoder4 = new TextEncoder;
     let streamController;
     const readable = new ReadableStream({
       start: (controller) => {
@@ -135116,7 +135338,7 @@ data:
     }
     this._streamMapping.set(this._standaloneSseStreamId, {
       controller: streamController,
-      encoder: encoder3,
+      encoder: encoder4,
       cleanup: () => {
         this._streamMapping.delete(this._standaloneSseStreamId);
         try {
@@ -135152,7 +135374,7 @@ data:
       if (this.sessionId !== undefined) {
         headers["mcp-session-id"] = this.sessionId;
       }
-      const encoder3 = new TextEncoder;
+      const encoder4 = new TextEncoder;
       let streamController;
       const readable = new ReadableStream({
         start: (controller) => {
@@ -135162,7 +135384,7 @@ data:
       });
       const replayedStreamId = await this._eventStore.replayEventsAfter(lastEventId, {
         send: async (eventId, message2) => {
-          const success = this.writeSSEEvent(streamController, encoder3, message2, eventId);
+          const success = this.writeSSEEvent(streamController, encoder4, message2, eventId);
           if (!success) {
             this.onerror?.(new Error("Failed replay events"));
             try {
@@ -135173,7 +135395,7 @@ data:
       });
       this._streamMapping.set(replayedStreamId, {
         controller: streamController,
-        encoder: encoder3,
+        encoder: encoder4,
         cleanup: () => {
           this._streamMapping.delete(replayedStreamId);
           try {
@@ -135187,7 +135409,7 @@ data:
       return this.createJsonErrorResponse(500, -32000, "Error replaying events");
     }
   }
-  writeSSEEvent(controller, encoder3, message2, eventId) {
+  writeSSEEvent(controller, encoder4, message2, eventId) {
     try {
       let eventData = `event: message
 `;
@@ -135198,7 +135420,7 @@ data:
       eventData += `data: ${JSON.stringify(message2)}
 
 `;
-      controller.enqueue(encoder3.encode(eventData));
+      controller.enqueue(encoder4.encode(eventData));
       return true;
     } catch (error2) {
       this.onerror?.(error2);
@@ -135314,7 +135536,7 @@ data:
           }
         });
       }
-      const encoder3 = new TextEncoder;
+      const encoder4 = new TextEncoder;
       let streamController;
       const readable = new ReadableStream({
         start: (controller) => {
@@ -135336,7 +135558,7 @@ data:
         if (isJSONRPCRequest(message2)) {
           this._streamMapping.set(streamId2, {
             controller: streamController,
-            encoder: encoder3,
+            encoder: encoder4,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
               try {
@@ -135347,7 +135569,7 @@ data:
           this._requestToStreamMapping.set(message2.id, streamId2);
         }
       }
-      await this.writePrimingEvent(streamController, encoder3, streamId2, clientProtocolVersion);
+      await this.writePrimingEvent(streamController, encoder4, streamId2, clientProtocolVersion);
       for (const message2 of messages) {
         let closeSSEStream;
         let closeStandaloneSSEStream;
@@ -149731,7 +149953,7 @@ var init_private_answer_crypto = __esm(() => {
 
 // src/workers/chatgpt/private-answer-payload.ts
 function utf8Bytes2(text4) {
-  return encoder3.encode(text4).byteLength;
+  return encoder4.encode(text4).byteLength;
 }
 function wellFormed(text4) {
   const native = text4.toWellFormed;
@@ -149891,7 +150113,7 @@ function serializePrivateAnswerPlaintext(plaintext) {
   const ack = typeof plaintext.ack === "string" && ACK_PATTERN.test(plaintext.ack) ? plaintext.ack : undefined;
   return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext), ...ack ? { ack } : {} });
 }
-var PRIVATE_ANSWER_PAYLOAD_LIMITS, PRIVATE_ANSWER_BYTE_BUDGETS, CUT_MARK = "…", UNSAFE, WHITESPACE_CONTROLS, encoder3, OPEN_TOKEN, ACK_PATTERN;
+var PRIVATE_ANSWER_PAYLOAD_LIMITS, PRIVATE_ANSWER_BYTE_BUDGETS, CUT_MARK = "…", UNSAFE, WHITESPACE_CONTROLS, encoder4, OPEN_TOKEN, ACK_PATTERN;
 var init_private_answer_payload = __esm(() => {
   PRIVATE_ANSWER_PAYLOAD_LIMITS = Object.freeze({
     answerUnits: 2700,
@@ -149910,7 +150132,7 @@ var init_private_answer_payload = __esm(() => {
   });
   UNSAFE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
   WHITESPACE_CONTROLS = /[\u0009]/g;
-  encoder3 = new TextEncoder;
+  encoder4 = new TextEncoder;
   OPEN_TOKEN = /^[A-Za-z0-9_-]{43}$/;
   ACK_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);
 });
@@ -156118,7 +156340,7 @@ async function main() {
     return answerActivity.run(() => prepareDocumentDigest({
       request: { question: request.question, ...request.query ? { query: request.query } : {}, context: { allowedTrustDomains: domains, allowCloudQueries: false, ...corpusIds ? { allowedCorpusIds: corpusIds } : {} } },
       model: answerBuiltInModel,
-      authorized: () => !signal?.aborted && authorityIdentity() === admittedAuthority,
+      authorized: () => authorityIdentity() === admittedAuthority,
       ...signal ? { signal } : {},
       ...onProgress ? { onProgress } : {},
       lanesFactory: () => {
@@ -156180,7 +156402,9 @@ async function main() {
       documentDigest: async (request) => {
         if (!workerBuiltInModel?.available() || request.selected_items?.length || request.max_results !== undefined)
           return;
-        return prepareDocumentsForRequest(request, currentAnalystAbortSignal());
+        return prepareDocumentsForRequest(request, currentAnalystAbortSignal(), (progress) => {
+          reportDocumentDigestProgress({ state: "summarizing", documentsRead: progress.documentsRead, documentsTotal: progress.documentsTotal });
+        });
       },
       queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
       ...cloudAnalyst ? { cloudAnalyst } : {},
@@ -156238,6 +156462,20 @@ async function main() {
   const sourceAnswer = analystSourceAnswer ? {
     async answer(request) {
       const kind = request.caller?.surface === "remote" && isBackgroundConnection(request.caller.connection_id) ? "background" : "owner";
+      const requestedProvider = request.analyst_provider ?? (request.analyst_model ? "venice" : "default");
+      if (requestedProvider === "venice" && workerBuiltInModel?.available() && !request.selected_items?.length && request.max_results === undefined) {
+        const connectionId = request.caller?.connection_id;
+        const active = () => !connectionId || remoteConnections()?.list().some((connection) => connection.id === connectionId && connection.revokedAt === null) === true;
+        const signal = currentAnalystAbortSignal();
+        return withDocumentAnswerReceipt({
+          jobs: documentRequests,
+          question: request.question,
+          authorized: active,
+          ...signal ? { signal } : {},
+          work: (signal2) => runWithAnalystAbortSignal(signal2, () => answerActivity.run(() => analystSourceAnswer.answer(request), kind)),
+          describe: (result) => ({ reply: result.answer, answeredByVenice: result.audit.answer_synthesis?.analyst_backend === "venice" })
+        });
+      }
       return answerActivity.run(() => analystSourceAnswer.answer(request), kind);
     }
   } : undefined;
@@ -158364,6 +158602,8 @@ var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSW
 var init_server5 = __esm(async () => {
   init_open_targets();
   init_private_document_requests();
+  init_document_answer_receipt();
+  init_document_dispatch();
   init_document_digest();
   init_document_digest2();
   init_document_consult();
