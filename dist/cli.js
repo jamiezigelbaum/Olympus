@@ -61477,12 +61477,12 @@ var init_vocabulary = __esm(() => {
     stepsIntro: "Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.",
     steps: [
       "Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). On macOS, the confined route requires the Olympus zkapi-clientd fork 0.1.6-olympus2; the upstream 0.1.5/0.1.6 build cannot confirm it.",
-      "Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.",
+      "Run: {daemon} config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.",
       'Wait until the tool prints "Private inference balance activated".',
-      "Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050",
-      "Run: zkapi-clientd config --require-api-key",
-      "Run: zkapi-clientd config --api-key <key>. Store the same key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
-      "Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
+      "Run: {daemon} config --relay-url socks5://127.0.0.1:19050",
+      "Run: {daemon} config --require-api-key",
+      "Run: {daemon} config --api-key <key>. Store the same key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
+      "Run: {daemon} config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
     ],
     costTitle: "Cost and risk",
     costIntro: "Nothing is sent until you accept these. If the wording changes, you are asked again.",
@@ -64289,10 +64289,15 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "sync"));
   if (tasks.length === 0)
     return;
-  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
-  if (signals.some((value) => typeof value !== "number" || !Number.isFinite(value)))
-    return false;
-  return signals.every((value) => value === 1);
+  const walks = [];
+  for (const task of tasks) {
+    if (!task.last_result)
+      return false;
+    const signal = [task.last_result.counts?.traversal_complete, task.last_result.counts?.global_traversal_exhausted].find((value) => typeof value === "number" && Number.isFinite(value));
+    if (signal !== undefined)
+      walks.push(signal === 1);
+  }
+  return walks.length === 0 ? undefined : walks.every(Boolean);
 }
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
@@ -108690,6 +108695,14 @@ var init_components = __esm(() => {
 });
 
 // src/workers/dashboard/outside-help-tools.ts
+function shellWord(value) {
+  return /^[A-Za-z0-9_@%+:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+function outsideHelpDaemonCommand(tools) {
+  const entry = tools?.tools.find((item) => item.tool === "zkapi-clientd");
+  const program = entry?.source === "configured" ? entry.path : entry?.executable;
+  return program ? shellWord(program) : "zkapi-clientd";
+}
 function installable(entry) {
   return entry.source === "missing" || entry.source === "outdated";
 }
@@ -108940,7 +108953,7 @@ function renderOutsideHelpCard(status, input) {
     more.push(renderLimits(route, canEdit));
   if (route.state === "configured" && route.acknowledgements.complete)
     more.push(renderAccepted());
-  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit })));
+  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit }), outsideHelpDaemonCommand(status.tools)));
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const config2 = {
@@ -109116,13 +109129,14 @@ function renderStandard(standard, level, canEdit) {
   const summary = level === "general" ? fill(C2.unusedAtStrict, { mode: C2.modes[standard.mode].short }) : C2.modes[standard.mode].short;
   return renderSection({ id: "standard", title: C2.title, summary, body });
 }
-function renderSetupSteps(secretRef, tools = "") {
-  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => fill(step, { secretRef }));
+function renderSetupSteps(secretRef, toolsHtml, daemon) {
+  const values = { secretRef, daemon };
+  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => step.replace(/\{(secretRef|daemon)\}/g, (_match, key2) => values[key2]));
   return renderSection({
     id: "steps",
     title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
     summary: "",
-    body: `${tools}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
+    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
   });
 }
 function renderLimits(route, canEdit) {
@@ -144543,6 +144557,7 @@ __export(exports_dashboard_consult, {
   DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
   DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
 });
+import { delimiter as delimiter9, dirname as dirname65 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -144579,12 +144594,14 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname65(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
         source: entry.installed ? "olympus" : system ? "system" : entry.offered ? "missing" : "not_offered",
         version: entry.version,
-        offered: entry.offered
+        offered: entry.offered,
+        ...executable ? { executable } : {}
       };
     });
   });
@@ -145484,7 +145501,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync59 } from "node:fs";
-import { dirname as dirname65, isAbsolute as isAbsolute22, join as join92 } from "node:path";
+import { dirname as dirname66, isAbsolute as isAbsolute22, join as join92 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -148687,7 +148704,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join92(dirname65(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join92(dirname66(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
