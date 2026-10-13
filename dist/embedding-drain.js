@@ -14745,6 +14745,255 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
+// src/workers/classification/secret-locations.ts
+import { Database as Database2 } from "bun:sqlite";
+import { createHash as createHash7 } from "node:crypto";
+import { chmodSync as chmodSync4, closeSync as closeSync5, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync5 } from "node:fs";
+import { dirname as dirname10 } from "node:path";
+function screenedSecretLocator(locator) {
+  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
+}
+
+class SecretLocationsIndex {
+  dbPath;
+  db;
+  now;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database2(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      return;
+    }
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk) {
+      mkdirSync9(dirname10(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync10(this.dbPath))
+        closeSync5(openSync5(this.dbPath, "a", 384));
+      chmodSync4(this.dbPath, 384);
+    }
+    this.db = new Database2(this.dbPath, { create: true });
+    try {
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
+    } catch (error) {
+      closeSqliteStore(this.db);
+      throw error;
+    }
+  }
+  close() {
+    closeSqliteStore(this.db);
+  }
+  record(input) {
+    const kinds = [...new Set(input.findingKinds.map((kind) => kind.trim()).filter(Boolean))].sort();
+    if (kinds.length === 0)
+      throw new Error("A secret location needs at least one finding kind.");
+    const namesReleasable = input.namesReleasable === true;
+    const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
+    const locator = screenedSecretLocator(input.locator);
+    const folderKeys = [...new Set((input.folderKeys ?? []).map((key2) => key2.trim()).filter(Boolean))].sort();
+    const contentHash = input.text !== undefined ? createHash7("sha256").update(input.text, "utf8").digest("hex") : null;
+    const existing = this.get(input.identity);
+    if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
+      return false;
+    }
+    this.db.query(`
+      INSERT INTO secret_locations (
+        provider, account_scope, conversation_key, provider_item_id, locator, title, names_releasable,
+        folder_keys_json, scope_generation, scope_revision, finding_kinds_json, content_hash, detected_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+        locator = excluded.locator, title = excluded.title, names_releasable = excluded.names_releasable,
+        folder_keys_json = excluded.folder_keys_json, scope_generation = excluded.scope_generation,
+        scope_revision = excluded.scope_revision, finding_kinds_json = excluded.finding_kinds_json,
+        content_hash = excluded.content_hash, detected_at = excluded.detected_at
+    `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
+    return true;
+  }
+  remove(identity) {
+    return this.db.query(`
+      DELETE FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
+  }
+  get(identity) {
+    const row = this.db.query(`
+      SELECT * FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
+    return row ? locationFromRow(row) : undefined;
+  }
+  count() {
+    return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
+  }
+  search(query, scope, options = {}) {
+    const terms = secretLocationQueryTerms(query);
+    if (terms.length === 0)
+      return [];
+    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
+    const rows = this.db.query(`
+      SELECT * FROM secret_locations
+      ${scope.accountScope ? "WHERE account_scope = ?" : ""}
+      ORDER BY detected_at DESC
+    `).all(...scope.accountScope ? [scope.accountScope] : []);
+    const scored = [];
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (!secretLocationWithinScope(location, scope))
+        continue;
+      const haystack = [
+        location.namesReleasable ? location.locator ?? "" : "",
+        location.title ?? "",
+        location.findingKinds.join(" ").replaceAll("_", " ")
+      ].join(`
+`).toLowerCase();
+      const score = terms.filter((term) => haystack.includes(term)).length;
+      if (score > 0)
+        scored.push({ location, score });
+    }
+    return scored.sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
+      source: location.source,
+      ref: secretLocationRef(location),
+      locator: location.namesReleasable ? location.locator : null,
+      title: location.namesReleasable ? location.title : null,
+      findingKinds: location.findingKinds,
+      detectedAt: location.detectedAt
+    }));
+  }
+}
+function secretLocationRef(location) {
+  return `secret:${createHash7("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+}
+function secretLocationWithinScope(location, scope) {
+  if (scope.accountScope && location.accountScope !== scope.accountScope)
+    return false;
+  const filters = scope.filters;
+  if (!filters)
+    return true;
+  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
+    return false;
+  }
+  if (filters.provider && location.source !== filters.provider)
+    return false;
+  if (filters.conversationId !== undefined && location.conversationKey !== filters.conversationId)
+    return false;
+  if (filters.sourceScopeGeneration !== undefined && location.scopeGeneration !== filters.sourceScopeGeneration)
+    return false;
+  if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
+    return false;
+  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key2) => location.folderKeys.includes(key2))) {
+    return false;
+  }
+  if (filters.sourceScopeFolderNoneKeys?.some((key2) => location.folderKeys.includes(key2)))
+    return false;
+  const pathScopes = [
+    ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
+    ...filters.locatorPathScopes ?? []
+  ];
+  if (pathScopes.length > 0 && !pathScopes.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  if (filters.locatorPathExcludedScopes?.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  return true;
+}
+function locatorWithin(locator, scopePath) {
+  if (!locator)
+    return false;
+  const path = locator.toLowerCase();
+  const root = scopePath.toLowerCase().replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`);
+}
+function secretLocationQueryTerms(query) {
+  return [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+}
+function locationFromRow(row) {
+  return {
+    source: row.provider,
+    accountScope: row.account_scope,
+    conversationKey: row.conversation_key,
+    providerItemId: row.provider_item_id,
+    locator: row.locator,
+    title: row.title,
+    namesReleasable: row.names_releasable === 1,
+    folderKeys: JSON.parse(row.folder_keys_json),
+    scopeGeneration: row.scope_generation,
+    scopeRevision: row.scope_revision,
+    findingKinds: JSON.parse(row.finding_kinds_json),
+    contentHash: row.content_hash,
+    detectedAt: row.detected_at
+  };
+}
+function secretLocationsMigrations() {
+  return [
+    {
+      version: SECRET_LOCATIONS_SCHEMA_VERSION,
+      name: "create_secret_locations",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_locations (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            locator TEXT,
+            title TEXT,
+            names_releasable INTEGER NOT NULL DEFAULT 0 CHECK (names_releasable IN (0, 1)),
+            folder_keys_json TEXT NOT NULL DEFAULT '[]',
+            scope_generation TEXT,
+            scope_revision TEXT,
+            finding_kinds_json TEXT NOT NULL,
+            content_hash TEXT,
+            detected_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
+    }
+  ];
+}
+var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  init_tier_classifier();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
 // src/workers/classification/installed-tier-classification-registry.ts
 function registeredInstalledTierClassification() {
   return registered;
@@ -15221,10 +15470,10 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash7, randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync10, lstatSync as lstatSync3, mkdirSync as mkdirSync9, statSync as statSync7 } from "node:fs";
-import { dirname as dirname10 } from "node:path";
-import { Database as Database2 } from "bun:sqlite";
+import { createHash as createHash8, randomUUID as randomUUID6 } from "node:crypto";
+import { existsSync as existsSync11, lstatSync as lstatSync3, mkdirSync as mkdirSync10, statSync as statSync7 } from "node:fs";
+import { dirname as dirname11 } from "node:path";
+import { Database as Database3 } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
     ...currentStoreMigrations(),
@@ -15851,7 +16100,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash7("sha256");
+  const digest = createHash8("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -15944,7 +16193,7 @@ function namesOnlyKept(db, itemPks) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash7("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash8("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function textFromRawItem(item) {
   if (item.content.kind === "text")
@@ -17297,7 +17546,7 @@ function requireNonEmpty(value, label) {
   return text2;
 }
 function hashString2(value) {
-  return createHash7("sha256").update(value).digest("hex");
+  return createHash8("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -17335,6 +17584,7 @@ var init_local_index = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_tier_classifier();
+  init_secret_locations();
   init_tier_placement();
   init_source_ingestion_exclusions();
   init_fts();
@@ -17469,9 +17719,9 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync9(dirname10(this.dbPath), { recursive: true, mode: 448 });
+        mkdirSync10(dirname11(this.dbPath), { recursive: true, mode: 448 });
       }
-      this.db = new Database2(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.db = new Database3(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -17596,14 +17846,14 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       const path = tierLedgerPathForStore(this.dbPath);
-      if (path === ":memory:" || !existsSync10(path))
+      if (path === ":memory:" || !existsSync11(path))
         return;
       return this.tierLedger();
     }
     boundTierLedger(ledgerPath) {
       if (this.boundLedgerHandle?.dbPath === ledgerPath)
         return this.boundLedgerHandle;
-      if (ledgerPath !== ":memory:" && !existsSync10(ledgerPath))
+      if (ledgerPath !== ":memory:" && !existsSync11(ledgerPath))
         throw new TierLedgerUnavailableError(this.corpusId);
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
@@ -18031,7 +18281,7 @@ var init_local_index = __esm(() => {
         seen.add(sha);
         if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
           continue;
-        if (!isMediaCachePath(row.media_path, sha) || !existsSync10(row.media_path))
+        if (!isMediaCachePath(row.media_path, sha) || !existsSync11(row.media_path))
           continue;
         images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
       }
@@ -19015,7 +19265,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash7("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash8("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -19324,7 +19574,7 @@ var init_local_index = __esm(() => {
         WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
       `).all();
         for (const row of rows) {
-          if (existsSync10(row.media_path))
+          if (existsSync11(row.media_path))
             retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
         }
         reassertedMediaHolders.add(this.mediaHolder);
@@ -19866,8 +20116,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash7("sha256");
-      const outputDigest = createHash7("sha256");
+      const inputDigest = createHash8("sha256");
+      const outputDigest = createHash8("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -19937,8 +20187,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash7("sha256");
-      const outputDigest = createHash7("sha256");
+      const inputDigest = createHash8("sha256");
+      const outputDigest = createHash8("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -20779,9 +21029,13 @@ var init_local_index = __esm(() => {
         `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(existing.item_pk);
           this.deleteFtsForItem(existing.item_pk);
+          if (tombstoneTrustTier === "S5")
+            this.keepSecretsLocationOnly(existing.item_pk);
           this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
           return true;
         }
+        if (existing && tombstoneTrustTier === "S5")
+          this.keepSecretsLocationOnly(existing.item_pk);
         if (activeOnly)
           return false;
         this.db.query(`
@@ -20797,6 +21051,15 @@ var init_local_index = __esm(() => {
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
         return true;
       })();
+    }
+    keepSecretsLocationOnly(itemPk) {
+      const row = this.db.query("SELECT locator_uri FROM items WHERE item_pk = ?").get(itemPk);
+      this.db.query(`
+      UPDATE items
+      SET title = NULL, search_text = NULL, locator_uri = ?, reactions_json = NULL,
+        sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, authored_at = NULL, updated_at = NULL
+      WHERE item_pk = ?
+    `).run(screenedSecretLocator(row.locator_uri), itemPk);
     }
     rememberItemOwner(itemPk, connectorId, ownershipKind, syncRunId, observedAt, observation) {
       this.db.query(`
@@ -21335,7 +21598,7 @@ var init_local_index = __esm(() => {
               continue;
             if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
               skip.add(row);
-            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync10(row.media_path)) {
+            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync11(row.media_path)) {
               this.clearChunkMedia(row.chunk_pk, row.item_pk);
               skip.add(row);
             }
@@ -21759,7 +22022,7 @@ var init_local_index = __esm(() => {
       }
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const scanDb = this.dbPath === ":memory:" ? this.db : new Database2(this.dbPath, { readonly: true, create: false, strict: true });
+      const scanDb = this.dbPath === ":memory:" ? this.db : new Database3(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       const bestByItem = new Map;
       let dimensionMismatches = 0;
@@ -22717,9 +22980,9 @@ var init_tier_names_only_settle = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync11, statSync as statSync8 } from "node:fs";
+import { existsSync as existsSync12, statSync as statSync8 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname11, isAbsolute as isAbsolute4, join as join11 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname12, isAbsolute as isAbsolute4, join as join11 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 function helperEnvironment() {
@@ -22933,10 +23196,10 @@ async function startLiteRtEmbedder(options) {
   };
 }
 function helperPath() {
-  const here = dirname11(fileURLToPath(import.meta.url));
+  const here = dirname12(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join11(here, name);
-    if (existsSync11(candidate))
+    if (existsSync12(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -23166,10 +23429,10 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { readFileSync as readFileSync12 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname12, join as join13 } from "node:path";
+import { dirname as dirname13, join as join13 } from "node:path";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -23215,7 +23478,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash8("sha256").update(JSON.stringify({
+    this.configHash = createHash9("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -23342,7 +23605,7 @@ class BuiltInSourceEmbeddingProvider {
         const embedder = await this.liteRtFactory({
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join13(dirname12(installed.modelPath), "cache"),
+          cacheDir: join13(dirname13(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -23693,7 +23956,7 @@ var init_provider = __esm(() => {
 // src/workers/embedding-ledger.ts
 import { homedir as homedir9 } from "node:os";
 import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
-import { dirname as dirname13, join as join14 } from "node:path";
+import { dirname as dirname14, join as join14 } from "node:path";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
@@ -23704,7 +23967,7 @@ function resolveEmbeddingLedgerPath(env = process.env) {
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
 `;
-  await mkdir3(dirname13(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname14(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -24600,7 +24863,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -24754,7 +25017,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash9("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash10("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function storedSignals(copy) {
   const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -25345,14 +25608,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash10("sha256").update(block).digest());
+    blockDigests.push(createHash11("sha256").update(block).digest());
   }
-  return createHash10("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash11("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -25398,7 +25661,7 @@ var init_evidence_versions = __esm(() => {
 
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -25473,7 +25736,7 @@ var init_analyst = __esm(() => {
 `);
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
   promptEncoder = new TextEncoder;
-  STOP_WORDS = new Set([
+  STOP_WORDS2 = new Set([
     "a",
     "about",
     "also",
@@ -26081,7 +26344,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 import { homedir as homedir11 } from "node:os";
 import { join as join17 } from "node:path";
 
@@ -26656,7 +26919,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash12("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -27142,7 +27405,7 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
 import { join as join20 } from "node:path";
 
@@ -27758,7 +28021,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash13("sha256").update(value).digest("hex");
+  return createHash14("sha256").update(value).digest("hex");
 }
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
@@ -27789,7 +28052,7 @@ var init_corpus_adapter2 = __esm(() => {
 
 // src/workers/readwise/connector.ts
 import { homedir as homedir15 } from "node:os";
-import { dirname as dirname15, join as join21 } from "node:path";
+import { dirname as dirname16, join as join21 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
@@ -28048,251 +28311,6 @@ var init_telegram_messages = __esm(() => {
   init_corpus_adapter4();
   init_capture_spool_connector();
   init_store_sync2();
-});
-
-// src/workers/classification/secret-locations.ts
-import { Database as Database3 } from "bun:sqlite";
-import { createHash as createHash14 } from "node:crypto";
-import { chmodSync as chmodSync4, closeSync as closeSync5, existsSync as existsSync13, mkdirSync as mkdirSync11, openSync as openSync5 } from "node:fs";
-import { dirname as dirname16 } from "node:path";
-
-class SecretLocationsIndex {
-  dbPath;
-  db;
-  now;
-  constructor(options) {
-    this.dbPath = options.dbPath;
-    this.now = options.now ?? (() => new Date);
-    if (options.readOnly === true) {
-      this.db = new Database3(this.dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      return;
-    }
-    const onDisk = this.dbPath !== ":memory:";
-    if (onDisk) {
-      mkdirSync11(dirname16(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync13(this.dbPath))
-        closeSync5(openSync5(this.dbPath, "a", 384));
-      chmodSync4(this.dbPath, 384);
-    }
-    this.db = new Database3(this.dbPath, { create: true });
-    try {
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
-      runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
-    } catch (error) {
-      closeSqliteStore(this.db);
-      throw error;
-    }
-  }
-  close() {
-    closeSqliteStore(this.db);
-  }
-  record(input) {
-    const kinds = [...new Set(input.findingKinds.map((kind) => kind.trim()).filter(Boolean))].sort();
-    if (kinds.length === 0)
-      throw new Error("A secret location needs at least one finding kind.");
-    const namesReleasable = input.namesReleasable === true;
-    const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
-    const locator = input.locator?.trim() && detectSecretFindingKinds(input.locator).length === 0 ? input.locator.trim().slice(0, 1000) : null;
-    const folderKeys = [...new Set((input.folderKeys ?? []).map((key2) => key2.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash14("sha256").update(input.text, "utf8").digest("hex") : null;
-    const existing = this.get(input.identity);
-    if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
-      return false;
-    }
-    this.db.query(`
-      INSERT INTO secret_locations (
-        provider, account_scope, conversation_key, provider_item_id, locator, title, names_releasable,
-        folder_keys_json, scope_generation, scope_revision, finding_kinds_json, content_hash, detected_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
-        locator = excluded.locator, title = excluded.title, names_releasable = excluded.names_releasable,
-        folder_keys_json = excluded.folder_keys_json, scope_generation = excluded.scope_generation,
-        scope_revision = excluded.scope_revision, finding_kinds_json = excluded.finding_kinds_json,
-        content_hash = excluded.content_hash, detected_at = excluded.detected_at
-    `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
-    return true;
-  }
-  remove(identity) {
-    return this.db.query(`
-      DELETE FROM secret_locations
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
-  }
-  get(identity) {
-    const row = this.db.query(`
-      SELECT * FROM secret_locations
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
-    return row ? locationFromRow(row) : undefined;
-  }
-  count() {
-    return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
-  }
-  search(query, scope, options = {}) {
-    const terms = secretLocationQueryTerms(query);
-    if (terms.length === 0)
-      return [];
-    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
-    const rows = this.db.query(`
-      SELECT * FROM secret_locations
-      ${scope.accountScope ? "WHERE account_scope = ?" : ""}
-      ORDER BY detected_at DESC
-    `).all(...scope.accountScope ? [scope.accountScope] : []);
-    const scored = [];
-    for (const row of rows) {
-      const location = locationFromRow(row);
-      if (!secretLocationWithinScope(location, scope))
-        continue;
-      const haystack = [
-        location.namesReleasable ? location.locator ?? "" : "",
-        location.title ?? "",
-        location.findingKinds.join(" ").replaceAll("_", " ")
-      ].join(`
-`).toLowerCase();
-      const score = terms.filter((term) => haystack.includes(term)).length;
-      if (score > 0)
-        scored.push({ location, score });
-    }
-    return scored.sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
-      source: location.source,
-      ref: secretLocationRef(location),
-      locator: location.namesReleasable ? location.locator : null,
-      title: location.namesReleasable ? location.title : null,
-      findingKinds: location.findingKinds,
-      detectedAt: location.detectedAt
-    }));
-  }
-}
-function secretLocationRef(location) {
-  return `secret:${createHash14("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
-}
-function secretLocationWithinScope(location, scope) {
-  if (scope.accountScope && location.accountScope !== scope.accountScope)
-    return false;
-  const filters = scope.filters;
-  if (!filters)
-    return true;
-  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
-    return false;
-  }
-  if (filters.provider && location.source !== filters.provider)
-    return false;
-  if (filters.conversationId !== undefined && location.conversationKey !== filters.conversationId)
-    return false;
-  if (filters.sourceScopeGeneration !== undefined && location.scopeGeneration !== filters.sourceScopeGeneration)
-    return false;
-  if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
-    return false;
-  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key2) => location.folderKeys.includes(key2))) {
-    return false;
-  }
-  if (filters.sourceScopeFolderNoneKeys?.some((key2) => location.folderKeys.includes(key2)))
-    return false;
-  const pathScopes = [
-    ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
-    ...filters.locatorPathScopes ?? []
-  ];
-  if (pathScopes.length > 0 && !pathScopes.some((scopePath) => locatorWithin(location.locator, scopePath)))
-    return false;
-  if (filters.locatorPathExcludedScopes?.some((scopePath) => locatorWithin(location.locator, scopePath)))
-    return false;
-  return true;
-}
-function locatorWithin(locator, scopePath) {
-  if (!locator)
-    return false;
-  const path = locator.toLowerCase();
-  const root = scopePath.toLowerCase().replace(/\/+$/, "");
-  return path === root || path.startsWith(`${root}/`);
-}
-function secretLocationQueryTerms(query) {
-  return [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2 && !STOP_WORDS2.has(term)))];
-}
-function locationFromRow(row) {
-  return {
-    source: row.provider,
-    accountScope: row.account_scope,
-    conversationKey: row.conversation_key,
-    providerItemId: row.provider_item_id,
-    locator: row.locator,
-    title: row.title,
-    namesReleasable: row.names_releasable === 1,
-    folderKeys: JSON.parse(row.folder_keys_json),
-    scopeGeneration: row.scope_generation,
-    scopeRevision: row.scope_revision,
-    findingKinds: JSON.parse(row.finding_kinds_json),
-    contentHash: row.content_hash,
-    detectedAt: row.detected_at
-  };
-}
-function secretLocationsMigrations() {
-  return [
-    {
-      version: SECRET_LOCATIONS_SCHEMA_VERSION,
-      name: "create_secret_locations",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS secret_locations (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            locator TEXT,
-            title TEXT,
-            names_releasable INTEGER NOT NULL DEFAULT 0 CHECK (names_releasable IN (0, 1)),
-            folder_keys_json TEXT NOT NULL DEFAULT '[]',
-            scope_generation TEXT,
-            scope_revision TEXT,
-            finding_kinds_json TEXT NOT NULL,
-            content_hash TEXT,
-            detected_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-        `);
-      }
-    }
-  ];
-}
-var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS2;
-var init_secret_locations = __esm(() => {
-  init_sqlite_migrations();
-  init_engine();
-  STOP_WORDS2 = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "put",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
 });
 
 // src/workers/source-index/status.ts
@@ -34555,7 +34573,7 @@ init_credential_broker();
 init_types();
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
   source_item_not_found: "failed_terminal",
   source_permission_denied: "failed_terminal",
@@ -34583,7 +34601,7 @@ class FileExtractionSourceError extends Error {
     this.errorKind = errorKind;
     this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
     this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash11("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+    const errorHash = options.detailForHash === undefined ? undefined : createHash12("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
   }
@@ -35181,8 +35199,8 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync12,
-  mkdirSync as mkdirSync10,
+  existsSync as existsSync13,
+  mkdirSync as mkdirSync11,
   readFileSync as readFileSync13,
   renameSync as renameSync4,
   rmSync as rmSync5,
@@ -35190,7 +35208,7 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { homedir as homedir13 } from "node:os";
-import { dirname as dirname14, isAbsolute as isAbsolute5, join as join19 } from "node:path";
+import { dirname as dirname15, isAbsolute as isAbsolute5, join as join19 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -35371,7 +35389,7 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync12(path))
+  if (!existsSync13(path))
     return;
   let payload2;
   try {
@@ -35407,7 +35425,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID7()}.tmp`;
   try {
-    mkdirSync10(dirname14(path), { recursive: true, mode: 448 });
+    mkdirSync11(dirname15(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync6(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
