@@ -33,8 +33,9 @@ and return addresses, never fetched; `src/workers/remote-oauth/pinned-clients.ts
 and the relay's registration, `connect-relay/server/client-registration.ts`)
 and get the remote tool set (`source_answer`, `source_answer_result`,
 `source_index_status`, `ask_anonymously`), never the ChatGPT surface, the
-private answer panel or `/openai/mcp`. Grok Bot needs no connector of its
-own: once Olympus is connected on grok.com, Grok Bot uses that connection.
+private answer panel or `/openai/mcp`. Grok Bot is in 1.0 too (owner
+decision 2026-10-13) and needs no connector of its own: once Olympus is
+connected on grok.com, Grok Bot uses that connection.
 Grok Bot's own sign-in (as Cursor's pinned client), Muse and the Grok API key
 path stay after 1.0.
 
