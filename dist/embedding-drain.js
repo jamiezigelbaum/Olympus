@@ -22487,7 +22487,7 @@ class BuiltInSourceEmbeddingProvider {
       return false;
     if (this.picturesHeld())
       return false;
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     const supported = model.kind === "litert" && model.embedder.vision;
     if (!supported && !this.imageSupportWarned) {
       this.imageSupportWarned = true;
@@ -22512,7 +22512,7 @@ class BuiltInSourceEmbeddingProvider {
         throw new BuiltInEmbeddingNotReadyError(this.status());
       }
     }
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     return this.embedLoaded(model, inputs, options.taskType);
   }
   loadedOnly() {
@@ -22532,6 +22532,15 @@ class BuiltInSourceEmbeddingProvider {
         return this.embedLoaded(model, inputs, options.taskType);
       }
     };
+  }
+  async ready() {
+    if (this.loaded)
+      return this.loaded;
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
+    }
   }
   load() {
     if (this.loading)
@@ -22645,7 +22654,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedWithImageVectors(inputs) {
     if (inputs.length === 0)
       return { vectors: [], imageVectors: [] };
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
         return;
@@ -22667,7 +22676,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedImageVectors(images) {
     if (images.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
     }
@@ -22687,7 +22696,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedPromptTexts(texts) {
     if (texts.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert")
       throw new Error("The photo judge needs the LiteRT model.");
     const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
@@ -22911,11 +22920,11 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status) {
+    constructor(status, cause) {
       super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
-      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : `The built-in search model is still being prepared (${status.percent}%).`;
+      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
       this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
     }
   };

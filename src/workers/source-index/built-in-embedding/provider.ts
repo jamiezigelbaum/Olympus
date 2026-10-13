@@ -217,7 +217,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   async imageSupport(): Promise<boolean> {
     if (this.spec.runtime !== 'litert' || !this.spec.vision) return false;
     if (this.picturesHeld()) return false;
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     const supported = model.kind === 'litert' && model.embedder.vision;
     if (!supported && !this.imageSupportWarned) {
       this.imageSupportWarned = true;
@@ -245,7 +245,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         throw new BuiltInEmbeddingNotReadyError(this.status());
       }
     }
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     return this.embedLoaded(model, inputs, options.taskType);
   }
 
@@ -272,6 +272,24 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         return this.embedLoaded(model, inputs, options.taskType);
       },
     };
+  }
+
+  /**
+   * The model for an embed call. While it is not available (the download,
+   * install or start failed, or has not finished) the call throws
+   * BuiltInEmbeddingNotReadyError, a transient error, so a caller that can wait
+   * (the embedding sweep) defers and retries with its back-off instead of
+   * recording the item as failed. A plain install error here once left every
+   * item a sweep touched during a download hiccup permanently unembedded.
+   * prepare, warm and retry call load directly and see the install error itself.
+   */
+  private async ready(): Promise<LoadedModel> {
+    if (this.loaded) return this.loaded;
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
+    }
   }
 
   private load(): Promise<LoadedModel> {
@@ -409,7 +427,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
    */
   async embedWithImageVectors(inputs: SourceEmbeddingInput[]): Promise<{ vectors: number[][]; imageVectors: Array<number[] | undefined> }> {
     if (inputs.length === 0) return { vectors: [], imageVectors: [] };
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== 'litert' || !this.spec.vision) {
       return { vectors: await this.embedLoaded(model, inputs, 'RETRIEVAL_DOCUMENT'), imageVectors: inputs.map(() => undefined) };
     }
@@ -432,7 +450,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   /** Each picture's image-only vector (undefined for one the encoder could not read). */
   async embedImageVectors(images: SourceEmbeddingImageInput[]): Promise<Array<number[] | undefined>> {
     if (images.length === 0) return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== 'litert' || !this.spec.vision) {
       throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), 'image_encoder_unavailable', 'held');
     }
@@ -450,7 +468,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   /** Text embedded exactly as given, with no task prefix (the photo judge's descriptions). */
   async embedPromptTexts(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== 'litert') throw new Error('The photo judge needs the LiteRT model.');
     const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, 'RETRIEVAL_DOCUMENT', new Set());
     if (failed.length > 0) throw new Error('The photo judge\'s descriptions could not be embedded.');
@@ -643,13 +661,17 @@ function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddingInput
 export class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
   readonly status: BuiltInEmbeddingStatus;
 
-  constructor(status: BuiltInEmbeddingStatus) {
+  constructor(status: BuiltInEmbeddingStatus, cause?: unknown) {
     super(BUILT_IN_EMBEDDING_PROVIDER, 'timeout', 0);
     this.name = 'BuiltInEmbeddingNotReadyError';
     this.status = status;
+    // The status file is the shared record; a load that just failed in this
+    // process is named even before that file says so.
     this.message = status.state === 'failed'
       ? `The built-in search model is not available: ${status.failure?.message ?? 'install failed'}.`
-      : `The built-in search model is still being prepared (${status.percent}%).`;
+      : cause !== undefined
+        ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.`
+        : `The built-in search model is still being prepared (${status.percent}%).`;
     this.suggestion = 'Answers use keyword search until it is ready; nothing needs to be done.';
   }
 }
