@@ -150891,9 +150891,25 @@ function parsePastedOAuthCallback(input) {
   }
   return { source, query };
 }
+function loopbackEngineRoot(workerRoot) {
+  let url;
+  try {
+    url = new URL(workerRoot.trim());
+  } catch {
+    url = undefined;
+  }
+  if (url?.hostname === "0.0.0.0")
+    url.hostname = "127.0.0.1";
+  else if (url?.hostname === "[::]")
+    url.hostname = "[::1]";
+  if (!url || url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    throw new PastedCallbackError("Olympus on this computer is not set up on a local address, so the sign-in was not sent. Choose Connect again in the Olympus dashboard instead.");
+  }
+  return url.origin;
+}
 async function finishPastedOAuthCallback(input, options) {
   const { source, query } = parsePastedOAuthCallback(input);
-  const root = options.workerRoot.replace(/\/+$/, "");
+  const root = loopbackEngineRoot(options.workerRoot);
   const fetchImpl = options.fetch ?? fetch;
   let response;
   try {

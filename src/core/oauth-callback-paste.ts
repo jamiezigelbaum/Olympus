@@ -75,13 +75,33 @@ export interface FinishPastedCallbackResult {
   next: string;
 }
 
+/**
+ * The engine root on this machine's loopback, or a refusal: the code and state
+ * go nowhere else, whatever worker.env or the status file say. An engine bound
+ * to every address (`0.0.0.0`, `::`) is reached on its loopback.
+ */
+function loopbackEngineRoot(workerRoot: string): string {
+  let url: URL | undefined;
+  try {
+    url = new URL(workerRoot.trim());
+  } catch {
+    url = undefined;
+  }
+  if (url?.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
+  else if (url?.hostname === '[::]') url.hostname = '[::1]';
+  if (!url || url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
+    throw new PastedCallbackError('Olympus on this computer is not set up on a local address, so the sign-in was not sent. Choose Connect again in the Olympus dashboard instead.');
+  }
+  return url.origin;
+}
+
 /** Hands a pasted callback to this machine's engine; resolves when the engine says connected. */
 export async function finishPastedOAuthCallback(
   input: string,
   options: FinishPastedCallbackOptions,
 ): Promise<FinishPastedCallbackResult> {
   const { source, query } = parsePastedOAuthCallback(input);
-  const root = options.workerRoot.replace(/\/+$/, '');
+  const root = loopbackEngineRoot(options.workerRoot);
   const fetchImpl = options.fetch ?? fetch;
   let response: Response;
   try {

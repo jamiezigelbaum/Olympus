@@ -366,6 +366,29 @@ describe('olympus connect finish', () => {
     }
   });
 
+  test('the code and state go only to this computer\'s loopback', async () => {
+    const seen: string[] = [];
+    const recording = (async (url: string | URL | Request) => {
+      seen.push(String(url));
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    const address = 'http://127.0.0.1:8010/oauth/callback/gmail?code=c&state=s';
+    for (const workerRoot of ['http://olympus.example.org:8010', 'http://192.168.1.20:8010', 'https://127.0.0.1:8010', 'http://[fe80::1]:8010', 'not a url']) {
+      const refused = await finishPastedOAuthCallback(address, { workerRoot, fetch: recording }).then(() => undefined, (error: unknown) => error);
+      expect(refused, workerRoot).toBeInstanceOf(PastedCallbackError);
+      expect(String((refused as Error).message)).toContain('not set up on a local address');
+    }
+    expect(seen).toEqual([]);
+    for (const [workerRoot, expected] of [
+      ['http://0.0.0.0:8123', 'http://127.0.0.1:8123'],
+      ['http://[::]:8123', 'http://[::1]:8123'],
+      ['http://localhost:8123/v1', 'http://localhost:8123'],
+    ] as const) {
+      await finishPastedOAuthCallback(address, { workerRoot, fetch: recording }).catch(() => undefined);
+      expect(new URL(seen.at(-1)!).origin, workerRoot).toBe(expected);
+    }
+  });
+
   test('an engine that does not answer gets a plain sentence', async () => {
     const failing = finishPastedOAuthCallback('http://127.0.0.1:8010/oauth/callback/gmail?code=c&state=s', {
       workerRoot: 'http://127.0.0.1:8010',
