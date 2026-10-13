@@ -15,7 +15,10 @@
  * Secrets cannot write the name back (a new job, or a refreshed one).
  *
  * Every ledger file this process opens for writing is registered here, so a
- * runtime given its own path (not the default) is cleared too.
+ * runtime given its own path (not the default) is cleared too. Another
+ * process (the `tier set` command) cannot see that registry: it leaves the
+ * item owed in the tier ledger, with any ledger path it could not clear, and
+ * the worker's next tier tick repeats the clearing with its own paths.
  *
  * Doc comments in this directory are always multi-line: the architecture
  * guard's regex-literal heuristic reads a one-line block comment as a regex.
@@ -98,23 +101,27 @@ export function itemNameRedacted(db: Database, item: ExtractionJobItemKey): bool
  * Clear the captured name on every job row of one item, in the ledger file
  * at `dbPath`, and record the redaction so no later enqueue writes it back.
  * A file that does not exist (no extraction lane ever ran) is left
- * uncreated. Returns the rows changed.
+ * uncreated. `durable` is false when the ledger predates the redactions
+ * table (its writer has not upgraded it yet): the names are cleared, but
+ * nothing yet stops an enqueue from writing them back, so the caller keeps
+ * the item owed until it is.
  */
-export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemKey): number {
-  if (dbPath === ':memory:' || !existsSync(dbPath)) return 0;
+export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemKey): { cleared: number; durable: boolean } {
+  if (dbPath === ':memory:' || !existsSync(dbPath)) return { cleared: 0, durable: true };
   const db = new Database(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
-    if (!table) return 0;
+    if (!table) return { cleared: 0, durable: true };
     return db.transaction(() => {
-      if (redactionsTableExists(db)) {
+      const durable = redactionsTableExists(db);
+      if (durable) {
         db.query(`
           INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
           VALUES (?, ?, ?, ?, ?)
         `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? '', new Date().toISOString());
       }
-      return item.localItemId !== undefined
+      const cleared = item.localItemId !== undefined
         ? db.query(`
             UPDATE extraction_jobs SET name = NULL
             WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
@@ -123,6 +130,7 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
             UPDATE extraction_jobs SET name = NULL
             WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
           `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      return { cleared, durable };
     }).immediate();
   } finally {
     closeSqliteStore(db);

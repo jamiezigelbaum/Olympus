@@ -54,6 +54,8 @@ export interface ForgottenSecretSideStores {
   extractionJobNames: number;
   /** Side stores that could not be reached; left as a ledger debt, retried every tier tick. */
   failed: number;
+  /** Job ledgers cleared but not yet able to keep the names out (an older schema); also owed. */
+  notDurable: number;
 }
 
 /**
@@ -105,9 +107,18 @@ export function settleSecretsCopies(options: {
 export function forgetSecretInSideStores(options: {
   ledger: TierLedger;
   identity: TierLedgerIdentity & { localItemId?: string };
+  /** Job ledgers an earlier attempt owed, beyond the ones this process knows. */
+  jobLedgerPaths?: readonly string[];
+  /**
+   * Called outside the worker (the `tier set` command): the extraction
+   * runtime may keep its job ledger at a path only its own process knows, so
+   * the item stays owed until the worker's next tier tick repeats this there.
+   */
+  confirmInWorker?: boolean;
 }): ForgottenSecretSideStores {
-  const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, failed: 0 };
+  const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
+  const owedJobLedgers: string[] = [];
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ':memory:' && existsSync(snifferPath)) {
     try {
@@ -126,22 +137,28 @@ export function forgetSecretInSideStores(options: {
       result.failed += 1;
     }
   }
-  // The default ledger and any other this process opened (a runtime given
-  // its own path).
-  for (const jobsPath of extractionJobsDbPaths()) {
+  // The default ledger, any other this process opened (a runtime given its
+  // own path), and any an earlier attempt still owes.
+  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...(options.jobLedgerPaths ?? [])])) {
     try {
-      result.extractionJobNames += clearExtractionJobNames(jobsPath, {
+      const cleared = clearExtractionJobNames(jobsPath, {
         provider: identity.provider,
         accountScope: identity.accountScope,
         providerItemId: identity.providerItemId,
         ...(identity.localItemId ? { localItemId: identity.localItemId } : {}),
       });
+      result.extractionJobNames += cleared.cleared;
+      if (!cleared.durable) {
+        result.notDurable += 1;
+        owedJobLedgers.push(jobsPath);
+      }
     } catch {
       result.failed += 1;
+      owedJobLedgers.push(jobsPath);
     }
   }
   try {
-    if (result.failed > 0) ledger.recordSecretSideStoreDebt(identity);
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
     else ledger.clearSecretSideStoreDebt(identity);
   } catch {
     // The ledger itself unreachable: the copies' own settlement fails loudly elsewhere.
@@ -154,7 +171,9 @@ export function forgetSecretInSideStores(options: {
 export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): number {
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
-    if (forgetSecretInSideStores({ ledger, identity }).failed === 0) cleared += 1;
+    const { jobLedgerPaths, ...item } = identity;
+    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+    if (result.failed === 0 && result.notDurable === 0) cleared += 1;
   }
   return cleared;
 }

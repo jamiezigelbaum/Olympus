@@ -2355,21 +2355,33 @@ export class TierLedger {
    * `routed`, so a later reappearance is routed again rather than treated as
    * pre-P1b data.
    */
-  /** A Secret's side stores still hold its names: remember to clear them (see `secretSideStoreDebts`). */
-  recordSecretSideStoreDebt(identity: TierLedgerIdentity & { localItemId?: string }): void {
-    this.db.query(`
-      INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, recorded_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
-        local_item_id = CASE WHEN excluded.local_item_id <> '' THEN excluded.local_item_id ELSE secret_side_store_debt.local_item_id END,
-        recorded_at = excluded.recorded_at
-    `).run(...idParams(identity), identity.localItemId ?? '', this.now().toISOString());
+  /**
+   * A Secret's side stores still hold its names: remember to clear them (see
+   * `secretSideStoreDebts`), with the extraction job ledgers that were not
+   * cleared, so a retry after a restart still reaches them.
+   */
+  recordSecretSideStoreDebt(identity: TierLedgerIdentity & { localItemId?: string }, jobLedgerPaths: readonly string[] = []): void {
+    this.db.transaction(() => {
+      const existing = this.db.query(`
+        SELECT job_ledger_paths_json FROM secret_side_store_debt
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).get(...idParams(identity)) as { job_ledger_paths_json: string } | null;
+      const paths = [...new Set([...(existing ? JSON.parse(existing.job_ledger_paths_json) as string[] : []), ...jobLedgerPaths])].sort();
+      this.db.query(`
+        INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, job_ledger_paths_json, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+          local_item_id = CASE WHEN excluded.local_item_id <> '' THEN excluded.local_item_id ELSE secret_side_store_debt.local_item_id END,
+          job_ledger_paths_json = excluded.job_ledger_paths_json,
+          recorded_at = excluded.recorded_at
+      `).run(...idParams(identity), identity.localItemId ?? '', JSON.stringify(paths), this.now().toISOString());
+    })();
   }
 
   /** Secrets whose side stores are still to be cleared, oldest first. */
-  secretSideStoreDebts(limit = 100): Array<TierLedgerIdentity & { localItemId?: string }> {
+  secretSideStoreDebts(limit = 100): Array<TierLedgerIdentity & { localItemId?: string; jobLedgerPaths: string[] }> {
     const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id, local_item_id
+      SELECT provider, account_scope, conversation_key, provider_item_id, local_item_id, job_ledger_paths_json
       FROM secret_side_store_debt ORDER BY recorded_at LIMIT ?
     `).all(Math.max(1, Math.min(limit, 1_000))) as Array<{
       provider: string;
@@ -2377,6 +2389,7 @@ export class TierLedger {
       conversation_key: string;
       provider_item_id: string;
       local_item_id: string;
+      job_ledger_paths_json: string;
     }>;
     return rows.map((row) => ({
       provider: row.provider,
@@ -2384,6 +2397,7 @@ export class TierLedger {
       providerItemId: row.provider_item_id,
       ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
       ...(row.local_item_id ? { localItemId: row.local_item_id } : {}),
+      jobLedgerPaths: JSON.parse(row.job_ledger_paths_json) as string[],
     }));
   }
 
@@ -3460,6 +3474,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
             conversation_key TEXT NOT NULL DEFAULT '',
             provider_item_id TEXT NOT NULL,
             local_item_id TEXT NOT NULL DEFAULT '',
+            job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );

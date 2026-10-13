@@ -13,6 +13,7 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Database } from 'bun:sqlite';
 import {
   clearInstalledTierClassification,
   configureInstalledTierClassification,
@@ -24,6 +25,7 @@ import { tierSnifferPathForLedger } from '../src/workers/classification/tier-led
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
 import {
   ACCOUNT,
@@ -211,6 +213,97 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.get(gardenJob!)).toMatchObject({ status: 'leased' });
     expect(jobs.get(gardenJob!)?.ref.name).toBeUndefined();
     expect(jobs.record({ jobId: gardenJob!, status: 'indexed', leaseToken: lease!.leaseToken }).status).toBe('indexed');
+  });
+
+  /** One job's name, read without opening the store (which would upgrade an older ledger). */
+  function rawJobName(path: string, jobId: string): string | null {
+    const raw = new Database(path, { readonly: true });
+    try {
+      return (raw.query('SELECT name FROM extraction_jobs WHERE job_id = ?').get(jobId) as { name: string | null }).name;
+    } finally {
+      raw.close();
+    }
+  }
+
+  test('marked Secret from the command in another process: owed until the worker, which knows its own ledger path, clears it', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const before = new LocalFileExtractionJobStore(runtimePath);
+    const [gardenJob] = before.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    // The command's process never opened the runtime's ledger.
+    before.close();
+
+    expect(runTierSet(['garden', 'secrets'], { storePaths: storePaths(fx) }))
+      .toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
+    expect(rawJobName(runtimePath, gardenJob!)).toBe(GARDEN.name);
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([expect.objectContaining({ providerItemId: 'garden' })]);
+
+    // The worker's tick, its runtime holding the ledger open.
+    const worker = new LocalFileExtractionJobStore(runtimePath);
+    cleanups.push(() => worker.close());
+    applyOwnerOverrides({ set: fx.set });
+    expect(worker.get(gardenJob!)?.ref.name).toBeUndefined();
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+  });
+
+  test('a ledger only a runtime knew, unreachable when the item became Secret, is still cleared after that runtime is gone', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    writeFileSync(runtimePath, 'not a database');
+    const unregister = registerExtractionJobsDbPath(runtimePath);
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
+      expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([expect.objectContaining({ providerItemId: 'garden', jobLedgerPaths: [runtimePath] })]);
+    // The runtime stops (its path forgotten in this process); its ledger comes back holding the name.
+    unregister();
+    rmSync(runtimePath);
+    const restored = new LocalFileExtractionJobStore(runtimePath);
+    const [gardenJob] = restored.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    restored.close();
+
+    applyOwnerOverrides({ set: fx.set });
+    expect(rawJobName(runtimePath, gardenJob!)).toBeNull();
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+  });
+
+  test('a job ledger on the schema before redactions stays owed until it can keep the name out', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
+    pointJobsEnvAt(jobsPath);
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const older = new LocalFileExtractionJobStore(jobsPath);
+    const [gardenJob] = older.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    older.close();
+    // As an older build left it: schema 3, no redactions table.
+    const raw = new Database(jobsPath);
+    raw.exec(`DROP TABLE ${SECRET_ITEM_REDACTIONS_TABLE}; UPDATE schema_version SET version = 3 WHERE store_id = 'file-extraction-jobs';`);
+    raw.close();
+
+    fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+    expect(rawJobName(jobsPath, gardenJob!)).toBeNull();
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([expect.objectContaining({ providerItemId: 'garden' })]);
+
+    // The worker upgrades its ledger; the next tick makes the clearing durable.
+    const jobs = new LocalFileExtractionJobStore(jobsPath);
+    cleanups.push(() => jobs.close());
+    applyOwnerOverrides({ set: fx.set });
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+    // A planning pass that listed the file before it became Secret.
+    jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1', force: true });
+    expect(jobs.get(gardenJob!)?.ref.name).toBeUndefined();
   });
 });
 

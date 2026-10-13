@@ -249,6 +249,7 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
       forgetSecretInSideStores({
         ledger,
         identity: { ...item.identity, ...(item.localItemId ? { localItemId: item.localItemId } : {}) },
+        confirmInWorker: true,
       });
     }
     if (override.kind === 'not_secret') {
