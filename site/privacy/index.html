@@ -73,7 +73,7 @@
       <ul>
         <li><strong>Relay registry:</strong> active registrations expire after about 90 days without a connection, or sooner if you ask (see <a href="#retention">Retention</a> for what the relay keeps after that).</li>
         <li><strong>Relay event logs:</strong> 14 days.</li>
-        <li><strong>Google sign-in service:</strong> no tokens are stored; the per-account hash is kept while the service runs; IP addresses about a minute.</li>
+        <li><strong>Google sign-in service:</strong> no tokens are stored; the per-account hash is kept while the service runs; IP addresses about a minute. Cloudflare's request logs for the page that returns you after Google or Dropbox sign-in, including the one-time code they may record, are kept under Cloudflare's own retention for our account; we use them only to troubleshoot.</li>
         <li><strong>In-memory data on the relay:</strong> only while needed; the relay's code does not write it to disk.</li>
         <li><strong>Support email:</strong> until your request is resolved, then deleted unless the law requires longer.</li>
         <li><strong>Account and billing data:</strong> none; we do not hold any.</li>
@@ -230,6 +230,7 @@
         <li><strong>Private panels:</strong> private answer jobs expire 10 minutes after they are created and private question jobs after 30 minutes. They are held in memory on your computer and removed by periodic cleanup. An answer already shown can stay visible while its panel is open. For the panel's browser storage, see <a href="#private-panel">The private answer panel</a>.</li>
         <li><strong>Relay registry:</strong> active registrations expire after about 90 days without a connection. Earlier registry entries stay on disk until the relay restarts and compacts its records. The relay keeps up to 20,000 expired install identifiers, with no fixed time limit, to recognise returning installs, and keeps the identifiers of revoked installs until they are restored, so that a blocked install cannot reconnect.</li>
         <li><strong>Relay event logs:</strong> kept for 14 days, then deleted.</li>
+        <li><strong>Google sign-in service and sign-in return page:</strong> no Google tokens are stored; the keyed per-account hash is kept while the service runs; IP addresses about a minute. Cloudflare's request logs for the page that returns you after Google or Dropbox sign-in, including the one-time code they may record, are kept under Cloudflare's own retention for our account; we use them only to troubleshoot.</li>
         <li><strong>Support email:</strong> kept as long as needed to resolve your request, then deleted unless the law requires us to keep it longer.</li>
         <li><strong>Anonymous questions:</strong> Olympus keeps a usage record on your computer (counts, costs and session checks, not questions or answers) until you delete Olympus's data.</li>
         <li><strong>Account and billing data:</strong> Olympus does not require an OCU account and OCU does not currently take payments for Olympus, so we hold none.</li>
