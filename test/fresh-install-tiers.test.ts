@@ -10,7 +10,7 @@
 //   interface, reading the owner's own words about privacy, only after the
 //   owner approves it.
 // - Public is retired: the seeded policy has no Public tier and nothing is
-//   ever placed Public.
+//   ever placed Public. Since 2026-10-13 no shipped preset defines one.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { isPublicTierRetired, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { isPublicTierRetired, loadSovereigntyPreset, SOVEREIGNTY_PRESETS, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import {
@@ -303,14 +303,46 @@ describe('Public is retired on a fresh install', () => {
     expect(overridden).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
   });
 
+  test('every shipped preset has no Public tier (owner ruling 2026-10-13)', () => {
+    for (const preset of SOVEREIGNTY_PRESETS) {
+      const config = loadSovereigntyPreset(preset);
+      expect({ preset, retired: isPublicTierRetired(config) }).toEqual({ preset, retired: true });
+      expect(() => loadSovereigntyEngine({ inlineConfig: config })).not.toThrow();
+    }
+  });
+
   test('an older policy that defines Public keeps it; a half-removed Public tier is refused', () => {
-    const localFirst = loadSovereigntyPreset('local-first');
-    expect(isPublicTierRetired(localFirst)).toBe(false);
-    const halfRemoved = structuredClone(localFirst);
-    delete halfRemoved.routes.public_safe;
-    expect(() => loadSovereigntyEngine({ inlineConfig: halfRemoved })).toThrow(/public_safe/);
+    const older = olderPolicyWithPublic();
+    expect(isPublicTierRetired(older)).toBe(false);
+    const engine = loadSovereigntyEngine({ inlineConfig: older });
+    expect(isPublicTierRetired(engine.config)).toBe(false);
+    expect(engine.resolveAnalystRoute({ trustDomain: 'public_safe' }).map(({ id }) => id))
+      .toEqual(['cloud-openclaw-infer', 'local-source-answer']);
+    const noRoute = structuredClone(older);
+    delete noRoute.routes.public_safe;
+    expect(() => loadSovereigntyEngine({ inlineConfig: noRoute })).toThrow(/public_safe/);
+    const noRetrieval = structuredClone(older);
+    delete noRetrieval.retrieval.trustDomains.public_safe;
+    expect(() => loadSovereigntyEngine({ inlineConfig: noRetrieval })).toThrow(/public_safe/);
   });
 });
+
+/**
+ * A policy written before 1.0: the shipped local-first preset with the Public
+ * tier every preset then defined (route and retrieval, as they shipped).
+ */
+function olderPolicyWithPublic(): SovereigntyConfig {
+  const config = structuredClone(loadSovereigntyPreset('local-first'));
+  config.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+  config.retrieval.trustDomains.public_safe = {
+    minimumExecutionTrust: 'standard_cloud',
+    allowedEmbeddingTrust: ['local', 'standard_cloud'],
+    embeddingProfile: 'built-in-embedding',
+    allowCloudQuery: true,
+    activationMode: 'hybrid_shadow',
+  };
+  return config;
+}
 
 describe('owner defaults (2026-10-01): the registered built-in model is approved by default, and Personal verdicts move at once', () => {
   afterEach(() => registerBuiltInPrivateModel(undefined));

@@ -6,7 +6,9 @@ Updated: 2026-08-29
 
 ## Display terminology
 
-Use Public, Personal, Private, and Secrets in user-facing explanations.
+Use Personal, Private, and Secrets in user-facing explanations; Public only
+for an install made before 1.0, whose policy keeps a Public tier (owner ruling
+2026-10-13: no new install has one).
 [TRUST_MODEL.md](TRUST_MODEL.md#product-tier-names) defines their mapping to
 unchanged S0–S5 tiers and `public_safe` / `internal` / `secure_local` domains.
 In technical names below, `secure_local` and secure-pool symbols refer to the
@@ -606,6 +608,13 @@ see both change logs.
 
 ## Change log
 
+- 2026-10-13 (no version change): **no Public tier on any new install.** No
+  shipped sovereignty preset defines a `public_safe` route or retrieval
+  policy, so every new policy runs with Public retired (Public verdicts are
+  Personal, reason `tier:public_retired`). User-facing terminology is
+  Personal, Private and Secrets. `SourceConnector`, `EvidencePack` and
+  `Analyst` shapes are unchanged, and `public_safe` stays a valid domain:
+  a policy written before 1.0 keeps its Public tier and routing.
 - 2026-09-23 (v2.0.0): `SourceConnector.classify` is replaced by
   `classificationSignals`; the shared tier classifier decides and the tier
   ledger records. EvidencePack and Analyst shapes are unchanged. Full entry and
