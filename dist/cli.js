@@ -15021,6 +15021,31 @@ function createDropboxSourceConnector(options) {
         const requestedPages = new Set;
         const liveItemIds = new Set;
         const deletedItemIds = new Set;
+        let lookaheadAttempted = false;
+        let lookaheadComplete = false;
+        const lookAhead = async (fromCursor) => {
+          lookaheadAttempted = true;
+          let seen = 0;
+          let next = fromCursor;
+          try {
+            for (;; ) {
+              const ahead = await client.listFolderContinue({ cursor: next, limit: providerPageLimit });
+              for (const entry of ahead.entries) {
+                if (entry.tag !== "deleted")
+                  liveItemIds.add(entry.id);
+              }
+              if (!ahead.hasMore)
+                return true;
+              seen += ahead.entries.length;
+              const following = ahead.cursor?.trim();
+              if (!following || following === next || seen >= DELETED_FOLDER_LOOKAHEAD_ENTRIES)
+                return false;
+              next = following;
+            }
+          } catch {
+            return false;
+          }
+        };
         while (hasMore && remaining > 0) {
           const requestKey = cursor.providerCursor ?? "<initial>";
           if (requestedPages.has(requestKey)) {
@@ -15070,7 +15095,13 @@ function createDropboxSourceConnector(options) {
               continue;
             }
             const deletion = scopedItems([entry], fetchedAt);
-            const descendants = deletion.length === 0 ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            if (deletion.length > 0 && options.deletedItemIdentityResolver?.lookupsReady?.() === false)
+              break;
+            let descendants = deletion.length === 0 ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            if (descendants.length > 0 && hasMore && !lookaheadAttempted) {
+              lookaheadComplete = await lookAhead(nextCursor);
+              descendants = expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            }
             if (descendants.length >= remaining) {
               for (const descendant of descendants.slice(0, remaining)) {
                 deletedItemIds.add(descendant.identity.providerItemId);
@@ -15113,7 +15144,7 @@ function createDropboxSourceConnector(options) {
             ...nextCursor ? { nextCursor } : {},
             done: !hasMore
           };
-          if (!hasMore || remaining === 0 || expandedDeletedFolder)
+          if (!hasMore || remaining === 0 || expandedDeletedFolder && !lookaheadComplete)
             return;
           cursor = { providerCursor: nextCursor };
         }
@@ -15406,7 +15437,7 @@ function requireNonEmpty(value, label) {
 function nowIso() {
   return new Date().toISOString();
 }
-var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_MAX_FETCH_BYTES = 8000000, DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
+var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_MAX_FETCH_BYTES = 8000000, DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DELETED_FOLDER_LOOKAHEAD_ENTRIES = 50000, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
 var init_connector = __esm(() => {
   init_credential_broker();
   init_provider_client();
@@ -25977,6 +26008,9 @@ function createConnectorStoreLocatorIdentityIndex(db) {
     END;
   `);
 }
+function foldLocator(locator) {
+  return locator.normalize("NFC").toLowerCase();
+}
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
@@ -27407,6 +27441,9 @@ var init_local_index = __esm(() => {
         indexedItems: Number(indexed.count)
       };
     }
+    locatorIdentityIndexReady() {
+      return this.locatorIdentityIndexState().completed;
+    }
     locatorIdentityIndexState() {
       const state = this.db.query(`
       SELECT cursor_item_pk, completed
@@ -27545,7 +27582,41 @@ var init_local_index = __esm(() => {
       const folder = input.locatorUri.replace(/\/+$/, "");
       if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
         return [];
-      const rows = this.db.query(`
+      const toRow = (row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : [];
+      const nonAscii = /[^\u0000-\u007f]/.exec(folder);
+      if (!nonAscii) {
+        const rows = this.db.query(`
+        SELECT
+          i.provider_item_id, i.provider_file_id, i.local_item_id,
+          i.source_version, i.locator_uri
+        FROM item_locator_identities locator
+        JOIN items i ON i.item_pk = locator.item_pk
+        WHERE locator.provider = ?
+          AND locator.account_scope = ?
+          AND locator.normalized_conversation = ''
+          AND locator.normalized_locator >= LOWER(?) || '/'
+          AND locator.normalized_locator < LOWER(?) || '0'
+          AND i.tombstoned = 0
+        ORDER BY locator.normalized_locator, locator.item_pk
+        LIMIT ?
+      `).all(input.provider, input.accountScope, folder, folder, input.limit);
+        return rows.flatMap(toRow);
+      }
+      const directory = folder.slice(0, folder.lastIndexOf("/", nonAscii.index));
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -27558,20 +27629,15 @@ var init_local_index = __esm(() => {
         AND locator.normalized_locator < LOWER(?) || '0'
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
-      LIMIT ?
-    `).all(input.provider, input.accountScope, folder, folder, input.limit);
-      return rows.flatMap((row) => row.locator_uri ? [{
-        identity: {
-          family: this.family,
-          provider: input.provider,
-          accountScope: input.accountScope,
-          providerItemId: row.provider_item_id,
-          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
-          localItemId: row.local_item_id,
-          ...row.source_version ? { sourceVersion: row.source_version } : {}
-        },
-        locatorUri: row.locator_uri
-      }] : []);
+    `);
+      for (const row of candidates.iterate(input.provider, input.accountScope, directory, directory)) {
+        if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
+          continue;
+        matches.push(...toRow(row));
+        if (matches.length >= input.limit)
+          break;
+      }
+      return matches;
     }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
@@ -35229,6 +35295,9 @@ function createDropboxProviderStoreSyncHandler(options) {
         }
       }
       return [...union.values()];
+    },
+    lookupsReady() {
+      return ["secure_local", "internal", "public_safe"].every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
     }
   } : options.store;
   return {

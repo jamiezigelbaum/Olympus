@@ -16465,6 +16465,9 @@ function createConnectorStoreLocatorIdentityIndex(db) {
     END;
   `);
 }
+function foldLocator(locator) {
+  return locator.normalize("NFC").toLowerCase();
+}
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
@@ -17895,6 +17898,9 @@ var init_local_index = __esm(() => {
         indexedItems: Number(indexed.count)
       };
     }
+    locatorIdentityIndexReady() {
+      return this.locatorIdentityIndexState().completed;
+    }
     locatorIdentityIndexState() {
       const state = this.db.query(`
       SELECT cursor_item_pk, completed
@@ -18033,7 +18039,41 @@ var init_local_index = __esm(() => {
       const folder = input.locatorUri.replace(/\/+$/, "");
       if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
         return [];
-      const rows = this.db.query(`
+      const toRow = (row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : [];
+      const nonAscii = /[^\u0000-\u007f]/.exec(folder);
+      if (!nonAscii) {
+        const rows = this.db.query(`
+        SELECT
+          i.provider_item_id, i.provider_file_id, i.local_item_id,
+          i.source_version, i.locator_uri
+        FROM item_locator_identities locator
+        JOIN items i ON i.item_pk = locator.item_pk
+        WHERE locator.provider = ?
+          AND locator.account_scope = ?
+          AND locator.normalized_conversation = ''
+          AND locator.normalized_locator >= LOWER(?) || '/'
+          AND locator.normalized_locator < LOWER(?) || '0'
+          AND i.tombstoned = 0
+        ORDER BY locator.normalized_locator, locator.item_pk
+        LIMIT ?
+      `).all(input.provider, input.accountScope, folder, folder, input.limit);
+        return rows.flatMap(toRow);
+      }
+      const directory = folder.slice(0, folder.lastIndexOf("/", nonAscii.index));
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -18046,20 +18086,15 @@ var init_local_index = __esm(() => {
         AND locator.normalized_locator < LOWER(?) || '0'
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
-      LIMIT ?
-    `).all(input.provider, input.accountScope, folder, folder, input.limit);
-      return rows.flatMap((row) => row.locator_uri ? [{
-        identity: {
-          family: this.family,
-          provider: input.provider,
-          accountScope: input.accountScope,
-          providerItemId: row.provider_item_id,
-          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
-          localItemId: row.local_item_id,
-          ...row.source_version ? { sourceVersion: row.source_version } : {}
-        },
-        locatorUri: row.locator_uri
-      }] : []);
+    `);
+      for (const row of candidates.iterate(input.provider, input.accountScope, directory, directory)) {
+        if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
+          continue;
+        matches.push(...toRow(row));
+        if (matches.length >= input.limit)
+          break;
+      }
+      return matches;
     }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);

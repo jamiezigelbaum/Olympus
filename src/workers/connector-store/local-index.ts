@@ -4052,6 +4052,15 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Whether the locator identity projection is fully built, so a locator
+   * lookup is authoritative. A cheap state read (no row count). A caller that
+   * must not act on an empty answer from a store still converging asks first.
+   */
+  locatorIdentityIndexReady(): boolean {
+    return this.locatorIdentityIndexState().completed;
+  }
+
+  /**
    * The durable cursor/completion pair alone. Separate from the public status
    * projection because that projection COUNTs the whole indexed table: fine for
    * an operator receipt, ruinous for a per-deletion gate or a convergence loop
@@ -4294,37 +4303,13 @@ export class LocalConnectorStore {
     // The root is never "a folder that was deleted": refusing it keeps a
     // malformed event from reading as a request to empty the whole account.
     if (folder === '' || !Number.isSafeInteger(input.limit) || input.limit <= 0) return [];
-    // `/` sorts immediately before `0`, so [folder + '/', folder + '0') is
-    // exactly the set of strings that start with `folder + '/'`. A range on
-    // the projection's own index, not a LIKE scan, and no wildcard escaping.
-    const rows = this.db.query(`
-      SELECT
-        i.provider_item_id, i.provider_file_id, i.local_item_id,
-        i.source_version, i.locator_uri
-      FROM item_locator_identities locator
-      JOIN items i ON i.item_pk = locator.item_pk
-      WHERE locator.provider = ?
-        AND locator.account_scope = ?
-        AND locator.normalized_conversation = ''
-        AND locator.normalized_locator >= LOWER(?) || '/'
-        AND locator.normalized_locator < LOWER(?) || '0'
-        AND i.tombstoned = 0
-      ORDER BY locator.normalized_locator, locator.item_pk
-      LIMIT ?
-    `).all(
-      input.provider,
-      input.accountScope,
-      folder,
-      folder,
-      input.limit,
-    ) as Array<{
+    const toRow = (row: {
       provider_item_id: string;
       provider_file_id: string | null;
       local_item_id: string;
       source_version: string | null;
       locator_uri: string | null;
-    }>;
-    return rows.flatMap((row) => row.locator_uri
+    }): Array<{ identity: SourceItemIdentity; locatorUri: string }> => row.locator_uri
       ? [{
           identity: {
             family: this.family,
@@ -4337,7 +4322,61 @@ export class LocalConnectorStore {
           },
           locatorUri: row.locator_uri,
         }]
-      : []);
+      : [];
+    type Row = Parameters<typeof toRow>[0];
+    const nonAscii = /[^\u0000-\u007f]/.exec(folder);
+    if (!nonAscii) {
+      // `/` sorts immediately before `0`, so [folder + '/', folder + '0') is
+      // exactly the set of strings that start with `folder + '/'`. A range on
+      // the projection's own index, not a LIKE scan, and no wildcard escaping.
+      const rows = this.db.query(`
+        SELECT
+          i.provider_item_id, i.provider_file_id, i.local_item_id,
+          i.source_version, i.locator_uri
+        FROM item_locator_identities locator
+        JOIN items i ON i.item_pk = locator.item_pk
+        WHERE locator.provider = ?
+          AND locator.account_scope = ?
+          AND locator.normalized_conversation = ''
+          AND locator.normalized_locator >= LOWER(?) || '/'
+          AND locator.normalized_locator < LOWER(?) || '0'
+          AND i.tombstoned = 0
+        ORDER BY locator.normalized_locator, locator.item_pk
+        LIMIT ?
+      `).all(input.provider, input.accountScope, folder, folder, input.limit) as Row[];
+      return rows.flatMap(toRow);
+    }
+    // The projection lower-cases with SQLite's LOWER(), which is ASCII-only and
+    // does not normalize, while a provider's path_lower folds every script and
+    // may compose accents differently from the stored display path. So a path
+    // with non-ASCII characters is matched in two steps: the index narrows to
+    // the ASCII-only directories above the first non-ASCII segment (identical
+    // under any folding or composition), then the rows are compared with both
+    // sides NFC-normalized and lower-cased in full. Rare, and bounded by the
+    // account's rows under that directory.
+    const directory = folder.slice(0, folder.lastIndexOf('/', nonAscii.index));
+    const wanted = `${foldLocator(folder)}/`;
+    const matches: Array<{ identity: SourceItemIdentity; locatorUri: string }> = [];
+    const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+    `);
+    for (const row of candidates.iterate(input.provider, input.accountScope, directory, directory) as Iterable<Row>) {
+      if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted)) continue;
+      matches.push(...toRow(row));
+      if (matches.length >= input.limit) break;
+    }
+    return matches;
   }
 
   activeItemForLocator(input: {
@@ -14188,6 +14227,11 @@ function createConnectorStoreLocatorIdentityIndex(db: Database): void {
       WHERE NEW.tombstoned = 0 AND NEW.locator_uri IS NOT NULL;
     END;
   `);
+}
+
+/** A locator as the provider's own folding sees it: composed, and lower-cased in every script. */
+function foldLocator(locator: string): string {
+  return locator.normalize('NFC').toLowerCase();
 }
 
 function toFtsQuery(query: string, options: { prefix?: boolean } = {}): string {

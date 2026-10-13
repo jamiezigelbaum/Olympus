@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
@@ -15,6 +16,7 @@ import {
   type DropboxMetadataEntry,
   type DropboxMetadataPage,
 } from '../src/workers/dropbox-files/index.ts';
+import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 
 // A deleted Dropbox folder arrives as ONE entry for its whole subtree: the
@@ -251,24 +253,58 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
       });
     }
 
-    test('a pass that expands a deleted folder ends with its page, so a later page re-adding a file cannot be overruled by the delete', async () => {
-      const { store, sync, calls } = singleStoreLane({
-        initial: TREE,
-        deltaPages: {
-          'cursor-1': { entries: [gone], cursor: 'cursor-2', hasMore: true },
-          'cursor-2': { entries: moved, cursor: 'cursor-3', hasMore: false },
-        },
-      });
-      await sync.pull({ approved_scope_key: SCOPE });
-      const first = await sync.pull({ approved_scope_key: SCOPE });
+    const crossPage: Script = {
+      initial: TREE,
+      deltaPages: {
+        'cursor-1': { entries: [gone], cursor: 'cursor-2', hasMore: true },
+        'cursor-2': { entries: moved, cursor: 'cursor-3', hasMore: false },
+      },
+    };
 
-      expect(calls.filter((call) => call.startsWith('continue'))).toEqual(['continue:cursor-1']);
+    test('a file re-listed on a later page keeps its indexed text, and what was not re-listed loses it', async () => {
+      const { store, sync, calls } = singleStoreLane(crossPage);
+      await sync.pull({ approved_scope_key: SCOPE });
+      for (const id of ['id:a', 'id:b', 'id:c']) expect((await landText(store, id, `The pelican of ${id} nests here.`)).accepted).toBe(true);
+      expect(store.searchItems('pelican', 10).map((row) => row.sourceItem.providerItemId).sort()).toEqual(['id:a', 'id:b', 'id:c']);
+
+      const outcome = await sync.pull({ approved_scope_key: SCOPE });
+
+      // The pass looked past the folder's page, saw the move, and never took the files down.
+      expect(calls).toContain('continue:cursor-2');
+      expect(outcome.receipt.counts.traversal_complete).toBe(1);
+      expectActive(store, ['id:a', 'id:b']);
+      expectInactive(store, ['id:c', 'id:sub', 'id:deep', 'id:docs']);
+      expect(store.searchItems('pelican', 10).map((row) => row.sourceItem.providerItemId).sort()).toEqual(['id:a', 'id:b']);
+    });
+
+    test('when the later pages cannot be read ahead, the folder\'s page still ends the pass, and the move restores the files on the next', async () => {
+      const root = workspace();
+      const store = laneStore(join(root, 'store.sqlite'));
+      const base = client(crossPage);
+      let readAheadFails = true;
+      const flaky: DropboxMetadataClient = {
+        ...base,
+        async listFolderContinue(request) {
+          if (request.cursor === 'cursor-2' && readAheadFails) {
+            readAheadFails = false;
+            throw new Error('transient');
+          }
+          return base.listFolderContinue(request);
+        },
+      };
+      const sync = handler(store, 'personal', flaky);
+      await sync.pull({ approved_scope_key: SCOPE });
+
+      const first = await sync.pull({ approved_scope_key: SCOPE });
+      // Without the look-ahead the delete is applied as before and the pass ends with its page...
       expect(first.receipt.counts.traversal_complete).toBe(0);
       expectInactive(store, ['id:a', 'id:b', 'id:c']);
 
+      // ...so the next page's re-add is not overruled, and the files come back.
       const second = await sync.pull({ approved_scope_key: SCOPE });
       expect(second.receipt.counts.traversal_complete).toBe(1);
       expectActive(store, ['id:a', 'id:b']);
+      expectInactive(store, ['id:c']);
     });
   });
 
@@ -344,6 +380,38 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
   });
 });
 
+describe('a deleted folder with a non-ASCII name', () => {
+  test('is matched without regard to case or accent composition, and takes its descendants with it', async () => {
+    const decomposed = 'Cafe\u0301';
+    const { store, sync } = singleStoreLane({
+      initial: [
+        folder('id:school', '/Approved/\u00c9cole'),
+        file('id:s1', '/Approved/\u00c9cole/a.txt'),
+        file('id:s2', '/Approved/\u00c9cole/Sub/b.txt'),
+        file('id:ecole', '/Approved/Ecole/c.txt'),
+        folder('id:cafe', `/Approved/${decomposed}`),
+        file('id:k1', `/Approved/${decomposed}/m.txt`),
+      ],
+      deltas: {
+        'cursor-1': [
+          // Dropbox lower-cases the whole path, accents included.
+          { tag: 'deleted', name: '\u00c9cole', pathDisplay: '/Approved/\u00c9cole', pathLower: '/approved/\u00e9cole' },
+          // And may spell the accent composed where the index stored it decomposed.
+          { tag: 'deleted', name: 'Caf\u00e9', pathDisplay: '/Approved/Caf\u00e9', pathLower: '/approved/caf\u00e9' },
+        ],
+      },
+    });
+    await sync.pull({ approved_scope_key: SCOPE });
+    expectActive(store, ['id:school', 'id:s1', 'id:s2', 'id:ecole', 'id:cafe', 'id:k1']);
+
+    await sync.pull({ approved_scope_key: SCOPE });
+
+    expectInactive(store, ['id:school', 'id:s1', 'id:s2', 'id:k1']);
+    // The unaccented twin is a different folder.
+    expectActive(store, ['id:ecole']);
+  });
+});
+
 describe('LocalConnectorStore.activeItemsUnderLocatorIfIndexed', () => {
   const under = (store: LocalConnectorStore, locatorUri: string, limit = 100) => store
     .activeItemsUnderLocatorIfIndexed({ provider: 'dropbox', accountScope: 'personal', locatorUri, limit })
@@ -402,6 +470,40 @@ describe('LocalConnectorStore.activeItemsUnderLocatorIfIndexed', () => {
     expect(under(store, '/Approved/Docs', 1.5)).toEqual([]);
   });
 
+  test('matches non-ASCII folders by their folded form: case, and composed or decomposed accents', async () => {
+    const store = laneStore(join(workspace(), 'store.sqlite'));
+    const decomposed = 'Cafe\u0301';
+    await handler(store, 'personal', client({
+      initial: [
+        file('id:e1', '/Approved/\u00c9cole/a.txt'),
+        file('id:e2', '/Approved/\u00c9cole/Sub/b.txt'),
+        // Not under the folder: another name, an unaccented twin, a longer name.
+        file('id:e3', '/Approved/Ecole/c.txt'),
+        file('id:e4', '/Approved/\u00c9coleNord/d.txt'),
+        file('id:e5', '/Approved/\u00c9cole.txt'),
+        // Stored decomposed.
+        file('id:c1', `/Approved/${decomposed}/m.txt`),
+        // Under an ASCII folder with a non-ASCII child folder.
+        file('id:z1', '/Approved/Docs/\u00dcber/z.txt'),
+      ],
+    })).pull({ approved_scope_key: SCOPE });
+
+    // SQLite's LOWER() leaves \u00c9 alone, so an upper-cased stored name only matches by folding in full.
+    expect(under(store, '/Approved/\u00c9cole')).toEqual(['id:e1', 'id:e2']);
+    expect(under(store, '/approved/\u00e9cole')).toEqual(['id:e1', 'id:e2']);
+    expect(under(store, '/APPROVED/\u00c9COLE/')).toEqual(['id:e1', 'id:e2']);
+    expect(under(store, '/approved/\u00e9cole/sub')).toEqual(['id:e2']);
+    // Composed and decomposed spellings of one name are one folder.
+    expect(under(store, '/Approved/Caf\u00e9')).toEqual(['id:c1']);
+    expect(under(store, '/approved/caf\u00e9')).toEqual(['id:c1']);
+    expect(under(store, `/approved/${decomposed}`)).toEqual(['id:c1']);
+    expect(under(store, '/Approved/Docs/\u00fcber')).toEqual(['id:z1']);
+    // Look-alikes stay out, and the limit still holds on the slow path.
+    expect(under(store, '/Approved/Ecole')).toEqual(['id:e3']);
+    expect(under(store, '/Approved/\u00c9cole', 1)).toHaveLength(1);
+    expect(under(store, '/Approved/\u00c9col')).toEqual([]);
+  });
+
   test('skips tombstoned rows', async () => {
     const { store } = await indexedTree();
     await handler(store, 'personal', client({
@@ -437,7 +539,8 @@ describe('a deleted folder through the per-tier stores', () => {
     file('id:new-pub', '/Approved/Docs/Published/essay.pdf'),
   ];
 
-  test('removes legacy and routed descendants from every store that holds a copy, and clears the ledger', async () => {
+  /** Legacy files in the lane's one secure store, then routed files whose names and text land by tier. */
+  async function tierFixture() {
     const root = workspace();
     const env = {
       OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
@@ -506,19 +609,20 @@ describe('a deleted folder through the per-tier stores', () => {
     const publicStore = lane.public.current()!;
     expect(publicStore).toBeDefined();
     expect(publicStore.searchItems('tomatoes', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-pub']);
-
-    const id = (providerItemId: string) => identityFor(providerItemId);
-    expect(copiesIn(lane, id('id:new-top')).length).toBeGreaterThan(1);
-    expect(lane.ledger.isRouted(id('id:new-top'))).toBe(true);
+    expect(copiesIn(lane, identityFor('id:new-top')).length).toBeGreaterThan(1);
+    expect(lane.ledger.isRouted(identityFor('id:new-top'))).toBe(true);
     expect(secure.searchItems('diagnosis', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-top']);
     expect(internal.searchItems('cartography', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-deep']);
+    return { root, lane, sync, secure, internal, publicStore };
+  }
 
-    const outcome = await sync.pull({ approved_scope_key: SCOPE });
-
+  function expectFolderGone(fixture: Awaited<ReturnType<typeof tierFixture>>): void {
+    const { lane, secure, internal, publicStore } = fixture;
     // Gone from every store the item had a copy in: legacy rows, routed names, routed text.
-    const stores = [secure, internal, publicStore];
     for (const providerItemId of [...UNDER_DOCS, 'id:new-top', 'id:new-deep', 'id:new-pub']) {
-      for (const store of stores) expect(store.itemPresence(id(providerItemId)).active).toBe(false);
+      for (const store of [secure, internal, publicStore]) {
+        expect([providerItemId, store.itemPresence(identityFor(providerItemId)).active]).toEqual([providerItemId, false]);
+      }
     }
     expect(secure.searchItems('diagnosis', 10)).toEqual([]);
     expect(internal.searchItems('diagnosis', 10)).toEqual([]);
@@ -528,16 +632,49 @@ describe('a deleted folder through the per-tier stores', () => {
     // The ledger forgot the routed items' copies, as for a single-file delete
     // (the item stays "routed", so a reappearance is routed afresh).
     for (const providerItemId of ['id:new-top', 'id:new-deep', 'id:new-pub']) {
-      expect(copiesIn(lane, id(providerItemId))).toEqual([]);
+      expect(copiesIn(lane, identityFor(providerItemId))).toEqual([]);
     }
+    // The look-alikes beside the folder are untouched, in the stores that hold them.
+    for (const providerItemId of BESIDE_DOCS) expect(secure.itemPresence(identityFor(providerItemId)).active).toBe(true);
+    expect(internal.itemPresence(identityFor('id:new-sibling')).active).toBe(true);
+    expect(internal.searchItems('lighthouses', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-sibling']);
+    expect(copiesIn(lane, identityFor('id:new-sibling')).length).toBeGreaterThan(0);
+  }
+
+  test('removes legacy and routed descendants from every store that holds a copy, and clears the ledger', async () => {
+    const fixture = await tierFixture();
+    const outcome = await fixture.sync.pull({ approved_scope_key: SCOPE });
+
+    expectFolderGone(fixture);
     expect(outcome.receipt.counts.items_rejected).toBe(0);
     expect(outcome.receipt.counts.deleted_events_applied).toBeGreaterThanOrEqual(UNDER_DOCS.length + 3);
+  });
 
-    // The look-alikes beside the folder are untouched, in the stores that hold them.
-    for (const providerItemId of BESIDE_DOCS) expect(secure.itemPresence(id(providerItemId)).active).toBe(true);
-    expect(internal.itemPresence(id('id:new-sibling')).active).toBe(true);
-    expect(internal.searchItems('lighthouses', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-sibling']);
-    expect(copiesIn(lane, id('id:new-sibling')).length).toBeGreaterThan(0);
+  test('a tier store still building its locator index holds the folder event for a pass instead of losing it', async () => {
+    const fixture = await tierFixture();
+    // The Personal store as an upgrade leaves it: projection empty and gated.
+    const db = new Database(join(fixture.root, 'dropbox-internal.sqlite'));
+    try {
+      db.exec(`
+        DELETE FROM item_locator_identities;
+        UPDATE locator_identity_index_state SET cursor_item_pk = 0, completed = 0 WHERE singleton = 1;
+      `);
+    } finally {
+      db.close();
+    }
+    expect(fixture.internal.locatorIdentityIndexReady()).toBe(false);
+
+    const held = await fixture.sync.pull({ approved_scope_key: SCOPE });
+    // The event was not consumed: its routed descendants are still there and the cursor has not passed it.
+    expect(held.receipt.counts.traversal_complete).toBe(0);
+    expect(fixture.internal.itemPresence(identityFor('id:new-deep')).active).toBe(true);
+    expect(fixture.internal.searchItems('cartography', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-deep']);
+    // That pass's own leg converged the store.
+    expect(fixture.internal.locatorIdentityIndexReady()).toBe(true);
+
+    const applied = await fixture.sync.pull({ approved_scope_key: SCOPE });
+    expect(applied.receipt.counts.traversal_complete).toBe(1);
+    expectFolderGone(fixture);
   });
 });
 
@@ -604,6 +741,31 @@ function singleStoreLane(script: Script) {
   const calls: string[] = [];
   const sync = handler(store, 'personal', client(script, calls));
   return { store, sync, calls };
+}
+
+/** Lands extracted text on an item of the lane's one store, as the extraction runner does. */
+function landText(store: LocalConnectorStore, providerItemId: string, text: string) {
+  return createConnectorStoreExtractionSink({
+    store,
+    classify: () => buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'secure_local' }),
+    syncConnectorId: 'extraction',
+    ownerConnectorId: 'dropbox',
+    ownershipKind: 'observed',
+  }).accept({
+    ref: {
+      corpusId: 'secure_local.dropbox.files',
+      provider: 'dropbox',
+      accountScope: 'personal',
+      approvedScopeKey: SCOPE,
+      providerItemId,
+      localItemId: `personal:${providerItemId}`,
+      sourceVersion: 'r1',
+    },
+    text,
+    extractorKind: 'local_text',
+    extractorVersion: 'test',
+    fetchedAt: '2026-10-13T00:00:00.000Z',
+  });
 }
 
 function fakeScope(allows: (lowerPath: string) => boolean) {

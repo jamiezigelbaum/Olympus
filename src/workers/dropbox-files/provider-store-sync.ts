@@ -150,6 +150,13 @@ export function createDropboxProviderStoreSyncHandler(
           }
           return [...union.values()];
         },
+        // A store still building its locator index answers "nothing" for a
+        // deletion it holds; the connector waits a pass instead (the store
+        // converges when its leg runs).
+        lookupsReady() {
+          return (['secure_local', 'internal', 'public_safe'] as const)
+            .every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
+        },
       }
     : options.store;
 
