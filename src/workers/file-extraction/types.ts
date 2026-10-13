@@ -516,6 +516,11 @@ export interface ExtractorRegistryConfig {
     client?: VlmClient;
     prompt?: string;
     model?: string;
+    /**
+     * The reader that checks a payload for secrets before it may leave.
+     * Defaults to the local OCR lane; replaced in tests.
+     */
+    localReader?: Pick<Extractor, 'extract'>;
   };
   transcription?: {
     command?: string;

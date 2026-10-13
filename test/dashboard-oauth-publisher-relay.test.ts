@@ -86,16 +86,24 @@ const GOOGLE_LOOPBACK_ORIGINS = [
 
 const dirs: string[] = [];
 let previousAppKey: string | undefined;
+let previousDesktopClientId: string | undefined;
 
+// This suite covers the publisher Web client, relay and exchange: the Google
+// path before the Desktop client (2026-10-13), which `none` selects. The
+// Desktop path is test/google-desktop-signin.test.ts.
 beforeEach(() => {
   resetGooglePublisherCapacityCache();
   previousAppKey = process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY;
   process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY = PUBLISHER_APP_KEY;
+  previousDesktopClientId = process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID;
+  process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID = 'none';
 });
 
 afterEach(() => {
   if (previousAppKey === undefined) delete process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY;
   else process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY = previousAppKey;
+  if (previousDesktopClientId === undefined) delete process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID;
+  else process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID = previousDesktopClientId;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 

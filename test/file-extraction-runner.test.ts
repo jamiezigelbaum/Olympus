@@ -1066,6 +1066,8 @@ describe('extraction egress gate: unreachable, not merely unconfigured', () => {
               return { text: 'described image' };
             },
           },
+          // The pre-send Secrets check read the payload and found no text.
+          localReader: { extract: async () => ({ status: 'metadata_only' }) },
         },
       });
       jobs.enqueue({

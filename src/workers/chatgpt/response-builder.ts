@@ -935,7 +935,7 @@ const SOURCE_LABELS: Record<string, string> = {
   'readwise.library': 'Readwise',
 };
 
-export function connectSourceToolResult(result: ConnectSourceResult, options: { direct?: boolean } = {}): ChatGptToolResult {
+export function connectSourceToolResult(result: ConnectSourceResult, options: { direct?: boolean; onComputer?: boolean } = {}): ChatGptToolResult {
   const source = OAUTH_SOURCES.has(result.source) ? result.source : undefined;
   // `direct`: the computer's own panel, where the link is the provider's
   // sign-in page itself (the start route already checked its origin).
@@ -947,7 +947,10 @@ export function connectSourceToolResult(result: ConnectSourceResult, options: { 
       type: 'text',
       text: options.direct
         ? `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl}. Then choose what Olympus may read in the Olympus panel.`
-        : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`,
+        : options.onComputer
+          // Google sign-in runs on the computer where Olympus runs, never on a phone.
+          ? `Open this link on the computer where Olympus runs to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`
+          : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`,
     }],
     structuredContent: structured as unknown as Record<string, unknown>,
   };

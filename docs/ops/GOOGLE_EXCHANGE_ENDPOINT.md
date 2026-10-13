@@ -1,6 +1,17 @@
 # Google token-exchange endpoint
 
-Status: canonical for the publisher-owned Google token exchange
+Status: canonical for the publisher-owned Google token exchange — **legacy
+only since 2026-10-13**
+
+**Legacy (owner decision 2026-10-13).** New Google sign-ins no longer use this
+Worker: they happen on the user's computer with Olympus's Google Desktop
+client, and the engine exchanges and refreshes tokens with Google directly
+([`OAUTH_RELAY.md`, "Google sign-in on the computer"](OAUTH_RELAY.md#google-sign-in-on-the-computer)).
+This Worker stays deployed only for connections made through the Web client
+before then (`exchangeVia: 'publisher_endpoint'`), which keep refreshing
+through it and are offered a one-time **Reconnect Google**. Retiring it is a
+later step that needs the owner's explicit go. Its user counter no longer sees
+new sign-ins, so its capacity answer and stats undercount from 2026-10-13 on.
 
 **Deployment status: DEPLOYED.** Verified live on 2026-09-03 —
 `POST https://auth.olympusplugin.ai/exchange/google` with a bad body answers

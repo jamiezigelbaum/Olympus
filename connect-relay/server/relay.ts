@@ -9,6 +9,8 @@
  * - the install-independent OAuth documents and `/healthz` (oauth-metadata.ts);
  * - `GET /connect/authorize`: the bridge page to the owner's own Mac
  *   (authorize-bridge.ts);
+ * - `GET /connect/signin`: the bridge page that takes a ChatGPT Google
+ *   sign-in hand-off to the engine on the owner's computer (signin-bridge.ts);
  * - `/connect/demo/authorize`: reviewer sign-in, routed only to the one demo
  *   install the relay is configured with (none by default);
  * - `POST /connect/register`: RFC 7591 registration for the pinned hosted
@@ -76,6 +78,7 @@ import type { McpSurface } from '../shared/directory-tools.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey, prefixKey } from '../shared/rate-limit.ts';
 import {
   HANDOFF_PATH_PREFIX,
+  SIGNIN_BRIDGE_PATH,
   OAUTH_HANDBACK_PATHS,
   credentialDigest,
   credentialInstallId,
@@ -93,6 +96,7 @@ import {
   privateAnswerJobId,
 } from '../shared/private-answer.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
+import { signinBridge } from './signin-bridge.ts';
 import { MAX_REGISTRATION_BYTES, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
 import {
   ConfirmedCredentials,
@@ -1022,6 +1026,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         case OAUTH_PATHS.authorize:
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
           return authorizeBridge(url, bridge);
+        case SIGNIN_BRIDGE_PATH:
+          if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+          return signinBridge(url, bridge);
         case OAUTH_PATHS.demoAuthorize:
           return demoSignIn(request, `${OAUTH_PATHS.demoAuthorize}${url.search}`, ip);
         case OAUTH_PATHS.register:

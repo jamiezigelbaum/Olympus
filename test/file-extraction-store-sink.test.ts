@@ -9,6 +9,7 @@
 // rather than replacing it.
 
 import { describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,11 +35,14 @@ import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-poli
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { dropboxCanonicalIngestionMatcher } from '../src/workers/dropbox-files/connector-store.ts';
 import {
+  EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
   EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
   EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
   EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
+  EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
   createConnectorStoreExtractionSink,
   planExtractionSinkWrite,
 } from '../src/workers/file-extraction/store-sink.ts';
@@ -307,6 +311,22 @@ describe('extraction factory store sink', () => {
         sourceScopeRevision: revision,
         locatorPathScopes: ['/3 resources/books'],
       })).toBe(true);
+
+      // Secret text changes nothing for a metadata-only item: it never takes
+      // text, so its names stay exactly as policy keeps them.
+      const secretBook = await sinkFor(store).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, {
+        ref: refFor({
+          providerItemId: book.identity.providerItemId,
+          localItemId: book.identity.localItemId,
+        }),
+      }));
+      expect(secretBook.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_METADATA_ONLY);
+      expect(store.itemMatchesSearchFilters(book.identity.localItemId, ACCOUNT, {
+        provider: PROVIDER,
+        sourceScopeGeneration: generation,
+        sourceScopeRevision: revision,
+        locatorPathScopes: ['/3 resources/books'],
+      })).toBe(true);
     } finally {
       store.close();
     }
@@ -478,6 +498,10 @@ describe('extraction factory store sink', () => {
       for (const candidate of store.extractionCandidates({ limit: 10 }).candidates) {
         expect(candidate.storedChunks).toBe(0);
       }
+      // Secret text is refused the same way: neither row is tombstoned.
+      const secret = await sinkFor(store).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`));
+      expect(secret.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS);
+      expect(store.extractionCandidates({ limit: 10 }).candidates).toHaveLength(2);
     } finally {
       store.close();
     }
@@ -509,6 +533,163 @@ describe('extraction factory store sink', () => {
       // nothing if no chunk was written in the first place.
       expect(counts.chunks).toBe(1);
       expect(counts.embeddedChunks).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// Assembled at run time so no key-shaped literal sits in the repository (as
+// test/content-policy-secrets.test.ts does).
+const STRIPE_LIVE_KEY = ['sk', '_live_', 'k9Xp2LmQ7vRt4WzY8bNc3HdF'].join('');
+
+/** What the store holds for any text, read straight from its tables. */
+function storedRows(store: LocalConnectorStore, needle: string): {
+  chunks: number;
+  ftsRows: number;
+  chunksWithNeedle: number;
+  ftsWithNeedle: number;
+  item: { tombstoned: number; trust_tier: string; title: string | null } | null;
+} {
+  const db = new Database(store.dbPath, { readonly: true });
+  try {
+    const count = (sql: string, ...params: string[]): number =>
+      (db.query(sql).get(...params) as { count: number }).count;
+    return {
+      chunks: count('SELECT COUNT(*) AS count FROM chunks'),
+      ftsRows: count('SELECT COUNT(*) AS count FROM connector_store_fts'),
+      chunksWithNeedle: count('SELECT COUNT(*) AS count FROM chunks WHERE instr(bounded_text, ?) > 0', needle),
+      ftsWithNeedle: count('SELECT COUNT(*) AS count FROM connector_store_fts WHERE instr(bounded_text, ?) > 0', needle),
+      item: db.query('SELECT tombstoned, trust_tier, title FROM items WHERE provider_item_id = ?')
+        .get(ITEM_ID) as { tombstoned: number; trust_tier: string; title: string | null } | null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+describe('extraction factory store sink: the Secrets floor', () => {
+  test('text holding an API key leaves no chunk or FTS row and keeps the location only', async () => {
+    const store = await seededStore();
+    try {
+      const text = `Deploy notes.\nSTRIPE_SECRET_KEY=${STRIPE_LIVE_KEY}\nRotate quarterly.`;
+      const result = await sinkFor(store).accept(requestFor(text));
+      expect(result.accepted).toBe(false);
+      expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+      expect(result.chunksIndexed).toBe(0);
+
+      const rows = storedRows(store, STRIPE_LIVE_KEY);
+      expect(rows.chunks).toBe(0);
+      expect(rows.ftsRows).toBe(0);
+      expect(rows.chunksWithNeedle).toBe(0);
+      expect(rows.ftsWithNeedle).toBe(0);
+      // Tombstoned as the store's own sync tombstones an S5 item: the row
+      // stays (so nothing resurrects it), its title does not.
+      expect(rows.item).toEqual({ tombstoned: 1, trust_tier: 'S5', title: null });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('text that landed earlier is removed when a re-read finds it Secret', async () => {
+    const store = await seededStore();
+    try {
+      const sink = sinkFor(store);
+      expect((await sink.accept(requestFor('An ordinary first draft.'))).accepted).toBe(true);
+      expect(storedRows(store, 'ordinary').chunksWithNeedle).toBe(1);
+
+      // A re-extraction of the same revision (a newer extractor) reads a secret.
+      const secret = await sink.accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, { extractorVersion: '2' }));
+      expect(secret.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+      const rows = storedRows(store, 'ordinary');
+      expect(rows.chunks).toBe(0);
+      expect(rows.ftsRows).toBe(0);
+      expect(storedRows(store, STRIPE_LIVE_KEY).chunksWithNeedle).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a superseded generation cannot tombstone the current holder\'s content', async () => {
+    const store = await seededStore();
+    try {
+      const claim = (ordinal: number) => ({
+        jobId: `job-${ordinal}`,
+        leaseToken: `lease-${ordinal}`,
+        grantAuthority: 'queue-a',
+        grantOrdinal: ordinal,
+      });
+      const sink = sinkFor(store);
+      expect((await sink.accept(requestFor('The current holder\'s clean text.', { claim: claim(2) }))).accepted).toBe(true);
+      // A recycled lease: the older generation reaches the store after the
+      // newer one wrote, with text that is Secret.
+      const stale = await sink.accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, { claim: claim(1) }));
+      expect(stale.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED);
+      const rows = storedRows(store, 'current holder');
+      expect(rows.chunksWithNeedle).toBe(1);
+      expect(rows.item?.tombstoned).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('skipOwner leaves an item alone even when its text is Secret', async () => {
+    const store = await seededStore();
+    try {
+      const result = await sinkFor(store, {
+        skipOwner: { connectorId: 'fake-metadata-sync', ownershipKind: 'observed' },
+      }).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`));
+      expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE);
+      const item = storedRows(store, STRIPE_LIVE_KEY).item;
+      expect(item?.tombstoned).toBe(0);
+      expect(item?.title).toBe(SEEDED_TITLE);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a Secret in an older revision never removes the newer revision\'s row', async () => {
+    const store = await seededStore();
+    try {
+      // The row is at rev-7 with clean text; a job queued for rev-6 reads a secret.
+      expect((await sinkFor(store).accept(requestFor('The current revision, clean.'))).accepted).toBe(true);
+      const stale = await sinkFor(store).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, {
+        ref: refFor({ sourceVersion: 'rev-6' }),
+      }));
+      expect(stale.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE);
+      const rows = storedRows(store, 'current revision');
+      expect(rows.chunksWithNeedle).toBe(1);
+      expect(rows.item?.tombstoned).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("the owner's not-secret override lets the text land", async () => {
+    const store = await seededStore();
+    try {
+      store.tierLedger()!.setOverride(
+        { provider: PROVIDER, accountScope: ACCOUNT, providerItemId: ITEM_ID },
+        { kind: 'not_secret' },
+      );
+      const result = await sinkFor(store).accept(requestFor(`Test fixture key ${STRIPE_LIVE_KEY}`));
+      expect(result.accepted).toBe(true);
+      expect(storedRows(store, STRIPE_LIVE_KEY).chunksWithNeedle).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("the owner's Secrets override holds even for text the detector finds clean", async () => {
+    const store = await seededStore();
+    try {
+      store.tierLedger()!.setOverride(
+        { provider: PROVIDER, accountScope: ACCOUNT, providerItemId: ITEM_ID },
+        { kind: 'tier', tier: 'secrets' },
+      );
+      const result = await sinkFor(store).accept(requestFor('Nothing a detector would flag.'));
+      expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+      expect(storedRows(store, 'detector').chunks).toBe(0);
     } finally {
       store.close();
     }

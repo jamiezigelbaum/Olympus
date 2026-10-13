@@ -21,6 +21,11 @@ import {
   type SourceSensitivity,
 } from '../../core/source-index/types.ts';
 import {
+  redactCaptureSpoolLines,
+  type CaptureSpoolRedactionResult,
+  type SpoolSecretJudge,
+} from '../connector-store/capture-spool-secrets.ts';
+import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   type TelegramMessagesCorpusId,
@@ -46,6 +51,11 @@ export const TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTO
 // eviction lineage: eviction runs carry no cursor, so one inline eviction
 // would erase the sweep's durable position.
 export const TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
+
+// A record whose item was judged Secrets keeps its place in the spool but not
+// its text (connector-store/capture-spool-secrets.ts). The flag it carries is
+// read back as a Secrets floor, so a replay judges it Secrets again.
+export const TELEGRAM_SECRET_REDACTED_FLOOR_BASIS = 'capture:secret_redacted';
 
 const MAX_SPOOL_BYTES = 768_000_000;
 const MAX_RECORDS = 1_000_000;
@@ -183,11 +193,14 @@ export function createTelegramCaptureSpoolConnector(options: {
       // messages rest at and are never lowered below. A Secret Chat is a
       // provider fact and floors the item at Private.
       const conversationKind = telegramConversationKind(signalText(item.metadata, 'chatType'));
+      const redacted = item.metadata['secretRedacted'] === true;
       return compactClassificationSignals({
         prior: trustDomainPrior(trustDomain, 'source_config'),
-        ...(conversationKind === 'secret_chat'
-          ? { floor: { tier: 'secure' as const, basis: 'provider:secret_chat' } }
-          : {}),
+        ...(redacted
+          ? { floor: { tier: 'secrets' as const, basis: TELEGRAM_SECRET_REDACTED_FLOOR_BASIS } }
+          : conversationKind === 'secret_chat'
+            ? { floor: { tier: 'secure' as const, basis: 'provider:secret_chat' } }
+            : {}),
         conversationKind,
         title: signalText(item.metadata, 'title'),
         sender: signalText(item.metadata, 'senderDisplayName', 'senderId'),
@@ -222,9 +235,7 @@ export function readTelegramCaptureSpool(options: {
     ? { file: '', line: 0 }
     : parseTelegramCaptureSpoolCursor(options.admitThroughCursor);
   const limit = options.limit === undefined ? undefined : normalizeLimit(options.limit);
-  const names = readdirSync(options.spoolDir)
-    .filter((value) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(value))
-    .sort();
+  const names = telegramCaptureSpoolFiles(options.spoolDir);
   if (cursor && !names.includes(cursor.file) && names.some((name) => name < cursor.file)) {
     throw new Error('Telegram capture spool cursor file is missing.');
   }
@@ -329,6 +340,89 @@ export function readTelegramCaptureSpool(options: {
     ...(resumeCursor ? { resumeCursor } : {}),
     exhausted,
   };
+}
+
+/**
+ * Rewrite, in place, every complete record in `[from, through)` whose item
+ * the judge says is Secrets: its text and attachment names go (and its chat
+ * title and sender name when the names themselves were judged Secrets, also
+ * from a record whose text went earlier), its
+ * identity, version and capture id stay, and it is flagged so a replay
+ * judges it Secrets again. Cursors are this spool's `<file>:<lines>`.
+ */
+export function redactTelegramCaptureSpoolSecrets(options: {
+  spoolDir: string;
+  from?: string;
+  through?: string;
+  judge: SpoolSecretJudge;
+}): CaptureSpoolRedactionResult {
+  assertTelegramCaptureSpoolDirectory(options.spoolDir);
+  const from = parseTelegramCaptureSpoolCursor(options.from);
+  const through = parseTelegramCaptureSpoolCursor(options.through);
+  return redactCaptureSpoolLines({
+    dir: options.spoolDir,
+    files: telegramCaptureSpoolFiles(options.spoolDir),
+    ...(from ? { from } : {}),
+    ...(through ? { through } : {}),
+    redact: (line) => redactTelegramSpoolLine(line, options.judge),
+  });
+}
+
+function redactTelegramSpoolLine(line: string, judge: SpoolSecretJudge): string | undefined {
+  let record: TelegramCaptureSpoolRecord;
+  let raw: Record<string, unknown>;
+  try {
+    record = parseTelegramCaptureSpoolRecord(line);
+    raw = requireObject(JSON.parse(line), 'record');
+  } catch {
+    // A damaged record is left exactly as it is; every reader skips it.
+    return undefined;
+  }
+  const message = requireObject(raw.message, 'message');
+  const item = record.capturedItem.item;
+  const alreadyRedacted = message.secretRedacted === true;
+  const text = alreadyRedacted || typeof item.metadata['searchText'] !== 'string'
+    ? undefined
+    : item.metadata['searchText'] as string;
+  const redaction = judge(item.identity, text);
+  if (!redaction) return undefined;
+  // A record already cleared of its text is rewritten again only when its
+  // names are now judged Secrets and still there.
+  if (alreadyRedacted && (redaction !== 'names' || (message.chatTitle === undefined && message.senderDisplayName === undefined))) {
+    return undefined;
+  }
+  const namesLeft = message.chatTitle !== undefined || message.senderDisplayName !== undefined;
+  const namedAttachment = Array.isArray(message.attachments) && message.attachments.some((attachment) => (
+    !!attachment && typeof attachment === 'object' && !Array.isArray(attachment) && 'name' in attachment
+  ));
+  // A record with nothing left to remove is not rewritten: the flag alone
+  // would not fit, and blanking it would lose the record for nothing.
+  if (
+    message.boundedText === undefined && message.attachmentNames === undefined && !namedAttachment
+    && (redaction !== 'names' || !namesLeft)
+  ) return undefined;
+  const kept: Record<string, unknown> = { ...message };
+  delete kept.boundedText;
+  delete kept.attachmentNames;
+  if (Array.isArray(kept.attachments)) {
+    kept.attachments = kept.attachments.map((attachment) => {
+      if (!attachment || typeof attachment !== 'object' || Array.isArray(attachment)) return attachment;
+      const { name: _name, ...rest } = attachment as Record<string, unknown>;
+      return rest;
+    });
+  }
+  if (redaction === 'names') {
+    delete kept.chatTitle;
+    delete kept.senderDisplayName;
+  }
+  kept.secretRedacted = true;
+  return JSON.stringify({ ...raw, message: kept });
+}
+
+function telegramCaptureSpoolFiles(spoolDir: string): string[] {
+  return readdirSync(spoolDir)
+    .filter((value) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(value))
+    .sort();
 }
 
 /**
@@ -449,6 +543,7 @@ function messageToCapturedItem(input: {
     reactions: input.message.reactions,
     corpusId: input.corpusId,
     trustDomain: input.trustDomain,
+    ...(input.message.secretRedacted === true ? { secretRedacted: true } : {}),
   };
   return {
     trustDomain: input.trustDomain,

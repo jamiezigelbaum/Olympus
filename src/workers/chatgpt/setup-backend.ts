@@ -20,6 +20,7 @@ import type {
   OlympusSourceScopeSelection,
 } from '../../control-ui-contract.ts';
 import { HANDOFF_PATH_PREFIX } from '../../../connect-relay/shared/tokens.ts';
+import { googleDesktopClient } from '../../core/publisher-oauth-client.ts';
 import type { ChatGptDisconnectSourceId, ChatGptOAuthSource, ChatGptSyncSourceId, PrivacyRuleView, PrivacySettings } from './dashboard-contract.ts';
 import { readPrivacyProfile, writePrivacyProfile, type PrivacyRule } from '../classification/privacy-profile.ts';
 import type { ChatGptHandoffs } from './handoff.ts';
@@ -134,9 +135,13 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
 
   return {
     async startOAuth(source) {
-      const result = await post('/dashboard/connect/oauth/start', { source, handback: 'relay' });
+      // Google signs in on the computer once Olympus's Desktop client is
+      // configured (owner, 2026-10-13): the start route then returns to this
+      // engine on loopback, and the hand-off link takes the person there.
+      const onComputer = source !== 'dropbox' && googleDesktopClient() !== undefined;
+      const result = await post('/dashboard/connect/oauth/start', { source, handback: onComputer ? 'computer' : 'relay' });
       if (typeof result.authorization_url !== 'string' || typeof result.expires_at !== 'string') throw new SetupBackendError('internal');
-      return { authorizationUrl: result.authorization_url, expiresAt: result.expires_at };
+      return { authorizationUrl: result.authorization_url, expiresAt: result.expires_at, ...(onComputer ? { onComputer: true } : {}) };
     },
 
     handoffLink(target) {
