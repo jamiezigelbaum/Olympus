@@ -19543,6 +19543,34 @@ class TierLedger {
     })();
     return { record: this.getCurrent(identity), copies };
   }
+  recordSecretSideStoreDebt(identity) {
+    this.db.query(`
+      INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, recorded_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+        local_item_id = CASE WHEN excluded.local_item_id <> '' THEN excluded.local_item_id ELSE secret_side_store_debt.local_item_id END,
+        recorded_at = excluded.recorded_at
+    `).run(...idParams(identity), identity.localItemId ?? "", this.now().toISOString());
+  }
+  secretSideStoreDebts(limit = 100) {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, local_item_id
+      FROM secret_side_store_debt ORDER BY recorded_at LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 1000)));
+    return rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+      ...row.local_item_id ? { localItemId: row.local_item_id } : {}
+    }));
+  }
+  clearSecretSideStoreDebt(identity) {
+    this.db.query(`
+      DELETE FROM secret_side_store_debt
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
+  }
   removeCopies(identity) {
     let removed = [];
     this.db.transaction(() => {
@@ -20222,15 +20250,32 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 5,
       name: "tier_owner_prior_decision",
       up(db) {
         db.exec("ALTER TABLE tier_items ADD COLUMN owner_prior_json TEXT;");
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "secret_side_store_debt",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_side_store_debt (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            local_item_id TEXT NOT NULL DEFAULT '',
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 5, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 6, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -23630,6 +23675,386 @@ var init_tier_placement = __esm(() => {
   };
 });
 
+// src/workers/classification/sniffer-store.ts
+import { Database as Database5 } from "bun:sqlite";
+import { createHash as createHash16 } from "node:crypto";
+import { chmodSync as chmodSync9, existsSync as existsSync22, mkdirSync as mkdirSync16 } from "node:fs";
+import { dirname as dirname21 } from "node:path";
+function snifferMaterialHash(pass, material) {
+  return createHash16("sha256").update(`${pass}
+${material}`).digest("hex");
+}
+
+class TierSnifferStore {
+  dbPath;
+  db;
+  now;
+  readOnly;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database5(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk)
+      mkdirSync16(dirname21(this.dbPath), { recursive: true, mode: 448 });
+    const previousUmask = onDisk ? process.umask(63) : undefined;
+    let db;
+    try {
+      db = new Database5(this.dbPath, { create: true });
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      if (onDisk)
+        restrictFiles(this.dbPath);
+    } catch (error) {
+      if (db)
+        closeSqliteStore(db);
+      throw error;
+    } finally {
+      if (previousUmask !== undefined)
+        process.umask(previousUmask);
+    }
+    this.db = db;
+  }
+  close() {
+    try {
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
+    } finally {
+      if (this.dbPath !== ":memory:" && !this.readOnly)
+        restrictFiles(this.dbPath);
+    }
+  }
+  getVerdict(key2) {
+    const row = this.db.query(`
+      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
+    `).get(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision);
+    if (!row)
+      return;
+    return {
+      tier: row.tier,
+      category: row.category,
+      confidence: row.confidence,
+      failSafe: row.fail_safe === 1,
+      decidedAt: row.decided_at
+    };
+  }
+  putVerdict(key2, verdict) {
+    this.db.query(`
+      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
+        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
+        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
+    `).run(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
+  }
+  enqueue(question) {
+    const materialHash = snifferMaterialHash(question.pass, question.material);
+    this.db.query(`
+      INSERT INTO sniffer_questions (
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision
+          THEN sniffer_questions.attempts ELSE 0 END,
+        material_hash = excluded.material_hash,
+        map_revision = excluded.map_revision,
+        material = excluded.material,
+        flags_json = excluded.flags_json
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
+  }
+  questionFor(subject, pass) {
+    const row = this.db.query(`
+      SELECT * FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).get(...subjectParams(subject), pass);
+    return row ? questionFromRow(row) : undefined;
+  }
+  listQuestions(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+    const rows = options.pass ? this.db.query("SELECT * FROM sniffer_questions WHERE pass = ? ORDER BY question_pk LIMIT ?").all(options.pass, limit) : this.db.query("SELECT * FROM sniffer_questions ORDER BY question_pk LIMIT ?").all(limit);
+    return rows.map(questionFromRow);
+  }
+  deleteQuestion(subject, pass) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass).changes > 0;
+  }
+  deleteItemQuestions(subject) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
+  }
+  rekey(subject, pass, mapRevision) {
+    this.db.query(`
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(mapRevision, ...subjectParams(subject), pass);
+  }
+  recordAttemptFailure(subject, pass) {
+    this.db.query(`
+      UPDATE sniffer_questions SET attempts = attempts + 1
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass);
+    return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+  counts() {
+    const byPass = { metadata: 0, content: 0 };
+    let questions = 0;
+    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
+      byPass[row.pass] = row.n;
+      questions += row.n;
+    }
+    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get().n;
+    return { questions, items, byPass, verdicts };
+  }
+}
+function questionFromRow(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+    pass: row.pass,
+    materialHash: row.material_hash,
+    mapRevision: row.map_revision,
+    material: row.material,
+    flags: JSON.parse(row.flags_json),
+    attempts: row.attempts,
+    queuedAt: row.queued_at
+  };
+}
+function subjectParams(subject) {
+  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
+}
+function restrictFiles(dbPath) {
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync22(path))
+      chmodSync9(path, 384);
+  }
+}
+function snifferMigrations() {
+  return [
+    {
+      version: TIER_SNIFFER_SCHEMA_VERSION,
+      name: "create_tier_sniffer",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
+            material_hash TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
+            category TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
+          );
+          CREATE TABLE IF NOT EXISTS sniffer_questions (
+            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
+            material_hash TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            material TEXT NOT NULL,
+            flags_json TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            queued_at TEXT NOT NULL,
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
+          );
+        `);
+      }
+    }
+  ];
+}
+var TIER_SNIFFER_SCHEMA_VERSION = 1;
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+});
+
+// src/workers/file-extraction/job-names.ts
+import { existsSync as existsSync23 } from "node:fs";
+import { homedir as homedir20 } from "node:os";
+import { join as join26 } from "node:path";
+import { Database as Database6 } from "bun:sqlite";
+function defaultFileExtractionJobsDbPath(env = process.env) {
+  const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
+  if (override)
+    return override;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join26(homedir20(), ".local", "share");
+  return join26(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+}
+function registerExtractionJobsDbPath(dbPath) {
+  if (dbPath === ":memory:")
+    return () => {};
+  openLedgerPaths.set(dbPath, (openLedgerPaths.get(dbPath) ?? 0) + 1);
+  let registered3 = true;
+  return () => {
+    if (!registered3)
+      return;
+    registered3 = false;
+    const count = (openLedgerPaths.get(dbPath) ?? 1) - 1;
+    if (count > 0)
+      openLedgerPaths.set(dbPath, count);
+    else
+      openLedgerPaths.delete(dbPath);
+  };
+}
+function extractionJobsDbPaths(env = process.env) {
+  return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
+}
+function itemNameRedacted(db, item) {
+  if (!redactionsTableExists(db))
+    return false;
+  return db.query(`
+    SELECT 1 FROM ${SECRET_ITEM_REDACTIONS_TABLE}
+    WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      AND (local_item_id = '' OR local_item_id = ?)
+    LIMIT 1
+  `).get(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "") !== null;
+}
+function clearExtractionJobNames(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync23(dbPath))
+    return 0;
+  const db = new Database6(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
+    if (!table)
+      return 0;
+    return db.transaction(() => {
+      if (redactionsTableExists(db)) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", new Date().toISOString());
+      }
+      return item.localItemId !== undefined ? db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId).changes;
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function redactionsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
+}
+var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", openLedgerPaths;
+var init_job_names = __esm(() => {
+  openLedgerPaths = new Map;
+});
+
+// src/workers/connector-store/secrets-disposition.ts
+import { existsSync as existsSync24 } from "node:fs";
+function secretsDisposition() {
+  return SECRETS_DISPOSITION;
+}
+function settleSecretsCopies(options) {
+  const disposition = options.disposition ?? secretsDisposition();
+  const chunks = {};
+  const identity = {
+    family: options.identity.family ?? "file",
+    provider: options.identity.provider,
+    accountScope: options.identity.accountScope,
+    providerItemId: options.identity.providerItemId,
+    localItemId: options.identity.localItemId,
+    ...options.identity.providerConversationId ? { providerConversationId: options.identity.providerConversationId } : {}
+  };
+  for (const copy of options.copies) {
+    const store = options.storeFor(copy.corpusId);
+    if (!store)
+      continue;
+    chunks[copy.corpusId] = (chunks[copy.corpusId] ?? 0) + (store.itemStoredContent(identity)?.chunkCount ?? 0);
+    if (disposition === "tombstone_now") {
+      const trustTier = "S5";
+      store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
+    }
+  }
+  const sideStores = forgetSecretInSideStores({ ledger: options.ledger, identity });
+  if (disposition === "tombstone_now")
+    options.ledger.removeCopies(options.identity);
+  return { disposition, chunks, sideStores };
+}
+function forgetSecretInSideStores(options) {
+  const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0 };
+  const { identity, ledger } = options;
+  const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
+  if (snifferPath !== ":memory:" && existsSync24(snifferPath)) {
+    try {
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      try {
+        result.snifferQuestions = sniffer.deleteItemQuestions({
+          provider: identity.provider,
+          accountScope: identity.accountScope,
+          providerItemId: identity.providerItemId,
+          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+        });
+      } finally {
+        sniffer.close();
+      }
+    } catch {
+      result.failed += 1;
+    }
+  }
+  for (const jobsPath of extractionJobsDbPaths()) {
+    try {
+      result.extractionJobNames += clearExtractionJobNames(jobsPath, {
+        provider: identity.provider,
+        accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId,
+        ...identity.localItemId ? { localItemId: identity.localItemId } : {}
+      });
+    } catch {
+      result.failed += 1;
+    }
+  }
+  try {
+    if (result.failed > 0)
+      ledger.recordSecretSideStoreDebt(identity);
+    else
+      ledger.clearSecretSideStoreDebt(identity);
+  } catch {}
+  if (result.failed > 0)
+    console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
+  return result;
+}
+function retrySecretSideStoreDebts(ledger, limit = 100) {
+  let cleared = 0;
+  for (const identity of ledger.secretSideStoreDebts(limit)) {
+    if (forgetSecretInSideStores({ ledger, identity }).failed === 0)
+      cleared += 1;
+  }
+  return cleared;
+}
+var SECRETS_DISPOSITION = "tombstone_now";
+var init_secrets_disposition = __esm(() => {
+  init_sniffer_store();
+  init_job_names();
+});
+
 // src/core/source-index/chunk-selection.ts
 function sourceIndexChunkQueryTerms(query) {
   return sourceIndexFtsTermGroups(query, {
@@ -24167,10 +24592,10 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash16, randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync22, lstatSync as lstatSync10, mkdirSync as mkdirSync16, statSync as statSync11 } from "node:fs";
-import { dirname as dirname21 } from "node:path";
-import { Database as Database5 } from "bun:sqlite";
+import { createHash as createHash17, randomUUID as randomUUID6 } from "node:crypto";
+import { existsSync as existsSync25, lstatSync as lstatSync10, mkdirSync as mkdirSync17, statSync as statSync11 } from "node:fs";
+import { dirname as dirname22 } from "node:path";
+import { Database as Database7 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
 }
@@ -25553,7 +25978,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest2 = createHash16("sha256");
+  const digest2 = createHash17("sha256");
   for (const row of rows)
     digest2.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -25650,7 +26075,7 @@ function namesOnlyKept(db, itemPks) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash16("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash17("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function connectorStoreItemText(item) {
   return textFromRawItem(item);
@@ -27006,7 +27431,7 @@ function requireNonEmpty2(value, label) {
   return text2;
 }
 function hashString2(value) {
-  return createHash16("sha256").update(value).digest("hex");
+  return createHash17("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -27046,6 +27471,7 @@ var init_local_index = __esm(() => {
   init_tier_classifier();
   init_secret_locations();
   init_tier_placement();
+  init_secrets_disposition();
   init_source_ingestion_exclusions();
   init_fts();
   init_chunk_selection();
@@ -27179,9 +27605,9 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync16(dirname21(this.dbPath), { recursive: true, mode: 448 });
+        mkdirSync17(dirname22(this.dbPath), { recursive: true, mode: 448 });
       }
-      this.db = new Database5(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.db = new Database7(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -27306,14 +27732,14 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       const path = tierLedgerPathForStore(this.dbPath);
-      if (path === ":memory:" || !existsSync22(path))
+      if (path === ":memory:" || !existsSync25(path))
         return;
       return this.tierLedger();
     }
     boundTierLedger(ledgerPath) {
       if (this.boundLedgerHandle?.dbPath === ledgerPath)
         return this.boundLedgerHandle;
-      if (ledgerPath !== ":memory:" && !existsSync22(ledgerPath))
+      if (ledgerPath !== ":memory:" && !existsSync25(ledgerPath))
         throw new TierLedgerUnavailableError(this.corpusId);
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
@@ -27741,7 +28167,7 @@ var init_local_index = __esm(() => {
         seen.add(sha);
         if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
           continue;
-        if (!isMediaCachePath(row.media_path, sha) || !existsSync22(row.media_path))
+        if (!isMediaCachePath(row.media_path, sha) || !existsSync25(row.media_path))
           continue;
         images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
       }
@@ -28022,6 +28448,9 @@ var init_local_index = __esm(() => {
           trustDomain: stored.trustDomain,
           trustTier: stored.trustTier
         });
+        if (decision.contentTier === "secrets" || decision.metadataTier === "secrets") {
+          forgetSecretInSideStores({ ledger, identity: item.identity });
+        }
       } catch {
         run.ledgerFailed = true;
         run.gaps.push("tier_ledger_unavailable: four-tier decisions were not recorded for the rest of this run; storage was unaffected.");
@@ -28725,7 +29154,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash16("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash17("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -29034,7 +29463,7 @@ var init_local_index = __esm(() => {
         WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
       `).all();
         for (const row of rows) {
-          if (existsSync22(row.media_path))
+          if (existsSync25(row.media_path))
             retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
         }
         reassertedMediaHolders.add(this.mediaHolder);
@@ -29576,8 +30005,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash16("sha256");
-      const outputDigest = createHash16("sha256");
+      const inputDigest = createHash17("sha256");
+      const outputDigest = createHash17("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -29647,8 +30076,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash16("sha256");
-      const outputDigest = createHash16("sha256");
+      const inputDigest = createHash17("sha256");
+      const outputDigest = createHash17("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -31058,7 +31487,7 @@ var init_local_index = __esm(() => {
               continue;
             if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
               skip.add(row);
-            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync22(row.media_path)) {
+            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync25(row.media_path)) {
               this.clearChunkMedia(row.chunk_pk, row.item_pk);
               skip.add(row);
             }
@@ -31482,7 +31911,7 @@ var init_local_index = __esm(() => {
       }
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const scanDb = this.dbPath === ":memory:" ? this.db : new Database5(this.dbPath, { readonly: true, create: false, strict: true });
+      const scanDb = this.dbPath === ":memory:" ? this.db : new Database7(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       const bestByItem = new Map;
       let dimensionMismatches = 0;
@@ -32327,328 +32756,6 @@ function tierSetForLedger(ledgerPath) {
   return tierSets?.get(ledgerPath);
 }
 var tierSets;
-
-// src/workers/classification/sniffer-store.ts
-import { Database as Database6 } from "bun:sqlite";
-import { createHash as createHash17 } from "node:crypto";
-import { chmodSync as chmodSync9, existsSync as existsSync23, mkdirSync as mkdirSync17 } from "node:fs";
-import { dirname as dirname22 } from "node:path";
-function snifferMaterialHash(pass, material) {
-  return createHash17("sha256").update(`${pass}
-${material}`).digest("hex");
-}
-
-class TierSnifferStore {
-  dbPath;
-  db;
-  now;
-  readOnly;
-  constructor(options) {
-    this.dbPath = options.dbPath;
-    this.now = options.now ?? (() => new Date);
-    if (options.readOnly === true) {
-      this.db = new Database6(this.dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      this.readOnly = true;
-      return;
-    }
-    this.readOnly = false;
-    const onDisk = this.dbPath !== ":memory:";
-    if (onDisk)
-      mkdirSync17(dirname22(this.dbPath), { recursive: true, mode: 448 });
-    const previousUmask = onDisk ? process.umask(63) : undefined;
-    let db;
-    try {
-      db = new Database6(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
-      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
-      if (onDisk)
-        restrictFiles(this.dbPath);
-    } catch (error) {
-      if (db)
-        closeSqliteStore(db);
-      throw error;
-    } finally {
-      if (previousUmask !== undefined)
-        process.umask(previousUmask);
-    }
-    this.db = db;
-  }
-  close() {
-    try {
-      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
-    } finally {
-      if (this.dbPath !== ":memory:" && !this.readOnly)
-        restrictFiles(this.dbPath);
-    }
-  }
-  getVerdict(key2) {
-    const row = this.db.query(`
-      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
-      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
-    `).get(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision);
-    if (!row)
-      return;
-    return {
-      tier: row.tier,
-      category: row.category,
-      confidence: row.confidence,
-      failSafe: row.fail_safe === 1,
-      decidedAt: row.decided_at
-    };
-  }
-  putVerdict(key2, verdict) {
-    this.db.query(`
-      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
-        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
-        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
-    `).run(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
-  }
-  enqueue(question) {
-    const materialHash = snifferMaterialHash(question.pass, question.material);
-    this.db.query(`
-      INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
-        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
-          AND sniffer_questions.map_revision = excluded.map_revision
-          THEN sniffer_questions.attempts ELSE 0 END,
-        material_hash = excluded.material_hash,
-        map_revision = excluded.map_revision,
-        material = excluded.material,
-        flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
-  }
-  questionFor(subject, pass) {
-    const row = this.db.query(`
-      SELECT * FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).get(...subjectParams(subject), pass);
-    return row ? questionFromRow(row) : undefined;
-  }
-  listQuestions(options = {}) {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
-    const rows = options.pass ? this.db.query("SELECT * FROM sniffer_questions WHERE pass = ? ORDER BY question_pk LIMIT ?").all(options.pass, limit) : this.db.query("SELECT * FROM sniffer_questions ORDER BY question_pk LIMIT ?").all(limit);
-    return rows.map(questionFromRow);
-  }
-  deleteQuestion(subject, pass) {
-    return this.db.query(`
-      DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass).changes > 0;
-  }
-  deleteItemQuestions(subject) {
-    return this.db.query(`
-      DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...subjectParams(subject)).changes;
-  }
-  rekey(subject, pass, mapRevision) {
-    this.db.query(`
-      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(mapRevision, ...subjectParams(subject), pass);
-  }
-  recordAttemptFailure(subject, pass) {
-    this.db.query(`
-      UPDATE sniffer_questions SET attempts = attempts + 1
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass);
-    return this.questionFor(subject, pass)?.attempts ?? 0;
-  }
-  counts() {
-    const byPass = { metadata: 0, content: 0 };
-    let questions = 0;
-    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
-      byPass[row.pass] = row.n;
-      questions += row.n;
-    }
-    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
-    const items = this.db.query(`
-      SELECT COUNT(*) AS n FROM (
-        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
-      )
-    `).get().n;
-    return { questions, items, byPass, verdicts };
-  }
-}
-function questionFromRow(row) {
-  return {
-    provider: row.provider,
-    accountScope: row.account_scope,
-    providerItemId: row.provider_item_id,
-    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
-    pass: row.pass,
-    materialHash: row.material_hash,
-    mapRevision: row.map_revision,
-    material: row.material,
-    flags: JSON.parse(row.flags_json),
-    attempts: row.attempts,
-    queuedAt: row.queued_at
-  };
-}
-function subjectParams(subject) {
-  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
-}
-function restrictFiles(dbPath) {
-  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync23(path))
-      chmodSync9(path, 384);
-  }
-}
-function snifferMigrations() {
-  return [
-    {
-      version: TIER_SNIFFER_SCHEMA_VERSION,
-      name: "create_tier_sniffer",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
-            material_hash TEXT NOT NULL,
-            model_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
-            category TEXT NOT NULL,
-            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
-            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
-            decided_at TEXT NOT NULL,
-            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
-          );
-          CREATE TABLE IF NOT EXISTS sniffer_questions (
-            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
-            material_hash TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            material TEXT NOT NULL,
-            flags_json TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            queued_at TEXT NOT NULL,
-            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
-          );
-        `);
-      }
-    }
-  ];
-}
-var TIER_SNIFFER_SCHEMA_VERSION = 1;
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-});
-
-// src/workers/file-extraction/job-names.ts
-import { existsSync as existsSync24 } from "node:fs";
-import { homedir as homedir20 } from "node:os";
-import { join as join26 } from "node:path";
-import { Database as Database7 } from "bun:sqlite";
-function defaultFileExtractionJobsDbPath(env = process.env) {
-  const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
-  if (override)
-    return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join26(homedir20(), ".local", "share");
-  return join26(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
-}
-function clearExtractionJobNames(dbPath, item) {
-  if (dbPath === ":memory:" || !existsSync24(dbPath))
-    return 0;
-  const db = new Database7(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
-    if (!table)
-      return 0;
-    return item.localItemId !== undefined ? db.query(`
-          UPDATE extraction_jobs SET name = NULL
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
-        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
-          UPDATE extraction_jobs SET name = NULL
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
-        `).run(item.provider, item.accountScope, item.providerItemId).changes;
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4;
-var init_job_names = () => {};
-
-// src/workers/connector-store/secrets-disposition.ts
-import { existsSync as existsSync25 } from "node:fs";
-function secretsDisposition() {
-  return SECRETS_DISPOSITION;
-}
-function settleSecretsCopies(options) {
-  const disposition = options.disposition ?? secretsDisposition();
-  const chunks = {};
-  const identity = {
-    family: options.identity.family ?? "file",
-    provider: options.identity.provider,
-    accountScope: options.identity.accountScope,
-    providerItemId: options.identity.providerItemId,
-    localItemId: options.identity.localItemId,
-    ...options.identity.providerConversationId ? { providerConversationId: options.identity.providerConversationId } : {}
-  };
-  for (const copy of options.copies) {
-    const store = options.storeFor(copy.corpusId);
-    if (!store)
-      continue;
-    chunks[copy.corpusId] = (chunks[copy.corpusId] ?? 0) + (store.itemStoredContent(identity)?.chunkCount ?? 0);
-    if (disposition === "tombstone_now") {
-      const trustTier = "S5";
-      store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
-    }
-  }
-  const sideStores = forgetSecretInSideStores({ ledgerPath: options.ledger.dbPath, identity });
-  if (disposition === "tombstone_now")
-    options.ledger.removeCopies(options.identity);
-  return { disposition, chunks, sideStores };
-}
-function forgetSecretInSideStores(options) {
-  const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0 };
-  const { identity } = options;
-  const snifferPath = tierSnifferPathForLedger(options.ledgerPath);
-  if (snifferPath !== ":memory:" && existsSync25(snifferPath)) {
-    try {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
-      try {
-        result.snifferQuestions = sniffer.deleteItemQuestions({
-          provider: identity.provider,
-          accountScope: identity.accountScope,
-          providerItemId: identity.providerItemId,
-          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
-        });
-      } finally {
-        sniffer.close();
-      }
-    } catch {
-      result.failed += 1;
-    }
-  }
-  try {
-    result.extractionJobNames = clearExtractionJobNames(defaultFileExtractionJobsDbPath(process.env), {
-      provider: identity.provider,
-      accountScope: identity.accountScope,
-      providerItemId: identity.providerItemId,
-      ...identity.localItemId ? { localItemId: identity.localItemId } : {}
-    });
-  } catch {
-    result.failed += 1;
-  }
-  if (result.failed > 0)
-    console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at its next listing.`);
-  return result;
-}
-var SECRETS_DISPOSITION = "tombstone_now";
-var init_secrets_disposition = __esm(() => {
-  init_sniffer_store();
-  init_job_names();
-});
 
 // src/workers/connector-store/tier-names-only-settle.ts
 function settleNamesOnlyItems(options) {
@@ -34855,6 +34962,7 @@ function applyOwnerOverrides(options) {
   try {
     retirePublic = set.classification()?.retirePublic === true;
   } catch {}
+  retrySecretSideStoreDebts(ledger);
   const overrides = ledger.listRoutedOverrides();
   options.afterRead?.();
   for (const { record, override } of overrides) {
@@ -34895,7 +35003,7 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
       return;
     }
     if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === "secrets") {
-      forgetSecretInSideStores({ ledgerPath: ledger.dbPath, identity });
+      forgetSecretInSideStores({ ledger, identity });
       report.secrets += 1;
     }
     return;
@@ -36087,7 +36195,7 @@ class TieredRoutingRun {
     switch (recorded.outcome) {
       case "secrets":
         this.counts.itemsSecrets += 1;
-        forgetSecretInSideStores({ ledgerPath: ledger.dbPath, identity });
+        forgetSecretInSideStores({ ledger, identity });
         if (secretsDisposition() === "hide_until_purge")
           return { kind: "hold", reason: "secrets" };
         this.copyRemovals.set(identityKey(identity), identity);
@@ -75738,7 +75846,7 @@ async function migrateOne(lane, proposal, context2) {
   if (record?.routed && record.state !== "moving") {
     const copies = ledger.copies(proposal.identity);
     const current2 = currentPlacement(copies);
-    if (secrets && record.contentTier === "secrets" && current2.length === 0 && unsettledSecretsCopies(copies, context2.secretsDisposition ?? secretsDisposition())) {
+    if (secrets && record.contentTier === "secrets" && current2.length === 0 && copies.length > 0) {
       return resumeSecretsSettle(lane, proposal, record, copies, context2.secretsDisposition);
     }
     const done = secrets ? record.contentTier === "secrets" && current2.length === 0 : record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier && samePlacement(current2, placement);
@@ -75901,9 +76009,6 @@ function settleMigrationSecrets(lane, identity, generation, copies, disposition)
     secretsChunks: settled.chunks,
     secretsDisposition: settled.disposition
   };
-}
-function unsettledSecretsCopies(copies, disposition) {
-  return disposition === "tombstone_now" && copies.length > 0;
 }
 function resumeSecretsSettle(lane, proposal, record, copies, disposition) {
   let identity;
@@ -97977,6 +98082,7 @@ class LocalFileExtractionJobStore {
   readonly;
   db;
   grantAuthorityId;
+  unregisterPath;
   constructor(dbPath = defaultFileExtractionJobsDbPath(), options = {}) {
     this.dbPath = dbPath;
     this.readonly = options.readonly === true;
@@ -97996,9 +98102,11 @@ class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
+      this.unregisterPath = registerExtractionJobsDbPath(dbPath);
     }
   }
   close() {
+    this.unregisterPath?.();
     closeSqliteStore(this.db);
   }
   invalidateUnsettledForCorpus(corpusId) {
@@ -98030,6 +98138,7 @@ class LocalFileExtractionJobStore {
         const status = maxBytesPerFile !== undefined && ref.sizeBytes !== undefined && ref.sizeBytes > maxBytesPerFile ? "skipped_too_large" : "queued";
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
+        const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
         const forceExisting = Boolean(existing) && force && status === "queued";
         const reset = forceExisting ? 1 : 0;
         this.db.query(`
@@ -98064,7 +98173,7 @@ class LocalFileExtractionJobStore {
             next_retry_at = CASE WHEN ? THEN NULL ELSE extraction_jobs.next_retry_at END,
             temp_bytes_cleaned = CASE WHEN ? THEN 1 ELSE extraction_jobs.temp_bytes_cleaned END,
             updated_at = excluded.updated_at
-        `).run(jobId, ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.providerItemId, ref.localItemId, ref.sourceVersion ?? "", ref.contentHash ?? "", ref.name ?? null, ref.mimeType ?? null, ref.sizeBytes ?? null, extractorKind, extractorVersion, policyDecision, status, priority, maxBytesPerFile ?? null, now, now, policyDecisionSupplied, reset, reset, reset, reset, reset, reset, reset, reset, reset, reset);
+        `).run(jobId, ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.providerItemId, ref.localItemId, ref.sourceVersion ?? "", ref.contentHash ?? "", name, ref.mimeType ?? null, ref.sizeBytes ?? null, extractorKind, extractorVersion, policyDecision, status, priority, maxBytesPerFile ?? null, now, now, policyDecisionSupplied, reset, reset, reset, reset, reset, reset, reset, reset, reset, reset);
         if (forceExisting) {
           jobsForced += 1;
         } else if (existing) {
@@ -98079,7 +98188,7 @@ class LocalFileExtractionJobStore {
           status: forceExisting ? status : jobStatus(existing?.status) ?? status
         });
       }
-    })();
+    }).immediate();
     return { jobsQueued, jobsExisting, jobsForced, jobsSkippedTooLarge, jobRefs };
   }
   lease(request) {
@@ -99023,6 +99132,21 @@ function fileExtractionJobMigrations() {
         VALUES (1, ?, 0)
       `).run(randomUUID22());
     }
+  }, {
+    version: 4,
+    name: "add_secret_item_redactions",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTIONS_TABLE} (
+          provider TEXT NOT NULL,
+          account_scope TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          local_item_id TEXT NOT NULL DEFAULT '',
+          redacted_at TEXT NOT NULL,
+          PRIMARY KEY (provider, account_scope, provider_item_id, local_item_id)
+        );
+      `);
+    }
   }];
 }
 function nextRetryTimestamp(status, attempts, now) {
@@ -99256,7 +99380,7 @@ function terminalRetryPathSql(alias, paths) {
     return { sql: "0", params };
   return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 4, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   init_job_names();
@@ -153516,7 +153640,7 @@ function runTierSet(args, context2 = {}) {
     ledger.setOverride(item.identity, override);
     if (override.kind === "tier" && override.tier === "secrets") {
       forgetSecretInSideStores({
-        ledgerPath: item.ledgerPath,
+        ledger,
         identity: { ...item.identity, ...item.localItemId ? { localItemId: item.localItemId } : {} }
       });
     }

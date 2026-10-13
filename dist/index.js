@@ -10957,6 +10957,23 @@ var init_tier_placement = __esm(() => {
   init_tier_classifier();
 });
 
+// src/workers/classification/sniffer-store.ts
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+});
+
+// src/workers/file-extraction/job-names.ts
+var openLedgerPaths;
+var init_job_names = __esm(() => {
+  openLedgerPaths = new Map;
+});
+
+// src/workers/connector-store/secrets-disposition.ts
+var init_secrets_disposition = __esm(() => {
+  init_sniffer_store();
+  init_job_names();
+});
+
 // src/core/source-index/chunk-selection.ts
 var CHUNK_WINDOW_PROSE_TERMS;
 var init_chunk_selection = __esm(() => {
@@ -11134,6 +11151,7 @@ var init_local_index = __esm(() => {
   init_tier_classifier();
   init_secret_locations();
   init_tier_placement();
+  init_secrets_disposition();
   init_source_ingestion_exclusions();
   init_fts();
   init_chunk_selection();
@@ -11306,20 +11324,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
-// src/workers/classification/sniffer-store.ts
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-});
-
-// src/workers/file-extraction/job-names.ts
-var init_job_names = () => {};
-
-// src/workers/connector-store/secrets-disposition.ts
-var init_secrets_disposition = __esm(() => {
-  init_sniffer_store();
-  init_job_names();
-});
-
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
