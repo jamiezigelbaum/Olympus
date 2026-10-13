@@ -201,8 +201,8 @@ When some of the items that match your question are Private, a small Olympus
 panel appears on its own under ChatGPT's reply: **Private answer from your
 computer**, marked **Not sent to ChatGPT**.
 
-- Your computer writes the answer with its built-in private model (Qwen3.5 4B)
-  and sends it to the panel sealed, so only the panel can open it. It goes
+- Your computer writes the answer with its built-in private model (Qwen3.5,
+  sized to its memory: 2B under 16 GB, 4B with more) and sends it to the panel sealed, so only the panel can open it. It goes
   around the ChatGPT conversation, not through it, and the Olympus relay
   cannot read it.
 - It usually arrives within a minute. Ask for *"all the details"* and
