@@ -20356,7 +20356,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 6,
       name: "secret_side_store_debt",
       up(db) {
         db.exec(`
@@ -20370,8 +20370,14 @@ function tierLedgerMigrations() {
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
-          -- Bumped before every side-store clearing of a Secret, so a
-          -- classification pass can tell one happened since it read the item.
+        `);
+      }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "secret_side_store_scrubs",
+      up(db) {
+        db.exec(`
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
@@ -20385,7 +20391,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 6, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 7, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -23760,7 +23766,8 @@ function isTextualMimeType(mimeType) {
 function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read) : options?.sniffer;
+  const fresh = text2 !== undefined && extra.contentFetchFailed !== true;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, fresh ? read : undefined) : options?.sniffer;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
@@ -28706,7 +28713,7 @@ var init_local_index = __esm(() => {
           trustDomain: stored.trustDomain,
           trustTier: stored.trustTier
         });
-        if (decision.contentTier === "secrets" || decision.metadataTier === "secrets") {
+        if (decision.contentTier === "secrets" || decision.metadataTier === "secrets" || ledger.itemIsSecret(item.identity)) {
           forgetSecretInSideStores({ ledger, identity: item.identity });
         }
       } catch {
@@ -36429,7 +36436,10 @@ class TieredRoutingRun {
     const deferred = this.set.readsContentLater(item);
     const text2 = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
     const classification = this.classification;
-    let decision = decideItemTiers(connector, item, text2, classification, ledger, { namesOnly: deferred && input.metadataOnly });
+    let decision = decideItemTiers(connector, item, text2, classification, ledger, {
+      namesOnly: deferred && input.metadataOnly,
+      ...input.contentFetchFailed ? { contentFetchFailed: true } : {}
+    });
     if (classification?.unavailableReason && decision.contentTier !== "secrets") {
       decision = { ...decision, state: "pending", metadataPending: true, reasons: [...decision.reasons, `metadata:${classification.unavailableReason}`] };
     }
@@ -127738,8 +127748,12 @@ class TierSnifferService {
   applyOwnerOverrides() {
     for (const ledgerPath of this.ledgerPaths()) {
       const set2 = tierSetForLedger(ledgerPath);
-      if (!set2)
+      if (!set2) {
+        try {
+          retrySecretSideStoreDebts(this.ledgerAt(ledgerPath));
+        } catch {}
         continue;
+      }
       try {
         const report = applyOwnerOverrides({ set: set2 });
         if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {
@@ -127932,6 +127946,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_names_only_settle();
   init_tier_rules_sweep();
   init_tier_override_settle();
+  init_secrets_disposition();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   init_tier_ledger();
