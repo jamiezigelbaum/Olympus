@@ -82,7 +82,9 @@ The publisher-side token-exchange endpoint the Google Web client needs
 (decided 2026-10-13). It was deployed and verified live 2026-09-03, and
 Web-client connections made by the 1.0.0 release candidates record
 `oauth2Refresh.exchangeVia: 'publisher_endpoint'`, so they keep refreshing
-through it until it is retired. New Google sign-ins do not use it.
+through it until it was retired on 2026-10-13, before the 1.0.0 launch. Such a
+connection can no longer refresh and needs Olympus 1.0.0 and then **Reconnect
+Google**. New Google sign-ins never used it.
 
 ### The worker's state signing key
 
