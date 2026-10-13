@@ -122020,6 +122020,17 @@ function hostProgram(input, bridge) {
     frame,
     callTool,
     openUrl(url) {
+      const own3 = Object.keys(input.bridge.links).map((key2) => input.bridge.links[key2]).concat(Object.keys(input.bridge.openTargets).map((key2) => input.bridge.openTargets[key2]));
+      let parsed;
+      try {
+        parsed = new URL(url, window.location.href);
+      } catch {
+        parsed = undefined;
+      }
+      if (parsed && (own3.indexOf(url) >= 0 || parsed.origin === window.location.origin)) {
+        window.location.assign(parsed.pathname + parsed.search + parsed.hash);
+        return;
+      }
       window.open(url, "_blank", "noopener");
     }
   });
