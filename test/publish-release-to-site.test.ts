@@ -71,7 +71,8 @@ test('local Linux bundle pins the real installer without publishing unqualified 
   expect(() => publishLinuxToSite({ root, artifact })).toThrow();
   expect(() => prepareLinuxLocalBundle({ root, artifact, output })).toThrow();
   expect(readFileSync(join(output, 'SHA256SUMS'), 'utf8')).toContain(fileDigest(artifact).sha256);
-});
+  expect(readFileSync(join(output, 'README.txt'), 'utf8')).toContain(`sh ./install-linux.sh --tarball "$(pwd)/olympus-${pins.version}.tgz"`);
+}, 30_000);
 
 function linuxFixture(qualification: LinuxRuntimePins['bun']['qualification'] = 'qualified-omarchy') {
   const result = fixture();

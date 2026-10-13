@@ -350,8 +350,8 @@ export class LinuxLibsecretSecretStore implements SecretStore {
     return result.stdout;
   }
 
-  private access(action: 'lookup' | 'store' | 'clear', collection: string, key: string, value?: string): string {
-    return this.command('/usr/bin/python3', ['-c', LINUX_SECRET_SERVICE_HELPER], JSON.stringify({ action, collection, key, value }));
+  private access(action: 'lookup' | 'store' | 'clear', collection: string, key: string, value?: string, items?: string[]): string {
+    return this.command('/usr/bin/python3', ['-c', LINUX_SECRET_SERVICE_HELPER], JSON.stringify({ action, collection, key, value, items }));
   }
 
   private bus(request: { path: string; interface: string; method: string; signature: string; args: unknown[] }, signature: string): unknown[] {
@@ -405,8 +405,9 @@ export class LinuxLibsecretSecretStore implements SecretStore {
   async delete(key: string): Promise<void> {
     assertSafeKey(key);
     const { collection, items } = this.accessibleItems(key);
+    if (items.some((item) => !item.startsWith(`${collection}/`)) || items.length > 1) throw new SecretStoreError('configuration', 'matching item is outside the selected collection or ambiguous; no migration is supported.');
     if (!items.length) return;
-    this.access('clear', collection, key);
+    this.access('clear', collection, key, undefined, items);
     if (this.accessibleItems(key).items.length) throw new SecretStoreError('unavailable', 'libsecret deletion was not confirmed.');
   }
 

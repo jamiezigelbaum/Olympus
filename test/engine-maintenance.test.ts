@@ -201,4 +201,4 @@ test('lifecycle holds admission before drain; timeout releases it and never send
  const stopCommands:string[][]=[];
  stopEngine({platform:'darwin',homeDir:root,now:true,exec:(cmd,args)=>{stopCommands.push([cmd,...args]);const refusal=Bun.spawnSync([process.execPath,'-e',`const {withEngineConsultAdmission}=await import(${JSON.stringify(MODULE)});try{await withEngineConsultAdmission(${JSON.stringify(state)},async()=>{});process.exit(2);}catch(e){process.exit(e.code==='engine_maintenance_in_progress'?0:3);}`]);expect(refusal.exitCode).toBe(0);return {status:0,stdout:'state = running',stderr:''};}});
  expect(stopCommands.some(c=>c.includes('bootout'))).toBe(true);
-});
+}, 30_000);

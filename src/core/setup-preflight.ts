@@ -24,19 +24,19 @@ export interface SetupPreflightOptions {
 }
 
 export async function setupPreflight(options: SetupPreflightOptions): Promise<SetupPrerequisite[]> {
+  const inputEnv = options.env ?? (options.homeDir ? { HOME: options.homeDir } : process.env);
   // The managed worker.env counts as present. `olympus connect gemini` stores
   // the key there because that is where the supervised worker reads it from,
   // so a preflight reading only process.env reported the key missing straight
   // after the operator stored it -- and named the command they had just run.
   const env = environmentWithWorkerSetupEnv({
-    ...(options.env ? { env: options.env } : {}),
+    env: inputEnv,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}),
   });
   // A shell export does not reach launchd/systemd. When checking a managed
   // install, only its persisted environment proves an env-secret prerequisite.
   // Keep scoped, standalone preflights usable when no install was selected.
-  const inputEnv = options.env ?? process.env;
   const managedInstall = options.workerEnvPath || options.homeDir
     || (inputEnv.HOME?.trim() && existsSync(workerSetupEnvPath(options)));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;

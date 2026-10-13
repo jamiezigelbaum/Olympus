@@ -142,6 +142,7 @@ describe('olympus open: no state change from a link', () => {
     chmodSync(envPath, 0o600);
     for (const [key, value] of Object.entries({
       HOME: home,
+      XDG_CONFIG_HOME: join(home, '.config'),
       OLYMPUS_CONFIG: join(home, 'missing-config.json'),
       OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
     })) {

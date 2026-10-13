@@ -907,6 +907,8 @@ describe('the install route', () => {
   }
 
   const consultAdapter = (env: Record<string, string>) => createDashboardConsultAdapter({
+    // Exercise the setup card on a platform that supplies network confinement.
+    confinement: { level: 'loopback_filtered', limit: 'fixture', wrap: argv => [...argv], selfTest: async () => true },
     sovereignty: { config: loadSovereigntyPreset('local-first'), source: 'preset' },
     secretPresent: () => false,
     recoverSession: async () => { throw new Error('not used'); },

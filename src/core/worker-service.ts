@@ -503,7 +503,9 @@ function defaultWorkerServiceExec(command: string, args: string[]): WorkerServic
   };
 }
 
-export function workerServicePaths(platform: WorkerServicePlatform, homeDir: string, env: Record<string, string | undefined> = process.env): {
+// The legacy lifecycle owns paths beneath its explicit home. XDG selectors
+// belong to an explicitly supplied engine environment, never an ambient user.
+export function workerServicePaths(platform: WorkerServicePlatform, homeDir: string, env: Record<string, string | undefined> = {}): {
   label: string;
   unitPath: string;
   envPath: string;

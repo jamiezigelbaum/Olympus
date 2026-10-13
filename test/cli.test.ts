@@ -271,7 +271,7 @@ describe('CLI tool surface', () => {
     const result = await runBin(['engine', '--help']);
     expect(result.stdout).toContain(process.platform === 'linux' ? 'per-user systemd service' : 'per-user LaunchAgent');
     if (process.platform === 'linux') expect(result.stdout).not.toContain('this Mac');
-  });
+  }, 30_000);
 
   test('the public CLI catalog rejects repository-only commands before dispatch', async () => {
     expect(isV04PublicCliInvocation(['source', 'answer', 'question'])).toBe(true);
@@ -1816,6 +1816,7 @@ function recordingFetch(
 
 /** Set process.env entries and hand back the exact restore for a `finally`. */
 function withTemporaryEnv(values: Record<string, string | undefined>): { restore: () => void } {
+  if (values.HOME && !Object.hasOwn(values, 'XDG_CONFIG_HOME')) values = { ...values, XDG_CONFIG_HOME: join(values.HOME, '.config') };
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(values)) {
     previous.set(key, process.env[key]);

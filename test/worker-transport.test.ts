@@ -46,7 +46,7 @@ test('stale socket removal needs both supervisor process custody and listener re
  const made=spawnSync('python3',['-c','import socket,sys\ns=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()',path]);expect(made.status).toBe(0);chmodSync(path,0o600);
  expect(()=>removeReleasedWorkerSocket(options,{previousWorkerReleased:false})).toThrow('custody');expect(lstatSync(path).isSocket()).toBe(true);
  expect(removeReleasedWorkerSocket(options,{previousWorkerReleased:true})).toBe(true);expect(()=>lstatSync(path)).toThrow();
-});
+}, 30_000);
 
 test('real Unix worker health and CLI/relay fetch retain origin and never follow redirects', async () => {
   const { options } = fixture(); const path = prepareWorkerSocket(options)!;

@@ -507,7 +507,7 @@ export function prepareLinuxLocalBundle(input: { root: string; artifact: string;
   writeFileSync(join(input.output, 'SHA256SUMS'), `${pins.sha256}  ${name}\n`, { flag: 'wx' });
   writeFileSync(join(input.output, 'README.txt'),
     `Local Linux x64 acceptance candidate; not host-qualified or published.\n`
-    + `sha256sum -c SHA256SUMS\nsh ./install-linux.sh --tarball "${name}"\n`
+    + `sha256sum -c SHA256SUMS\nsh ./install-linux.sh --tarball "$(pwd)/${name}"\n`
     + `sh ./uninstall-linux.sh\nData is retained by default. See the Omarchy acceptance runbook for explicit purge and recovery.\n`, { flag: 'wx' });
   return { ...pins, directory: input.output };
 }

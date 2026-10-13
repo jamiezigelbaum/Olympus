@@ -3541,18 +3541,23 @@ try:
             raise RuntimeError('IsLocked')
     collection = request['collection']
     unlocked(collection, 'Collection')
-    items, locked = call(base, iface + 'Service', 'SearchItems', '(a{ss})', ({'application': 'olympus', 'key': request['key']},))
-    if locked:
-        raise RuntimeError('IsLocked')
-    for item in items:
-        unlocked(item, 'Item')
     action = request['action']
     if action == 'clear':
+        # Delete only the parent-validated identity, never new attribute matches.
+        items = request.get('items')
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], str) or not items[0].startswith(collection + '/'):
+            raise RuntimeError('InvalidData')
         for item in items:
+            unlocked(item, 'Item')
             prompt = call(item, iface + 'Item', 'Delete', None, ())[0]
             if prompt != '/':
                 raise RuntimeError('IsLocked')
     else:
+        items, locked = call(base, iface + 'Service', 'SearchItems', '(a{ss})', ({'application': 'olympus', 'key': request['key']},))
+        if locked:
+            raise RuntimeError('IsLocked')
+        for item in items:
+            unlocked(item, 'Item')
         if len(items) > 1:
             raise RuntimeError('InvalidData')
         if action == 'lookup' and not items:
@@ -4005,8 +4010,8 @@ class LinuxLibsecretSecretStore {
     }
     return result.stdout;
   }
-  access(action, collection, key, value) {
-    return this.command("/usr/bin/python3", ["-c", LINUX_SECRET_SERVICE_HELPER], JSON.stringify({ action, collection, key, value }));
+  access(action, collection, key, value, items) {
+    return this.command("/usr/bin/python3", ["-c", LINUX_SECRET_SERVICE_HELPER], JSON.stringify({ action, collection, key, value, items }));
   }
   bus(request, signature) {
     const text2 = this.command("/usr/bin/python3", ["-c", LINUX_SECRET_SERVICE_HELPER], JSON.stringify({ action: "bus", ...request }));
@@ -4068,9 +4073,11 @@ class LinuxLibsecretSecretStore {
   async delete(key) {
     assertSafeKey(key);
     const { collection, items } = this.accessibleItems(key);
+    if (items.some((item) => !item.startsWith(`${collection}/`)) || items.length > 1)
+      throw new SecretStoreError("configuration", "matching item is outside the selected collection or ambiguous; no migration is supported.");
     if (!items.length)
       return;
-    this.access("clear", collection, key);
+    this.access("clear", collection, key, undefined, items);
     if (this.accessibleItems(key).items.length)
       throw new SecretStoreError("unavailable", "libsecret deletion was not confirmed.");
   }
@@ -6562,7 +6569,7 @@ function readWorkerSetupEnv(options = {}) {
   }
 }
 function workerSetupEnvPath(options = {}) {
-  const env = options.env ?? process.env;
+  const env = options.env ?? (options.homeDir ? {} : process.env);
   if (options.workerEnvPath)
     return options.workerEnvPath;
   if (process.platform === "linux")

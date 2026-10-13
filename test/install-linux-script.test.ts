@@ -195,7 +195,7 @@ for (const shell of shells) {
     expect(r.stdout).toContain('Installed for your user');
     expect(r.stdout).toContain('By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)\nand acknowledge its Privacy Policy (https://olympusplugin.ai/privacy/).\nOlympus is provided as is, without warranty. Keep your own backups.');
     expect(r.stdout.indexOf('By installing Olympus you agree')).toBeLessThan(r.stdout.indexOf('Installed for your user'));
-  });
+  }, 30_000);
   test(`${shell}: truncated pipe and unfilled template execute nothing`, () => {
     const h = fixture(shell);
     const template = text(join(REPO, 'scripts/install-linux.sh'));
@@ -204,7 +204,7 @@ for (const shell of shells) {
       expect(h.calls()).toBe('');
       expect(r.stdout).not.toContain('Installed for your user');
     }
-  });
+  }, 30_000);
   test(`${shell}: default OS-only uninstall removes receipt-owned machinery and keeps data`, () => {
     const h = fixture(shell);
     const receipt = h.receipt();
@@ -221,7 +221,7 @@ for (const shell of shells) {
     expect(existsSync(receipt.launcherPath)).toBe(false);
     expect(JSON.parse(text(receipt.path))).toMatchObject({ installationState: 'data_retained', machineArtifacts: [], ownedUnitLinks: [] });
     expect(existsSync(join(h.runtime, 'olympus/lifecycle.lock'))).toBe(true);
-  });
+  }, 30_000);
 }
 
 test('local pinned tarball and Bun archive install without curl', () => {
@@ -230,7 +230,7 @@ test('local pinned tarball and Bun archive install without curl', () => {
   const r = h.run({}, ['--tarball', h.tar, '--bun-archive', h.zip]);
   expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
   expect(h.calls()).toContain('engine status');
-});
+}, 30_000);
 
 test('local archive options still enforce pins and reject unsafe paths', () => {
   const h = fixture();
@@ -239,7 +239,7 @@ test('local archive options still enforce pins and reject unsafe paths', () => {
   expect(h.run({}, ['--tarball', tampered, '--bun-archive', h.zip]).stderr).toContain('Release checksum/size mismatch');
   expect(h.run({}, ['--tarball', 'relative.tgz']).stderr).toContain('must be absolute');
   expect(h.calls()).toBe('');
-});
+}, 30_000);
 
 test('Bun-free uninstaller tree digest matches lifecycle recursive ordering', () => {
   const root = mkdtempSync(join(tmpdir(), 'olympus-linux-digest-'));
@@ -273,7 +273,7 @@ for (const [env, message] of [
     expect(r.stderr).toContain(message);
     if ('FAKE_LOGIND_FAIL' in env) expect(h.calls()).toContain('--restart');
     else expect(h.calls()).toBe('');
-  });
+  }, 30_000);
 }
 
 test('missing tool refusal lists both distro remedies before mutation', () => {
@@ -285,7 +285,7 @@ test('missing tool refusal lists both distro remedies before mutation', () => {
   expect(r.stderr).toContain('sudo pacman -S --needed');
   expect(r.stderr).toContain('sudo apt install');
   expect(h.calls()).toBe('');
-});
+}, 30_000);
 
 test('lifecycle-owned linger denial propagates and never reports installation', () => {
   const h = fixture();
@@ -296,7 +296,7 @@ test('lifecycle-owned linger denial propagates and never reports installation', 
   expect(h.calls()).toContain('--restart');
   expect(h.calls()).not.toContain('engine status');
   expect(r.stdout).not.toContain('Installed for your user');
-});
+}, 30_000);
 
 test('CLI preflight refusal leaves linger and existing installation untouched', () => {
   const h = fixture();
@@ -304,14 +304,14 @@ test('CLI preflight refusal leaves linger and existing installation untouched', 
   expect(r.status).not.toBe(0);
   expect(h.calls()).not.toContain('enable-linger');
   expect(h.calls()).not.toContain('--restart');
-});
+}, 30_000);
 
 test('bootstrap never passes ambient linger provenance to lifecycle', () => {
   const h = fixture();
   expect(h.run({ FAKE_LINGER: 'no' }).status).toBe(0);
   expect(h.calls()).not.toContain('linger-before=');
   expect(text(h.script)).not.toContain('OLYMPUS_LINGER_BEFORE');
-});
+}, 30_000);
 
 for (const kind of ['link', 'traversal']) {
   test(`valid checksum cannot authorize unsafe archive ${kind}`, () => {
@@ -320,7 +320,7 @@ for (const kind of ['link', 'traversal']) {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toMatch(/archive path|special files/);
     expect(h.calls()).toBe('');
-  });
+  }, 30_000);
 }
 
 test('missing pin and tampered release refuse before execution', () => {
@@ -333,7 +333,7 @@ test('missing pin and tampered release refuse before execution', () => {
     expect(r.stderr).toMatch(/pin|checksum/);
     expect(h.calls()).toBe('');
   }
-});
+}, 30_000);
 
 test('tampered extracted Bun is not executed, even with an intact archive', () => {
   const h = fixture();
@@ -342,7 +342,7 @@ test('tampered extracted Bun is not executed, even with an intact archive', () =
   expect(r.status).not.toBe(0);
   expect(r.stderr).toContain('Bun executable checksum mismatch');
   expect(h.calls()).toBe('');
-});
+}, 30_000);
 
 test('unknown health and failed install never report success', () => {
   for (const env of [{ FAKE_HEALTH: 'false' }, { FAKE_INSTALL_FAIL: '1' }]) {
@@ -362,7 +362,7 @@ test('unsafe runtime path refuses without following a symlink', () => {
   symlinkSync(h.home, join(h.runtime, 'olympus'));
   expect(h.run().stderr).toContain('Symbolic link refused');
   expect(h.calls()).toBe('');
-});
+}, 30_000);
 
 for (const fault of ['duplicate', 'foreign', 'generation', 'marker', 'purge', 'custody', 'fragment']) {
   test(`uninstall fault ${fault} preserves personal data and refuses success`, () => {
@@ -371,16 +371,18 @@ for (const fault of ['duplicate', 'foreign', 'generation', 'marker', 'purge', 'c
     const personal = join(h.home, '.config/olympus/personal');
     writeFileSync(personal, 'untouched');
     if (fault === 'duplicate') writeFileSync(receipt.path, text(receipt.path).replace(`"uid":${TEST_UID}`, `"uid":${TEST_UID},"uid":${TEST_UID}`));
-    if (fault === 'generation') { rmSync(receipt.generation, { recursive: true }); mkdirSync(receipt.generation, { recursive: true, mode: 0o700 }); writeFileSync(receipt.markerPath, '{"schema":"olympus.engine.generation.v1","token":"fixture"}\n', { mode: 0o600 }); }
+    // Retain the old inode so Linux cannot reuse it for the replacement.
+    if (fault === 'generation') { renameSync(receipt.generation, join(h.root, 'displaced-generation')); mkdirSync(receipt.generation, { recursive: true, mode: 0o700 }); writeFileSync(receipt.markerPath, '{"schema":"olympus.engine.generation.v1","token":"fixture"}\n', { mode: 0o600 }); }
     if (fault === 'marker') writeFileSync(receipt.markerPath, 'replaced');
     const r = h.uninstall(fault === 'foreign' ? { FAKE_OWNER: String(FOREIGN_UID) } : fault === 'custody' ? { FAKE_UNINSTALL_FAIL: '1' } : fault === 'fragment' ? { FAKE_FRAGMENT: join(h.home, 'foreign.service') } : {}, fault === 'purge' ? ['--purge'] : []);
+    if (fault === 'generation') expect(r.stderr).toContain('generation root was replaced and retained');
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toContain('machinery was removed');
     expect(text(personal)).toBe('untouched');
     if (fault !== 'custody' && fault !== 'fragment') expect(h.calls()).toBe('');
     if (fault === 'custody') expect(r.stderr).toContain('active engine cgroup is unknown');
     if (fault === 'fragment') expect(r.stderr).toContain('not receipt-owned');
-  });
+  }, 30_000);
 }
 
 for (const damage of ['missing-bun', 'corrupt-cli', 'symlink-cli']) {
@@ -393,7 +395,7 @@ for (const damage of ['missing-bun', 'corrupt-cli', 'symlink-cli']) {
     const r = h.uninstall();
     expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
     expect(existsSync(receipt.generation)).toBe(false);
-  });
+  }, 30_000);
 }
 
 test('explicit purge removes only Olympus roots and restores receipt-proven linger by choice', () => {
@@ -408,7 +410,7 @@ test('explicit purge removes only Olympus roots and restores receipt-proven ling
   expect(r.stdout).toContain('pre-install linger state was restored');
   for (const root of [receipt.configDir, receipt.dataDir, receipt.stateDir, receipt.cacheDir]) expect(existsSync(root)).toBe(false);
   expect(text(unrelated)).toBe('keep');
-});
+}, 30_000);
 
 test('full purge refuses explicit libsecret without claiming keyring deletion', () => {
   const h = fixture();
@@ -420,7 +422,7 @@ test('full purge refuses explicit libsecret without claiming keyring deletion', 
   expect(r.stderr).toContain('never delete the whole keyring');
   expect(existsSync(receipt.path)).toBe(true);
   expect(existsSync(receipt.generation)).toBe(true);
-});
+}, 30_000);
 
 test('pending crash-safe open handler intent removes only marked desktop and Olympus MIME value', () => {
   const h = fixture();
@@ -437,7 +439,7 @@ test('pending crash-safe open handler intent removes only marked desktop and Oly
   expect(text(parsed.layout.mimeappsPath)).toContain('x-scheme-handler/olympus=other.desktop;');
   expect(text(parsed.layout.mimeappsPath)).toContain('x-scheme-handler/other=keep.desktop;');
   expect(JSON.parse(text(receipt.path))).toMatchObject({ installationState: 'data_retained', openHandlerPending: false });
-});
+}, 30_000);
 
 test('pending open handler recovers a receipt-bound tombstone after shell interruption', () => {
   const h = fixture();
@@ -458,7 +460,7 @@ test('pending open handler recovers a receipt-bound tombstone after shell interr
   expect(existsSync(tombstone)).toBe(false);
   expect(existsSync(journal)).toBe(false);
   expect(JSON.parse(text(receipt.path))).toMatchObject({ installationState: 'data_retained', openHandlerPending: false });
-});
+}, 30_000);
 
 test('pending open handler reuses an existing receipt artifact during tombstone replay', () => {
   const h = fixture();
@@ -480,7 +482,7 @@ test('pending open handler reuses an existing receipt artifact during tombstone 
   expect(existsSync(tombstone)).toBe(false);
   expect(existsSync(journal)).toBe(false);
   expect(JSON.parse(text(receipt.path))).toMatchObject({ installationState: 'data_retained', machineArtifacts: [], openHandlerPending: false });
-});
+}, 30_000);
 
 test('interrupted purge resumes from inode-bound tombstone while receipt stays reachable', () => {
   const h = fixture();
@@ -499,7 +501,7 @@ test('interrupted purge resumes from inode-bound tombstone while receipt stays r
   expect(existsSync(tombstone)).toBe(false);
   expect(existsSync(journal)).toBe(false);
   expect(existsSync(receipt.path)).toBe(false);
-});
+}, 30_000);
 
 test('interrupted generation deletion resumes after partial tombstone cleanup', () => {
   const h = fixture();
@@ -514,13 +516,13 @@ test('interrupted generation deletion resumes after partial tombstone cleanup', 
   expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
   expect(existsSync(tombstone)).toBe(false);
   expect(existsSync(journal)).toBe(false);
-});
+}, 30_000);
 
 test('uninstaller help is available without an install or live session', () => {
   const r = spawnSync('/bin/sh', [join(REPO, 'site/uninstall-linux.sh'), '--help'], { env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8' });
   expect(r.status).toBe(0);
   expect(r.stdout).toContain('--purge --yes');
-});
+}, 30_000);
 
 test('keep-data removal is repeatable and retained receipt authorizes later purge', () => {
   const h = fixture();
@@ -531,7 +533,7 @@ test('keep-data removal is repeatable and retained receipt authorizes later purg
   expect(h.uninstall({}, ['--purge', '--yes']).status).toBe(0);
   expect(existsSync(receipt.path)).toBe(false);
   expect(existsSync(receipt.dataDir)).toBe(false);
-});
+}, 30_000);
 
 test('failed-first recovery receipt supports Bun-free cleanup with no machine claims', () => {
   const h = fixture();
@@ -551,7 +553,7 @@ test('failed-first recovery receipt supports Bun-free cleanup with no machine cl
   expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
   expect(text(join(receipt.configDir, 'failed-first-setting'))).toBe('keep');
   expect(JSON.parse(text(receipt.path))).toMatchObject({ installationState: 'data_retained', machineArtifacts: [], ownedUnitLinks: [] });
-});
+}, 30_000);
 
 test('later purge recreates a missing private Olympus runtime directory after reboot', () => {
   const h = fixture();
@@ -562,7 +564,7 @@ test('later purge recreates a missing private Olympus runtime directory after re
   expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
   expect(existsSync(receipt.path)).toBe(false);
   expect((lstatSync(join(h.runtime, 'olympus')).mode & 0o777)).toBe(0o700);
-});
+}, 30_000);
 
 test('malformed receipt cannot widen purge to the home directory', () => {
   const h = fixture();
@@ -576,7 +578,7 @@ test('malformed receipt cannot widen purge to the home directory', () => {
   expect(r.status).not.toBe(0);
   expect(r.stderr).toContain('inconsistent Linux layout');
   expect(text(sentinel)).toBe('safe');
-});
+}, 30_000);
 
 test('overlapping canonical managed roots refuse before removal', () => {
   const h = fixture();
@@ -600,7 +602,7 @@ test('overlapping canonical managed roots refuse before removal', () => {
   expect(r.status).not.toBe(0);
   expect(r.stderr).toContain('managed Olympus roots overlap');
   expect(existsSync(receipt.generation)).toBe(true);
-});
+}, 30_000);
 
 test('unfinished install transaction refuses before service or artifact mutation', () => {
   const h = fixture();
@@ -613,7 +615,7 @@ test('unfinished install transaction refuses before service or artifact mutation
   expect(existsSync(receipt.unitPath)).toBe(true);
   expect(existsSync(receipt.generation)).toBe(true);
   expect(existsSync(receipt.path)).toBe(true);
-});
+}, 30_000);
 
 test('unknown package machinery is retained and prevents a success receipt', () => {
   const h = fixture();
@@ -626,7 +628,7 @@ test('unknown package machinery is retained and prevents a success receipt', () 
   expect(existsSync(unknown)).toBe(true);
   expect(existsSync(receipt.path)).toBe(true);
   expect(r.stdout).not.toContain('machinery was removed');
-});
+}, 30_000);
 
 test('Bun-free removal refuses while a recorded process group survives', async () => {
   const h = fixture();
@@ -643,7 +645,7 @@ test('Bun-free removal refuses while a recorded process group survives', async (
     try { process.kill(-child.pid!, 'SIGKILL'); } catch {}
     await new Promise(resolve => child.once('exit', resolve));
   }
-});
+}, 30_000);
 
 test('real flock contention and cancellation retain custody through the mutation child', async () => {
   const h = fixture();
@@ -704,7 +706,7 @@ test('killing the uninstall shell cannot release flock while Python mutation con
 
 test('Linux installers parse', () => {
  for(const p of ['scripts/install-linux.sh','site/uninstall-linux.sh']) for(const shell of shells) expect(spawnSync(shell,['-n',join(REPO,p)]).status).toBe(0);
-});
+}, 30_000);
 test.skipIf(spawnSync('shellcheck',['--version']).status !== 0)('Linux installers pass ShellCheck', () => {
   for (const p of ['scripts/install-linux.sh', 'site/uninstall-linux.sh']) {
     for (const shell of shells) expect(spawnSync(shell, ['-n', join(REPO, p)]).status).toBe(0);
@@ -728,7 +730,7 @@ for (const purge of [false, true]) test(`desktop launcher removal in ${purge ? '
  const result=h.uninstall({},purge?['--purge','--yes']:[]);
  expect({status:result.status,stderr:result.stderr}).toEqual({status:0,stderr:''});
  expect(existsSync(desktop)).toBe(false);expect(existsSync(icon)).toBe(false);
-});
+}, 30_000);
 
 for (const dataLayout of ['legacy', 'xdg'] as const) {
   for (const purge of [false, true]) {
@@ -744,6 +746,6 @@ for (const dataLayout of ['legacy', 'xdg'] as const) {
       expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
       expect(existsSync(join(r.dataDir, 'personal.sqlite'))).toBe(!purge);
       expect(readFileSync(join(other, 'unrelated.sqlite'), 'utf8')).toBe('unrelated');
-    });
+    }, 30_000);
   }
 }

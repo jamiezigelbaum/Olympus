@@ -137,7 +137,9 @@ export function environmentWithWorkerSetupEnv(
 }
 
 export function workerSetupEnvPath(options: WorkerAuthTokenLookupOptions = {}): string {
-  const env = options.env ?? process.env;
+  // An explicit home selects an install; ambient XDG roots may name another.
+  // Callers with a resolved engine environment can still supply it explicitly.
+  const env = options.env ?? (options.homeDir ? {} : process.env);
   if (options.workerEnvPath) return options.workerEnvPath;
   if (process.platform === 'linux') return resolveLinuxEngineLayout({ ...env, HOME: options.homeDir ?? env.HOME }).workerEnvPath;
   return join(

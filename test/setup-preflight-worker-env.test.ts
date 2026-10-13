@@ -19,6 +19,28 @@ import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { writeManagedWorkerEnvSecret } from '../src/core/worker-service.ts';
 import { createDefaultSecretStore } from '../src/core/secret-store.ts';
+import { workerSetupEnvPath } from '../src/core/worker-auth.ts';
+
+test.skipIf(process.platform !== 'linux')('an explicit preflight home isolates both stored keys and worker.env from ambient XDG paths', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'preflight-selected-'));
+  const other = mkdtempSync(join(tmpdir(), 'preflight-ambient-'));
+  const prior = process.env.XDG_CONFIG_HOME;
+  try {
+    await createDefaultSecretStore({ platform: 'linux', env: { HOME: home } }).set('venice.api_key', 'selected-fixture');
+    process.env.XDG_CONFIG_HOME = join(other, '.config');
+    const config = createSovereigntyEngine(loadPreBuiltInPreset('private-cloud-only')).config;
+    const unmet = await setupPreflight({ config, homeDir: home });
+    expect(unmet.map(item => item.id)).not.toContain('store:venice.api_key');
+    expect(existsSync(join(other, '.config'))).toBe(false);
+    expect(workerSetupEnvPath({ homeDir: home })).toBe(join(home, '.config/olympus/worker.env'));
+    expect(workerSetupEnvPath({ homeDir: home, env: { XDG_CONFIG_HOME: join(home, 'selected') } })).toBe(join(home, 'selected/olympus/worker.env'));
+  } finally {
+    if (prior === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prior;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
+  }
+});
 
 test('environment-only preflight does not initialize a durable secret backend', async () => {
   const home = mkdtempSync(join(tmpdir(), 'preflight-no-store-'));

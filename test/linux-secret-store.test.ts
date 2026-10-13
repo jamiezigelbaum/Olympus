@@ -154,6 +154,10 @@ const collection = '/org/freedesktop/secrets/collection/login';
 function fakeService(options: { locked?: boolean; itemLocked?: boolean; failure?: string; failedAction?: string } = {}) {
   const values = new Map<string, string>();
   const calls: { command: string; args: string[]; input?: string }[] = [];
+  const deleteItem = (path: string) => {
+    const key = [...values.keys()][Number(path.split('_').at(-1))];
+    if (key !== undefined) values.delete(key);
+  };
   const runner: CommandRunner = (command, args, input) => {
     calls.push({ command, args, ...(input ? { input } : {}) });
     const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -168,13 +172,24 @@ function fakeService(options: { locked?: boolean; itemLocked?: boolean; failure?
           const items = [...values.keys()].filter((k) => !key || k === key).map((k) => `${collection}/item_${[...values.keys()].indexOf(k)}`);
           return json('aoao', [items, []]);
         }
+        if (req.method === 'Delete') { deleteItem(req.path); return json('o', ['/']); }
         if (req.args[1] === 'Locked') return json('b', [options.locked || (req.args[0] === 'org.freedesktop.Secret.Item' && options.itemLocked) || false]);
         if (req.args[1] === 'Attributes') return json('a{ss}', [{ key: [...values.keys()][Number(req.path.split('_').at(-1))] }]);
       }
-      if (req.action === options.failedAction) return { status: 1, stdout: '', stderr: 'permission' };
-      if (req.action === 'store') { values.set(req.key, req.value); return ok(); }
-      if (req.action === 'lookup') return values.has(req.key) ? ok(values.get(req.key)) : { status: 1, stdout: '', stderr: '' };
-      if (req.action === 'clear') { values.delete(req.key); return ok(); }
+      // The fixed helper deletes the exact prevalidated item paths; the pre-fix
+      // helper re-searched by attribute. Model both request shapes.
+      const action = req.action === 'delete' ? 'clear' : req.action;
+      if (action === options.failedAction) return { status: 1, stdout: '', stderr: 'permission' };
+      if (action === 'store') { values.set(req.key, req.value); return ok(); }
+      if (action === 'lookup') return values.has(req.key) ? ok(values.get(req.key)) : { status: 1, stdout: '', stderr: '' };
+      if (action === 'clear') {
+        if (Array.isArray(req.items)) {
+          for (const path of req.items as string[]) deleteItem(path);
+        } else {
+          values.delete(req.key);
+        }
+        return ok();
+      }
     }
     throw new Error('Unexpected call');
   };
@@ -231,6 +246,81 @@ test('failed lookup after successful preflight is unavailable, failed delete and
   const d = fakeService({ failedAction: 'clear' }); d.values.set('fixture', 'value');
   await expect(d.store.delete('fixture')).rejects.toMatchObject({ code: 'permission' });
   await expect(d.store.probe()).rejects.toMatchObject({ code: 'cleanup' });
+});
+
+// Secret Service SearchItems matches attributes across the whole service, while
+// the chosen collection is only one of several it can return; Delete acts on an
+// exact item path. `delete` must therefore reuse set's collection/ambiguity
+// preflight and must act on the paths preflight proved, never on a repeat
+// attributes search.
+const otherCollection = '/org/freedesktop/secrets/collection/other';
+function pathService(seed: { path: string; key: string; value: string }[] = []) {
+  const items = new Map(seed.map((entry): [string, { key: string; value: string }] => [entry.path, { key: entry.key, value: entry.value }]));
+  const calls: { command: string; args: string[]; input?: string }[] = [];
+  let onDelete: (() => void) | undefined;
+  const matched = (attrs: { application?: string | undefined; key?: string | undefined }) =>
+    [...items].filter(([, item]) => (!attrs.key || item.key === attrs.key) && (!attrs.application || attrs.application === 'olympus')).map(([path]) => path);
+  const remove = (exact: string[] | undefined, attrs: { key?: string | undefined }) => {
+    // An explicit path list is the fixed contract; the attributes lookup is the
+    // pre-fix helper's repeat search, kept so the regression is red before it.
+    for (const path of exact ?? matched({ application: 'olympus', key: attrs.key })) items.delete(path);
+  };
+  const runner: CommandRunner = (command, args, input) => {
+    calls.push({ command, args, ...(input ? { input } : {}) });
+    const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
+    const json = (type: string, data: unknown[]) => ok(JSON.stringify({ type, data }));
+    if (command !== '/usr/bin/python3') throw new Error('Unexpected call');
+    const request = JSON.parse(input!);
+    if (request.action === 'bus') {
+      if (request.method === 'ReadAlias') return json('o', [collection]);
+      if (request.method === 'SearchItems') return json('aoao', [matched(request.args[0] ?? {}), []]);
+      if (request.method === 'Delete') { onDelete?.(); remove([request.path], {}); return json('o', ['/']); }
+      if (request.args[1] === 'Locked') return json('b', [false]);
+      if (request.args[1] === 'Attributes') return json('a{ss}', [{ application: 'olympus', key: items.get(request.path)?.key }]);
+    }
+    if (request.action === 'clear' || request.action === 'delete') {
+      onDelete?.();
+      remove(Array.isArray(request.items) ? request.items as string[] : undefined, request);
+      return ok();
+    }
+    throw new Error(`Unexpected call ${request.action}`);
+  };
+  return {
+    items, calls, runner,
+    store: new LinuxLibsecretSecretStore({ runner }),
+    onDelete: (fn: () => void) => { onDelete = fn; },
+  };
+}
+
+test('libsecret delete refuses an Olympus item outside the selected collection and leaves it intact', async () => {
+  const foreign = `${otherCollection}/item_0`;
+  const f = pathService([{ path: foreign, key: 'fixture', value: 'value' }]);
+  await expect(f.store.delete('fixture')).rejects.toMatchObject({ code: 'configuration' });
+  expect(f.items.get(foreign)?.value).toBe('value');
+});
+
+test('libsecret delete refuses ambiguous matches like set and deletes neither', async () => {
+  const first = `${collection}/item_0`, second = `${collection}/item_1`;
+  const f = pathService([{ path: first, key: 'fixture', value: 'one' }, { path: second, key: 'fixture', value: 'two' }]);
+  await expect(f.store.delete('fixture')).rejects.toMatchObject({ code: 'configuration' });
+  expect([...f.items.keys()]).toEqual([first, second]);
+});
+
+test('libsecret delete acts on the prevalidated item path, never a later attributes match', async () => {
+  const target = `${collection}/item_0`, latecomer = `${collection}/item_1`;
+  const f = pathService([{ path: target, key: 'fixture', value: 'value' }]);
+  // A second item with identical attributes materializes between preflight and delete.
+  f.onDelete(() => f.items.set(latecomer, { key: 'fixture', value: 'late' }));
+  await expect(f.store.delete('fixture')).rejects.toMatchObject({ code: 'unavailable' });
+  expect(f.items.has(target)).toBe(false);
+  expect(f.items.has(latecomer)).toBe(true);
+});
+
+test('libsecret delete removes the single prevalidated in-collection item', async () => {
+  const only = `${collection}/item_0`;
+  const f = pathService([{ path: only, key: 'fixture', value: 'value' }]);
+  expect(await f.store.delete('fixture')).toBeUndefined();
+  expect(f.items.has(only)).toBe(false);
 });
 
 test('hung helper is killed at five seconds, even if it ignores SIGTERM', () => {
@@ -295,5 +385,5 @@ for (const boundary of ['before', 'after']) {
       expect(existsSync(f.paths.keyFilePath)).toBe(false);
       expect(f.make().label).toBe('encrypted-file');
     } finally { f.clean(); }
-  });
+  }, 30_000);
 }

@@ -424,8 +424,10 @@ describe('native OpenClaw plugin adapter', () => {
     mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
     const writeToken = (token: string) => writeFileSync(envPath, `OLYMPUS_WORKER_AUTH_TOKEN=${token}\n`, { mode: 0o600 });
     const savedHome = process.env.HOME;
+    const savedConfigHome = process.env.XDG_CONFIG_HOME;
     const savedToken = process.env.OLYMPUS_WORKER_AUTH_TOKEN;
     process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = join(home, '.config');
     delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
     const authorizations: Array<string | null> = [];
     globalThis.fetch = (async (_url, init) => {
@@ -477,6 +479,8 @@ describe('native OpenClaw plugin adapter', () => {
       await pinned.get('source_answer')!.execute('token-pinned', { question: 'q' });
       expect(authorizations.at(-1)).toBe('Bearer config-token');
     } finally {
+      if (savedConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = savedConfigHome;
       if (savedHome === undefined) delete process.env.HOME;
       else process.env.HOME = savedHome;
       if (savedToken === undefined) delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
