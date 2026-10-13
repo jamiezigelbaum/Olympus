@@ -190,7 +190,9 @@ export function rejudgeStoredContent(
   // A failed cache/queue operation is not an open question. Leave all retry
   // stamps and receipts untouched until every needed question is persisted.
   let questionNotQueued = false;
-  const sniffer: TierSniffer | undefined = options.sniffer && {
+  // Fenced for both passes: a pass that began before the item became
+  // Secrets queues none of its names or excerpt (tier-placement.ts).
+  const counting: TierSniffer | undefined = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
       const verdict = options.sniffer!.judge(request);
@@ -198,6 +200,7 @@ export function rejudgeStoredContent(
       return verdict;
     },
   };
+  const sniffer = counting && secretFencedSniffer(counting, ledger, identity, read);
   const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity);
   const content = classifyContentTier(
     {
@@ -214,7 +217,7 @@ export function rejudgeStoredContent(
       subject: identity,
     },
     {
-      ...(sniffer ? { sniffer: secretFencedSniffer(sniffer, ledger, identity, read) } : {}),
+      ...(sniffer ? { sniffer } : {}),
       ...(options.retirePublic ? { retirePublic: true } : {}),
     },
   );
