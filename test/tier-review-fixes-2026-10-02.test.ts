@@ -1093,7 +1093,7 @@ test('a preempted pass drains its completed verdict moves independently', async 
       return { text: PERSONAL_VERDICT, modelId: 'built_in' };
     } },
   };
-  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, gardenOwnRecord: true });
   service = snifferFor(install, builtIn);
   const result = await service.runOnce();
   expect(result).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted', verdictsApplied: 1 }, autoMoves: { moved: 1 } });

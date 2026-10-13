@@ -761,7 +761,7 @@ describe('recent questions and bounded passes', () => {
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
       await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
       expect(model.requests[0]!.prompt).toContain('bank letter 12');
-      store.enqueue({ subject: subject(1), pass: 'metadata', material: 'bank urgent', flags: [], mapRevision: 'none', priority: 10 });
+      store.enqueue({ subject: subject(1), pass: 'metadata', material: 'bank urgent', flags: [], mapRevision: 'none', priority: 20 });
       await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
       expect(model.requests[1]!.prompt).toContain('bank urgent');
     } finally { store.close(); ledger.close(); }

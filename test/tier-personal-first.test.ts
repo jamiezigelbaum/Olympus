@@ -47,7 +47,7 @@ for (const [title, text, path] of [
   const placement = f.set.placementFor(decision);
   expect(placement.copies).toContainEqual(expect.objectContaining({ corpusId: CORPORA.secure_local, layers: 'content' }));
   expect(placement.embedHold).toBe(true);
-  expect(requests.find(r => r.pass === 'content')).toMatchObject({ priority: 'high' });
+  expect(requests.find(r => r.pass === 'content')).toMatchObject({ priority: 10 });
 });
 
 test('held names are searchable; no body, snippet or chunks reach Personal', async () => {
