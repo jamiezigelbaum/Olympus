@@ -34736,6 +34736,7 @@ init_tier_classifier();
 init_bounded_text();
 
 // src/workers/file-extraction/store-sink.ts
+init_engine();
 init_tier_classifier();
 init_source_ingestion_exclusions();
 init_connector_store();

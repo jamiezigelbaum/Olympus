@@ -32357,6 +32357,12 @@ function settleSecretsCopies(options) {
     options.ledger.removeCopies(options.identity);
   return { disposition, chunks };
 }
+function settleUntrackedSecretsCopy(options) {
+  const chunks = options.store.itemStoredContent(options.identity)?.chunkCount ?? 0;
+  const trustTier = "S5";
+  options.store.tombstoneCopy(options.identity, { connectorId: options.connectorId, trustTier });
+  return chunks;
+}
 var SECRETS_DISPOSITION = "tombstone_now";
 
 // src/workers/connector-store/tier-names-only-settle.ts
@@ -103912,6 +103918,18 @@ function createConnectorStoreExtractionSink(options) {
           skippedReason: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
         };
       }
+      if (options.secretsFloor !== false && plan.item.content.kind === "text" && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
+        if (options.recordContentTier !== false) {
+          store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
+        }
+        settleUntrackedSecretsCopy({ store, identity: plan.item.identity, connectorId: options.syncConnectorId });
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_SECRETS
+        };
+      }
       let summary;
       try {
         summary = store.restoreItemRepresentations({
@@ -103981,6 +103999,19 @@ function createConnectorStoreExtractionSink(options) {
     }
   };
 }
+function secretsFloorHolds(store, item, text2) {
+  let override;
+  try {
+    override = store.tierLedger()?.getOverride(item.identity);
+  } catch {
+    override = undefined;
+  }
+  if (override?.kind === "tier")
+    return override.tier === "secrets";
+  if (override?.kind === "not_secret")
+    return false;
+  return detectSecretFindingKinds(text2).length > 0;
+}
 function planExtractionSinkWrite(store, request) {
   const text2 = request.text;
   if (text2.trim() === "")
@@ -104015,6 +104046,7 @@ function planExtractionSinkWrite(store, request) {
 }
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets", EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
 var init_store_sink = __esm(() => {
+  init_engine();
   init_tier_classifier();
   init_source_ingestion_exclusions();
   init_connector_store();
@@ -104950,6 +104982,7 @@ function createTieredStoreExtractionSink(options) {
     ...options.claims ? { claims: options.claims } : {},
     ...tierClassification ? { tierClassification } : {},
     ...recordContentTier ? {} : { recordContentTier: false },
+    ...contentRulesRan ? { secretsFloor: false } : {},
     ...contentRulesRan ? { mediaJudgment: (sha2565) => setMediaJudgment(set2, sha2565) } : {}
   });
   return {
