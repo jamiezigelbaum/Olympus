@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 8;
+export const TIER_LEDGER_SCHEMA_VERSION = 9;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -2546,12 +2546,18 @@ export class TierLedger {
    * `secretSideStoreDebts`), with the extraction job ledgers that were not
    * cleared, so a retry after a restart still reaches them.
    */
-  recordSecretSideStoreDebt(identity: TierLedgerIdentity & { localItemId?: string }, jobLedgerPaths: readonly string[] = []): void {
+  recordSecretSideStoreDebt(
+    identity: TierLedgerIdentity & { localItemId?: string },
+    jobLedgerPaths: readonly string[] = [],
+    options: { onlyIfOwed?: boolean } = {},
+  ): void {
     this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT job_ledger_paths_json FROM secret_side_store_debt
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).get(...idParams(identity)) as { job_ledger_paths_json: string } | null;
+      // A retry whose debt was cancelled meanwhile (the item left Secrets).
+      if (options.onlyIfOwed && !existing) return;
       const paths = [...new Set([...(existing ? JSON.parse(existing.job_ledger_paths_json) as string[] : []), ...jobLedgerPaths])].sort();
       this.db.query(`
         INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, job_ledger_paths_json, recorded_at)
@@ -2587,6 +2593,14 @@ export class TierLedger {
     }));
   }
 
+  /** Whether a Secret's side-store clearing is still owed. */
+  hasSecretSideStoreDebt(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`
+      SELECT 1 FROM secret_side_store_debt
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) !== null;
+  }
+
   /** The extraction job ledgers a Secret is still owed in (empty when it owes none). */
   secretSideStoreDebtJobLedgerPaths(identity: TierLedgerIdentity): string[] {
     const row = this.db.query(`
@@ -2611,6 +2625,72 @@ export class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity));
     }).immediate();
+  }
+
+  /**
+   * Items that left Secrets whose extraction redaction markers are still to
+   * be retired (recorded by the ledger's own triggers, see the migration),
+   * oldest first; or only `identity`'s.
+   */
+  secretRedactionRetirements(options: { identity?: TierLedgerIdentity; limit?: number } = {}): Array<TierLedgerIdentity & { id: number; jobLedgerPaths: string[] }> {
+    const rows = (options.identity
+      ? this.db.query(`
+          SELECT id, provider, account_scope, conversation_key, provider_item_id, job_ledger_paths_json
+          FROM secret_redaction_retirement
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        `).all(...idParams(options.identity))
+      : this.db.query(`
+          SELECT id, provider, account_scope, conversation_key, provider_item_id, job_ledger_paths_json
+          FROM secret_redaction_retirement ORDER BY id LIMIT ?
+        `).all(Math.max(1, Math.min(options.limit ?? 100, 1_000)))) as Array<{
+      id: number;
+      provider: string;
+      account_scope: string;
+      conversation_key: string;
+      provider_item_id: string;
+      job_ledger_paths_json: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+      jobLedgerPaths: JSON.parse(row.job_ledger_paths_json) as string[],
+    }));
+  }
+
+  /**
+   * Forget one retirement, carried out or no longer due. Keyed by its id, so
+   * a newer one (the item became Secrets and left again meanwhile) stays.
+   */
+  settleSecretRedactionRetirement(id: number): void {
+    this.db.query('DELETE FROM secret_redaction_retirement WHERE id = ?').run(id);
+  }
+
+  /**
+   * Whether any item with this provider item id is Secrets here (in any
+   * conversation: the extraction job ledger keys an item without one), by
+   * its decision, a move toward Secrets, or the owner's override.
+   */
+  providerItemIsSecret(item: { provider: string; accountScope: string; providerItemId: string }): boolean {
+    const keys = [item.provider, item.accountScope, item.providerItemId];
+    return this.db.transaction(() => {
+      const decided = this.db.query(`
+        SELECT 1 FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+          AND 'secrets' IN (metadata_tier, content_tier, COALESCE(target_metadata_tier, ''), COALESCE(target_content_tier, ''))
+        LIMIT 1
+      `).get(...keys) !== null;
+      if (decided) return true;
+      const overrides = this.db.query(`
+        SELECT override_json FROM tier_overrides WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).all(...keys) as Array<{ override_json: string }>;
+      return overrides.some((row) => {
+        const override = JSON.parse(row.override_json) as ItemTierOverride;
+        return override.kind === 'tier' && override.tier === 'secrets';
+      });
+    })();
   }
 
   removeCopies(identity: TierLedgerIdentity): TierCopy[] {
@@ -3710,7 +3790,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // generation of a Secrets item last had its side stores cleared, so
       // every tick finds a Secret whose clearing never finished (whatever
       // made it Secrets, debt written down or not).
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 8,
       name: 'secret_side_stores_settled',
       up(db) {
         db.exec(`
@@ -3723,6 +3803,60 @@ function tierLedgerMigrations(): SqliteMigration[] {
           CREATE INDEX IF NOT EXISTS tier_items_secrets
             ON tier_items (provider, account_scope, conversation_key, provider_item_id)
             WHERE metadata_tier = 'secrets' OR content_tier = 'secrets';
+        `);
+      },
+    },
+    {
+      // An item that leaves Secrets: its extraction jobs' redaction markers
+      // are retired (secrets-disposition.ts `retireSecretRedactions`), and
+      // any side-store clearing still owed for it is cancelled, so the retry
+      // never writes a marker back. Triggers, so every write that changes an
+      // item's tiers (a listing, an override, a move landing, a legacy
+      // decision, another process) is caught in its own transaction. Becoming
+      // Secrets again cancels a retirement not yet carried out.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'secret_redaction_retirement',
+      up(db) {
+        const item = `provider = NEW.provider AND account_scope = NEW.account_scope
+          AND conversation_key = NEW.conversation_key AND provider_item_id = NEW.provider_item_id`;
+        const secretsIn = (row: 'OLD' | 'NEW') => `'secrets' IN (${row}.metadata_tier, ${row}.content_tier,
+          COALESCE(${row}.target_metadata_tier, ''), COALESCE(${row}.target_content_tier, ''))`;
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_redaction_retirement (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
+            recorded_at TEXT NOT NULL,
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TRIGGER IF NOT EXISTS tier_items_left_secrets
+          AFTER UPDATE OF metadata_tier, content_tier, target_metadata_tier, target_content_tier ON tier_items
+          WHEN ${secretsIn('OLD')} AND NOT ${secretsIn('NEW')}
+          BEGIN
+            INSERT OR REPLACE INTO secret_redaction_retirement (
+              provider, account_scope, conversation_key, provider_item_id, job_ledger_paths_json, recorded_at
+            ) VALUES (
+              NEW.provider, NEW.account_scope, NEW.conversation_key, NEW.provider_item_id,
+              COALESCE((SELECT job_ledger_paths_json FROM secret_side_store_debt WHERE ${item}), '[]'),
+              strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            );
+            DELETE FROM secret_side_store_debt WHERE ${item};
+          END;
+          CREATE TRIGGER IF NOT EXISTS tier_items_entered_secrets
+          AFTER UPDATE OF metadata_tier, content_tier, target_metadata_tier, target_content_tier ON tier_items
+          WHEN ${secretsIn('NEW')}
+          BEGIN
+            DELETE FROM secret_redaction_retirement WHERE ${item};
+          END;
+          CREATE TRIGGER IF NOT EXISTS tier_items_inserted_secrets
+          AFTER INSERT ON tier_items
+          WHEN ${secretsIn('NEW')}
+          BEGIN
+            DELETE FROM secret_redaction_retirement WHERE ${item};
+          END;
         `);
       },
     },

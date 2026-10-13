@@ -22354,12 +22354,14 @@ class TierLedger {
     })();
     return { record: this.getCurrent(identity), copies };
   }
-  recordSecretSideStoreDebt(identity, jobLedgerPaths = []) {
+  recordSecretSideStoreDebt(identity, jobLedgerPaths = [], options = {}) {
     this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT job_ledger_paths_json FROM secret_side_store_debt
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).get(...idParams(identity));
+      if (options.onlyIfOwed && !existing)
+        return;
       const paths = [...new Set([...existing ? JSON.parse(existing.job_ledger_paths_json) : [], ...jobLedgerPaths])].sort();
       this.db.query(`
         INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, job_ledger_paths_json, recorded_at)
@@ -22385,6 +22387,12 @@ class TierLedger {
       jobLedgerPaths: JSON.parse(row.job_ledger_paths_json)
     }));
   }
+  hasSecretSideStoreDebt(identity) {
+    return this.db.query(`
+      SELECT 1 FROM secret_side_store_debt
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) !== null;
+  }
   secretSideStoreDebtJobLedgerPaths(identity) {
     const row = this.db.query(`
       SELECT job_ledger_paths_json FROM secret_side_store_debt
@@ -22404,6 +22412,47 @@ class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity));
     }).immediate();
+  }
+  secretRedactionRetirements(options = {}) {
+    const rows = options.identity ? this.db.query(`
+          SELECT id, provider, account_scope, conversation_key, provider_item_id, job_ledger_paths_json
+          FROM secret_redaction_retirement
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        `).all(...idParams(options.identity)) : this.db.query(`
+          SELECT id, provider, account_scope, conversation_key, provider_item_id, job_ledger_paths_json
+          FROM secret_redaction_retirement ORDER BY id LIMIT ?
+        `).all(Math.max(1, Math.min(options.limit ?? 100, 1000)));
+    return rows.map((row) => ({
+      id: row.id,
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+      jobLedgerPaths: JSON.parse(row.job_ledger_paths_json)
+    }));
+  }
+  settleSecretRedactionRetirement(id) {
+    this.db.query("DELETE FROM secret_redaction_retirement WHERE id = ?").run(id);
+  }
+  providerItemIsSecret(item) {
+    const keys = [item.provider, item.accountScope, item.providerItemId];
+    return this.db.transaction(() => {
+      const decided = this.db.query(`
+        SELECT 1 FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+          AND 'secrets' IN (metadata_tier, content_tier, COALESCE(target_metadata_tier, ''), COALESCE(target_content_tier, ''))
+        LIMIT 1
+      `).get(...keys) !== null;
+      if (decided)
+        return true;
+      const overrides = this.db.query(`
+        SELECT override_json FROM tier_overrides WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).all(...keys);
+      return overrides.some((row) => {
+        const override = JSON.parse(row.override_json);
+        return override.kind === "tier" && override.tier === "secrets";
+      });
+    })();
   }
   removeCopies(identity) {
     let removed = [];
@@ -23125,7 +23174,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 8,
       name: "secret_side_stores_settled",
       up(db) {
         db.exec(`
@@ -23140,10 +23189,57 @@ function tierLedgerMigrations() {
             WHERE metadata_tier = 'secrets' OR content_tier = 'secrets';
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "secret_redaction_retirement",
+      up(db) {
+        const item = `provider = NEW.provider AND account_scope = NEW.account_scope
+          AND conversation_key = NEW.conversation_key AND provider_item_id = NEW.provider_item_id`;
+        const secretsIn = (row) => `'secrets' IN (${row}.metadata_tier, ${row}.content_tier,
+          COALESCE(${row}.target_metadata_tier, ''), COALESCE(${row}.target_content_tier, ''))`;
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_redaction_retirement (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
+            recorded_at TEXT NOT NULL,
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TRIGGER IF NOT EXISTS tier_items_left_secrets
+          AFTER UPDATE OF metadata_tier, content_tier, target_metadata_tier, target_content_tier ON tier_items
+          WHEN ${secretsIn("OLD")} AND NOT ${secretsIn("NEW")}
+          BEGIN
+            INSERT OR REPLACE INTO secret_redaction_retirement (
+              provider, account_scope, conversation_key, provider_item_id, job_ledger_paths_json, recorded_at
+            ) VALUES (
+              NEW.provider, NEW.account_scope, NEW.conversation_key, NEW.provider_item_id,
+              COALESCE((SELECT job_ledger_paths_json FROM secret_side_store_debt WHERE ${item}), '[]'),
+              strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            );
+            DELETE FROM secret_side_store_debt WHERE ${item};
+          END;
+          CREATE TRIGGER IF NOT EXISTS tier_items_entered_secrets
+          AFTER UPDATE OF metadata_tier, content_tier, target_metadata_tier, target_content_tier ON tier_items
+          WHEN ${secretsIn("NEW")}
+          BEGIN
+            DELETE FROM secret_redaction_retirement WHERE ${item};
+          END;
+          CREATE TRIGGER IF NOT EXISTS tier_items_inserted_secrets
+          AFTER INSERT ON tier_items
+          WHEN ${secretsIn("NEW")}
+          BEGIN
+            DELETE FROM secret_redaction_retirement WHERE ${item};
+          END;
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 8, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -27301,7 +27397,7 @@ function itemNameRedacted(db, item) {
     LIMIT 1
   `).get(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "") !== null;
 }
-function clearExtractionJobNames(dbPath, item) {
+function clearExtractionJobNames(dbPath, item, options = {}) {
   if (dbPath === ":memory:" || !existsSync26(dbPath))
     return { cleared: 0, durable: true };
   const db = new Database6(dbPath, { readwrite: true, create: false });
@@ -27311,12 +27407,22 @@ function clearExtractionJobNames(dbPath, item) {
     if (!table)
       return { cleared: 0, durable: true };
     return db.transaction(() => {
-      const durable = redactionsTableExists(db);
-      if (durable) {
+      if (options.proceed && !options.proceed())
+        return { cleared: 0, durable: true };
+      const claims = claimsTableExists(db);
+      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
+      const now = new Date().toISOString();
+      if (redactionsTableExists(db)) {
         db.query(`
           INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
           VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", new Date().toISOString());
+        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", now);
+      }
+      if (options.claimant !== undefined && claims) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
       }
       const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
       const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
@@ -27339,13 +27445,64 @@ function clearExtractionJobNames(dbPath, item) {
     closeSqliteStore(db);
   }
 }
+function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
+  if (dbPath === ":memory:" || !existsSync26(dbPath))
+    return { retired: 0, stillSecret: false };
+  const db = new Database6(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!redactionsTableExists(db))
+      return { retired: 0, stillSecret: false };
+    return db.transaction(() => {
+      if (stillSecret())
+        return { retired: 0, stillSecret: true };
+      if (claimsTableExists(db)) {
+        db.query(`
+          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
+        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
+        const heldElsewhere = db.query(`
+          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
+        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
+        if (heldElsewhere)
+          return { retired: 0, stillSecret: false };
+      }
+      const retired = db.query(`
+        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      if (retired > 0 && rereadsTableExists(db)) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          SELECT job_id FROM extraction_jobs
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND status = 'indexed'
+        `).run(item.provider, item.accountScope, item.providerItemId);
+      }
+      return { retired, stillSecret: false };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
 function artifactsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
+}
+function takeRestoredReread(db, jobId) {
+  if (!rereadsTableExists(db))
+    return false;
+  return db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
+}
+function rereadsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
+}
+function claimsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
 }
 function redactionsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
 }
-var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", openLedgerPaths;
+var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths;
 var init_job_names = __esm(() => {
   init_linux_engine_layout();
   openLedgerPaths = new Map;
@@ -27386,6 +27543,20 @@ function forgetSecretInSideStores(options) {
   const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
   const owedJobLedgers = [];
+  const stillOwed = () => ledger.hasSecretSideStoreDebt(identity);
+  if (options.onlyWhileOwed) {
+    try {
+      if (!stillOwed())
+        return result;
+    } catch {
+      result.failed += 1;
+      return result;
+    }
+  }
+  let claimant;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {}
   let mark;
   try {
     mark = ledger.noteSecretScrub(identity);
@@ -27424,6 +27595,9 @@ function forgetSecretInSideStores(options) {
         accountScope: identity.accountScope,
         providerItemId: identity.providerItemId,
         ...identity.localItemId ? { localItemId: identity.localItemId } : {}
+      }, {
+        ...claimant !== undefined ? { claimant } : {},
+        ...options.onlyWhileOwed ? { proceed: stillOwed } : {}
       });
       result.extractionJobNames += cleared.cleared;
       if (!cleared.durable) {
@@ -27436,9 +27610,12 @@ function forgetSecretInSideStores(options) {
     }
   }
   try {
-    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker)
-      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
-    else {
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync27(path)));
+  } catch {}
+  try {
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
+      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
+    } else {
       ledger.clearSecretSideStoreDebt(identity, jobLedgers);
       if (mark)
         ledger.markSecretSideStoresCleared(identity, mark);
@@ -27455,7 +27632,7 @@ function retrySecretSideStoreDebts(ledger, limit = 100) {
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
     const { jobLedgerPaths, ...item } = identity;
-    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths, onlyWhileOwed: true });
     if (result.failed === 0 && result.notDurable === 0)
       cleared += 1;
   }
@@ -27502,6 +27679,54 @@ function snifferRetriesSettlement(ledger, identity) {
   } catch {
     return false;
   }
+}
+function retireSecretRedactions(ledger, options = {}) {
+  let pending;
+  try {
+    pending = ledger.secretRedactionRetirements(options);
+  } catch {
+    return 0;
+  }
+  let claimant;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {
+    return 0;
+  }
+  let knownJobLedgers = [];
+  try {
+    knownJobLedgers = ledger.knownJobLedgerPaths();
+  } catch {}
+  let retired = 0;
+  for (const retirement of pending) {
+    const item = { provider: retirement.provider, accountScope: retirement.accountScope, providerItemId: retirement.providerItemId };
+    const stillSecret = () => ledger.providerItemIsSecret(item);
+    let failed = 0;
+    let secret2 = false;
+    try {
+      secret2 = stillSecret();
+    } catch {
+      failed += 1;
+    }
+    if (!secret2 && failed === 0) {
+      for (const jobsPath of new Set([...extractionJobsDbPaths(), ...knownJobLedgers, ...retirement.jobLedgerPaths])) {
+        try {
+          if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret)
+            secret2 = true;
+        } catch {
+          failed += 1;
+        }
+      }
+    }
+    if (failed > 0 && !secret2)
+      continue;
+    try {
+      ledger.settleSecretRedactionRetirement(retirement.id);
+      if (!secret2)
+        retired += 1;
+    } catch {}
+  }
+  return retired;
 }
 function settleUntrackedSecretsCopy(options) {
   const settled = options.store.tombstoneSecretsExtraction(options.identity, {
@@ -32012,6 +32237,8 @@ var init_local_index = __esm(() => {
         });
         if (decision.contentTier === "secrets" || decision.metadataTier === "secrets" || ledger.itemIsSecret(item.identity)) {
           forgetSecretInSideStores({ ledger, identity: item.identity });
+        } else {
+          retireSecretRedactions(ledger, { identity: item.identity });
         }
       } catch {
         run.ledgerFailed = true;
@@ -38633,6 +38860,7 @@ function applyOwnerOverrides(options) {
       applyOne(set, record, override.tier, retirePublic, report, { generation: record.generation, override });
     } catch {}
   }
+  retireSecretRedactions(ledger);
   return report;
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
@@ -38678,7 +38906,10 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
     if (exported)
       decision.reasons.push(contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join("")));
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, placement, { guard });
+  const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
+    guard,
+    staleCopiesGone: set.routedWithoutAnyCopy(identity)
+  });
   switch (recorded.outcome) {
     case "queued_move":
       if (recorded.raise)
@@ -39519,7 +39750,7 @@ class TieredStoreSet {
   routedCopiesGone(identity) {
     const copies = this.ledger.copies(identity);
     if (copies.length === 0)
-      return true;
+      return this.routedWithoutAnyCopy(identity);
     const current2 = copies.filter((copy) => copy.state === "current");
     if (current2.length === 0)
       return false;
@@ -39528,6 +39759,11 @@ class TieredStoreSet {
       const store = domain ? this.store(domain) : undefined;
       return store !== undefined && !store.itemPresence(identity).active;
     });
+  }
+  routedWithoutAnyCopy(identity) {
+    if (this.ledger.copies(identity).length > 0)
+      return false;
+    return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
   }
   anyLegHasRow(identity) {
     return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity) === true);
@@ -39874,6 +40110,8 @@ class TieredRoutingRun {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
       ...deferred ? { stagedLandingAllowed: true } : {}
     });
+    if (recorded.outcome !== "secrets")
+      retireSecretRedactions(ledger, { identity });
     switch (recorded.outcome) {
       case "secrets":
         this.counts.itemsSecrets += 1;
@@ -105169,7 +105407,8 @@ class LocalFileExtractionJobStore {
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
         const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
-        const forceExisting = Boolean(existing) && force && status === "queued";
+        const reread = existing !== undefined && existing !== null && status === "queued" && takeRestoredReread(this.db, existing.job_id);
+        const forceExisting = Boolean(existing) && (force || reread) && status === "queued";
         const reset = forceExisting ? 1 : 0;
         this.db.query(`
           INSERT INTO extraction_jobs (
@@ -106185,6 +106424,24 @@ function fileExtractionJobMigrations() {
         );
       `);
     }
+  }, {
+    version: 5,
+    name: "add_secret_item_redaction_claims",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (
+          provider TEXT NOT NULL,
+          account_scope TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          claimant TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          PRIMARY KEY (provider, account_scope, provider_item_id, claimant)
+        );
+        CREATE TABLE IF NOT EXISTS ${SECRET_RESTORED_REREADS_TABLE} (
+          job_id TEXT PRIMARY KEY
+        );
+      `);
+    }
   }];
 }
 function nextRetryTimestamp(status, attempts, now) {
@@ -106418,7 +106675,7 @@ function terminalRetryPathSql(alias, paths) {
     return { sql: "0", params };
   return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 4, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 5, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   init_job_names();
@@ -132715,7 +132972,9 @@ class TierSnifferService {
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2) {
         try {
-          retrySecretSideStoreDebts(this.ledgerAt(ledgerPath));
+          const ledger = this.ledgerAt(ledgerPath);
+          retrySecretSideStoreDebts(ledger);
+          retireSecretRedactions(ledger);
         } catch {}
         continue;
       }

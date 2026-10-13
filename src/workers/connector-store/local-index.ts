@@ -85,7 +85,7 @@ import {
   type ConnectorStorePlacement,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
-import { forgetSecretInSideStores } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
@@ -3890,6 +3890,9 @@ export class LocalConnectorStore {
       // keep nothing of it either (the router's routed path does the same).
       if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets' || ledger.itemIsSecret(item.identity)) {
         forgetSecretInSideStores({ ledger, identity: item.identity });
+      } else {
+        // Left Secrets in this write: its job names come back.
+        retireSecretRedactions(ledger, { identity: item.identity });
       }
     } catch {
       run.ledgerFailed = true;
@@ -4200,7 +4203,7 @@ export class LocalConnectorStore {
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
-  itemPresence(identity: SourceItemIdentity): ConnectorStoreItemPresence {
+  itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
     const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned
       FROM items

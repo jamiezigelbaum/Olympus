@@ -34,7 +34,7 @@ import {
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
-import { forgetSecretInSideStores, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -84,6 +84,9 @@ export function applyOwnerOverrides(options: {
       // Left as it was; the next pass (or the item's next listing) applies it.
     }
   }
+  // Items that left Secrets since the last tick (here, in a listing, a move
+  // landing or another process): their job names come back.
+  retireSecretRedactions(ledger);
   return report;
 }
 
@@ -144,7 +147,12 @@ function applyOne(
     const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
     if (exported) decision.reasons.push(contentDigestReason(exported.chunks.map(chunk => chunk.boundedText).join('')));
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, placement, { guard });
+  // A Secret whose copies were tombstoned has nothing to move: its new
+  // placement is recorded afresh (served once its next listing writes it).
+  const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
+    guard,
+    staleCopiesGone: set.routedWithoutAnyCopy(identity),
+  });
   switch (recorded.outcome) {
     case 'queued_move':
       if (recorded.raise) report.raised += 1;
