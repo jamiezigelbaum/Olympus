@@ -5733,10 +5733,26 @@ function isGooglePublisherWebClientId(clientId, env = process.env) {
     return true;
   return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
 }
-var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS;
+function googleDesktopClientSecret(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return;
+  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret)
+      return overrideSecret;
+  }
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  return known?.secret.trim() || undefined;
+}
+var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
 var init_publisher_oauth_client = __esm(() => {
   GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
     DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
+  ];
+  GOOGLE_DESKTOP_CLIENTS = [
+    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
   ];
 });
 
@@ -6069,7 +6085,7 @@ class EnvCredentialBroker {
       storedState = resolved.state;
     }
     const clientId = await this.resolveFirstSecret(oauth2.clientIdEnvNames, oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : []);
-    const clientSecret = await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
+    const clientSecret = googleDesktopClientSecret(clientId, this.env) ?? await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
     const refreshToken = await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? storedState?.refreshToken?.trim();
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv2(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
@@ -8108,7 +8124,10 @@ var init_vocabulary = __esm(() => {
     diskFreeUpUnknown: "Free up some space, then Try again.",
     fixOnMac: "Open Olympus on your computer to fix this.",
     privateMatches: "Some matching items are private and stay on your computer.",
-    changeModelsOnMac: "Change models in Olympus on your computer."
+    changeModelsOnMac: "Change models in Olympus on your computer.",
+    googleSigninMoved: "Google sign-in now happens on your computer. Reconnect once to switch.",
+    reconnectGoogle: "Reconnect Google",
+    googleConnectingOnServer: "Waiting for you to finish signing in… If Google ends on a page that does not load, copy its address and run olympus connect finish '<address>' on the server."
   };
   DASHBOARD_CHATGPT_PAGE_COPY = {
     title: "Olympus",
@@ -12823,9 +12842,15 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
+// src/workers/connector-store/capture-spool-secrets.ts
+var init_capture_spool_secrets = __esm(() => {
+  init_engine();
+});
+
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
 var init_capture_spool_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
@@ -12839,6 +12864,7 @@ var init_capture_spool_connector = __esm(() => {
 var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -12998,6 +13024,7 @@ var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_P
 var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
   init_google_signin_full_copy();
+  init_publisher_oauth_client();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -13128,6 +13155,7 @@ var init_reaction_index = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 var init_live_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_reaction_index();
 });
 
@@ -13136,6 +13164,7 @@ var WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",

@@ -174,8 +174,9 @@ export function decideItemTiers(
   ledger: TierLedger | undefined,
   extra: { namesOnly?: boolean } = {},
 ): TierDecision {
-  const override = ledger?.getOverride(item.identity);
-  const sniffer = options?.sniffer && ledger ? secretFencedSniffer(options.sniffer, ledger, item.identity) : options?.sniffer;
+  const read = ledger?.classificationRead(item.identity);
+  const override = read?.override;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read.secret) : options?.sniffer;
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
@@ -201,9 +202,17 @@ export function decideItemTiers(
  * names or excerpt the Secrets disposition just cleared are not queued
  * again. An item already Secrets when the pass read it is not fenced: its
  * listing is the fresh truth (its secret gone, it is asked about again).
+ * `secretWhenRead` must come from the same snapshot as the override the pass
+ * classifies with (`TierLedger.classificationRead`), or a Secrets marking
+ * between the two reads would leave a stale pass unfenced.
  */
-export function secretFencedSniffer(sniffer: TierSniffer, ledger: TierLedger, identity: TierLedgerIdentity): TierSniffer {
-  if (ledger.itemIsSecret(identity)) return sniffer;
+export function secretFencedSniffer(
+  sniffer: TierSniffer,
+  ledger: TierLedger,
+  identity: TierLedgerIdentity,
+  secretWhenRead: boolean,
+): TierSniffer {
+  if (secretWhenRead) return sniffer;
   return {
     id: sniffer.id,
     judge: (request) => sniffer.judge({ ...request, stillAsk: () => !ledger.itemIsSecret(identity) }),

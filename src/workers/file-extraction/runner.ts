@@ -79,6 +79,7 @@ import {
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
   EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
 } from './store-sink.ts';
 import type {
@@ -149,6 +150,9 @@ const ERROR_HASH_CHARS = 32;
 const SINK_SKIP_SETTLEMENTS: Readonly<Record<string, ExtractionTerminalStatus>> = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: 'failed_terminal',
   [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: 'failed_terminal',
+  // A job for a revision the item has moved past: the current revision's
+  // own job decides it, so this one is done.
+  [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: 'failed_terminal',
   [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: 'blocked_policy',
   [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: 'blocked_policy',
   // Decided by the item's tiers, not failures: a queued tier move waits for

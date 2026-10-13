@@ -1064,6 +1064,15 @@ export class TierLedger {
     })();
   }
 
+  /**
+   * What a classification pass reads before judging an item, in one read
+   * snapshot: the owner's override, and whether the item is Secrets already
+   * (the sniffer fence, connector-store/tier-placement.ts, keys off it).
+   */
+  classificationRead(identity: TierLedgerIdentity): { override: ItemTierOverride | undefined; secret: boolean } {
+    return this.db.transaction(() => ({ override: this.getOverride(identity), secret: this.itemIsSecret(identity) }))();
+  }
+
   /** Whether the item is Secrets here: decided, moving there, or set so by the owner. */
   itemIsSecret(identity: TierLedgerIdentity): boolean {
     const override = this.getOverride(identity);
@@ -1352,6 +1361,35 @@ export class TierLedger {
       LIMIT ?
     `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), limit);
     return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
+  /**
+   * Every item judged Secrets in either layer, in key order, with whether its
+   * names were judged Secrets too: what a lane that keeps a raw copy outside
+   * the stores (a capture spool) must clear, and how much of it. Identities
+   * only, never content; the list is small by nature.
+   */
+  secretsIdentities(): Array<{ identity: TierLedgerIdentity; names: boolean }> {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, metadata_tier FROM tier_items
+      WHERE metadata_tier = 'secrets' OR content_tier = 'secrets'
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all() as Array<{
+      provider: string;
+      account_scope: string;
+      conversation_key: string;
+      provider_item_id: string;
+      metadata_tier: string;
+    }>;
+    return rows.map((row) => ({
+      identity: {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+      },
+      names: row.metadata_tier === 'secrets',
+    }));
   }
 
   isRouted(identity: TierLedgerIdentity): boolean {

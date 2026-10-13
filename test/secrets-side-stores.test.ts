@@ -28,6 +28,7 @@ import { secretFencedSniffer } from '../src/workers/connector-store/tier-placeme
 import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
+import type { RawItem } from '../src/core/contracts.ts';
 import {
   ACCOUNT,
   CORPORA,
@@ -144,8 +145,10 @@ describe('a sniffer pass that read an item before it became Secret', () => {
       .filter((pass) => store.questionFor(identityOf(id), pass) !== undefined);
     const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
     // A pass in flight: it read both items (neither Secret) and is about to ask.
-    const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'));
-    const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'));
+    const staleRead = fx.ledger.classificationRead(identityOf('mortgage-letter'));
+    expect(staleRead).toEqual({ override: undefined, secret: false });
+    const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), staleRead.secret);
+    const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'), fx.ledger.classificationRead(identityOf('therapy-notes')).secret);
 
     expect(runTierSet(['mortgage-letter', 'secrets'], { storePaths: storePaths(fx) }))
       .toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
@@ -456,6 +459,47 @@ describe('a legacy item (never routed by a set) judged Secret', () => {
     await store.syncFromConnector(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     expect(ledger.getCurrent(subject)).toMatchObject({ contentTier: 'secrets', routed: false });
     expect(sniffer.questionFor(subject, 'metadata')).toBeUndefined();
+    expect(jobs.get(jobId!)?.ref.name).toBeUndefined();
+  });
+
+  test('whose extracted text turns out Secret keeps no queued question or job name either', async () => {
+    const dir = workspace('olympus-secret-side-legacy-');
+    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
+    pointJobsEnvAt(jobsPath);
+    const ledger = new TierLedger({ dbPath: join(dir, 'legacy.tier-ledger.sqlite') });
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'legacy.sqlite'),
+      corpusId: 'internal.legacy.files',
+      family: 'file',
+      trustDomain: 'internal',
+      tierLedger: ledger,
+    });
+    const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(ledger.dbPath) });
+    const jobs = new LocalFileExtractionJobStore(jobsPath);
+    cleanups.push(() => {
+      jobs.close();
+      sniffer.close();
+      store.close();
+      ledger.close();
+    });
+    const subject = identityOf('ops');
+    await store.syncFromConnector(fixtureConnector(() => [{ id: 'ops', name: 'ops note', text: 'Weekly notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(ledger.getCurrent(subject)?.contentTier).not.toBe('secrets');
+    sniffer.enqueue({ subject, pass: 'content', material: 'ops note', mapRevision: 'none', flags: [] });
+    const [jobId] = jobs.enqueue({
+      refs: [{
+        corpusId: 'internal.legacy.files', provider: PROVIDER, accountScope: ACCOUNT, approvedScopeKey: 'fixture:/Files',
+        providerItemId: 'ops', localItemId: fixtureLocalId({ id: 'ops' }), sourceVersion: 'v1', name: 'ops note',
+      }],
+      extractorKind: 'text',
+      extractorVersion: 'v1',
+    }).jobRefs.map((entry) => entry.jobId);
+
+    // The extraction sink's Secrets floor records what the extracted text decided.
+    const item = { identity: subject, metadata: { title: 'ops note' }, mimeType: 'text/plain' } as unknown as RawItem;
+    expect(store.recordExtractedContentTier(item, `The deploy key is ${FAKE_AWS_KEY} until Friday.`)).toBe(true);
+    expect(ledger.getCurrent(subject)?.contentTier).toBe('secrets');
+    expect(sniffer.questionFor(subject, 'content')).toBeUndefined();
     expect(jobs.get(jobId!)?.ref.name).toBeUndefined();
   });
 });

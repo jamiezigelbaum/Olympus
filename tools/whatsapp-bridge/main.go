@@ -35,7 +35,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -95,6 +97,10 @@ const (
 
 	audioMediaMaxFileBytes = 25 * 1024 * 1024
 	audioMediaQuotaBytes   = 5 * 1024 * 1024 * 1024
+	// The readable part of a saved file's name; the chat-scoped hash after it
+	// is what keeps names unique.
+	audioMediaReadableStemMax = 64
+	audioMediaNameAttempts    = 100
 
 	previewTitleMaxBytes       = 256
 	previewDescriptionMaxBytes = 1024
@@ -972,7 +978,7 @@ func recordFromMessage(ctx context.Context, client *whatsmeow.Client, audioStore
 	rec.applyLinkPreview(evt.Message.GetExtendedTextMessage())
 	rec.applyReaction(evt.Message.GetReactionMessage())
 	if audio := evt.Message.GetAudioMessage(); audio != nil {
-		rec.applyAudioCapture(audioStore.capture(ctx, rec.ID, audio))
+		rec.applyAudioCapture(audioStore.capture(ctx, rec.ChatJID, rec.ID, audio))
 	}
 	return rec, true
 }
@@ -1227,7 +1233,7 @@ func newAudioMediaStore(stateDir string, downloader mediaDownloader) *audioMedia
 	}
 }
 
-func (store *audioMediaStore) capture(ctx context.Context, messageID string, audio *waE2E.AudioMessage) audioCaptureResult {
+func (store *audioMediaStore) capture(ctx context.Context, chatJID string, messageID string, audio *waE2E.AudioMessage) audioCaptureResult {
 	result := audioRetryFields(audio)
 	result.MediaMime = audio.GetMimetype()
 	result.MediaDurationSeconds = audio.GetSeconds()
@@ -1251,7 +1257,7 @@ func (store *audioMediaStore) capture(ctx context.Context, messageID string, aud
 		result.DownloadStatus = "too_large"
 		return result
 	}
-	path, err := store.write(messageID, result.MediaMime, bytes)
+	path, err := store.write(chatJID, messageID, result.MediaMime, bytes)
 	if err != nil {
 		result.DownloadStatus = "failed:" + classifyDownloadError(err)
 		return result
@@ -1274,38 +1280,87 @@ func audioRetryFields(audio *waE2E.AudioMessage) audioCaptureResult {
 	}
 }
 
-func (store *audioMediaStore) write(messageID string, mediaMime string, bytes []byte) (string, error) {
+// write saves one voice note and returns its path. A WhatsApp message id is
+// unique only within its chat, so the file name carries a hash of the
+// normalized chat JID and id as well as the readable id. The final step links
+// rather than renames, so an existing file is never overwritten: identical
+// bytes (a re-delivered message) reuse it, different bytes take the next free
+// "-N" name. Files saved under older names stay where their spool lines point.
+func (store *audioMediaStore) write(chatJID string, messageID string, mediaMime string, bytes []byte) (string, error) {
 	if err := os.MkdirAll(store.dir, 0o700); err != nil {
 		return "", err
 	}
-	name := safeMediaFileStem(messageID) + extensionFromMime(mediaMime)
-	path := filepath.Join(store.dir, name)
-	tmp, err := os.OpenFile(path+".tmp", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o600)
+	tmp, err := os.CreateTemp(store.dir, ".audio-*.tmp")
 	if err != nil {
 		return "", err
 	}
+	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(bytes); err != nil {
 		tmp.Close()
-		os.Remove(tmp.Name())
 		return "", err
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		os.Remove(tmp.Name())
 		return "", err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
 		return "", err
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return "", err
+	stem := mediaFileStem(chatJID, messageID)
+	ext := extensionFromMime(mediaMime)
+	for attempt := 0; attempt < audioMediaNameAttempts; attempt++ {
+		name := stem + ext
+		if attempt > 0 {
+			name = fmt.Sprintf("%s-%d%s", stem, attempt, ext)
+		}
+		path := filepath.Join(store.dir, name)
+		err := os.Link(tmp.Name(), path)
+		if err == nil {
+			return path, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		if sameFileBytes(path, bytes) {
+			return path, nil
+		}
 	}
-	return path, nil
+	return "", fmt.Errorf("no free media file name for %s", stem)
+}
+
+func sameFileBytes(path string, want []byte) bool {
+	got, err := os.ReadFile(path)
+	return err == nil && string(got) == string(want)
+}
+
+// mediaFileStem is the readable message id plus a hash of the normalized chat
+// JID and the raw id, so the same id in two chats (or two ids that sanitize
+// alike) never share a file.
+func mediaFileStem(chatJID string, messageID string) string {
+	sum := sha256.Sum256([]byte(normalizeChatJID(chatJID) + "\x00" + messageID))
+	readable := safeMediaFileStem(messageID)
+	if len(readable) > audioMediaReadableStemMax {
+		readable = readable[:audioMediaReadableStemMax]
+	}
+	return readable + "-" + hex.EncodeToString(sum[:8])
+}
+
+// normalizeChatJID matches the TypeScript side's normalizeWhatsAppJid: trimmed,
+// lower-case, device suffix dropped.
+func normalizeChatJID(value string) string {
+	jid := strings.ToLower(strings.TrimSpace(value))
+	at := strings.LastIndex(jid, "@")
+	if at <= 0 {
+		return jid
+	}
+	user := jid[:at]
+	if device := strings.Index(user, ":"); device != -1 {
+		user = user[:device]
+	}
+	return user + "@" + jid[at+1:]
 }
 
 type mediaFileInfo struct {

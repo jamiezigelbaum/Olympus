@@ -54,6 +54,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
+import { secretFencedSniffer } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 /** Items re-judged per call (one call per sniffer tick, per set). */
@@ -154,7 +155,8 @@ export function rejudgeStoredContent(
   const { report, key, autoMoves } = options;
   const ledger = set.ledger;
   const identity = identityOf(record);
-  if (ledger.getOverride(identity)) {
+  const read = ledger.classificationRead(identity);
+  if (read.override) {
     if (key) ledger.markRejudged(identity, key);
     report.skipped += 1;
     return;
@@ -191,7 +193,7 @@ export function rejudgeStoredContent(
       subject: identity,
     },
     {
-      ...(options.sniffer ? { sniffer: options.sniffer } : {}),
+      ...(options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, read.secret) } : {}),
       ...(options.retirePublic ? { retirePublic: true } : {}),
     },
   );

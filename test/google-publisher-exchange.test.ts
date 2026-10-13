@@ -51,16 +51,23 @@ const dirs: string[] = [];
 let previousWebClientId: string | undefined;
 let previousExchangeUrl: string | undefined;
 
+let previousDesktopClientId: string | undefined;
+
+// The legacy Web-client path (before 2026-10-13), which `none` selects; the
+// Desktop path is test/google-desktop-signin.test.ts.
 beforeEach(() => {
   previousWebClientId = process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
   previousExchangeUrl = process.env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  previousDesktopClientId = process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID;
   process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID = PUBLISHER_WEB_CLIENT_ID;
   process.env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL = EXCHANGE_URL;
+  process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID = 'none';
 });
 
 afterEach(() => {
   restoreEnv('OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID', previousWebClientId);
   restoreEnv('OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL', previousExchangeUrl);
+  restoreEnv('OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID', previousDesktopClientId);
   delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });

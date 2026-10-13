@@ -27,7 +27,10 @@
 
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
-import { isImageMediaType } from '../classification/tier-classifier.ts';
+import { detectSecretFindingKinds } from '../classification/engine.ts';
+import { isImageMediaType, type ItemTierOverride } from '../classification/tier-classifier.ts';
+import { settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
+import type { ConnectorStoreItemWriteClaim } from '../connector-store/local-index.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
@@ -84,10 +87,17 @@ export const EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = 'extraction_claim_supers
  */
 export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = 'store_item_tier_move_queued';
 /**
- * A tiered store set: the item's text carries a secret, so the item is
- * stored nowhere and only its location is kept.
+ * The item's text carries a secret, so the item is stored nowhere and only
+ * its location is kept (a tiered store set, or the plain sink's Secrets
+ * floor).
  */
 export const EXTRACTION_SINK_SKIPPED_SECRETS = 'store_item_secrets';
+/**
+ * The text was judged Secret, but the item has since moved to another source
+ * revision, so this job's verdict is about a revision the store no longer
+ * holds. Nothing is changed; the current revision's own extraction decides it.
+ */
+export const EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = 'store_item_source_version_stale';
 /**
  * A still image's content (its picture, and any text read off it) rests only
  * in a Private store unless the photo judge found the picture ordinary
@@ -173,6 +183,15 @@ export interface ConnectorStoreExtractionSinkOptions {
    * never lets picture content into a store outside Private.
    */
   mediaJudgment?: (mediaSha256: string) => MediaJudgment | undefined;
+  /**
+   * Whether this sink applies the Secrets floor to the text before writing
+   * it. Default true. The store's own S5 refusal judges only the row's stored
+   * tier, decided at listing before the text existed, so without this floor
+   * text recognized as Secret would be chunked and indexed. A tiered store
+   * set's routed landing turns it off: it has already judged this text with
+   * the shared classifier and settles Secrets through its ledger.
+   */
+  secretsFloor?: boolean;
 }
 
 /**
@@ -366,6 +385,48 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
+      // THE DECIDING HALF of the fence (extractionWriteClaim).
+      const writeClaim = extractionWriteClaim(request);
+
+      // THE SECRETS FLOOR, before anything is written. A Secret is stored
+      // nowhere: the copy this store already holds (an earlier version's text)
+      // goes, and only the location is kept, per the one Secrets policy
+      // (connector-store/secrets-disposition.ts). An explicit per-item owner
+      // override outranks the detector, as it does in the shared classifier.
+      // The tombstone is fenced inside the store exactly as the write it
+      // replaces: an item another owner claims is left alone, and a superseded
+      // worker changes nothing.
+      if (options.secretsFloor !== false && plan.item.content.kind === 'text'
+        && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
+        const settled = settleUntrackedSecretsCopy({
+          store,
+          identity: plan.item.identity,
+          connectorId: options.syncConnectorId,
+          metadata: plan.item.metadata,
+          ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
+          ...(writeClaim ? { writeClaim } : {}),
+        });
+        if (settled === 'tombstoned' && options.recordContentTier !== false) {
+          store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
+        }
+        const secretsSkip: Record<typeof settled, string> = {
+          tombstoned: EXTRACTION_SINK_SKIPPED_SECRETS,
+          missing: EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
+          ambiguous: EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
+          excluded: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
+          metadata_only: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
+          stale_version: EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
+          owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
+          stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
+        };
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: secretsSkip[settled],
+        };
+      }
+
       let summary;
       try {
         summary = store.restoreItemRepresentations({
@@ -375,26 +436,8 @@ export function createConnectorStoreExtractionSink(
           ownershipKind: options.ownershipKind,
           classify: options.classify,
           ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
-          // THE DECIDING HALF. The grant travels into the store's write
-          // transaction, where it is compared against the newest one that
-          // corpus has accepted for this item and extractor — a comparison no
-          // race can get between, because it commits with the content itself.
-          //
-          // Scoped by extractor kind, so two extractors reading the same item
-          // order their own generations without ordering each other's. The
-          // lease token is hashed rather than copied: it is a capability in the
-          // queue, and the corpus needs only to tell two generations apart.
-          ...(request.claim
-            ? {
-              writeClaim: {
-                scope: request.extractorKind,
-                authority: request.claim.grantAuthority,
-                ordinal: request.claim.grantOrdinal,
-                holder: request.claim.jobId,
-                generation: connectorStoreHashString(request.claim.leaseToken),
-              },
-            }
-            : {}),
+          // The deciding half of the lease fence (above).
+          ...(writeClaim ? { writeClaim } : {}),
         });
       } catch (error) {
         // Only the two refusals a healthy sink can genuinely race into become
@@ -476,6 +519,47 @@ export function createConnectorStoreExtractionSink(
       };
     },
   };
+}
+
+/**
+ * The grant a claimed extraction carries into the store's write transaction,
+ * where it is compared against the newest one that corpus has accepted for
+ * this item and extractor — a comparison no race can get between, because it
+ * commits with the content itself (or with a Secret's tombstone).
+ *
+ * Scoped by extractor kind, so two extractors reading the same item order
+ * their own generations without ordering each other's. The lease token is
+ * hashed rather than copied: it is a capability in the queue, and the corpus
+ * needs only to tell two generations apart.
+ */
+export function extractionWriteClaim(request: ExtractionSinkRequest): ConnectorStoreItemWriteClaim | undefined {
+  return request.claim
+    ? {
+      scope: request.extractorKind,
+      authority: request.claim.grantAuthority,
+      ordinal: request.claim.grantOrdinal,
+      holder: request.claim.jobId,
+      generation: connectorStoreHashString(request.claim.leaseToken),
+    }
+    : undefined;
+}
+
+/**
+ * Whether the item's text is Secrets: an owner's tier override decides
+ * outright, an owner's not-secret override clears the detector, and otherwise
+ * any secret finding in the text holds. An unreadable ledger reads as no
+ * override, so the detector still decides.
+ */
+function secretsFloorHolds(store: LocalConnectorStore, item: RawItem, text: string): boolean {
+  let override: ItemTierOverride | undefined;
+  try {
+    override = store.tierLedger()?.getOverride(item.identity);
+  } catch {
+    override = undefined;
+  }
+  if (override?.kind === 'tier') return override.tier === 'secrets';
+  if (override?.kind === 'not_secret') return false;
+  return detectSecretFindingKinds(text).length > 0;
 }
 
 /**
