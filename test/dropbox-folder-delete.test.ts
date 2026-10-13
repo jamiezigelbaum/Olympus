@@ -673,9 +673,10 @@ describe('a deleted folder through the per-tier stores', () => {
       extractorVersion: 'test',
       fetchedAt: '2026-10-13T00:00:00.000Z',
     });
-    // One routed file keeps names in Personal and its Private text in Private;
+    // One routed file (an own record: measured values with a reference range)
+    // keeps names in Personal and its Private text in Private;
     // another keeps both in Personal; the sibling is Personal too.
-    expect((await land('id:new-top', 'The lab results confirm the diagnosis; treatment starts Monday.')).accepted).toBe(true);
+    expect((await land('id:new-top', 'Lab results for the owner: hemoglobin 13.2 g/dL (reference 12.0-15.5). The diagnosis is confirmed; treatment starts Monday.')).accepted).toBe(true);
     expect((await land('id:new-deep', 'Chapter three covers the history of cartography.')).accepted).toBe(true);
     expect((await land('id:new-sibling', 'Chapter four covers the history of lighthouses.')).accepted).toBe(true);
     expect((await land('id:new-pub', 'An essay on heirloom tomatoes, published on the owner site.')).accepted).toBe(true);
