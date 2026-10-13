@@ -10,7 +10,9 @@ import {
   type EngineBriefViewModel,
 } from '../src/core/engine-brief.ts';
 import { runEngineCommand } from '../src/core/engine-cli.ts';
-import { ENGINE_LABEL, enginePaths, type EngineExec } from '../src/core/engine-service.ts';
+import { ENGINE_LABEL, enginePaths, engineServicePaths, type EngineExec } from '../src/core/engine-service.ts';
+import { bindWorkerSocket, prepareWorkerSocket } from '../src/core/worker-transport.ts';
+import { withRequestPeer } from '../src/core/request-peer.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { withEngineBriefRoute } from '../src/workers/engine-brief-route.ts';
 
@@ -314,5 +316,95 @@ describe('olympus engine status --brief', () => {
     const report = await runEngineCommand(['status', '--brief'], { ...common(home), exec: launchctl('absent') });
     expect(report).toMatchObject({ schema: ENGINE_BRIEF_SCHEMA, state: 'not_installed' });
     await expect(runEngineCommand(['status', '--bogus'], { ...common(home), exec: launchctl('absent') })).rejects.toThrow('Unknown engine status option');
+  });
+});
+
+describe('brief platform integration', () => {
+  const token = 'fixture-secret-never-print';
+  const brief = { schema: ENGINE_BRIEF_SCHEMA, progress: null, blocker: null, needsYou: { count: 1, sentences: ['Dropbox — signed out'] }, token };
+  function linux() {
+    const home = mkdtempSync('/tmp/brief-');
+    roots.push(home);
+    const env = { HOME: home, XDG_CONFIG_HOME: join(home, 'config'), XDG_DATA_HOME: join(home, 'data'),
+      XDG_STATE_HOME: join(home, 'state'), XDG_RUNTIME_DIR: home, OLYMPUS_WORKER_AUTH_TOKEN: token };
+    const paths = engineServicePaths({ homeDir: home, platform: 'linux', env });
+    for (const path of [paths.plistPath, paths.configPath, paths.statusPath]) mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(paths.plistPath, '[Service]');
+    writeFileSync(paths.configPath, JSON.stringify({ email: { baseUrl: 'http://127.0.0.1:19876/v1' } }));
+    writeFileSync(paths.statusPath, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: 4242, started_at: '2020-01-01T00:00:00Z' }));
+    const exec: EngineExec = () => ({ status: 0, stderr: '', stdout: [
+      'LoadState=loaded', 'ActiveState=active', 'UnitFileState=enabled', 'MainPID=4242',
+      'ControlGroup=/user.slice/engine', 'Result=success', 'ExecMainStatus=0', `FragmentPath=${paths.plistPath}`,
+    ].join('\n') });
+    return { homeDir: home, platform: 'linux', env, exec };
+  }
+
+  test('Linux reads the XDG unit and config with the injected transport', async () => {
+    const deps = linux();
+    const seen: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(String(input));
+      if (String(input).endsWith('/engine/brief')) expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${token}`);
+      return Response.json(String(input).endsWith('/health') ? { ok: true } : brief);
+    }) as typeof fetch;
+    const result = await runEngineCommand(['status', '--brief'], { ...deps, fetchImpl });
+    expect(result).toEqual({ schema: ENGINE_BRIEF_SCHEMA, state: 'running', progress: null, blocker: null, needsYou: brief.needsYou });
+    expect(seen.sort()).toEqual(['http://127.0.0.1:19876/v1/engine/brief', 'http://127.0.0.1:19876/v1/health']);
+    const line = JSON.stringify(result);
+    expect(line).not.toContain(token);
+    expect(line).not.toContain('"token"');
+    expect(line.split('\n')).toHaveLength(1);
+  });
+
+  test('Linux reads the XDG status for grace expiry on synchronous transport failure', async () => {
+    const result = await engineBriefReport({ ...linux(), fetchImpl: (() => { throw new Error(token); }) as unknown as typeof fetch });
+    expect(result).toMatchObject({ state: 'unhealthy', detail: 'Olympus is running but is not answering. Run olympus engine logs to see why.' });
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+
+  test.skipIf(process.platform !== 'linux')('default fetch reaches only the owner socket and treats custody throws as unreachable', async () => {
+    const deps = linux();
+    const oldRuntime = process.env.XDG_RUNTIME_DIR;
+    process.env.XDG_RUNTIME_DIR = deps.env.XDG_RUNTIME_DIR;
+    const path = prepareWorkerSocket({ env: deps.env })!;
+    const seen: string[] = [];
+    const handler = withWorkerBearerAuth(withEngineBriefRoute(async () => Response.json({ ok: true }), {
+      view: async () => view({ needsYou: [item('x', 'Dropbox — signed out')] }),
+    }), { authToken: token, requireOwnerSocket: true });
+    const server = bindWorkerSocket(path, () => Bun.serve({ unix: path, fetch: withRequestPeer(request => {
+      seen.push(new URL(request.url).pathname);
+      return handler(request);
+    }, true) }));
+    try {
+      expect(await engineBriefReport(deps)).toMatchObject({ state: 'running', needsYou: brief.needsYou });
+      expect(seen.sort()).toEqual(['/v1/engine/brief', '/v1/health']);
+      // Exercise the actual CLI printer, not just JSON serialization of its return value.
+      const bin = join(deps.homeDir, 'bin');
+      mkdirSync(bin);
+      const systemctl = join(bin, 'systemctl');
+      writeFileSync(systemctl, "#!/bin/sh\ncat <<'FACTS'\n" + deps.exec('systemctl', []).stdout + '\nFACTS\n', { mode: 0o700 });
+      const child = Bun.spawn([process.execPath, 'src/cli.ts', 'engine', 'status', '--brief'], {
+        env: { ...process.env, ...deps.env, PATH: bin + ':' + process.env.PATH }, stdout: 'pipe', stderr: 'pipe',
+      });
+      const printed = await new Response(child.stdout).text();
+      const stderr = await new Response(child.stderr).text();
+      expect(await child.exited).toBe(0);
+      expect(stderr).toBe('');
+      expect(printed.trim().split('\n')).toHaveLength(1);
+      expect(JSON.parse(printed)).toMatchObject({ schema: ENGINE_BRIEF_SCHEMA, state: 'running', needsYou: brief.needsYou });
+      expect(printed).not.toContain(token);
+      process.env.XDG_RUNTIME_DIR = join(deps.homeDir, 'missing');
+      const failed = await engineBriefReport(deps);
+      expect(failed).toMatchObject({ state: 'unhealthy', detail: 'Olympus is running but is not answering. Run olympus engine logs to see why.' });
+    } finally {
+      server.stop(true);
+      if (oldRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = oldRuntime;
+    }
+  });
+
+  test('Darwin preserves historical paths even with XDG overrides', () => {
+    const home = '/Users/brief-fixture';
+    expect(engineServicePaths({ homeDir: home, platform: 'darwin', env: { XDG_CONFIG_HOME: '/ignored', XDG_DATA_HOME: '/ignored' } })).toEqual(enginePaths(home));
   });
 });

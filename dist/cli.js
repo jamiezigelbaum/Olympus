@@ -79464,9 +79464,10 @@ async function engineBriefReport(deps = {}) {
 async function readEngineBrief(deps) {
   const homeDir = deps.homeDir ?? homedir52();
   const env = { ...deps.env ?? process.env, HOME: homeDir };
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...deps, homeDir });
   const agent = inspectEngine({
     homeDir,
+    env,
     ...deps.exec ? { exec: deps.exec } : {},
     ...deps.uid !== undefined ? { uid: deps.uid } : {},
     ...deps.platform ? { platform: deps.platform } : {}
@@ -79483,7 +79484,7 @@ async function readEngineBrief(deps) {
   } catch {}
   const baseUrl = config.email.baseUrl || DEFAULT_BASE_URL;
   const token = workerAuthTokenFromConfig(config, { env, homeDir });
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const fetchImpl = deps.fetchImpl ?? workerFetch;
   const root = baseUrl.replace(/\/$/, "");
   const [reachable, brief] = await Promise.all([
     probeHealth(fetchImpl, `${root}/health`, deps.healthTimeoutMs ?? 1000),
@@ -79564,6 +79565,7 @@ var ENGINE_BRIEF_SCHEMA = "olympus.engine.brief.v1", ENGINE_BRIEF_PATH = "/engin
 var init_engine_brief = __esm(() => {
   init_config();
   init_engine_service();
+  init_worker_transport();
   init_worker_auth();
   UNITS = new Set(["files", "messages", "items"]);
   PHASES = new Set(["initial", "refresh"]);
