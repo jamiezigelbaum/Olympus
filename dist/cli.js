@@ -64158,6 +64158,7 @@ __export(exports_source_dashboard, {
   publisherConnectIntro: () => publisherConnectIntro,
   isGoogleOAuthSource: () => isGoogleOAuthSource2,
   defaultSourceDashboardHistoryDbPath: () => defaultSourceDashboardHistoryDbPath,
+  dashboardSensitivityTiers: () => dashboardSensitivityTiers,
   dashboardSchedulerTaskFailing: () => dashboardSchedulerTaskFailing,
   dashboardManualSyncOutcome: () => dashboardManualSyncOutcome,
   dashboardLiveManualSync: () => dashboardLiveManualSync,
@@ -64258,6 +64259,14 @@ function dashboardGuidedSessionAgentPrompt(source) {
     return "Connect Telegram to Olympus using the packaged olympus connect telegram --pair command. The dashboard has no Connect/Pair button or login form; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.";
   }
   return "Connect WhatsApp to Olympus using the packaged olympus connect whatsapp --pair command. The dashboard has no Connect/Pair button or QR display; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.";
+}
+function dashboardSensitivityTiers(sovereigntyEngine) {
+  if (!isPublicTierRetired(sovereigntyEngine.config))
+    return DASHBOARD_SENSITIVITY_TIERS;
+  return {
+    ...DASHBOARD_SENSITIVITY_TIERS,
+    tiers: DASHBOARD_SENSITIVITY_TIERS.tiers.filter((tier) => tier.tier_label !== "S0")
+  };
 }
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join56(homedir40(), ".local", "share");
@@ -64589,7 +64598,7 @@ function buildSourceDashboardViewModel(options) {
     where_your_data_lives: trustCards,
     unassigned_corpora: unassignedCorpora,
     excluded_by_configuration: excludedByConfiguration,
-    sensitivity_tiers: DASHBOARD_SENSITIVITY_TIERS,
+    sensitivity_tiers: dashboardSensitivityTiers(options.sovereigntyEngine),
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
@@ -66088,11 +66097,12 @@ function withActiveStep(steps) {
   }));
 }
 function trustDomainCards(sourceCards, unassigned, sovereigntyEngine) {
+  const productDomains = isPublicTierRetired(sovereigntyEngine.config) ? DASHBOARD_TRUST_DOMAINS.filter((trustDomain) => trustDomain !== "public_safe") : DASHBOARD_TRUST_DOMAINS;
   const extraDomains = [
     ...sourceCards.flatMap((card) => card.tier_composition.map((tier) => tier.trust_domain)),
     ...unassigned.entries.map((entry) => entry.trust_domain)
-  ].filter((trustDomain) => !DASHBOARD_TRUST_DOMAINS.includes(trustDomain));
-  return [...DASHBOARD_TRUST_DOMAINS, ...new Set(extraDomains)].map((trustDomain) => {
+  ].filter((trustDomain) => !productDomains.includes(trustDomain));
+  return [...productDomains, ...new Set(extraDomains)].map((trustDomain) => {
     const tiers = sourceCards.flatMap((card) => card.tier_composition.filter((tier) => tier.trust_domain === trustDomain));
     const unassignedInTier = unassigned.entries.filter((entry) => entry.trust_domain === trustDomain);
     const sourcesWithTier = sourceCards.filter((card) => card.tier_composition.some((tier) => tier.trust_domain === trustDomain && (tier.indexed_items > 0 || tier.content_ready_items > 0)));
@@ -66228,6 +66238,7 @@ var init_source_dashboard = __esm(() => {
   init_ingestion_throughput();
   init_source_corpus_registry();
   init_types();
+  init_sovereignty();
   init_scheduler_markers();
   init_source_failure();
   init_answer_ready_coverage();

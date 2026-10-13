@@ -28893,6 +28893,7 @@ var init_source_dashboard = __esm(() => {
   init_ingestion_throughput();
   init_source_corpus_registry();
   init_types();
+  init_sovereignty();
   init_scheduler_markers();
   init_source_failure();
   init_answer_ready_coverage();
