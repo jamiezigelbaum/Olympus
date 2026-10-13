@@ -49,6 +49,13 @@
       <pre><code>ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:/run/user/1000/olympus/worker.sock you@your-computer</code></pre>
       <p>Then, on that computer, run <code>olympus dashboard --no-open</code> and open the link it prints on the computer you sit at.</p>
       <p>Approving ChatGPT, Claude or Grok works the same way: the approval page opens through the tunnel.</p>
+      <p>Signing in to Gmail or Google Drive works through the tunnel too: keep it open, open the sign-in link on the computer you sit at, and Google returns you to Olympus through it. Without the tunnel, the last page after you allow access does not load. Its address still finishes the sign-in: copy the whole address from the address bar and, on the computer running Olympus, run (keeping the quotes):</p>
+      <pre><code>olympus connect finish 'http://127.0.0.1:8010/oauth/callback/gmail?…'</code></pre>
+      <p>Do it within 10 minutes of choosing <strong>Connect</strong>; after that, choose <strong>Connect</strong> again.</p>
+
+      <h2 id="google">Connect Gmail or Google Drive</h2>
+      <p>Google sign-in happens on the computer where Olympus runs, so your Google account connects straight to it. In ChatGPT, <strong>Connect</strong> gives you a link: open it on that computer and it continues to Google. On a phone the link says to open it on your computer instead; Gmail and Google Drive cannot be connected from a phone. If Olympus runs on a computer you reach over SSH, see <a href="#headless">On a Linux computer without a screen</a>.</p>
+      <p>If you connected Google with a version of Olympus before 1.0.0, choose <strong>Reconnect Google</strong> in the dashboard after you update: the old sign-in service is retired, so the old connection can no longer renew.</p>
 
       <h2 id="connect">Connect your sources</h2>
       <p>Every source can be connected from the Olympus dashboard on your computer. In ChatGPT, Gmail, Google Drive and Dropbox can also be connected from the Olympus dashboard there. These are only ever connected on your computer:</p>
