@@ -117,10 +117,11 @@ uninstall: <https://olympusplugin.ai/install/>.
 [Codex](https://olympusplugin.ai/install/codex/) ·
 [OpenClaw](https://olympusplugin.ai/install/openclaw/) ·
 [Hermes](https://olympusplugin.ai/install/hermes/) ·
-[any MCP app](https://olympusplugin.ai/install/other/). ChatGPT, Claude and
-Grok are approved with one click on a page Olympus opens on your own
-computer: there is no code to copy and no account to create. Grok Bot then
-uses the Grok connection. Apps on your
+[any MCP app](https://olympusplugin.ai/install/other/). In ChatGPT, Claude
+and Grok you add Olympus's address as a connector (in ChatGPT, in Developer
+mode until Olympus is listed in its directory), then approve it with one
+click on a page Olympus opens on your own computer: there is no pairing code
+and no account to create. Grok Bot then uses the Grok connection. Apps on your
 computer, such as Claude Code, Codex and Hermes, connect with one command.
 
 **3. Connect your sources and ask.** Open the dashboard (in ChatGPT, ask
@@ -589,8 +590,8 @@ computer**, choose **Open** next to **Agents**, then press **Connect an
 agent**. Pick the agent you use and follow its steps; every address and
 snippet has a copy button.
 
-- **ChatGPT**: add the Olympus plugin in ChatGPT (see
-  [Olympus for ChatGPT](#olympus-for-chatgpt)), then click **Connect** on the
+- **ChatGPT**: add Olympus in ChatGPT (Developer mode until it is listed;
+  see [Olympus for ChatGPT](#olympus-for-chatgpt)), then click **Connect** on the
   page that opens in this computer's browser.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
   `olympus serve` command) into the agent. This works without remote access.
