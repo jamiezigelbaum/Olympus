@@ -30408,12 +30408,13 @@ var init_x_bookmarks = __esm(() => {
 import { homedir as homedir18 } from "node:os";
 import { join as join29 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join29(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join29(standaloneLinuxDataDir(env) ?? join29(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join29(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join29(standaloneLinuxDataDir(env) ?? join29(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
+  init_linux_engine_layout();
   init_source_corpus_registry();
   init_corpus();
 });

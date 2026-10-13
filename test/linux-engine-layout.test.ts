@@ -187,3 +187,12 @@ test('an owned install re-checked after its engine wrote status is not refused a
   mkdirSync(engineDir, { recursive: true, mode: 0o700 }); writeFileSync(join(engineDir, 'status.json'), '{}', { mode: 0o600 });
   expect(() => preflightLinuxEngineLayout(resolveLinuxEngineLayout(xdg))).not.toThrow();
 });
+test('the standalone engine keeps Telegram stores under its own data root, never the OpenClaw path', async () => {
+  const { home, env } = fixture(); const xdg = { ...env, XDG_DATA_HOME: join(home, '.local/share'), OLYMPUS_ENGINE_HOST: '1' };
+  const { defaultInternalTelegramConnectorStoreDbPath, defaultProtectedTelegramConnectorStoreDbPath } = await import('../src/workers/telegram-messages/corpus-adapter.ts');
+  const layout = resolveLinuxEngineLayout(xdg);
+  for (const path of [defaultInternalTelegramConnectorStoreDbPath(xdg), defaultProtectedTelegramConnectorStoreDbPath(xdg)]) {
+    expect(path.startsWith(`${layout.dataDir}/`)).toBe(true);
+    expect(path).not.toContain('openclaw');
+  }
+});

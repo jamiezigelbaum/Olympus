@@ -47912,10 +47912,10 @@ var init_google_connectors = __esm(() => {
 import { homedir as homedir27 } from "node:os";
 import { join as join45 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join45(env.HOME?.trim() || homedir27(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join45(standaloneLinuxDataDir(env) ?? join45(env.HOME?.trim() || homedir27(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join45(env.HOME?.trim() || homedir27(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join45(standaloneLinuxDataDir(env) ?? join45(env.HOME?.trim() || homedir27(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
 }
 function defineInternalTelegramMessagesCorpus() {
   return defineSourceIndexCorpus({
@@ -47944,6 +47944,7 @@ function isTelegramMessagesCorpusId(corpusId) {
 }
 var INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID = "internal.telegram.messages", PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID2 = "secure_local.telegram.protected.messages", LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID;
 var init_corpus_adapter2 = __esm(() => {
+  init_linux_engine_layout();
   init_source_corpus_registry();
   init_corpus();
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
