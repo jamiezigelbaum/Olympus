@@ -11778,6 +11778,15 @@ class TierLedger {
       this.settleRevokedOwnerMove(identity);
     })();
   }
+  itemIsSecret(identity) {
+    const override = this.getOverride(identity);
+    if (override?.kind === "tier" && override.tier === "secrets")
+      return true;
+    const record = this.getCurrent(identity);
+    if (!record)
+      return false;
+    return [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
+  }
   getOverride(identity) {
     const row = this.db.query(`
       SELECT override_json FROM tier_overrides
@@ -14814,6 +14823,7 @@ function isTextualMimeType(mimeType) {
 }
 function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const override = ledger?.getOverride(item.identity);
+  const sniffer = options?.sniffer && ledger ? secretFencedSniffer(options.sniffer, ledger, item.identity) : options?.sniffer;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
@@ -14823,10 +14833,18 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     subject: item.identity
   }, {
     ...options?.rules ? { rules: options.rules } : {},
-    ...options?.sniffer ? { sniffer: options.sniffer } : {},
+    ...sniffer ? { sniffer } : {},
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+}
+function secretFencedSniffer(sniffer, ledger, identity) {
+  if (ledger.itemIsSecret(identity))
+    return sniffer;
+  return {
+    id: sniffer.id,
+    judge: (request) => sniffer.judge({ ...request, stillAsk: () => !ledger.itemIsSecret(identity) })
+  };
 }
 var DEFAULT_TIER_FOR_DOMAIN;
 var init_tier_placement = __esm(() => {
@@ -14920,7 +14938,10 @@ class TierSnifferStore {
   }
   enqueue(question) {
     const materialHash = snifferMaterialHash(question.pass, question.material);
-    this.db.query(`
+    return this.db.transaction(() => {
+      if (question.stillAsk && !question.stillAsk())
+        return false;
+      this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
@@ -14933,6 +14954,8 @@ class TierSnifferStore {
         material = excluded.material,
         flags_json = excluded.flags_json
     `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
+      return true;
+    }).immediate();
   }
   questionFor(subject, pass) {
     const row = this.db.query(`
@@ -37760,7 +37783,8 @@ class CachedTierSniffer {
           pass: request.pass,
           material,
           mapRevision,
-          flags: request.flags
+          flags: request.flags,
+          ...request.stillAsk ? { stillAsk: request.stillAsk } : {}
         });
       }
     } catch {}
@@ -38823,6 +38847,7 @@ init_embedding_cost_estimates();
 init_operation_error();
 init_tier_move();
 init_secrets_disposition();
+init_tier_placement();
 init_embedding_ledger();
 init_engine();
 init_tier_classifier();
