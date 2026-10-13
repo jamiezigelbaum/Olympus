@@ -30,7 +30,7 @@ import {
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
-import { placementIsRaise, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
+import { copyServingLayer, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
@@ -209,7 +209,17 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // listing (its names stay), also in a lane where only some items' does.
       // A re-judgment places it as every caller with only a decision does, so
       // the two never disagree into a move and back.
-      const placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
+      let placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
+      const fromContent = copyServingLayer(current, 'content');
+      const toContent = copyServingLayer(placement.copies, 'content');
+      // An edited Private copy waits in place for its new text's answer,
+      // just like an inline sync. Record the new decision's baseline so a
+      // Personal answer can lower it; the old tier is not a new-text floor.
+      if (record.contentRead && decision.contentPending && fromContent && toContent
+        && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain)
+        && !placementIsRaise(current, placement.copies)) {
+        placement = { copies: current, embedHold: true };
+      }
       const contentCopy = placement.copies.find((copy) => copy.layers !== 'metadata');
       const contentStore = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);

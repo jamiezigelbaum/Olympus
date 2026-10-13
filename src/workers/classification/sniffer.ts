@@ -34,7 +34,7 @@ import {
   type StoredSnifferVerdict,
   type TierSnifferStore,
 } from './sniffer-store.ts';
-import type { TierSniffer, TierSnifferRequest, TierSnifferVerdict } from './tier-classifier.ts';
+import { hasCredentialUrl, type TierSniffer, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 
 /** The sniffer may resolve a flagged item to Personal only at or above this confidence. */
 export const SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
@@ -133,7 +133,7 @@ const INJECTION_RULES: ReadonlyArray<readonly [string, RegExp]> = [
   ['role_boundary', /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
   ['instruction_override', /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
   ['forged_verdict', /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-  ['tier_steering', /\b(?:reply|respond|answer|output|return)\b[^.!?;]{0,50}\b(?:personal|private|public)\s+(?:tier|verdict)\b|\b(?:classify|label|mark|treat|tag|rate)\s+(?:(?:this|the|that|every|each|all)\s+(?:items?|files?|documents?|messages?|entries|list|batch)|(?:it|this|these|them))\s+(?:as\s+)?(?:personal|private|public|not private)\b|\b(?:classifier|sniffer)\b[^.!?;]{0,35}\b(?:classify|label|mark|treat|tag|rate)\b[^.!?;]{0,30}\b(?:personal|private|public)\b|\b(?:your verdict|verdict for this (?:file|item|document))\b[^.!?;]{0,40}\b(?:personal|private|public)\b|\b(?:classify|label|mark)\s+as\s+(?:personal|private|public)\b|\b(?:answer|respond|return|output)\s*(?::|with|only)?\s*(?:personal|private|public)\b/],
+  ['tier_steering', /\b(?:reply|respond|answer|output|return)\b[^.!?;]{0,50}\b(?:personal|private|public)\s+(?:tier|verdict)\b|\b(?:classify|label|mark|treat|tag|rate)\s+(?:(?:this|the|that|every|each|all)\s+(?:items?|files?|documents?|messages?|entries|list|batch)|(?:it|this|these|them))\s+(?:as\s+)?(?:personal|private|public|not private)\b|\b(?:classifier|sniffer)\b[^.!?;]{0,35}\b(?:classify|label|mark|treat|tag|rate)\b[^.!?;]{0,30}\b(?:personal|private|public)\b|\b(?:your verdict|verdict for this (?:file|item|document))\b[^.!?;]{0,40}\b(?:personal|private|public)\b|\b(?:classify|label|mark)\s+as\s+(?:personal|private|public)\b|\b(?:reply|answer|respond|return|output)\s*(?::|with)?\s*(?:only\s+)?(?:personal|private|public)\b/],
   ['cross_item_steering', /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/],
 ];
 
@@ -367,7 +367,7 @@ export function snifferCategoryOf(raw: string, tier: SnifferTier): SnifferCatego
 
 /** Material the model may never read: anything with a secret finding in it. */
 export function snifferMaterialCarriesSecret(material: string): boolean {
-  return detectSecretFindingKinds(material).length > 0;
+  return hasCredentialUrl(material) || detectSecretFindingKinds(material).length > 0;
 }
 
 // --- Synchronous, cache-backed sniffer ------------------------------------------------

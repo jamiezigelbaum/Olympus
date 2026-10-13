@@ -107,3 +107,13 @@ for (const locator of [
   expect(f.ledger.copies(identityOf('url'))).toEqual([]);
   expect(f.secrets.get(identityOf('url'))).toMatchObject({ locator: null, findingKinds: ['credential_assignment'] });
 });
+
+for (const prefix of ['', 'Ordinary background. '.repeat(200)]) test('encoded credential URL anywhere in a body settles as Secrets before storage', async () => {
+  const f = lane();
+  const text = prefix + 'Open https://example.test/?%61ccess%5F%74oken=synthetic-credential';
+  await f.set.sync(fixtureConnector(() => [{ id: 'body-url', name: 'Orchard notes', text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  expect(f.ledger.getCurrent(identityOf('body-url'))).toMatchObject({ contentTier: 'secrets', contentPending: false });
+  expect(f.ledger.copies(identityOf('body-url'))).toEqual([]);
+  expect(f.stores.internal!.localContent(localId('body-url'))).toBeUndefined();
+  expect(requests).toEqual([]);
+});

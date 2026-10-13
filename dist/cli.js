@@ -17972,6 +17972,8 @@ function contentPass(args) {
   }
   if (!args.secretsCleared) {
     const secretKinds = detectSecretFindingKinds(text2);
+    if (hasCredentialUrl(text2) && !secretKinds.includes("credential_assignment"))
+      secretKinds.push("credential_assignment");
     if (secretKinds.length > 0) {
       return {
         tier: "secrets",
@@ -18210,7 +18212,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-13.p5", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_engine();
   init_sender_rules();
@@ -34358,6 +34360,21 @@ function rejudgeMetadata(record, sniffer, names, subject) {
     ]
   };
 }
+function settleLegacySecrets(options) {
+  const copies = options.stores.flatMap((store) => {
+    const exported = store.exportItemCopy(options.identity);
+    return exported ? [{ store, exported }] : [];
+  });
+  if (copies.length === 0 && !options.locations.get(options.identity)?.findingKinds.includes("sniffer_secret_refusal"))
+    return false;
+  for (const { exported } of copies)
+    recordSecretLocation(options.locations, options.decision, exported, { findingKinds: ["sniffer_secret_refusal"] });
+  for (const { store, exported } of copies) {
+    store.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
+  }
+  options.ledger.recordDecision(options.identity, options.decision);
+  return true;
+}
 function settleRoutedSecrets(set, identity, decision, exported, finding, placement = {}) {
   const ledger = set.ledger;
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
@@ -34365,22 +34382,9 @@ function settleRoutedSecrets(set, identity, decision, exported, finding, placeme
   });
   if (recorded.outcome !== "secrets")
     return false;
-  const locator = columnString(exported.columns["locator_uri"]);
-  const title = columnString(exported.columns["title"]);
-  const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
-  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
-  const scopeGeneration = columnString(exported.columns["source_scope_generation"]);
-  const scopeRevision = columnString(exported.columns["source_scope_revision"]);
-  set.secrets()?.record({
-    identity: exported.identity,
-    ...locator && !hasCredentialUrl(locator) ? { locator } : {},
-    ...title && namesReleasable ? { title } : {},
-    namesReleasable,
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {},
-    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ["owner_marked_secret"],
-    ...finding.text !== undefined ? { text: finding.text } : {}
-  });
+  const locations = set.secrets();
+  if (locations)
+    recordSecretLocation(locations, decision, exported, finding);
   settleSecretsCopies({
     ledger,
     identity: exported.identity,
@@ -34392,6 +34396,24 @@ function settleRoutedSecrets(set, identity, decision, exported, finding, placeme
     connectorId: TIER_REJUDGE_CONNECTOR_ID
   });
   return true;
+}
+function recordSecretLocation(locations, decision, exported, finding) {
+  const locator = columnString(exported.columns["locator_uri"]);
+  const title = columnString(exported.columns["title"]);
+  const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
+  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
+  const scopeGeneration = columnString(exported.columns["source_scope_generation"]);
+  const scopeRevision = columnString(exported.columns["source_scope_revision"]);
+  locations.record({
+    identity: exported.identity,
+    ...locator && !hasCredentialUrl(locator) ? { locator } : {},
+    ...title && namesReleasable ? { title } : {},
+    namesReleasable,
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {},
+    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ["owner_marked_secret"],
+    ...finding.text !== undefined ? { text: finding.text } : {}
+  });
 }
 function identityOf2(record) {
   return {
@@ -74118,15 +74140,49 @@ class TierSnifferStore {
   }
   listQuestions(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
-    const where = options.pass ? "WHERE pass = ?" : "";
-    const params = options.pass ? [options.pass] : [];
-    const rows = this.db.query(`SELECT * FROM sniffer_questions ${where}
-      ORDER BY priority DESC, queued_at DESC, question_pk DESC LIMIT ?`).all(...params, limit);
-    const oldest = this.db.query(`SELECT * FROM sniffer_questions ${where}
-      ORDER BY queued_at, question_pk LIMIT 1`).get(...params);
-    if (oldest && !rows.some((row) => row.question_pk === oldest.question_pk))
-      rows.push(oldest);
-    return rows.map(questionFromRow);
+    const accepted = new Map;
+    const eligible = (question) => {
+      if (!accepted.has(question.sequence))
+        accepted.set(question.sequence, options.eligible?.(question) ?? true);
+      return accepted.get(question.sequence);
+    };
+    const read = (oldest2, count) => {
+      const found = [];
+      let cursor;
+      do {
+        const filters = [];
+        const params = [];
+        if (options.pass) {
+          filters.push("pass = ?");
+          params.push(options.pass);
+        }
+        if (cursor) {
+          filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, queued_at, question_pk) < (?, ?, ?)");
+          if (!oldest2)
+            params.push(cursor.priority);
+          params.push(cursor.queued_at, cursor.question_pk);
+        }
+        const rows = this.db.query(`SELECT * FROM sniffer_questions
+          ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+          ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, limit);
+        for (const row of rows) {
+          const question = questionFromRow(row);
+          if (eligible(question))
+            found.push(question);
+          if (found.length === count)
+            return found;
+        }
+        if (rows.length < limit)
+          break;
+        cursor = rows.at(-1);
+      } while (cursor);
+      return found;
+    };
+    const questions = read(false, limit);
+    const oldest = read(true, 1)[0];
+    if (oldest && !questions.some((question) => question.sequence === oldest.sequence))
+      questions.push(oldest);
+    return questions;
   }
   dispatchCount() {
     const used = this.db.query("SELECT dispatches FROM sniffer_schedule WHERE id = 1").get().dispatches;
@@ -74377,7 +74433,7 @@ function snifferCategoryOf(raw, tier) {
   return SNIFFER_CATEGORY_SYNONYMS[key2] ?? "other";
 }
 function snifferMaterialCarriesSecret(material) {
-  return detectSecretFindingKinds(material).length > 0;
+  return hasCredentialUrl(material) || detectSecretFindingKinds(material).length > 0;
 }
 
 class CachedTierSniffer {
@@ -74432,6 +74488,7 @@ var init_sniffer = __esm(() => {
   init_engine();
   init_delphi_scorer();
   init_sniffer_store();
+  init_tier_classifier();
   SNIFFER_CATEGORIES = [
     "health",
     "therapy",
@@ -74450,7 +74507,7 @@ var init_sniffer = __esm(() => {
     ["role_boundary", /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
     ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
     ["forged_verdict", /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-    ["tier_steering", /\b(?:reply|respond|answer|output|return)\b[^.!?;]{0,50}\b(?:personal|private|public)\s+(?:tier|verdict)\b|\b(?:classify|label|mark|treat|tag|rate)\s+(?:(?:this|the|that|every|each|all)\s+(?:items?|files?|documents?|messages?|entries|list|batch)|(?:it|this|these|them))\s+(?:as\s+)?(?:personal|private|public|not private)\b|\b(?:classifier|sniffer)\b[^.!?;]{0,35}\b(?:classify|label|mark|treat|tag|rate)\b[^.!?;]{0,30}\b(?:personal|private|public)\b|\b(?:your verdict|verdict for this (?:file|item|document))\b[^.!?;]{0,40}\b(?:personal|private|public)\b|\b(?:classify|label|mark)\s+as\s+(?:personal|private|public)\b|\b(?:answer|respond|return|output)\s*(?::|with|only)?\s*(?:personal|private|public)\b/],
+    ["tier_steering", /\b(?:reply|respond|answer|output|return)\b[^.!?;]{0,50}\b(?:personal|private|public)\s+(?:tier|verdict)\b|\b(?:classify|label|mark|treat|tag|rate)\s+(?:(?:this|the|that|every|each|all)\s+(?:items?|files?|documents?|messages?|entries|list|batch)|(?:it|this|these|them))\s+(?:as\s+)?(?:personal|private|public|not private)\b|\b(?:classifier|sniffer)\b[^.!?;]{0,35}\b(?:classify|label|mark|treat|tag|rate)\b[^.!?;]{0,30}\b(?:personal|private|public)\b|\b(?:your verdict|verdict for this (?:file|item|document))\b[^.!?;]{0,40}\b(?:personal|private|public)\b|\b(?:classify|label|mark)\s+as\s+(?:personal|private|public)\b|\b(?:reply|answer|respond|return|output)\s*(?::|with)?\s*(?:only\s+)?(?:personal|private|public)\b/],
     ["cross_item_steering", /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/]
   ];
   SNIFFER_SYSTEM_PROMPT = [
@@ -105263,7 +105320,12 @@ function createTieredStoreExtractionSink(options) {
         });
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
-      const placement = set2.placementFor(decision, record3.contentRead ? {} : { contentArrivesLater: true });
+      let placement = set2.placementFor(decision, record3.contentRead ? {} : { contentArrivesLater: true });
+      const fromContent = copyServingLayer(current2, "content");
+      const toContent = copyServingLayer(placement.copies, "content");
+      if (record3.contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(current2, placement.copies)) {
+        placement = { copies: current2, embedHold: true };
+      }
       const contentCopy = placement.copies.find((copy) => copy.layers !== "metadata");
       const contentStore = contentCopy ? set2.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore)
@@ -126275,10 +126337,17 @@ async function runSnifferPass(options) {
   };
   const work = { metadata: [], content: [] };
   for (const target of options.targets) {
-    for (const question of target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500 })) {
+    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: (question) => {
       report.pendingSeen += 1;
       if (midMove(target, question))
-        continue;
+        return false;
+      if (stillOpen(target, question))
+        return true;
+      target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
+      report.staleDropped += 1;
+      return false;
+    } });
+    for (const question of questions) {
       if (!stillOpen(target, question)) {
         target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
         report.staleDropped += 1;
@@ -126298,7 +126367,7 @@ async function runSnifferPass(options) {
           contentPending: false,
           contentRead: true
         };
-        const settled = row.routed ? target.settleSecrets?.(question, decision) === true : (target.ledger.recordDecision(question, decision), true);
+        const settled = target.settleSecrets?.(question, decision) === true;
         if (settled) {
           target.sniffer.deleteQuestion(question, "metadata");
           target.sniffer.deleteQuestion(question, "content");
@@ -126824,6 +126893,20 @@ class TierSnifferService {
         ...planner ? { placementFor: planner } : {},
         settleSecrets: (question, decision) => {
           const set2 = tierSetForLedger(ledgerPath);
+          if (!ledger2.getCurrent(question)?.routed) {
+            const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath && typeof store.exportItemCopy === "function" && typeof store.tombstoneCopy === "function");
+            const home2 = stores[0];
+            if (!home2)
+              return false;
+            const shared = set2?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home2.dbPath) });
+            try {
+              return settleLegacySecrets({ ledger: ledger2, stores, locations, identity: question, decision });
+            } finally {
+              if (!shared)
+                locations.close();
+            }
+          }
           if (!set2)
             return false;
           const current2 = set2.ledger.copies(question).filter((copy) => copy.state === "current");
@@ -127110,6 +127193,7 @@ function positiveInteger7(value, fallback, minimum) {
 }
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
+  init_secret_locations();
   init_classification_ledger();
   init_tier_move();
   init_provider();

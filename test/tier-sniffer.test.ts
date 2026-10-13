@@ -169,7 +169,9 @@ describe('secrets are never sent', () => {
       recordFlagged(ledger, store, 2, 'lab results');
       store.enqueue({ subject: subject(2), pass: 'metadata', material: `lab results ${FAKE_AWS_KEY}`, mapRevision: 'none', flags: ['names:health'] });
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.9 }));
-      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, settleSecrets(question, decision) {
+        ledger.recordDecision(question, decision); return true;
+      } }], lane: LOCAL_LANE, model });
       expect(report.secretRefused).toBe(1);
       for (const n of [1, 2]) expect(ledger.getCurrent(subject(n))).toMatchObject({ state: 'current', contentTier: 'secrets', metadataPending: false, contentPending: false });
       expect(model.requests.every((request) => !request.prompt.includes(FAKE_AWS_KEY))).toBe(true);
@@ -980,5 +982,50 @@ test('a changed document tail invalidates an in-flight answer even when its exce
     expect(result.verdictsApplied).toBe(0);
     classify('Revision B.'); // The cached old answer cannot settle the new input either.
     expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true });
+  } finally { store.close(); ledger.close(); }
+});
+
+
+test('encoded credential URLs are refused both before queueing and before model dispatch', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  const material = 'Open https://example.test/?%61ccess%5F%74oken=synthetic-credential';
+  try {
+    const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+    expect(sniffer.judge({ pass: 'content', subject: subject(1), material, flags: [], mapRevision: 'none' }))
+      .toMatchObject({ verdict: 'decided', tier: 'secrets' });
+    expect(store.counts().questions).toBe(0);
+    recordFlagged(ledger, store, 2, 'bank letter');
+    store.enqueue({ subject: subject(2), pass: 'metadata', material, flags: [], mapRevision: 'none' });
+    const model = spyModel(() => { throw new Error('must not dispatch'); });
+    let settled = 0;
+    const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, settleSecrets(question, decision) {
+      settled++; ledger.recordDecision(question, decision); return true;
+    } }], lane: LOCAL_LANE, model });
+    expect(report.secretRefused).toBe(1);
+    expect(settled).toBe(1);
+    expect(model.requests).toEqual([]);
+    expect(store.counts().questions).toBe(0);
+  } finally { store.close(); ledger.close(); }
+});
+
+test('aging skips blocked moves on both sides of the oldest eligible question', async () => {
+  let clock = new Date('2026-01-01T00:00:00Z');
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:', now: () => clock });
+  try {
+    for (let n = 1; n <= 8; n++) {
+      recordFlagged(ledger, store, n, `bank age candidate ${n}`);
+      if (n !== 2 && n !== 7) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
+      clock = new Date(clock.getTime() + 1000);
+    }
+    clock = new Date('2026-01-01T02:00:00Z');
+    for (let i = 0; i < 4; i++) store.recordDispatch();
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]!.prompt).toContain('bank age candidate 2');
+    expect(store.questionFor(subject(1), 'metadata')).toBeDefined();
+    expect(store.questionFor(subject(8), 'metadata')).toBeDefined();
   } finally { store.close(); ledger.close(); }
 });

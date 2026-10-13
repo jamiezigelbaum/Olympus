@@ -5,7 +5,7 @@ import { InstalledTierClassification } from '../src/workers/classification/insta
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
-import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets } from '../src/workers/connector-store/tier-rejudge.ts';
+import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets, settleLegacySecrets } from '../src/workers/connector-store/tier-rejudge.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
@@ -121,4 +121,57 @@ for (const locator of [
   expect(f.ledger.copies(identity)).toEqual([]);
   expect(f.stores.secure_local!.exportItemCopy(identity)).toBeUndefined();
   expect(f.stores.internal!.localContent(localId('record'))).toBeUndefined();
+});
+
+
+for (const locator of ['https://example.test/notes', 'https://example.test/?%61ccess%5F%74oken=synthetic-credential'])
+  test('a legacy secret refusal removes the stored copy and records a safe location', async () => {
+    const tmp = tempDir();
+    const f = openTierFixture(tmp.dir, { embed: false });
+    cleanup.push(() => { f.close(); tmp.cleanup(); });
+    const store = f.stores.internal!;
+    await store.syncFromConnector(fixtureConnector(() => [{ id: 'record', name: 'Orchard notes', text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    store.bindTierSet(f.ledger);
+    expect(f.ledger.getCurrent(identity)?.routed).toBe(false);
+    expect(store.searchItems('Orchard', 10)).toHaveLength(1);
+    const db = new Database(f.paths.internal);
+    db.query('UPDATE items SET locator_uri = ?').run(locator); db.close();
+    const pending = classifyItemTiers({ signals: { title: 'Orchard notes' }, text, subject: identity },
+      { sniffer: { id: 'pending', judge() { return { verdict: 'undecided' }; } } });
+    f.ledger.recordDecision(identity, pending);
+    const installed = new InstalledTierClassification({ env: {} });
+    const queue = installed.snifferStoreForLedger(f.ledger.dbPath);
+    queue.enqueue({ subject: identity, pass: 'content', material: 'api_key=sk-abcdefghijklmnopqrstuvwxyz123456', flags: [], mapRevision: 'none' });
+    let calls = 0;
+    const service = new TierSnifferService({ installed, lane: BUILT_IN_SNIFFER_LANE,
+      model: { async complete() { calls++; throw new Error('must not dispatch'); } },
+      stores: () => [store], classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
+    try {
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
+      expect(store.searchItems('Orchard', 10)).toEqual([]);
+      expect(store.localContent(localId('record'))).toBeUndefined();
+      expect(f.secrets.get(identity)).toMatchObject({ locator: locator.includes('%') ? null : locator, findingKinds: ['sniffer_secret_refusal'] });
+      expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: 'secrets', contentPending: false });
+      expect(queue.counts().questions).toBe(0);
+      expect(calls).toBe(0);
+    } finally { service.stop(); installed.close(); }
+  });
+
+
+test('legacy Secrets settlement resumes after tombstoning but before the ledger write', async () => {
+  const tmp = tempDir();
+  const f = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { f.close(); tmp.cleanup(); });
+  const store = f.stores.internal!;
+  await store.syncFromConnector(fixtureConnector(() => [{ id: 'record', name: 'Orchard notes', text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const decision = classifyItemTiers({ signals: { title: 'Orchard notes' }, text: 'api_key=sk-abcdefghijklmnopqrstuvwxyz123456' });
+  const settle = () => settleLegacySecrets({ ledger: f.ledger, stores: [store], locations: f.secrets, identity, decision });
+  const original = f.ledger.recordDecision.bind(f.ledger);
+  f.ledger.recordDecision = () => { throw new Error('simulated ledger write failure'); };
+  expect(settle).toThrow('simulated ledger write failure');
+  f.ledger.recordDecision = original;
+  expect(store.localContent(localId('record'))).toBeUndefined();
+  expect(f.secrets.get(identity)).toBeDefined();
+  expect(settle()).toBe(true);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: 'secrets', contentPending: false });
 });

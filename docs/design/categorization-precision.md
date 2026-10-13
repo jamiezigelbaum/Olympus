@@ -92,7 +92,7 @@ The shared classifier now separates waiting from placement:
 - **Topic vocabulary alone** (`health`, `personal_life`, `finance` words) no
   longer flags anything. It only steers which passage the model reads.
 
-Implementation: classifier `2026-10-13.p5` records an open background
+Implementation: classifier `2026-10-13.p6` records an open background
 content question with `content:personal_first` for no-signal items. The same
 ledger verdict application and hide-before-move transaction handles a later
 Private verdict. Own-record requests use numeric `HELD_RECORD_PRIORITY = 10`; other requests

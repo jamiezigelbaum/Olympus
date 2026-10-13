@@ -57,6 +57,9 @@ import {
   type TierLedgerRecord,
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
+import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { LocalConnectorStore } from './local-index.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -313,6 +316,31 @@ function rejudgeMetadata(
   };
 }
 
+/** A legacy row has no copy ledger: remove every actual copy before settling. */
+export function settleLegacySecrets(options: {
+  ledger: TierLedger;
+  stores: readonly Pick<LocalConnectorStore, 'exportItemCopy' | 'tombstoneCopy'>[];
+  locations: SecretLocationsIndex;
+  identity: TierLedgerIdentity;
+  decision: TierDecision;
+}): boolean {
+  const copies = options.stores.flatMap(store => {
+    const exported = store.exportItemCopy(options.identity);
+    return exported ? [{ store, exported }] : [];
+  });
+  // A crash after the last tombstone can leave only the location receipt.
+  // Without that durable evidence, keep the question for retry.
+  if (copies.length === 0 && !options.locations.get(options.identity)?.findingKinds.includes('sniffer_secret_refusal')) return false;
+  for (const { exported } of copies) recordSecretLocation(options.locations, options.decision, exported, { findingKinds: ['sniffer_secret_refusal'] });
+  // Legacy reads do not obey routed copy rows. Tombstone before the final
+  // ledger write; a partial failure retains the question and remaining copy.
+  for (const { store, exported } of copies) {
+    store.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: 'S5' });
+  }
+  options.ledger.recordDecision(options.identity, options.decision);
+  return true;
+}
+
 /**
  * A routed item judged Secrets after it was stored (a re-judge found a
  * secret in its text; an owner rule made it Secrets): one ledger write hides
@@ -333,22 +361,8 @@ export function settleRoutedSecrets(
     ...(placement.guard ? { guard: placement.guard } : {}),
   });
   if (recorded.outcome !== 'secrets') return false;
-  const locator = columnString(exported.columns['locator_uri']);
-  const title = columnString(exported.columns['title']);
-  const namesReleasable = decision.metadataTier === 'public' || decision.metadataTier === 'private';
-  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
-  const scopeGeneration = columnString(exported.columns['source_scope_generation']);
-  const scopeRevision = columnString(exported.columns['source_scope_revision']);
-  set.secrets()?.record({
-    identity: exported.identity,
-    ...(locator && !hasCredentialUrl(locator) ? { locator } : {}),
-    ...(title && namesReleasable ? { title } : {}),
-    namesReleasable,
-    ...(folderKeys.length > 0 ? { folderKeys } : {}),
-    ...(scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {}),
-    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ['owner_marked_secret'],
-    ...(finding.text !== undefined ? { text: finding.text } : {}),
-  });
+  const locations = set.secrets();
+  if (locations) recordSecretLocation(locations, decision, exported, finding);
   settleSecretsCopies({
     ledger,
     identity: exported.identity,
@@ -360,6 +374,30 @@ export function settleRoutedSecrets(
     connectorId: TIER_REJUDGE_CONNECTOR_ID,
   });
   return true;
+}
+
+function recordSecretLocation(
+  locations: SecretLocationsIndex,
+  decision: TierDecision,
+  exported: ConnectorStoreItemCopy,
+  finding: { text?: string; findingKinds: readonly string[] },
+): void {
+  const locator = columnString(exported.columns['locator_uri']);
+  const title = columnString(exported.columns['title']);
+  const namesReleasable = decision.metadataTier === 'public' || decision.metadataTier === 'private';
+  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
+  const scopeGeneration = columnString(exported.columns['source_scope_generation']);
+  const scopeRevision = columnString(exported.columns['source_scope_revision']);
+  locations.record({
+    identity: exported.identity,
+    ...(locator && !hasCredentialUrl(locator) ? { locator } : {}),
+    ...(title && namesReleasable ? { title } : {}),
+    namesReleasable,
+    ...(folderKeys.length > 0 ? { folderKeys } : {}),
+    ...(scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {}),
+    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ['owner_marked_secret'],
+    ...(finding.text !== undefined ? { text: finding.text } : {}),
+  });
 }
 
 function identityOf(record: TierLedgerRecord): TierLedgerIdentity {

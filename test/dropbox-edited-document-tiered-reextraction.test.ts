@@ -12,6 +12,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
+import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
+import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -88,7 +92,7 @@ interface Lane {
   sink: ExtractionSink;
 }
 
-function openLane(): Lane {
+function openLane(sniffer: TierSniffer = SNIFFER): Lane {
   const { dir, cleanup } = tempDir('olympus-dropbox-tiered-reextract-');
   const paths = storePaths(dir);
   const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
@@ -133,7 +137,7 @@ function openLane(): Lane {
     syncConnectorId: 'extraction',
     ownerConnectorId: 'fixture-connector',
     ownershipKind: 'observed',
-    tierClassification: { sniffer: SNIFFER },
+    tierClassification: { sniffer },
   });
   cleanups.push(() => {
     for (const store of Object.values(stores)) store?.close();
@@ -328,4 +332,31 @@ describe('an edit that changes which store the text belongs in', () => {
     expect(searchIds(lane.stores.secure_local, 'diagnosis')).toEqual([REPORT.id]);
     expect(searchIds(lane.stores.secure_local, 'quadrants')).toEqual([REFERENCE.id]);
   });
+});
+
+
+test('an edited deferred Private document settles Personal with only the newly judged text', async () => {
+  const queue = new TierSnifferStore({ dbPath: ':memory:' });
+  cleanups.push(() => queue.close());
+  const cached = new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE);
+  let defer = false;
+  const lane = openLane({ id: cached.id, judge: r => defer ? cached.judge(r) : SNIFFER.judge(r) });
+  await landFirstReading(lane);
+  await list(lane, [REFERENCE, REPORT], { [REFERENCE.id]: 'rev-1', [REPORT.id]: 'rev-2' });
+  defer = true;
+  const revised = 'Weekend grocery list: oranges, bananas and oat milk.';
+  await lane.sink.accept(request(REPORT, revised, 'rev-2'));
+  expect(searchIds(lane.stores.internal, 'diagnosis')).toEqual([]);
+  // The old Private placement stays usable for judgment; no move blocks it.
+  expect(lane.ledger.getCurrent(identityOf(REPORT.id))!.state).not.toBe('moving');
+  await runSnifferPass({ targets: [{ ledger: lane.ledger, sniffer: queue, placementFor: d => lane.set.placementFor(d) }],
+    lane: BUILT_IN_SNIFFER_LANE, model: { async complete() { return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.99 }] }) }; } } });
+  await runQueuedMove(lane, REPORT);
+  expect(lane.ledger.getCurrent(identityOf(REPORT.id))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+  expect(lane.stores.internal!.localContent(localId(REPORT.id))?.chunks.join('')).toBe(revised);
+  expect(searchIds(lane.stores.internal, 'oranges')).toEqual([REPORT.id]);
+  expect(searchIds(lane.stores.internal, 'diagnosis')).toEqual([]);
+  expect(lane.stores.secure_local!.localContent(localId(REPORT.id))).toBeUndefined();
+  expect(queue.counts().questions).toBe(0);
+  expect(candidateIds(lane, true)).toEqual([]);
 });

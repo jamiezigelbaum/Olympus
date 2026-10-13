@@ -4,6 +4,7 @@
 // and does nothing until the owner has approved the exact classifier model
 // and prompt version in the classification ledger.
 
+import { SecretLocationsIndex, secretLocationsPathForStore } from './secret-locations.ts';
 import { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../../core/analyst.ts';
 import {
@@ -14,7 +15,7 @@ import {
   readClassificationLedger,
 } from '../classification-ledger.ts';
 import { moveTieredItem, TierMoveContentChangedError, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
-import type { ConnectorStoreItemCopy } from '../connector-store/local-index.ts';
+import type { ConnectorStoreItemCopy, LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
@@ -39,6 +40,7 @@ import {
   rejudgeRoutedItems,
   rejudgeStoredContent,
   settleRoutedSecrets,
+  settleLegacySecrets,
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
@@ -66,6 +68,9 @@ export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1_000;
 export interface TierSnifferServiceStore {
   readonly dbPath: string;
   tierSetBinding?(): { ledgerPath: string } | undefined;
+  tierLedgerPathInUse?: LocalConnectorStore['tierLedgerPathInUse'];
+  exportItemCopy?: LocalConnectorStore['exportItemCopy'];
+  tombstoneCopy?: LocalConnectorStore['tombstoneCopy'];
 }
 
 export interface TierSnifferServiceOptions {
@@ -633,6 +638,19 @@ export class TierSnifferService {
         ...(planner ? { placementFor: planner } : {}),
         settleSecrets: (question, decision) => {
           const set = tierSetForLedger(ledgerPath);
+          if (!ledger.getCurrent(question)?.routed) {
+            const stores = set?.openStores() ?? this.options.stores().filter(
+              (store): store is TierSnifferServiceStore & Pick<LocalConnectorStore, 'exportItemCopy' | 'tombstoneCopy'> =>
+                (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath
+                && typeof store.exportItemCopy === 'function' && typeof store.tombstoneCopy === 'function',
+            );
+            const home = stores[0];
+            if (!home) return false;
+            const shared = set?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
+            try { return settleLegacySecrets({ ledger, stores, locations, identity: question, decision }); }
+            finally { if (!shared) locations.close(); }
+          }
           if (!set) return false;
           const current = set.ledger.copies(question).filter(copy => copy.state === 'current');
           const serving = copyServingLayer(current, question.pass);

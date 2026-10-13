@@ -319,9 +319,15 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // page with rows that have no sniffer question and starve the rest.
   const work: Record<SnifferPass, WorkItem[]> = { metadata: [], content: [] };
   for (const target of options.targets) {
-    for (const question of target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500 })) {
+    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: question => {
       report.pendingSeen += 1;
-      if (midMove(target, question)) continue;
+      if (midMove(target, question)) return false;
+      if (stillOpen(target, question)) return true;
+      target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
+      report.staleDropped += 1;
+      return false;
+    } });
+    for (const question of questions) {
       // Queued material whose question is no longer open (the item was
       // re-synced, overridden, deleted or re-decided) must not linger.
       if (!stillOpen(target, question)) {
@@ -336,9 +342,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
           decidedBy: 'secret_detector', reasons: ['metadata:secret:sniffer_refused'],
           metadataPending: false, contentPending: false, contentRead: true,
         };
-        const settled = row.routed
-          ? target.settleSecrets?.(question, decision) === true
-          : (target.ledger.recordDecision(question, decision), true);
+        const settled = target.settleSecrets?.(question, decision) === true;
         if (settled) {
           target.sniffer.deleteQuestion(question, 'metadata');
           target.sniffer.deleteQuestion(question, 'content');

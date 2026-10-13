@@ -59,7 +59,7 @@ describe('every read item is judged; only own-record signals hold content', () =
       { signals: LAB_NAMES, provider: 'fixture', text: LAB_REPORT },
       { sniffer: answering({ verdict: 'undecided' }, asked) },
     );
-    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-13.p5');
+    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-13.p6');
     expect(decision).toMatchObject({ contentRead: true, contentPending: true, state: 'pending', engineVersion: TIER_CLASSIFIER_VERSION });
     expect(decision.reasons).not.toContain('content:no_raise');
     expect(asked).toHaveLength(1);

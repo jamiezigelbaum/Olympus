@@ -48,7 +48,7 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // and "confidence" alone no longer count). Items decided under p3 are judged
 // again, so a document either rule misfired on gets a real verdict.
 // p5: Personal-first content; own-record signals hold only the content.
-export const TIER_CLASSIFIER_VERSION = '2026-10-13.p5';
+export const TIER_CLASSIFIER_VERSION = '2026-10-13.p6';
 
 /**
  * The `mapRevision` every decision records. The legacy sensitivity map was
@@ -779,6 +779,7 @@ function contentPass(args: {
   // [9] Secret detector on the full text.
   if (!args.secretsCleared) {
     const secretKinds = detectSecretFindingKinds(text);
+    if (hasCredentialUrl(text) && !secretKinds.includes('credential_assignment')) secretKinds.push('credential_assignment');
     if (secretKinds.length > 0) {
       return {
         tier: 'secrets',

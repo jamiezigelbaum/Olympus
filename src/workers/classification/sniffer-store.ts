@@ -196,18 +196,45 @@ export class TierSnifferStore {
     return row ? questionFromRow(row) : undefined;
   }
 
-  /** Recent/high priority first; one in five dispatches serves the oldest aged question. */
-  listQuestions(options: { pass?: SnifferPass; limit?: number } = {}): SnifferQuestion[] {
+  /** Recent/high priority eligible work, plus the oldest eligible question. */
+  listQuestions(options: { pass?: SnifferPass; limit?: number; eligible?: (question: SnifferQuestion) => boolean } = {}): SnifferQuestion[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
-    const where = options.pass ? 'WHERE pass = ?' : '';
-    const params = options.pass ? [options.pass] : [];
-    const rows = this.db.query(`SELECT * FROM sniffer_questions ${where}
-      ORDER BY priority DESC, queued_at DESC, question_pk DESC LIMIT ?`).all(...params, limit) as QuestionRow[];
-    // Include the oldest even when it lies beyond the recent page.
-    const oldest = this.db.query(`SELECT * FROM sniffer_questions ${where}
-      ORDER BY queued_at, question_pk LIMIT 1`).get(...params) as QuestionRow | null;
-    if (oldest && !rows.some(row => row.question_pk === oldest.question_pk)) rows.push(oldest);
-    return rows.map(questionFromRow);
+    const accepted = new Map<number, boolean>();
+    const eligible = (question: SnifferQuestion): boolean => {
+      if (!accepted.has(question.sequence)) accepted.set(question.sequence, options.eligible?.(question) ?? true);
+      return accepted.get(question.sequence)!;
+    };
+    const read = (oldest: boolean, count: number): SnifferQuestion[] => {
+      const found: SnifferQuestion[] = [];
+      let cursor: QuestionRow | undefined;
+      do {
+        const filters: string[] = [];
+        const params: Array<string | number> = [];
+        if (options.pass) { filters.push('pass = ?'); params.push(options.pass); }
+        if (cursor) {
+          filters.push(oldest ? '(queued_at, question_pk) > (?, ?)'
+            : '(priority, queued_at, question_pk) < (?, ?, ?)');
+          if (!oldest) params.push(cursor.priority);
+          params.push(cursor.queued_at, cursor.question_pk);
+        }
+        const rows = this.db.query(`SELECT * FROM sniffer_questions
+          ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+          ORDER BY ${oldest ? 'queued_at, question_pk' : 'priority DESC, queued_at DESC, question_pk DESC'} LIMIT ?`)
+          .all(...params, limit) as QuestionRow[];
+        for (const row of rows) {
+          const question = questionFromRow(row);
+          if (eligible(question)) found.push(question);
+          if (found.length === count) return found;
+        }
+        if (rows.length < limit) break;
+        cursor = rows.at(-1);
+      } while (cursor);
+      return found;
+    };
+    const questions = read(false, limit);
+    const oldest = read(true, 1)[0];
+    if (oldest && !questions.some(question => question.sequence === oldest.sequence)) questions.push(oldest);
+    return questions;
   }
 
   dispatchCount(): number {
