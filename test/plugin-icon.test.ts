@@ -20,3 +20,14 @@ describe('OpenClaw plugin branding', () => {
     expect(icon.readUInt8(25)).toBe(6);
   });
 });
+
+describe('Linux app launcher icon', () => {
+  test('ships a 512px RGBA PNG with a transparent corner', () => {
+    expect(V0_4_PUBLIC_PACKAGE_FILES).toContain('assets/app-icon.png');
+    const icon = readFileSync(join(import.meta.dir, '..', 'assets', 'app-icon.png'));
+    expect(icon.readUInt32BE(16)).toBe(512);
+    expect(icon.readUInt32BE(20)).toBe(512);
+    expect(icon.readUInt8(24)).toBe(8);
+    expect(icon.readUInt8(25)).toBe(6);
+  });
+});

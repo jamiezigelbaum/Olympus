@@ -124,7 +124,7 @@ test.skipIf(process.platform!=='linux')('kernel lifecycle lock reuses only an in
  expect(closed.status).not.toBe(0);expect(closed.stdout).not.toContain('held');
  expect(withLinuxEngineLifecycleLock(l,()=>statSync(l.lifecycleLockPath).mode&0o777)).toBe(0o600);
 });
-function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);mkdirSync(join(dir,'assets'));copyFileSync(join(import.meta.dir,'../assets/icon.png'),join(dir,'assets/icon.png'));return dir;}
+function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);mkdirSync(join(dir,'assets'));copyFileSync(join(import.meta.dir,'../assets/app-icon.png'),join(dir,'assets/app-icon.png'));return dir;}
 function runtimeAt(root:string){const dir=join(root,`fixture-runtime-${Math.random().toString(16).slice(2)}`),runtime=join(dir,'bun');mkdirSync(dir,{mode:0o700});copyFileSync(realpathSync(process.execPath),runtime);chmodSync(runtime,0o700);return runtime;}
 test('install refuses an unintegrated approval package before enabling linger or writing config',()=>{
  const l=layout(),checkout=packageAt(l.home,'v1',false);const calls:string[][]=[];
@@ -156,7 +156,7 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  const options={platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:checkout,bunBin:runtime,consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true};
  const installedResult=installEngine(options);
  const desktop=join(l.dataHome,'applications/ai.olympusplugin.Olympus.desktop'),icon=join(l.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png');
- expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/icon.png')));
+ expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/app-icon.png')));
  expect(installedResult.program.workingDirectory).toStartWith(join(l.packageDir,'generations/'));expect(installedResult.program.workingDirectory).not.toBe(checkout);
  expect(readFileSync(l.launcherPath,'utf8')).toContain(`export XDG_CONFIG_HOME='${l.configHome}'`);
  const parentReceipt=JSON.parse(readFileSync(l.receiptPath,'utf8'));
@@ -187,7 +187,7 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  rmSync(interrupted.generationPath,{recursive:true});writeFileSync(journalPath,JSON.stringify({...interrupted,phase:'rollback_required',before:{...interrupted.before,active:false}}),{mode:0o600});
  expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect(upgraded.program.build).not.toBe(installedResult.program.build);
  expect(JSON.parse(readFileSync(l.receiptPath,'utf8')).ownedEmptyParents).toEqual(parentReceipt.ownedEmptyParents);
- expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/icon.png')));
+ expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/app-icon.png')));
 },20_000); // Copies and hashes the real Bun binary twice, including on emulated runners.
 for (const enablement of ['enabled', 'enabled-runtime'] as const) {
 test(`rollback restores the old unit/config and ${enablement} after failed health`,async()=>{
