@@ -6,7 +6,7 @@
 // are unchanged, and a replay into fresh stores still judges the item Secrets.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -234,8 +234,10 @@ describe('Capture spool clearing: retries and later decisions', () => {
       if (fail && window.from !== undefined) throw new Error('disk full');
       return { recordsRedacted: 0, recordsBlanked: 0 };
     };
-    // First pull: the first-run sweep is due, so pass it once cleanly.
+    // First pull: never cleared before, so its window starts at the very
+    // beginning; the first-run sweep is due too. Both pass cleanly.
     clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:0', through: 'a.jsonl:5', redact: (w) => { fail = false; const r = redact(w); fail = true; return r; } });
+    expect(windows[0]).toEqual({ through: 'a.jsonl:5' });
     expect(() => clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:5', through: 'a.jsonl:9', redact })).toThrow('disk full');
     fail = false;
     windows.length = 0;
@@ -428,19 +430,29 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
       whatsappLine({ id: 'SAME', text: '', media_type: 'audio', media_path: shared }),
       whatsappLine({ id: 'SAME', chat_jid: '15550002222@s.whatsapp.net', text: '', media_type: 'audio', media_path: shared }),
     ].join('\n')}\n`);
-    const secret = new Set(['M1', '15550001111@s.whatsapp.net SAME']);
+    // A third chat names the same file through a symlink: still one file.
+    const alias = join(mediaDir, 'ALIAS.ogg');
+    symlinkSync(shared, alias);
+    writeFileSync(file, `${readFileSync(file, 'utf8')}${whatsappLine({
+      id: 'ALIAS', chat_jid: '15550003333@s.whatsapp.net', text: '', media_type: 'audio', media_path: alias,
+      media_file_sha256: 'c2hhMjU2LWZpeHR1cmUtdmFsdWUtZm9yLXRlc3Rpbmc=',
+    })}\n`);
+    const secret = new Set(['M1', '15550001111@s.whatsapp.net SAME', '15550003333@s.whatsapp.net ALIAS']);
     const result = redactWhatsAppLiveSpoolSecrets({
       spoolDir,
       mediaDir,
       judge: (identity) => secret.has(identity.providerItemId)
         || secret.has(`${identity.providerConversationId} ${identity.providerItemId}`) ? 'content' : undefined,
     });
-    // The voice note had no text to remove: only its audio is its content.
-    expect(result).toEqual({ recordsRedacted: 1, recordsBlanked: 0 });
+    // The SAME voice note had nothing at all to remove; ALIAS gives up its
+    // media hash for the flag.
+    expect(result).toEqual({ recordsRedacted: 2, recordsBlanked: 0 });
     const spool = readFileSync(file, 'utf8');
     expect(spool).not.toContain(STRIPE_LIVE_KEY);
     expect(JSON.parse(spool.split('\n')[0]!)).not.toHaveProperty('mentions');
-    // Both chats name the same file: it is not this message's alone to delete.
+    // Three chats name the same file: it is not any one message's to delete.
     expect(existsSync(shared)).toBe(true);
+    expect(JSON.parse(spool.split('\n')[3]!)).toMatchObject({ id: 'ALIAS', secret_redacted: true });
+    expect(JSON.parse(spool.split('\n')[3]!)).not.toHaveProperty('media_file_sha256');
   });
 });

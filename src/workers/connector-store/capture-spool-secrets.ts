@@ -174,7 +174,8 @@ export function createSpoolSecretJudge(options: {
  * Clear a lane's spool: the window `[from, through)` the pull just read,
  * judged by the ledger and by the Secrets floor on each record's text, then a
  * whole-spool pass when the ledger's Secrets changed. `from` reaches back to
- * wherever the last successful window ended, so a failed window is retried.
+ * wherever the last successful window ended (the start of the spool when none
+ * has), so a failed window is retried.
  * `through` absent means the lane has read nothing yet, so nothing is judged.
  * `redact` is the lane's own rewrite over a window with the judge it is given.
  */
@@ -189,9 +190,10 @@ export function clearCaptureSpoolSecrets(options: {
   if (!through) return addCaptureSpoolRedactions();
   const clearedKey = `${options.stateKey}:cleared_through`;
   const cleared = options.ledger.readMeta(clearedKey);
-  const from = options.from === undefined
+  // Never cleared before: the first window reaches back to the start.
+  const from = options.from === undefined || cleared === undefined
     ? undefined
-    : cleared === undefined ? options.from : earlierSpoolCursor(cleared, options.from);
+    : earlierSpoolCursor(cleared, options.from);
   const window = options.redact(
     { ...(from === undefined ? {} : { from }), through },
     createSpoolSecretJudge({ ledger: options.ledger, floor: true }),

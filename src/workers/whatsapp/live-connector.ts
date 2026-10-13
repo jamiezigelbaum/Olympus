@@ -49,7 +49,7 @@
 //   reaction re-emit judges it Secrets again.
 
 import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -724,9 +724,10 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   const deleteOwnedMedia = (message: SpoolMessage): void => {
     if (!message.mediaPath || !mediaRoot) return;
     owners ??= mediaPathOwners(options.spoolDir);
-    const named = owners.get(resolve(message.mediaPath));
-    if (named && named.size > 1) return;
-    deleteSavedMedia(message.mediaPath, mediaRoot);
+    // Keyed by the file itself, so a symlink and its target are one file.
+    const real = existingRealPath(message.mediaPath);
+    if (!real || (owners.get(real)?.size ?? 0) > 1) return;
+    deleteSavedMedia(real, mediaRoot);
   };
   return redactCaptureSpoolLines({
     dir: options.spoolDir,
@@ -754,11 +755,15 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
       if (alreadyRedacted && (redaction !== 'names' || !namesLeft)) return undefined;
       const record = JSON.parse(line) as Record<string, unknown>;
       // Mentions are display names copied into the text, so they go with it.
-      const removable = ['preview_title', 'preview_description', 'preview_url', 'mentions', 'media_key', 'media_direct_path']
-        .filter((key) => key in record);
-      // A line with nothing left to remove (a voice note whose audio was its
-      // only content) is not rewritten: the flag alone would not fit, and
-      // blanking it would lose the record for nothing.
+      // The media hashes and key time only serve a re-download, which a
+      // Secret message must never get; they also make room for the flag on a
+      // voice note whose audio was its only content.
+      const removable = [
+        'preview_title', 'preview_description', 'preview_url', 'mentions',
+        'media_key', 'media_direct_path', 'media_file_sha256', 'media_file_enc_sha256', 'media_key_timestamp',
+      ].filter((key) => key in record);
+      // A line with nothing at all to remove is not rewritten: the flag alone
+      // would not fit, and blanking it would lose the record for nothing.
       if (message.text === '' && removable.length === 0 && (redaction !== 'names' || !namesLeft)) return undefined;
       record['text'] = '';
       for (const key of removable) delete record[key];
@@ -773,8 +778,8 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
 }
 
 /**
- * Every saved media path the spool names, and the messages (chat-scoped)
- * that name it.
+ * Every saved media file the spool names (by its real path), and the
+ * messages (chat-scoped) that name it.
  */
 function mediaPathOwners(spoolDir: string): Map<string, Set<string>> {
   const owners = new Map<string, Set<string>>();
@@ -782,7 +787,8 @@ function mediaPathOwners(spoolDir: string): Map<string, Set<string>> {
     for (const line of terminatedLines(join(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message?.mediaPath === undefined) continue;
-      const path = resolve(message.mediaPath);
+      const path = existingRealPath(message.mediaPath);
+      if (path === undefined) continue;
       const named = owners.get(path) ?? new Set<string>();
       named.add(chatScopedKey(message.chatJid, message.id));
       owners.set(path, named);
