@@ -15197,7 +15197,7 @@ function createNativeProcessService(options) {
     reload: { configPrefixes: [...options.reload.configPrefixes] },
     async start(context) {
       const requestedGeneration = ++generation;
-      await stopCurrent();
+      const previousChildReleased = await stopCurrent();
       if (requestedGeneration !== generation)
         return;
       const lifetime = {
@@ -15211,7 +15211,7 @@ function createNativeProcessService(options) {
         restartTimer: undefined,
         stableTimer: undefined,
         cleanupPromise: undefined,
-        previousChildReleased: false
+        previousChildReleased
       };
       current2 = lifetime;
       try {
@@ -15237,7 +15237,7 @@ function createNativeProcessService(options) {
       return await retirement;
     const lifetime = current2 ?? retiring;
     if (!lifetime)
-      return;
+      return false;
     current2 = undefined;
     retiring = lifetime;
     lifetime.stopping = true;
@@ -15255,10 +15255,11 @@ function createNativeProcessService(options) {
       }
       if (retiring === lifetime)
         retiring = undefined;
+      return lifetime.previousChildReleased;
     });
     retirement = cleanup;
     try {
-      await cleanup;
+      return await cleanup;
     } finally {
       if (retirement === cleanup)
         retirement = undefined;
@@ -20021,7 +20022,8 @@ function inspectSystemdEngine(l, exec = linuxEngineExec) {
   const code = /^\d+$/.test(f.ExecMainStatus ?? "") ? Number(f.ExecMainStatus) : null;
   return {
     state: active && pid ? "running" : ["inactive", "failed"].includes(f.ActiveState) ? failed ? "loaded" : "not_loaded" : "loaded",
-    enabled: ["enabled", "enabled-runtime", "linked", "linked-runtime"].includes(f.UnitFileState) ? f.UnitFileState === "enabled" : f.UnitFileState === "disabled" ? false : null,
+    enabled: ["enabled", "enabled-runtime"].includes(f.UnitFileState) ? true : ["disabled", "linked", "linked-runtime"].includes(f.UnitFileState) ? false : null,
+    enabled_runtime: f.UnitFileState === "enabled-runtime",
     active,
     failed,
     pid,

@@ -31,6 +31,17 @@ test('unreachable user bus stays unknown; failed config is independent from enab
  expect(inspectSystemdEngine(l, exec)).toMatchObject({ state: 'loaded', enabled: true, active: false, failed: true, last_exit_code: 78 });
  expect(inspectSystemdEngine(l, exec).detail).toContain('reset-failed olympus-engine.service');
 });
+for (const [unitState, enabled, custody] of [
+ ['enabled-runtime', true, 'loaded'], ['enabled', true, 'loaded'],
+ ['linked', false, 'none'], ['linked-runtime', false, 'none'], ['disabled', false, 'none'],
+] as const) {
+ test(`inactive ${unitState} engine reports enablement and custody`, () => {
+  const l = layout();
+  const facts = inspectSystemdEngine(l, () => good(`LoadState=loaded\nActiveState=inactive\nUnitFileState=${unitState}\nMainPID=0\nControlGroup=\nFragmentPath=${l.unitPath}\n`));
+  expect(facts.enabled).toBe(enabled);
+  expect(linuxEngineCustody(l, facts, {workerStopped: () => true})).toBe(custody);
+ });
+}
 test('linger refusal is exact, uses no password prompt, and distinguishes unavailable logind', () => {
  const calls: string[][] = []; let reads = 0;
  const exec: EngineExec = (cmd, args) => { calls.push([cmd, ...args]); return args[0] === 'show-user' ? good(++reads > 0 ? 'no\n' : '') : { status: 1, stdout: '', stderr: 'Access denied' }; };
@@ -54,12 +65,12 @@ test('copytruncate retains inode and bounded private backups; open append descri
 
 import { engineServicePaths, engineDataCustody, verifyEngine, installEngine, waitForEngineHealthy, startEngine, stopEngine, restartEngine, uninstallEngine, rollbackEngine } from '../src/core/engine-service.ts';
 import { publishLinuxEngineReceipt, linuxEngineEnvironment } from '../src/core/linux-engine-layout.ts';
-function installed() {
+function installed(initialEnablement: 'enabled' | 'enabled-runtime' = 'enabled') {
  const l=layout(); publishLinuxEngineReceipt(l); mkdirSync(l.stateDir,{recursive:true,mode:0o700}); mkdirSync(join(l.configHome,'systemd/user'),{recursive:true,mode:0o700}); writeFileSync(l.unitPath,'unit',{mode:0o600});
- const calls:string[][]=[]; let active=true,enabled=true;
+ const calls:string[][]=[]; let active=true,enabled: string | false=initialEnablement;
  const exec:EngineExec=(c,a)=>{ calls.push([c,...a]);
-  if(a.includes('show'))return good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled?'enabled':'disabled'}\nMainPID=${active?42:0}\nControlGroup=/user.slice/engine\nResult=success\nExecMainStatus=0\nFragmentPath=${l.unitPath}\n`);
-  if(a.includes('disable')){enabled=false;active=false;} if(a.includes('enable'))enabled=true;if(a.includes('start')||a.includes('restart'))active=true;
+  if(a.includes('show'))return good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled || 'disabled'}\nMainPID=${active?42:0}\nControlGroup=/user.slice/engine\nResult=success\nExecMainStatus=0\nFragmentPath=${l.unitPath}\n`);
+  if(a.includes('disable')){enabled=false;active=false;} if(a.includes('enable'))enabled=a.includes('--runtime')?'enabled-runtime':'enabled';if(a.includes('start')||a.includes('restart'))active=true;
   return good(); };
  return {l,calls,exec,options:{platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),exec,consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true}};
 }
@@ -175,8 +186,9 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect(upgraded.program.build).not.toBe(installedResult.program.build);
  expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/icon.png')));
 },20_000); // Copies and hashes the real Bun binary twice, including on emulated runners.
-test('rollback uses the recorded matching runtime and restores the old unit/config after failed health',async()=>{
- const {l,options,calls}=installed();
+for (const enablement of ['enabled', 'enabled-runtime'] as const) {
+test(`rollback restores the old unit/config and ${enablement} after failed health`,async()=>{
+ const {l,options,calls}=installed(enablement);
  const {engineBuildIdentity}=await import('../src/core/engine-service.ts');
  const artifacts:any[]=[];const generation=(version:string)=>{const stage=join(l.home,`stage-${version}`),sourceApp=packageAt(stage,version),app=join(stage,'app');renameSync(sourceApp,app);const runtimeDir=join(stage,'runtime');mkdirSync(runtimeDir);const runtime=join(runtimeDir,'bun');writeFileSync(runtime,'#!/bin/sh\nexit 0\n',{mode:0o700});writeFileSync(join(stage,'.olympus-generation.json'),JSON.stringify({schema:'olympus.engine.generation.v1',token:version,build:version}),{mode:0o600});
   const digest=linuxMachineArtifactDigest(stage,'tree'),root=join(l.packageDir,'generations',digest);mkdirSync(dirname(root),{recursive:true,mode:0o700});renameSync(stage,root);const info=statSync(root),marker=join(root,'.olympus-generation.json');artifacts.push({path:root,kind:'tree',sha256:digest,rootDevice:info.dev,rootInode:info.ino,markerPath:marker,markerSha256:createHash('sha256').update(readFileSync(marker)).digest('hex')});
@@ -188,7 +200,9 @@ test('rollback uses the recorded matching runtime and restores the old unit/conf
  const exec:EngineExec=(c,a)=>c==='loginctl'?good('yes'):a.includes('--version')?good('systemd 256'):a.includes('--property=Version')?good('256'):a.includes('olympus-worker.service')?good('LoadState=not-found'):options.exec(c,a);
  const result=await rollbackEngine({...options,uid:1000,exec,health:{timeoutMs:0}});
  expect(result.ok).toBe(false);expect(result.restored?.ok).toBe(false);expect(readFileSync(l.unitPath,'utf8')).toBe('unit');expect(readFileSync(l.configPath,'utf8')).toBe('{"remote":{"enabled":false}}');expect(calls.filter(c=>c.includes('restart'))).toHaveLength(1);
+ expect(calls.filter(c=>c.includes('enable')).at(-1)).toEqual(['systemctl','--user','enable',...(enablement === 'enabled-runtime' ? ['--runtime'] : []),l.unitPath]);
 });
+}
 test('inactive disabled service with retained escaped-child evidence never releases data custody',()=>{
  const {l,options}=installed();stopEngine(options);const paths=engineServicePaths(options);mkdirSync(join(l.dataDir,'engine'),{recursive:true,mode:0o700});writeFileSync(paths.childrenPath,'unreadable retained record',{mode:0o600});
  const {inspectEngine}=require('../src/core/engine-service.ts');expect(engineDataCustody(inspectEngine(options))).toBe('unknown');
