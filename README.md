@@ -50,8 +50,8 @@ private models if you choose a Venice-only setup.
   it on); your AI app never gets the item itself. In ChatGPT, only you see the
   answer; other apps get an answer written from it, which can repeat what it
   says.
-- **Secret:** passwords, recovery codes and keys that Olympus recognizes are
-  never sent or answered from.
+- **Secret:** passwords, recovery codes and keys. Once Olympus recognizes a
+  Secret, it is never sent or answered from.
 
 Labels are automatic and can be wrong.
 
