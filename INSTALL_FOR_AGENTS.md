@@ -1774,9 +1774,10 @@ operator's own Google app is the sanctioned route, so help them through the
 next section: **Set up** on the card opens the Client ID field and the same
 steps. They must publish their own app to production, because a Google app
 left in Testing expires its refresh tokens after 7 days. The full state holds
-back only a first Google connection; an install that already has Gmail or
-Drive connected keeps reconnecting, and adding Drive beside Gmail, through the
-one-click path. If the operator tells you the card no longer says full, the
+back a Google source that has no connection of its own, even when the other
+Google source is connected (Google's consent lets the person pick any account,
+so adding Drive beside Gmail can be a new user). A source that is already
+connected keeps its one-click Reauthenticate. If the operator tells you the card no longer says full, the
 one-click Connect is back; use it.
 
 **Helper-binary rule (hard-learned):** never install or upgrade a
@@ -1795,11 +1796,17 @@ calm, then start it again.
 ### Advanced Google BYO fallback
 
 Use this when the operator explicitly chooses BYO, or when the Gmail or Drive
-card says Google sign-in is full (above). A Google Desktop
-client ID is public application identity and can be entered locally. Olympus
-uses S256 PKCE; Google documents `client_secret` as optional for installed-app
-authorization-code exchange and refresh, so the BYO path does not ask for or
-store one.
+card says Google sign-in is full (above). The client type follows the address
+the dashboard is opened on. Opened on this computer (loopback), use a Google
+Desktop client: its ID is public application identity and can be entered
+locally. Olympus uses S256 PKCE; Google documents `client_secret` as optional
+for installed-app authorization-code exchange and refresh, so the Desktop path
+does not ask for or store one. Opened over https (a tunnel or proxy), Google
+accepts only a **Web application** client, and that client requires its secret
+at the token exchange and every refresh: the dashboard shows a **Client
+secret** field next to the Client ID, and the operator enters the secret there
+and nowhere else (never in chat). Olympus keeps it in the secret store and
+sends it on the exchange and on refresh.
 
 Choose the Console mode based on capability detection:
 
@@ -1825,20 +1832,25 @@ Manual fallback, OAuth client page:
 
 1. Open <https://console.cloud.google.com/auth/clients>, select the same
    project, and choose **Create client**.
-2. Choose application type **Desktop app**.
+2. Choose application type **Desktop app** (or **Web application** when the
+   dashboard is opened over https: add the redirect URI shown on its card under
+   **Authorized redirect URIs**).
 3. Name it **Olympus**.
 4. Click **Create**.
 5. Enable the Gmail API and Google Drive API for the same project:
    <https://console.cloud.google.com/apis/library/gmail.googleapis.com> and
    <https://console.cloud.google.com/apis/library/drive.googleapis.com>. Sync
    returns Google 403 errors until these APIs are enabled.
-6. Copy the Client ID into the dashboard form. Do not copy or request the
-   client secret.
+6. Copy the Client ID into the dashboard form. For a Desktop app client do not
+   copy or request the client secret. For a Web application client the operator
+   also copies the Client secret into the dashboard's **Client secret** field,
+   and only there.
 
-When the client ID is ready, have the operator paste it into the advanced BYO
-dashboard card and click Connect. Google desktop
+When the client ID (and, for a Web application client, the secret) is ready,
+have the operator paste it into the advanced BYO dashboard card and click
+Connect. Google desktop
 clients use loopback redirects with random ports, so there is no fixed redirect
-URI to register. If Google shows an unverified-app interstitial, explain which
+URI to register; a Web application client uses the exact URI the card shows. If Google shows an unverified-app interstitial, explain which
 OAuth app is being used and let the operator choose whether to continue. Watch
 the dashboard and `olympus connect status`; `connected`
 means the handle was stored, `pending` means the browser consent is not

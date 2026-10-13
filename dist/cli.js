@@ -63579,7 +63579,8 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       return { kind: "none" };
     const knownClientId = oauthClientIdForSource(definition.connect_action.source, oauthClientIds);
     const clientSecretRequired = definition.connect_action.source === "x";
-    const clientSecretOnFile = clientSecretRequired && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
+    const googleWebClient = isGoogleOAuthSource2(definition.connect_action.source) && googleOAuthClientType(oauthRedirectBaseUrl) === "web";
+    const clientSecretOnFile = (clientSecretRequired || googleWebClient) && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
     const hasClientSecret = !clientSecretRequired || clientSecretOnFile;
     const redirectUriToRegister = oauthRedirectUriToRegister(definition.connect_action.source, oauthRedirectBaseUrl);
     const redirectUriGuidance = oauthRedirectUriGuidance(definition.connect_action.source, oauthRedirectBaseUrl);
@@ -63597,11 +63598,11 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
           kind: "needs_setup",
           source: definition.connect_action.source,
           label: "Set up",
-          client_secret_required: false,
+          client_secret_required: web,
           publisher_full: true,
           instructions: {
             ...ownApp,
-            plain_intro: `${GOOGLE_SIGNIN_FULL_SENTENCE} Olympus needs a Google ${web ? "Web application" : "Desktop app"} Client ID that you create in your own Google account (about 5 minutes; the steps are below).${web ? " Register the redirect URI shown on this card on that client." : ""}`
+            plain_intro: web ? `${GOOGLE_SIGNIN_FULL_SENTENCE} Olympus needs a Google Web application Client ID and Client secret that you create in your own Google account (about 5 minutes; the steps are below). Register the redirect URI shown on this card on that client, then paste the Client ID and the Client secret into the fields on this card.` : `${GOOGLE_SIGNIN_FULL_SENTENCE} Olympus needs a Google Desktop app Client ID that you create in your own Google account (about 5 minutes; the steps are below).`
           },
           ...redirectFields
         };
@@ -63696,8 +63697,8 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
     const clientTypeName = web ? "Web application" : "Desktop app";
     const redirectClause = web ? `adding the redirect URI shown on the Olympus dashboard's ${sourceLabel2} card to that client's Authorized redirect URIs` : "confirming that Google accepts the loopback callback this dashboard uses without registering a redirect URI";
     return {
-      plain_intro: `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google ${clientTypeName} Client ID you create in your own Google account.${web ? " Register the redirect URI shown on this card on that client." : ""} PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
-      agent_prompt: `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
+      plain_intro: web ? `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Web application Client ID and Client secret you create in your own Google account. Register the redirect URI shown on this card on that client, then copy the Client ID and the Client secret into the fields on this card. Google Web clients need the secret to finish sign-in. Google shows you exactly what Olympus can see.` : `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Desktop app Client ID you create in your own Google account. PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
+      agent_prompt: web ? `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then tell me where to find the Client ID and the Client secret so I can paste each into its own field on that card and press Connect. Google Web clients need the secret to finish sign-in; do not ask me to type it into this chat, only into the Client secret field on the card. Do not ask me to edit files, configuration, or code.` : `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
       provider_console_url: googleConsoleUrl("https://console.cloud.google.com/auth/clients", googleCloudProjectId),
       ...googleCloudProjectId ? { google_cloud_project_id: googleCloudProjectId } : {},
       diy_summary: "Or set it up yourself (about 5 minutes)",
@@ -63708,10 +63709,10 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
         web ? { text: "Create an OAuth client ID, choose Web application, and add the redirect URI shown on this card to its Authorized redirect URIs. A Desktop app client cannot register an https redirect URI." } : { text: "Create an OAuth client ID and choose Desktop app. Google accepts this dashboard's loopback callback with nothing to register." },
         { text: "Enable the Gmail API for this project. Sync returns 403 errors until the Gmail and Drive APIs are enabled.", link: { label: "Open Gmail API", url: googleConsoleUrl("https://console.cloud.google.com/apis/library/gmail.googleapis.com", googleCloudProjectId) } },
         { text: "Enable the Google Drive API for the same project.", link: { label: "Open Google Drive API", url: googleConsoleUrl("https://console.cloud.google.com/apis/library/drive.googleapis.com", googleCloudProjectId) } },
-        { text: "Copy the Client ID shown in the popup. Olympus uses PKCE and does not need the client secret." }
+        web ? { text: "Copy the Client ID and the Client secret shown in the popup into the fields below. A Google Web application client needs its secret to finish sign-in. Paste the secret only into the Client secret field on this card; Olympus keeps it on this computer." } : { text: "Copy the Client ID shown in the popup. Olympus uses PKCE and does not need the client secret." }
       ],
       secret_shown_once: false,
-      fields: [clientIdField]
+      fields: web ? [clientIdField, clientSecretField] : [clientIdField]
     };
   }
   if (source === "dropbox") {
@@ -63855,7 +63856,7 @@ function oauthCallbackRegistration(source, baseUrl, googleCloudProjectId, google
       app_requirements: desktop ? `Create or pick an OAuth client ID of type Desktop app, and enable the ${apiName} API for the same project.` : `Press Create credentials and choose OAuth client ID (on the Google Auth Platform Clients page the button is Create client). Set Application type to Web application: a Desktop app client cannot register an https redirect URI and shows no redirect URI section, so make a new Web client rather than reusing one. Separately, enable the ${apiName} API for the same project under APIs & Services → Library.`,
       setting_label: "Authorized redirect URIs",
       redirect_uri: redirectUri,
-      finish: desktop ? "Copy the Client ID back into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste." : "Add it with + Add URI, press Create, then copy the Client ID from the confirmation dialog into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste."
+      finish: desktop ? "Copy the Client ID back into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste." : "Add it with + Add URI, press Create, then copy the Client ID and the Client secret from the confirmation dialog into the fields below and press Connect. A Web application client needs its secret to finish sign-in; paste it only into the Client secret field."
     };
   }
   if (source === "dropbox") {
@@ -116947,7 +116948,7 @@ function createEmailSourceWorker(options = {}) {
               googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
               oauthRedirectBaseUrl: dashboardOAuthOrigin,
               publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
-              googlePublisherFull: dashboardPublisherOAuthSources(dashboardClientIdSets.own).some(dashboardGoogleOAuthSource) && await dashboardGooglePublisherFull(sourceDashboard, registry2),
+              googlePublisherFull: dashboardPublisherOAuthSources(dashboardClientIdSets.own).some(dashboardGoogleOAuthSource) && await dashboardGooglePublisherFull(sourceDashboard),
               apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
               pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
               contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -117118,7 +117119,7 @@ function createEmailSourceWorker(options = {}) {
             }
             const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
             const publisher = submittedClientId ? undefined : dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, clientIdSets.own));
-            if (publisher && dashboardGoogleOAuthSource(source) && await dashboardGooglePublisherFull(sourceDashboard, registry2)) {
+            if (publisher && dashboardGoogleOAuthSource(source) && await dashboardGooglePublisherFull(sourceDashboard, registry2, source)) {
               throw new EmailSourceWorkerError(409, GOOGLE_SIGNIN_FULL_CODE, GOOGLE_SIGNIN_FULL_SENTENCE);
             }
             if (handback && (submittedClientId || publisher?.relay !== true)) {
@@ -119932,11 +119933,21 @@ function dashboardPublisherOAuthFlow(source, ownClientId) {
   const appKey = dropboxPublisherAppKey();
   return appKey ? { clientId: appKey, redirectUri: oauthRelayUrl(), relay: true } : undefined;
 }
-async function dashboardGooglePublisherFull(sourceDashboard, registry2) {
-  const hasGoogleConnection = registry2.handles.some((handle) => (handle.provider === "gmail" || handle.provider === "google_drive") && !isRetiredGoogleHandle(handle));
-  if (hasGoogleConnection)
-    return false;
+async function dashboardGooglePublisherFull(sourceDashboard, registry2, source) {
+  if (registry2 && source) {
+    const providers = dashboardGoogleProvidersForSource(source);
+    const hasOwnConnection = registry2.handles.some((handle) => providers.includes(handle.provider) && !isRetiredGoogleHandle(handle));
+    if (hasOwnConnection)
+      return false;
+  }
   return googlePublisherSignInFull(sourceDashboard.googleCapacityFetch ? { fetch: sourceDashboard.googleCapacityFetch } : {});
+}
+function dashboardGoogleProvidersForSource(source) {
+  if (source === "gmail")
+    return ["gmail"];
+  if (source === "google-drive")
+    return ["google_drive"];
+  return ["gmail", "google_drive"];
 }
 function dashboardPublisherOAuthSources(ownClientIds) {
   const sources = ["gmail", "google-drive", "dropbox", "x"];

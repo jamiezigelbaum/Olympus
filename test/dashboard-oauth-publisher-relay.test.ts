@@ -42,6 +42,7 @@ import {
 } from '../src/core/control-ui-gateway.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import {
+  DASHBOARD_SAVED_SECRET_FIELD_VALUE,
   PUBLISHER_ADVANCED_BYO_SUMMARY,
   publisherConnectIntro,
   type DashboardSourceAction,
@@ -66,6 +67,7 @@ import {
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
   withWorkerBearerAuth,
 } from '../src/workers/http.ts';
+import { createEnvCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
   readConnectedHandleRegistry,
   writeConnectedHandleRegistry,
@@ -1681,8 +1683,12 @@ describe('Google sign-in capacity: the full state before the wall', () => {
         expect(action.publisher_full).toBe(true);
         expect(action.publisher_client).toBeUndefined();
         expect(action.instructions.plain_intro.startsWith(FULL_COPY)).toBe(true);
-        // A route the owner can finish from the dashboard: a Client ID field...
-        expect(action.instructions.fields.map((field: { name: string }) => field.name)).toEqual(['client_id']);
+        // A route the owner can finish from the dashboard: a Client ID field
+        // and, because this dashboard is served over https and Google accepts
+        // only a Web application client there, the Client secret field that
+        // client cannot sign in without...
+        expect(action.instructions.fields.map((field: { name: string }) => field.name)).toEqual(['client_id', 'client_secret']);
+        expect(action.client_secret_required).toBe(true);
         // ...with the Google Cloud Console steps, including the production
         // publish that keeps a refresh token alive past seven days.
         expect(action.instructions.diy_steps.length).toBeGreaterThan(3);
@@ -1846,24 +1852,74 @@ describe('Google sign-in capacity: the full state before the wall', () => {
     });
   });
 
-  test('a person who already has Gmail connected is never held back: adding Drive is not a new Google user', async () => {
+  /** Gmail connected through the publisher app while the app was still open. */
+  async function withGmailConnected(): Promise<Fixture> {
+    const instance = fixture({}, { googleCapacityFetch: open().fetch });
+    const started = await authorizationUrl(await startRaw(instance, { source: 'gmail' }));
+    const callback = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=gmail-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
+    ));
+    expect(callback.status).toBe(303);
+    // The wall goes up after Gmail is connected.
+    resetGooglePublisherCapacityCache();
+    return instance;
+  }
+
+  test('open: adding Drive beside a connected Gmail is the ordinary one-click Connect', async () => {
     await withoutPilotClient(async () => {
-      const fake = open();
-      const instance = fixture({}, { googleCapacityFetch: fake.fetch });
-      const started = await authorizationUrl(await startRaw(instance, { source: 'gmail' }));
-      const callback = await instance.fetch(new Request(
-        `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=gmail-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
-      ));
-      expect(callback.status).toBe(303);
-      // The wall goes up after Gmail is connected.
-      resetGooglePublisherCapacityCache();
+      const instance = await withGmailConnected();
+      const beside = fixtureWithRegistry(instance.registryPath, instance.secretStore, open().fetch);
+      const driveUrl = await authorizationUrl(await startRaw(beside, { source: 'google-drive' }));
+      expect(driveUrl.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+      expect(googleCard(await dashboardJson(beside), 'google_drive.docs').connection.action.publisher_full).toBeUndefined();
+    });
+  });
+
+  test('full: a connected Gmail does not excuse Drive, which has no connection of its own and is held back like a new user', async () => {
+    await withoutPilotClient(async () => {
+      const instance = await withGmailConnected();
       const fullFake = full();
       const wall = fixtureWithRegistry(instance.registryPath, instance.secretStore, fullFake.fetch);
-      const driveUrl = await authorizationUrl(await startRaw(wall, { source: 'google-drive' }));
-      expect(driveUrl.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
-      const driveCard = googleCard(await dashboardJson(wall), 'google_drive.docs');
-      expect(driveCard.connection.action.publisher_full).toBeUndefined();
-      expect(fullFake.calls).toEqual([]);
+      // Google's consent lets the person pick any account, so Drive could be
+      // a different, new user: refused before any Google URL exists.
+      const refused = await startRaw(wall, { source: 'google-drive' });
+      expect(refused.status).toBe(409);
+      const body = await refused.json();
+      expect(body.error.code).toBe('google_signin_full');
+      expect(body.error.message).toBe(FULL_COPY);
+      expect(body.authorization_url).toBeUndefined();
+      // The Drive card says so and leads into the own-app steps; the connected
+      // Gmail card offers nothing to hold back.
+      const view = await dashboardJson(wall);
+      const driveAction = googleCard(view, 'google_drive.docs').connection.action;
+      expect(driveAction.kind).toBe('needs_setup');
+      expect(driveAction.publisher_full).toBe(true);
+      expect(googleCard(view, 'gmail.email').connection.action.kind).toBe('none');
+      expect(fullFake.calls.length).toBe(1);
+    });
+  });
+
+  test('full: reauthorizing a source that already has its own connection is allowed, and its card stays the one-click Reauthenticate', async () => {
+    await withoutPilotClient(async () => {
+      const instance = await withGmailConnected();
+      const registry = readConnectedHandleRegistry(instance.registryPath);
+      writeConnectedHandleRegistry({
+        ...registry,
+        handles: registry.handles.map((candidate) => (
+          candidate.provider === 'gmail'
+            ? { ...candidate, backendState: { kind: 'oauth2_refresh' as const, status: 'reauth_required' as const } }
+            : candidate
+        )),
+      }, instance.registryPath);
+      const wall = fixtureWithRegistry(instance.registryPath, instance.secretStore, full().fetch);
+      const url = await authorizationUrl(await startRaw(wall, { source: 'gmail' }));
+      expect(url.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+      // Olympus keeps only opaque account labels, never the address, so there
+      // is nothing to preselect with login_hint; the reauth is allowed anyway.
+      expect(url.searchParams.has('login_hint')).toBe(false);
+      const action = googleCard(await dashboardJson(wall), 'gmail.email').connection.action;
+      expect(action).toMatchObject({ kind: 'oauth', label: 'Reauthenticate', publisher_client: true });
+      expect(action.publisher_full).toBeUndefined();
     });
   });
 
@@ -1876,6 +1932,146 @@ describe('Google sign-in capacity: the full state before the wall', () => {
       expect(html).toContain('Set up');
       expect(html).not.toContain('unverified app');
       expect(html.toLowerCase()).not.toContain('waitlist');
+    });
+  });
+});
+
+// Bring-your-own Google when the dashboard is served over https: Google accepts
+// only a Web application client there, and that client type requires its
+// client_secret at the token exchange and at every refresh. Served on this
+// computer (loopback) the Desktop app client needs none. The secret is entered
+// only in the dashboard's Client secret field.
+describe('Google bring-your-own client secret on an https dashboard', () => {
+  const OWN_WEB_CLIENT_ID = 'owner-web-app.apps.googleusercontent.com';
+  const OWN_WEB_CLIENT_SECRET = 'GOCSPX-owner-web-secret-fixture';
+  const LOOPBACK_ORIGIN = 'http://127.0.0.1:8010';
+
+  const gmailCardAction = (view: { sources: Array<Record<string, any>> }) =>
+    view.sources.find((source) => source.source_id === 'gmail.email')!.connection.action;
+
+  test('the https walkthrough asks for the Client secret in a masked field and tells the owner to paste it there', async () => {
+    await withoutPilotClient(async () => {
+      const fullFetch = (async () => new Response(JSON.stringify({ google: 'full' }), { status: 200 })) as unknown as typeof fetch;
+      const action = gmailCardAction(await dashboardJson(fixture({}, { googleCapacityFetch: fullFetch })));
+      expect(action.kind).toBe('needs_setup');
+      expect(action.client_secret_required).toBe(true);
+      expect(action.instructions.fields).toEqual([
+        { name: 'client_id', label: 'Client ID', required: true, secret: false },
+        { name: 'client_secret', label: 'Client secret', required: true, secret: true },
+      ]);
+      const walkthrough = [
+        action.instructions.plain_intro,
+        action.instructions.agent_prompt,
+        ...action.instructions.diy_steps.map((step: { text: string }) => step.text),
+        action.callback_registration.finish,
+      ].join('\n');
+      expect(walkthrough).toContain('Client secret');
+      expect(walkthrough).not.toContain('no client secret to paste');
+      expect(walkthrough).not.toContain('does not need the client secret');
+      // The assistant is told to keep the secret out of chat.
+      expect(action.instructions.agent_prompt).toContain('only into the Client secret field');
+    });
+  });
+
+  test('the loopback (Desktop app) walkthrough is unchanged: a Client ID field and no secret', async () => {
+    await withoutPilotClient(async () => {
+      const fullFetch = (async () => new Response(JSON.stringify({ google: 'full' }), { status: 200 })) as unknown as typeof fetch;
+      const action = gmailCardAction(await dashboardJson(fixture({}, { googleCapacityFetch: fullFetch }), LOOPBACK_ORIGIN));
+      expect(action.kind).toBe('needs_setup');
+      expect(action.client_secret_required).toBe(false);
+      expect(action.instructions.fields.map((field: { name: string }) => field.name)).toEqual(['client_id']);
+      expect(action.instructions.plain_intro).toContain('Desktop app Client ID');
+      expect(action.callback_registration.finish).toContain('no client secret to paste');
+    });
+  });
+
+  test('the exchange sends the pasted secret, it is stored with the handle, and every refresh sends it too', async () => {
+    await withoutPilotClient(async () => {
+      const instance = fixture();
+      const started = await authorizationUrl(await startConnect(instance, {
+        source: 'gmail',
+        client_id: OWN_WEB_CLIENT_ID,
+        client_secret: OWN_WEB_CLIENT_SECRET,
+      }));
+      // The authorization URL carries the client id only, never the secret.
+      expect(started.toString()).not.toContain(OWN_WEB_CLIENT_SECRET);
+      const callback = await instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=byo-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
+      ));
+      expect(callback.status).toBe(303);
+
+      // Direct to Google, with the client secret in the form body.
+      expect(instance.exchangeUrls).toEqual(['https://oauth2.googleapis.com/token']);
+      expect(instance.exchanges[0]!.get('client_id')).toBe(OWN_WEB_CLIENT_ID);
+      expect(instance.exchanges[0]!.get('client_secret')).toBe(OWN_WEB_CLIENT_SECRET);
+
+      // Stored the way connect.ts stores every Google client secret, and
+      // referenced from the handle so the broker finds it again.
+      expect(await instance.secretStore.get('gmail.personal.oauth.client_secret')).toBe(OWN_WEB_CLIENT_SECRET);
+      const handle = readConnectedHandleRegistry(instance.registryPath).handles.find((entry) => entry.provider === 'gmail')!;
+      expect(handle.oauth2Refresh?.clientSecretSecretRef).toBe('store:gmail.personal.oauth.client_secret');
+      expect(handle.oauth2Refresh?.exchangeVia).toBeUndefined();
+
+      // The refresh authenticates with the same pair (HTTP Basic), not the id alone.
+      const refreshCalls: Array<{ url: string; headers: Headers; body: string }> = [];
+      const broker = createEnvCredentialBroker({
+        handleRegistryPath: instance.registryPath,
+        secretStore: instance.secretStore,
+        oauth2CacheNamespace: `byo-web-refresh-${Math.random()}`,
+        env: {},
+        fetch: async (url, init) => {
+          refreshCalls.push({ url: String(url), headers: new Headers(init?.headers), body: String(init?.body ?? '') });
+          return new Response(JSON.stringify({ access_token: 'refreshed-access-token-fixture', expires_in: 3599 }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+      });
+      await broker.issueSession({ handle: 'gmail.personal', capability: 'gmail.email.sync' });
+      expect(refreshCalls).toHaveLength(1);
+      expect(refreshCalls[0]!.url).toBe('https://oauth2.googleapis.com/token');
+      expect(refreshCalls[0]!.headers.get('authorization'))
+        .toBe(`Basic ${Buffer.from(`${OWN_WEB_CLIENT_ID}:${OWN_WEB_CLIENT_SECRET}`).toString('base64')}`);
+    });
+  });
+
+  test('a saved secret is never echoed: the stand-in value is not sent to Google, and the stored secret is reused on reauthorization', async () => {
+    await withoutPilotClient(async () => {
+      const instance = fixture({
+        'gmail.personal.oauth.client_id': OWN_WEB_CLIENT_ID,
+        'gmail.personal.oauth.client_secret': OWN_WEB_CLIENT_SECRET,
+        'gmail.personal.oauth.client_id_source': 'byo',
+      });
+      const action = gmailCardAction(await dashboardJson(instance));
+      expect(action).toMatchObject({ kind: 'oauth', client_secret_on_file: true });
+      expect(JSON.stringify(await dashboardJson(instance))).not.toContain(OWN_WEB_CLIENT_SECRET);
+      const started = await authorizationUrl(await startConnect(instance, {
+        source: 'gmail',
+        client_id: OWN_WEB_CLIENT_ID,
+        client_secret: DASHBOARD_SAVED_SECRET_FIELD_VALUE,
+      }));
+      await instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=byo-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
+      ));
+      expect(instance.exchanges[0]!.get('client_secret')).toBe(OWN_WEB_CLIENT_SECRET);
+    });
+  });
+
+  test('the Desktop app client still sends no secret at the exchange and stores none', async () => {
+    await withoutPilotClient(async () => {
+      const instance = fixture();
+      const started = await authorizationUrl(await startConnect(instance, {
+        source: 'gmail',
+        client_id: 'owner-desktop-app.apps.googleusercontent.com',
+      }, LOOPBACK_ORIGIN));
+      expect(started.searchParams.get('redirect_uri')).toBe(`${LOOPBACK_ORIGIN}/oauth/callback/gmail`);
+      const callback = await instance.fetch(new Request(
+        `${LOOPBACK_ORIGIN}/oauth/callback/gmail?code=byo-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
+      ));
+      expect(callback.status).toBe(303);
+      expect(instance.exchanges[0]!.get('client_id')).toBe('owner-desktop-app.apps.googleusercontent.com');
+      expect(instance.exchanges[0]!.has('client_secret')).toBe(false);
+      expect(await instance.secretStore.get('gmail.personal.oauth.client_secret')).toBeUndefined();
     });
   });
 });
