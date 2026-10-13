@@ -161,8 +161,14 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     const [keysJob, gardenJob] = queued.jobRefs.map((entry) => entry.jobId) as [string, string];
     const leased = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' });
     expect(leased.leasedJobs.map((job) => job.jobId).sort()).toEqual([keysJob, gardenJob].sort());
-    jobs.record({ jobId: keysJob, status: 'indexed' });
+    // A sheet named for what it holds: the structural ref carries the name.
+    jobs.record({
+      jobId: keysJob,
+      status: 'indexed',
+      derivations: [{ artifactKind: 'sheet', structuralRef: { kind: 'sheet', sheet: `keys ${FAKE_AWS_KEY}` }, chars: 40 }],
+    });
     expect(jobs.get(keysJob)?.ref.name).toBe(KEYS.name);
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(KEYS))).toHaveLength(1);
     const keysBefore = jobs.get(keysJob)!;
     const gardenBefore = jobs.get(gardenJob)!;
 
@@ -172,6 +178,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
 
     const keysAfter = jobs.get(keysJob)!;
     expect(keysAfter.ref.name).toBeUndefined();
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(KEYS))).toEqual([]);
     expect(JSON.stringify(keysAfter)).not.toContain(FAKE_AWS_KEY);
     // Only the name: the job's status, attempts and retry state are as recorded.
     const { ref: _keysRef, ...keysRest } = keysAfter;
@@ -179,8 +186,13 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(keysRest).toEqual(keysRestBefore);
     // Another item's job, still leased, is exactly as it was and records normally.
     expect(jobs.get(gardenJob)).toEqual(gardenBefore);
-    expect(jobs.record({ jobId: gardenJob, status: 'indexed' }).status).toBe('indexed');
+    expect(jobs.record({
+      jobId: gardenJob,
+      status: 'indexed',
+      derivations: [{ artifactKind: 'page', structuralRef: { kind: 'page', page: 1 }, chars: 40 }],
+    }).artifactsRecorded).toBe(1);
     expect(jobs.get(gardenJob)?.ref.name).toBe(GARDEN.name);
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(GARDEN))).toHaveLength(1);
 
     // A planning pass that listed the file before it became Secret enqueues
     // its stale ref afterwards: the refreshed job and a new one stay nameless.
@@ -212,7 +224,14 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
 
     expect(jobs.get(gardenJob!)).toMatchObject({ status: 'leased' });
     expect(jobs.get(gardenJob!)?.ref.name).toBeUndefined();
-    expect(jobs.record({ jobId: gardenJob!, status: 'indexed', leaseToken: lease!.leaseToken }).status).toBe('indexed');
+    const recorded = jobs.record({
+      jobId: gardenJob!,
+      status: 'indexed',
+      leaseToken: lease!.leaseToken,
+      derivations: [{ artifactKind: 'sheet', structuralRef: { kind: 'sheet', sheet: 'garden beds' }, chars: 40 }],
+    });
+    expect(recorded).toMatchObject({ status: 'indexed', artifactsRecorded: 0 });
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(GARDEN))).toEqual([]);
   });
 
   /** One job's name, read without opening the store (which would upgrade an older ledger). */

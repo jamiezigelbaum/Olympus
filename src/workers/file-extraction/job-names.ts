@@ -5,9 +5,11 @@
  * Secret tier: such an item keeps its location only).
  *
  * Kept apart from job-store.ts so the Secrets disposition can reach the
- * ledger without loading the queue. Only the name column is touched: status,
- * attempts, leases and retry state stay exactly as they were, so a job in
- * flight records normally and no other item's job changes.
+ * ledger without loading the queue. Only the name column and the item's
+ * extraction artifacts (structural refs can carry source names, such as a
+ * sheet's name) are touched: status, attempts, leases and retry state stay
+ * exactly as they were, so a job in flight records normally and no other
+ * item's job changes.
  *
  * The clearing is durable: the item is also written to the ledger's
  * `secret_item_redactions` table, and enqueue reads it in the same write
@@ -121,6 +123,18 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
           VALUES (?, ?, ?, ?, ?)
         `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? '', new Date().toISOString());
       }
+      const artifactItems = item.localItemId !== undefined
+        ? 'provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?'
+        : 'provider = ? AND account_scope = ? AND provider_item_id = ?';
+      const itemParams = item.localItemId !== undefined
+        ? [item.provider, item.accountScope, item.providerItemId, item.localItemId]
+        : [item.provider, item.accountScope, item.providerItemId];
+      if (artifactsTableExists(db)) {
+        db.query(`
+          DELETE FROM extraction_artifacts
+          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
+        `).run(...itemParams);
+      }
       const cleared = item.localItemId !== undefined
         ? db.query(`
             UPDATE extraction_jobs SET name = NULL
@@ -135,6 +149,10 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
   } finally {
     closeSqliteStore(db);
   }
+}
+
+function artifactsTableExists(db: Database): boolean {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
 }
 
 function redactionsTableExists(db: Database): boolean {

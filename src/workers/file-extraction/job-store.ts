@@ -1976,6 +1976,15 @@ export class LocalFileExtractionJobStore {
     this.db.query('DELETE FROM extraction_artifacts WHERE corpus_id = ? AND local_item_id = ?')
       .run(row.corpus_id, row.local_item_id);
     if (derivations.length === 0) return 0;
+    // A job in flight when its item became Secrets: its structural refs can
+    // carry source names (a sheet's name), so none is kept (job-names.ts).
+    const item = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      localItemId: row.local_item_id,
+    };
+    if (itemNameRedacted(this.db, item)) return 0;
     const insert = this.db.query(`
       INSERT INTO extraction_artifacts (
         corpus_id, local_item_id, artifact_index, job_id, extractor_kind,
