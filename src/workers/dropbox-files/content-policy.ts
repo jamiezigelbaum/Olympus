@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
+import { SHARED_SECRET_PATTERNS } from '../../core/secret-patterns.ts';
 
 export const DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = 'dropbox_deterministic_content_policy';
-export const DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = '2026-05-22';
+export const DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = '2026-10-13';
 
 export type DropboxContentPolicyTrustTier = 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S4+' | 'S5';
 export type DropboxContentPolicyClassificationDecision =
@@ -43,40 +44,19 @@ interface DropboxContentPolicyPattern {
   pattern: RegExp;
   confidence: number;
   trustTier: DropboxContentPolicyTrustTier;
+  /** Cuts false positives after the regex matches. Absent means every match counts. */
+  accept?: (match: RegExpMatchArray) => boolean;
 }
 
-const SECRET_PATTERNS: DropboxContentPolicyPattern[] = [
-  {
-    findingType: 'private_key_material',
-    pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
-    confidence: 1,
-    trustTier: 'S5',
-  },
-  {
-    findingType: 'aws_access_key_id',
-    pattern: /\bAKIA[0-9A-Z]{16}\b/g,
-    confidence: 0.98,
-    trustTier: 'S5',
-  },
-  {
-    findingType: 'slack_token',
-    pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
-    confidence: 0.98,
-    trustTier: 'S5',
-  },
-  {
-    findingType: 'api_secret_token',
-    pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
-    confidence: 0.95,
-    trustTier: 'S5',
-  },
-  {
-    findingType: 'credential_assignment',
-    pattern: /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi,
-    confidence: 0.9,
-    trustTier: 'S5',
-  },
-];
+// One credential pattern list for the Secrets floor and the outbound guard
+// (src/core/secret-patterns.ts), so a shape is never caught on one path only.
+const SECRET_PATTERNS: DropboxContentPolicyPattern[] = SHARED_SECRET_PATTERNS.map((shared) => ({
+  findingType: shared.findingType,
+  pattern: shared.pattern,
+  confidence: shared.confidence,
+  trustTier: 'S5',
+  ...(shared.accept ? { accept: shared.accept } : {}),
+}));
 
 const REVIEW_PATTERNS: DropboxContentPolicyPattern[] = [
   {
@@ -151,6 +131,7 @@ function scanPatterns(
     for (const match of matches) {
       const matchedText = match[0]?.trim();
       if (!matchedText) continue;
+      if (pattern.accept && !pattern.accept(match)) continue;
       findings.push({
         finding_type: pattern.findingType,
         finding_hash: hashFinding(pattern.findingType, matchedText),
