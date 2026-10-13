@@ -17,10 +17,20 @@
 // changes.
 //
 // The floor is the ONLY thing that classes an item as Secrets, and Personal
-// content can go to cloud models by design, so a miss leaks a credential. The
-// patterns therefore lean toward catching, and `accept` is where the false
-// positives are cut: documentation placeholders, masks, environment lookups,
-// type annotations, empty values and prose never count.
+// content can go to cloud models by design, so a miss leaks a credential while
+// a false positive only hides that one item from answers. Recall wins:
+//   - the patterns lean toward catching, and `accept` is where false positives
+//     are cut for the NEW shapes: documentation placeholders, masks,
+//     environment lookups, type annotations, empty values and prose;
+//   - the floor is a SUPERSET of the one it replaced. The old assignment shape
+//     is kept verbatim and unfiltered (LEGACY_CREDENTIAL_ASSIGNMENT), and the
+//     other old shapes are unchanged, so nothing the previous floor classed as
+//     Secrets is ever let through (test/content-policy-secrets.test.ts replays
+//     the old regexes over its whole corpus);
+//   - everything here runs on whole documents, so no pattern or check may
+//     backtrack super-linearly: trims are character walks, key names are read
+//     as one plain run and tested in `accept`, and the same test file runs the
+//     floor over adversarial 200 KB inputs.
 
 export type SecretFindingType =
   | 'private_key_material'
@@ -63,19 +73,25 @@ export function hasSecretPatternHit(text: string, spec: SharedSecretPattern): bo
 }
 
 // --- Value checks -------------------------------------------------------------
+//
+// Every check below runs on values of any length (an unbroken 200 KB run is a
+// legal value), so none of them may backtrack: trims are character walks, and
+// every regex is anchored, bounded, or has no overlapping quantifiers.
 
-/** Words that make a "Password: ..." value prose rather than a passphrase. */
+/**
+ * Instruction and interface vocabulary: a spaced value that contains one of
+ * these is a hint, a rule or a heading ("Password: reset your password at the
+ * link"), not a passphrase. Ordinary function words (the, at, of ...) are NOT
+ * here: "the horse rides at midnight" is a perfectly good passphrase.
+ */
 const PROSE_WORDS = new Set([
-  'a', 'about', 'above', 'after', 'again', 'all', 'also', 'an', 'and', 'any', 'are', 'as', 'at',
-  'be', 'because', 'been', 'before', 'below', 'by', 'can', 'cannot', 'change', 'changed', 'characters',
-  'choose', 'click', 'contact', 'could', 'do', 'does', 'enter', 'expired', 'expires', 'for', 'forgot',
-  'forgotten', 'from', 'get', 'has', 'have', 'here', 'hidden', 'how', 'if', 'in', 'incorrect', 'invalid',
-  'is', 'it', 'its', 'least', 'letters', 'link', 'long', 'manager', 'maximum', 'min', 'minimum', 'must',
-  'my', 'need', 'needed', 'needs', 'new', 'no', 'not', 'number', 'numbers', 'of', 'on', 'only', 'optional',
-  'or', 'our', 'please', 'provide', 'provided', 'protected', 'required', 'requirements', 'reset', 'see',
-  'send', 'sent', 'set', 'shared', 'should', 'shown', 'sign', 'so', 'symbols', 'that', 'the', 'their',
-  'then', 'these', 'this', 'those', 'to', 'type', 'unchanged', 'until', 'up', 'use', 'used', 'using',
-  'via', 'was', 'we', 'when', 'where', 'which', 'will', 'with', 'without', 'would', 'you', 'your',
+  'above', 'below', 'cannot', 'change', 'changed', 'characters', 'choose', 'click', 'contact', 'enter',
+  'expired', 'expires', 'forgot', 'forgotten', 'guideline', 'guidelines', 'hidden', 'incorrect',
+  'information', 'instruction', 'instructions', 'invalid', 'least', 'letters', 'link', 'manager',
+  'maximum', 'min', 'minimum', 'must', 'need', 'needed', 'needs', 'number', 'numbers', 'optional',
+  'please', 'policies', 'policy', 'protected', 'provide', 'provided', 'required', 'requirements',
+  'reset', 'see', 'send', 'sent', 'setting', 'settings', 'shared', 'should', 'shown', 'sign',
+  'strength', 'symbols', 'unchanged', 'use', 'used', 'using', 'via',
 ]);
 
 /** A mask or elision standing in for the real value: `****`, `xxxxx`, `abc...xyz`. */
@@ -94,45 +110,107 @@ const PLACEHOLDER_WORDS = new RegExp(
 const BARE_LITERALS = new Set([
   'password', 'passwd', 'passphrase', 'secret', 'token', 'apikey', 'api_key', 'api-key', 'string',
   'null', 'none', 'nil', 'undefined', 'true', 'false', 'empty', 'hidden', 'masked', 'required',
-  'optional', 'changeme',
+  'optional', 'changeme', 'enabled', 'disabled', 'encrypted', 'hashed', 'unknown', 'tbd', 'pending',
+  'missing',
 ]);
 /** Where a value is looked up (an environment, a settings object) rather than typed in. */
 const CODE_LOOKUP =
   /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|system\.getenv|deno\.env|getenv|environ|env|config|settings|secrets?|self|this|args|opts|options|params|req|request|ctx|vault|input)[.[(]/i;
 const CALL_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/;
-/** `user.password`, `req.body.token`: a property chain with no digit in it. */
+/** `user.password`, `req.body.token`: a dotted chain of identifiers. */
 const MEMBER_CHAIN = /^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)+$/;
+/** First or middle segments that make a dotted chain a property lookup, not a passphrase. */
+const COMMON_OBJECTS = new Set([
+  'user', 'users', 'body', 'data', 'form', 'state', 'props', 'creds', 'credentials', 'account', 'profile',
+  'session', 'auth', 'db', 'app', 'json', 'response', 'res', 'row', 'record', 'item', 'model',
+]);
 const TYPE_ANNOTATION = /^(?:secretstr(?:ing)?|optional[[<]|option<|union[[<]|promise<|record<|array<|string\s*\||[a-z]+\s*\|\s*(?:undefined|null))/i;
+/** A bare code identifier: letters, `_` and `$` only, so no digit or symbol that a credential would have. */
+const BARE_IDENTIFIER = /^[A-Za-z_$][A-Za-z_$]*$/;
 
-/** A value that stands in for a credential rather than being one. */
-export function isPlaceholderValue(value: string): boolean {
+/** `value` without trailing code punctuation (`;,)]}`) and sentence dots, in one walk. */
+function trimValueEnd(value: string): string {
+  let end = value.length;
+  while (end > 0 && ';,)]}'.includes(value[end - 1]!)) end -= 1;
+  while (end > 0 && value[end - 1] === '.') end -= 1;
+  return value.slice(0, end);
+}
+
+/** `word` without leading and trailing characters that are not ASCII letters or digits. */
+function stripNonAlphanumeric(word: string): string {
+  const isAlphanumeric = (code: number): boolean =>
+    (code >= 48 && code <= 57) || (code >= 97 && code <= 122);
+  const lower = word.toLowerCase();
+  let start = 0;
+  let end = lower.length;
+  while (start < end && !isAlphanumeric(lower.charCodeAt(start))) start += 1;
+  while (end > start && !isAlphanumeric(lower.charCodeAt(end - 1))) end -= 1;
+  return lower.slice(start, end);
+}
+
+function isBareLiteral(value: string): boolean {
+  if (value.length > 24) return false;
+  let end = value.length;
+  while (end > 0 && '.,;'.includes(value[end - 1]!)) end -= 1;
+  return BARE_LITERALS.has(value.slice(0, end).toLowerCase());
+}
+
+/**
+ * `$NAME` is a shell variable, but `$Money2024` is a password that starts with
+ * a dollar sign: a bare name counts as a variable when it has an underscore,
+ * is all upper case, or is all lower-case letters.
+ */
+function isVariableReference(value: string): boolean {
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$/s.exec(value);
+  if (!match) return false;
+  const name = match[1]!;
+  if (match[2]) return match[2].startsWith('/');
+  return name.includes('_')
+    || name === name.toUpperCase()
+    || (!/[0-9]/.test(name) && name === name.toLowerCase());
+}
+
+/**
+ * A value that stands in for a credential rather than being one. `lineRest` is
+ * the text after the value on the same line: `<your client secret goes here>`
+ * reaches this check as `<your`, and the closing `>` is what makes it a
+ * placeholder rather than a password that begins with `<`.
+ */
+export function isPlaceholderValue(value: string, lineRest = ''): boolean {
   const v = value.trim();
   if (!v) return true;
-  if (v.startsWith('<') || v.startsWith('(') || /^[[{].*[\]}]$/.test(v)) return true;
-  if (/\$\{|\{\{|<%|%\(|\$\(|^\$[A-Za-z_]|^%[A-Za-z_]+%$|^@/.test(v)) return true;
+  if (v.startsWith('<') && (v.includes('>') || lineRest.includes('>'))) return true;
+  if (v.startsWith('(') && (v.includes(')') || lineRest.includes(')'))) return true;
+  if (/^[[{].*[\]}]$/.test(v)) return true;
+  if (/\$\{|\{\{|<%|%\(|\$\(|^%[A-Za-z_]+%$/.test(v)) return true;
+  if (isVariableReference(v)) return true;
   if (MASKED_RUN.test(v)) return true;
   if (/^(.)\1+$/.test(v)) return true;
-  if (BARE_LITERALS.has(v.toLowerCase().replace(/[.,;]+$/, ''))) return true;
+  if (isBareLiteral(v)) return true;
   return PLACEHOLDER_WORDS.test(v);
 }
 
 /** `password_confirmation`, `token-value`: a variable or field name that mentions a credential word. */
 const CREDENTIAL_WORD = /pass(?:word|wd|phrase|code)|secret|token|api[_-]?key|credential/i;
+/** A spaced value that ends in a credential word is a field label: "Confirm password", "enter your secret". */
+const CREDENTIAL_NOUN = /^(?:pass(?:word|phrase|code)|passwd|secret|token|credential)s?$/;
 const IDENTIFIER_NAME = /^[A-Za-z]+(?:[_-][A-Za-z]+)+$/;
+
+/** A dotted chain that reads as a property lookup: a credential word or a common object in it. */
+function isPropertyLookup(value: string): boolean {
+  if (!MEMBER_CHAIN.test(value)) return false;
+  return value.split('.').some((segment) => CREDENTIAL_WORD.test(segment) || COMMON_OBJECTS.has(segment.toLowerCase()));
+}
 
 /** A value that reads as code, a URL or a path rather than a typed-in credential. */
 function isNotLiteralCredential(value: string): boolean {
   return CODE_LOOKUP.test(value)
     || (IDENTIFIER_NAME.test(value) && CREDENTIAL_WORD.test(value))
     || CALL_EXPRESSION.test(value)
-    || MEMBER_CHAIN.test(value)
+    || isPropertyLookup(value)
     || TYPE_ANNOTATION.test(value)
     || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
     || /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(value);
-}
-
-function trimValueEnd(value: string): string {
-  return value.replace(/[;,)\]}]+$/, '').replace(/\.+$/, '');
 }
 
 /** A digit or a symbol: what separates `s3cr3t-key` from the word "authentication". */
@@ -141,17 +219,20 @@ function hasCredentialShape(value: string): boolean {
 }
 
 /**
- * A multi-word value that is plausibly a passphrase: two to ten words, none of
- * which is ordinary prose glue ("Password: reset your password at the link").
+ * A spaced value that is plausibly a passphrase: two to fourteen words, none of
+ * them instruction vocabulary, and not ending in a credential word ("Password:
+ * reset your password at the link", "Confirm password"). Ordinary words are
+ * fine: "the horse rides at midnight" is a passphrase.
  */
-function isPlausiblePassphrase(value: string): boolean {
+function isPlausiblePassphrase(value: string, minLength: number): boolean {
   const v = value.trim();
-  if (v.length < 12 || v.length > 120) return false;
+  if (v.length < minLength || v.length > 160) return false;
   if (/[?:]$/.test(v) || /\bhttps?:\/\//i.test(v)) return false;
   if (isPlaceholderValue(v) || isNotLiteralCredential(v)) return false;
   const words = v.split(/\s+/);
-  if (words.length < 2 || words.length > 10) return false;
-  return !words.some((word) => PROSE_WORDS.has(word.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')));
+  if (words.length < 2 || words.length > 14) return false;
+  if (CREDENTIAL_NOUN.test(stripNonAlphanumeric(words[words.length - 1]!))) return false;
+  return !words.some((word) => PROSE_WORDS.has(stripNonAlphanumeric(word)));
 }
 
 /** A word before "secret" or "token" that makes the key a named credential. */
@@ -162,17 +243,74 @@ const STRONG_QUALIFIERS = new Set([
 ]);
 /** Tokens that are not credentials: pagination cursors and anti-forgery nonces. */
 const NON_CREDENTIAL_TOKEN_PREFIX = /(?:page|sync|cursor|continuation|resume|batch|delta|csrf|xsrf|nonce)[_ .-]?$/i;
+/** Declarations and member access: the line is code, so a bare identifier value is a variable. */
+const CODE_LEAD =
+  /(?:^|[^\w$])(?:const|let|var|val|final|static|public|private|protected|readonly|def)\s+[^=:\n]*$|[\w$]+\.[\w$]*$/;
+
+/** The text on the match's own line before `index`, at most `limit` characters. */
+function leadBefore(input: string, index: number, limit: number): string {
+  const window = input.slice(Math.max(0, index - limit), index);
+  const newline = Math.max(window.lastIndexOf('\n'), window.lastIndexOf('\r'));
+  return newline === -1 ? window : window.slice(newline + 1);
+}
+
+/** The text after the match on its own line, at most 200 characters. */
+function restOfLine(match: RegExpMatchArray): string {
+  const input = match.input ?? '';
+  const end = (match.index ?? 0) + match[0].length;
+  const window = input.slice(end, end + 200);
+  const newline = window.search(/[\r\n]/);
+  return newline === -1 ? window : window.slice(0, newline);
+}
+
+interface AssignedValue {
+  value: string;
+  quoted: boolean;
+  /** Punctuation trimmed off an unquoted value (`;`, `)`, `,` ...). */
+  tail: string;
+}
+
+function assignedValue(groups: Record<string, string | undefined>): AssignedValue {
+  const quotedValue = groups.dq ?? groups.sq ?? groups.bq;
+  if (quotedValue !== undefined) return { value: quotedValue.trim(), quoted: true, tail: '' };
+  const raw = groups.uv ?? '';
+  const value = trimValueEnd(raw).trim();
+  return { value, quoted: false, tail: raw.slice(value.length) };
+}
+
+/**
+ * Code assigning one identifier to another (`const sessionToken =
+ * authenticationToken;`): a bare identifier value on a declaration or member
+ * access, or closed by `;` / `)` when it is camelCase or snake_case.
+ */
+function isIdentifierHandOff(match: RegExpMatchArray, assigned: AssignedValue): boolean {
+  if (assigned.quoted || !BARE_IDENTIFIER.test(assigned.value)) return false;
+  if (CODE_LEAD.test(leadBefore(match.input ?? '', match.index ?? 0, 80))) return true;
+  return /[;)]/.test(assigned.tail) && (assigned.value.includes('_') || /[a-z][A-Z]/.test(assigned.value));
+}
+
+/** Whether `value` is the whole rest of its line (a trailing comment does not count). */
+function endsTheLine(match: RegExpMatchArray): boolean {
+  const rest = restOfLine(match).trim();
+  return rest === '' || /^(?:#|\/\/|;|--)/.test(rest);
+}
 
 function assignmentAccepted(match: RegExpMatchArray): boolean {
   const groups = match.groups ?? {};
   const keyword = (groups.kw ?? '').toLowerCase();
-  const quotedValue = groups.dq ?? groups.sq ?? groups.bq;
-  const value = (quotedValue !== undefined ? quotedValue : trimValueEnd(groups.uv ?? '')).trim();
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
   if (!value) return false;
-  if (isPlaceholderValue(value) || isNotLiteralCredential(value)) return false;
+  const rest = value.startsWith('<') || value.startsWith('(') ? restOfLine(match) : '';
+  if (isPlaceholderValue(value, quoted ? '' : rest) || isNotLiteralCredential(value)) return false;
 
   const isPassword = keyword.startsWith('pass');
-  if (/\s/.test(value)) return isPassword && isPlausiblePassphrase(value);
+  const isSecret = isPassword || keyword.startsWith('secret');
+
+  // Quoted values with spaces are the only spaced values this pattern sees.
+  if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
+  if (quoted && isSecret) return value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase());
+  if (isIdentifierHandOff(match, assigned)) return false;
 
   // Bare "secret" and "token" are ordinary words; a named key (`GITHUB_TOKEN`,
   // `client_secret`, "access token") is a credential outright.
@@ -192,7 +330,15 @@ function assignmentAccepted(match: RegExpMatchArray): boolean {
 
   if (!strong) return value.length >= 12 && hasCredentialShape(value);
   if (value.length >= 12) return true;
-  return value.length >= 8 && hasCredentialShape(value);
+  if (value.length >= 8 && hasCredentialShape(value)) return true;
+  // A short password after its label on the same line: `password: pancakes`.
+  // Not when the line goes on ("Password: security guidelines"); the labelled
+  // passphrase pattern reads the whole line then.
+  return isPassword
+    && !groups.nl
+    && value.length >= 6
+    && !PROSE_WORDS.has(value.toLowerCase())
+    && endsTheLine(match);
 }
 
 function maskedProviderToken(token: string): boolean {
@@ -200,11 +346,52 @@ function maskedProviderToken(token: string): boolean {
   return !body || MASKED_RUN.test(body) || /^(.)\1+$/.test(body) || /example|your|placeholder/i.test(body);
 }
 
+// --- Environment-style keys ---------------------------------------------------
+
+/** A key name that mentions a credential word anywhere in it: `DB_PASSWORD_PROD`, `Pwd`, `SECRET_KEY`. */
+const ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+const ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, 'i');
+/** Keys that name a property of a credential, not the credential: `TOKEN_TYPE`, `PASSWORD_FILE`. */
+const NON_CREDENTIAL_KEY_TAIL =
+  /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
+/** The camelCase form: `passwordHash`, `tokenType`. */
+const NON_CREDENTIAL_CAMEL_TAIL =
+  /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
+
+function envAssignmentAccepted(match: RegExpMatchArray): boolean {
+  const groups = match.groups ?? {};
+  const key = groups.ek ?? '';
+  if (!ENV_CREDENTIAL_KEY.test(key)) return false;
+  if (NON_CREDENTIAL_KEY_TAIL.test(key) || NON_CREDENTIAL_CAMEL_TAIL.test(key)) return false;
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
+  if (value.replace(/\s+/g, '').length < 6) return false;
+  const rest = value.startsWith('<') || value.startsWith('(') ? restOfLine(match) : '';
+  if (isPlaceholderValue(value, quoted ? '' : rest) || isNotLiteralCredential(value)) return false;
+  if (/\s/.test(value) && !isPlausiblePassphrase(value, 6)) return false;
+  return !isIdentifierHandOff(match, assigned);
+}
+
+/** The value on the line after `password: |` (a YAML block scalar), indented under the key. */
+function blockScalarAccepted(match: RegExpMatchArray): boolean {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? '').toLowerCase();
+  const value = (groups.bv ?? '').trim();
+  if (!value || value.startsWith('#')) return false;
+  const keyLead = leadBefore(match.input ?? '', match.index ?? 0, 200);
+  const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? '').length;
+  if ((groups.ind ?? '').length <= keyIndent) return false;
+  if (isPlaceholderValue(value) || isNotLiteralCredential(value)) return false;
+  const isSecret = keyword.startsWith('pass') || keyword.startsWith('secret');
+  if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
+  return value.length >= (isSecret ? 6 : 8);
+}
+
 // --- Assignment shapes --------------------------------------------------------
 
 const KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
 /** Optional closing quote or markdown emphasis, then the separator and its padding. */
-const SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?:\r?\n[ \t]*)?`;
+const SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
 const VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
 
 /**
@@ -217,11 +404,35 @@ const VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\
 const CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, 'gi');
 
 /**
+ * `KEY=value` where the key merely CONTAINS a credential word: `DB_PASSWORD_PROD=`,
+ * `Pwd=` in a connection string, `spring.datasource.password=`. Only keys that
+ * mention a credential word match at all, so `Id=app;Pwd=...` is not swallowed
+ * by the unquoted value of an earlier, harmless pair. The key is one plain run
+ * of key characters and the start is anchored by the lookbehind, so a long run
+ * costs one pass. Not inside a link's query string (`?token=`), and `==`, `=~`
+ * and `=>` never count.
+ */
+const ENV_ASSIGNMENT = new RegExp(
+  String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`,
+  'gi',
+);
+
+/**
+ * A YAML block scalar: `password: |-` (also `|`, `>`, `>-`, `|+`, with an
+ * indentation indicator or a trailing comment) whose value is the next
+ * indented line.
+ */
+const BLOCK_SCALAR = new RegExp(
+  String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`,
+  'gi',
+);
+
+/**
  * `Password: correct horse battery staple`: a labelled passphrase with spaces,
  * at the start of a line so a sentence mentioning a password never matches.
  */
 const LABELLED_PASSPHRASE = new RegExp(
-  String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\n\r]{12,160})$`,
+  String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{11,159})$`,
   'gim',
 );
 
@@ -231,6 +442,21 @@ const URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]
 /** `Authorization: Bearer <value>` (also Basic and Token). */
 const AUTHORIZATION_HEADER =
   /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
+
+/** Azure storage, Service Bus, Event Hubs and Cosmos connection strings carry the key as base64. */
+const AZURE_KEY =
+  /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
+/** The `sig` of a shared access signature in a URL query (`?sv=...&sig=...`, or `&amp;sig=` in HTML). */
+const AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+
+/**
+ * The assignment shape the floor had before the shared patterns, kept verbatim
+ * and unfiltered. The filters above cut false positives from the NEW shapes;
+ * this one is the floor's recall guarantee: every string it ever matched still
+ * is Secrets (test/content-policy-secrets.test.ts replays it over the corpus).
+ */
+const LEGACY_CREDENTIAL_ASSIGNMENT =
+  /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
 
 export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
   {
@@ -300,16 +526,36 @@ export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
   {
     findingType: 'credential_assignment',
     label: 'credential_assignment',
+    pattern: LEGACY_CREDENTIAL_ASSIGNMENT,
+    confidence: 0.9,
+  },
+  {
+    findingType: 'credential_assignment',
+    label: 'credential_assignment',
     pattern: CREDENTIAL_ASSIGNMENT,
     confidence: 0.9,
     accept: assignmentAccepted,
   },
   {
     findingType: 'credential_assignment',
+    label: 'credential_assignment',
+    pattern: ENV_ASSIGNMENT,
+    confidence: 0.85,
+    accept: envAssignmentAccepted,
+  },
+  {
+    findingType: 'credential_assignment',
+    label: 'credential_assignment',
+    pattern: BLOCK_SCALAR,
+    confidence: 0.85,
+    accept: blockScalarAccepted,
+  },
+  {
+    findingType: 'credential_assignment',
     label: 'password',
     pattern: LABELLED_PASSPHRASE,
     confidence: 0.85,
-    accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? ''),
+    accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? '', 12),
   },
   {
     findingType: 'credential_assignment',
@@ -327,5 +573,21 @@ export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
     pattern: AUTHORIZATION_HEADER,
     confidence: 0.9,
     accept: (match) => !isPlaceholderValue(match.groups?.tok ?? ''),
+  },
+  {
+    // Azure storage, Service Bus, Event Hubs and Cosmos DB keys.
+    findingType: 'api_secret_token',
+    label: 'azure_key',
+    pattern: AZURE_KEY,
+    confidence: 0.95,
+    accept: (match) => !isPlaceholderValue(match.groups?.key ?? ''),
+  },
+  {
+    // Azure shared access signature: whoever holds the URL holds the access.
+    findingType: 'api_secret_token',
+    label: 'azure_sas_signature',
+    pattern: AZURE_SAS_SIGNATURE,
+    confidence: 0.9,
+    accept: (match) => !isPlaceholderValue(match.groups?.sig ?? ''),
   },
 ];

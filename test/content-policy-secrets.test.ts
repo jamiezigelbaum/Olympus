@@ -5,7 +5,9 @@
 // by the outbound guard in src/core/opsec.ts) is the only thing that classes an
 // item as Secrets, and Personal content can reach cloud models by design, so a
 // miss leaks a credential. These tests pin both sides: the shapes that must be
-// caught, and the prose, placeholders and masks that must not be.
+// caught, and the prose, placeholders and masks that must not be. Recall wins
+// where the two conflict: the floor is a superset of the one it replaced (the
+// old regexes are replayed below), and it stays linear-time on hostile input.
 //
 // Provider-shaped fixtures are assembled at run time so this file itself holds
 // no literal that a secret scanner (GitHub push protection, the credential
@@ -37,6 +39,17 @@ const GOOGLE_CLIENT_SECRET = join('GOC', 'SPX-', 'aB3dE5fG7hJ9kL1mN3pQ5rS7tU9v')
 const GOOGLE_REFRESH = join('1/', '/0', 'gAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUvWx');
 const GOOGLE_ACCESS = join('ya', '29.', 'a0AfH6SMBq1w2e3r4t5y6u7i8o9p0');
 const ANTHROPIC = join('sk', '-ant-', 'api03-', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3');
+const B64_64 = 'k9Xp2LmQ7vRt4WzY8bNc3HdFa1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0';
+const AZURE_STORAGE = join(
+  'DefaultEndpointsProtocol=https;AccountName=mystorage;Account', 'Key=', B64_64, '==', ';EndpointSuffix=core.windows.net',
+);
+const AZURE_BUS = join(
+  'Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;Shared', 'AccessKey=', B64_64.slice(0, 43), '=',
+);
+const AZURE_SAS = join(
+  'https://mystorage.blob.core.windows.net/files/report.pdf?sv=2022-11-02&ss=b&srt=co&sp=r&se=2026-12-31T00:00:00Z&spr=https&si', 'g=',
+  'k9Xp2LmQ7vRt4WzY8bNc3HdF%2Ba1B2c3D4e5F6g7H8i9J0%3D',
+);
 
 const POSITIVES: Array<[string, string]> = [
   // Environment-style assignments: the keyword is the END of the key name.
@@ -88,6 +101,69 @@ const POSITIVES: Array<[string, string]> = [
   // Connection strings and headers.
   ['URL with password', 'postgres://admin:Xk29fjQ81z@db.internal:5432/app'],
   ['Authorization Bearer', 'curl -H "Authorization: Bearer 8c1f3a9d5e7b2c4a6d8f0e1b3a5c7d9e"'],
+  // Values the first draft of the filters threw away (the old floor caught both).
+  ['password with a leading @', 'password=@Moonlight927!'],
+  ['password as a dotted passphrase', 'password=correct.horse.battery.staple'],
+  ['env password as a dotted passphrase', 'DB_PASSWORD=correct.horse.battery.staple'],
+  // Short passwords and passphrases.
+  ['short env password', 'DB_PASSWORD=H8!tQ2v'],
+  ['bare-word password', 'password=pancakes'],
+  ['bare-word password in YAML', 'database:\n  password: pancakes\n  host: db'],
+  ['export with a short quoted password', "export DB_PASSWORD='H8!tQ2v'"],
+  ['PWD key', 'export DB_PWD=Tr0ub4d'],
+  ['PASSWD key', 'LDAP_PASSWD=Tr0ub4dor'],
+  ['SECRET key, short value', 'APP_SECRET=pancake9'],
+  ['TOKEN key, short value', 'SERVICE_TOKEN=abc123xy'],
+  ['ADO.NET Pwd', 'Server=db;User Id=app;Pwd=Tr0ub4dor;Encrypt=true'],
+  ['Java properties password', 'spring.datasource.password=pancakes'],
+  ['JSON password with ordinary words', '{"password": "the horse rides at midnight"}'],
+  ['JSON passphrase with ordinary words', '{"passphrase": "I am the walrus and you are not"}'],
+  ['JSON secret with words', '{"secret": "my grandmother sings at dawn"}'],
+  ['credential word inside a passphrase', '{"passphrase": "the secret garden gate"}'],
+  ['labelled passphrase with a trailing note', 'Password: pancakes (netflix)'],
+  ['short labelled password', 'Password: hunter2'],
+  ['YAML quoted password', 'password: "letmein99"'],
+  ['TOML passphrase with words', 'passphrase = "orange blue tiger"'],
+  ['quoted bare word', 'secret = "pancakes"'],
+  ['labelled passphrase with ordinary words', 'Password: the horse rides at midnight'],
+  ['labelled bold passphrase with ordinary words', '**Password:** the horse rides at midnight'],
+  // YAML block scalars hide the value on the next line.
+  ['block scalar |-', 'password: |-\n  s3cr3t-value-9'],
+  ['block scalar |', 'password: |\n  hunter2hunter2'],
+  ['block scalar >', 'password: >\n  pancakes-pancakes'],
+  ['block scalar >-', 'password: >-\n  Tr0ub4dor&3'],
+  ['block scalar |+', 'password: |+\n  Tr0ub4dor&3\n'],
+  ['block scalar with a comment', 'password: | # keep out\n  Tr0ub4dor&3'],
+  ['block scalar, nested key', 'database:\n  db_password: |-\n    Tr0ub4dor&3\n  host: db'],
+  ['block scalar passphrase with words', 'passphrase: |-\n  the horse rides at midnight'],
+  ['block scalar after a blank line', 'client_secret: |\n\n  4f9a2c7e1b8d3a6f5e0c9b7a'],
+  ['block scalar, CRLF', 'password: |-\r\n  s3cr3t-value-9\r\n'],
+  // Azure.
+  ['Azure storage connection string', AZURE_STORAGE],
+  ['Azure Service Bus connection string', AZURE_BUS],
+  ['Azure SAS signature', AZURE_SAS],
+  ['Azure AccountKey on its own line', join('Account', 'Key=', B64_64, '==')],
+  ['Azure SAS in an escaped URL', join('https://acct.blob.core.windows.net/c?sp=r&amp;si', 'g=', 'k9Xp2LmQ7vRt4WzY8bNc3HdF%2Ba1B2c3D4e5F6g7H8i9J0%3D')],
+];
+
+/**
+ * Strings the previous floor (origin/main) already classed as Secrets that the
+ * first draft of the shared patterns started letting through. They stay
+ * Secrets: the new floor is a superset of the old one. Several are plainly
+ * placeholders or code, and the old floor never told those apart either.
+ */
+const OLD_FLOOR_KEPT: Array<[string, string]> = [
+  ['mask of 20 stars', 'password: ********************'],
+  ['YOUR_API_KEY', 'export API_KEY=YOUR_API_KEY'],
+  ['my_api_key placeholder', 'api_key=my_api_key_value'],
+  ['example literal', 'api_key=example_api_key_value'],
+  ['process.env', 'const password = process.env.DB_PASSWORD_VALUE;'],
+  ['function call', 'const password = getPasswordFromVault(request);'],
+  ['property chain', 'password: user.password'],
+  ['type annotation', 'password: Optional[str] = None'],
+  ['field name value', 'password: password_confirmation'],
+  ['path value', 'password: /run/secrets/db_password'],
+  ['python format', 'password: %(password_value)s'],
 ];
 
 const NEGATIVES: Array<[string, string]> = [
@@ -107,33 +183,22 @@ const NEGATIVES: Array<[string, string]> = [
   ['empty quotes', 'password: ""'],
   ['short quoted', '"password": "abc"'],
   ['empty JSON value', '{"api_key": "", "client_secret": ""}'],
-  ['star mask', 'password: ********************'],
   ['x mask', 'API_TOKEN=xxxxxxxxxxxxxxxxxxxx'],
   ['dot elision', 'GITHUB_TOKEN=ghp_abc...wxyz1234'],
   // Documentation placeholders.
-  ['YOUR_API_KEY', 'export API_KEY=YOUR_API_KEY'],
-  ['my_api_key placeholder', 'api_key=my_api_key_value'],
   ['your-api-key-here', '{"api_key": "your-api-key-here"}'],
   ['angle placeholder', 'api_key: <token>'],
   ['angle long placeholder', 'client_secret = <your client secret goes here>'],
   ['env var placeholder', 'SECRET=${SECRET_FROM_VAULT}'],
   ['shell variable', 'GITHUB_TOKEN=$GITHUB_TOKEN_VALUE'],
   ['template placeholder', 'API_KEY={{ secrets.API_KEY_VALUE }}'],
-  ['python format', 'password: %(password_value)s'],
-  ['process.env', 'const password = process.env.DB_PASSWORD_VALUE;'],
   ['os.environ', 'token = os.environ["SERVICE_API_TOKEN"]'],
   ['os.getenv call', 'password = os.getenv("DB_PASSWORD_VALUE")'],
-  ['function call', 'const password = getPasswordFromVault(request);'],
-  ['property chain', 'password: user.password'],
-  ['type annotation', 'password: Optional[str] = None'],
   ['Django call', 'token = models.CharField(max_length=40)'],
   ['GitHub Actions secret', 'with:\n  token: ${{ secrets.DEPLOY_PAT }}'],
   ['TypeScript type', 'apiKey: string | undefined;'],
-  ['field name value', 'password: password_confirmation'],
   ['token field name', 'token: access-token-header'],
-  ['path value', 'password: /run/secrets/db_password'],
   ['url value', 'token: https://auth.example.com/oauth/token'],
-  ['example literal', 'api_key=example_api_key_value'],
   ['stripe placeholder', 'STRIPE_API_KEY=sk_live_YOUR_KEY_HERE'],
   ['masked github token', join('gh', 'p_', 'x'.repeat(36))],
   ['masked stripe key', join('sk', '_live_', 'x'.repeat(24))],
@@ -150,6 +215,45 @@ const NEGATIVES: Array<[string, string]> = [
   ['query string token', 'Open https://news.example.org/view?token=8f14e45fceea167a5a36dedd4bea2543 in your browser'],
   ['bare secret all letters', 'secret: authentication-provider'],
   ['bare token all letters', 'token: authentication'],
+  // Code assigning one identifier to another is not a credential.
+  ['const to identifier', 'const sessionToken = authenticationToken;'],
+  ['let to identifier', 'let refreshedToken = previousRefreshToken;'],
+  ['member to identifier', 'this.sessionToken = authenticationToken;'],
+  ['keyword argument', 'login(password=pwValue)'],
+  // Env-style keys that only mention a credential word.
+  ['MAX_TOKENS', 'MAX_TOKENS=128000'],
+  ['TOKEN_TYPE', 'TOKEN_TYPE=Bearer'],
+  ['PWD is the working directory', 'PWD=/Users/me/Code/Olympus'],
+  ['PASSWORD_FILE', 'PASSWORD_FILE=/run/secrets/db_password'],
+  ['TOKENIZERS_PARALLELISM', 'TOKENIZERS_PARALLELISM=false'],
+  ['PASSWORD_MIN_LENGTH', 'PASSWORD_MIN_LENGTH=12345678'],
+  // Prose labels and headings.
+  ['password heading', 'Password: security guidelines'],
+  ['UI label', '"password": "Enter your password"'],
+  ['UI label, forgot', '{"forgotPassword": "Forgot password?"}'],
+  ['UI label, confirm', '{"confirmPassword": "Confirm password"}'],
+  ['password rules in JSON', '{"password": "Password must be at least 8 characters"}'],
+  // Block scalars that hold a placeholder, a comment or nothing.
+  ['block scalar placeholder', 'password: |-\n  ${DB_PASSWORD}'],
+  ['block scalar redacted', 'password: |\n  <redacted>'],
+  ['block scalar not indented', 'password: |\nnext_key: s3cr3t-value-here'],
+  ['block scalar comment', 'password: |\n  # set this in the vault'],
+  ['block scalar empty', 'password: |-\n'],
+  ['block scalar mask', 'password: >-\n  ********'],
+  // Azure shapes without a key.
+  ['Azure AccountKey placeholder', 'AccountName=mystorage;AccountKey=<your account key>'],
+  ['Azure AccountKey short', 'AccountKey=abc123'],
+  ['Azure AccountKey masked', `AccountKey=${'x'.repeat(88)}`],
+  ['Azure AccountKey variable', 'AccountKey=${STORAGE_KEY}'],
+  ['sig short', 'https://example.com/share?sig=abc123'],
+  ['sig not a query parameter', 'the sig=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa was in the text'],
+];
+
+// Placeholders and masks that must never count, whatever key they sit under.
+const PLACEHOLDER_VALUES = [
+  '<password>', '${DB_PASSWORD}', '$DB_PASSWORD', '$db_password', '%DB_PASSWORD%', '{{ db_password }}', '{{DB_PASSWORD}}',
+  '********', 'xxxxxxxx', '........', 'changeme', 'password', 'your_password', 'example', 'REDACTED',
+  'null', 'none', 'true', 'false', 'NULL', 'None', 'True', 'False',
 ];
 
 describe('Secrets floor: credential shapes the detector must catch', () => {
@@ -255,4 +359,187 @@ describe('the classifier sends these items to Secrets', () => {
     );
     expect(decision.contentTier).not.toBe('secrets');
   });
+});
+
+// --- The floor never loses what the previous floor caught -------------------
+
+// Verbatim from origin/main (src/workers/dropbox-files/content-policy.ts before
+// the shared patterns). Every string any of these matches must still be
+// Secrets: widening the floor may add shapes, never drop one.
+const OLD_FLOOR: RegExp[] = [
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+  /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi,
+];
+
+function oldFloorFlags(text: string): boolean {
+  return OLD_FLOOR.some((pattern) => {
+    pattern.lastIndex = 0;
+    return pattern.test(text);
+  });
+}
+
+function newFloorFlags(text: string): boolean {
+  return scanDropboxContentPolicyText({ text }).policy_decision === 'blocked_sensitive';
+}
+
+describe('Secrets floor: a superset of the previous floor', () => {
+  const corpus = [...POSITIVES, ...NEGATIVES, ...OLD_FLOOR_KEPT];
+
+  test('every string the old floor matched in the corpus is still Secrets', () => {
+    const lost = corpus.filter(([, text]) => oldFloorFlags(text) && !newFloorFlags(text)).map(([name]) => name);
+    expect(lost).toEqual([]);
+  });
+
+  test('the corpus entries kept for the old floor really are old-floor hits', () => {
+    for (const [name, text] of OLD_FLOOR_KEPT) {
+      expect([name, oldFloorFlags(text)]).toEqual([name, true]);
+      expect([name, newFloorFlags(text)]).toEqual([name, true]);
+    }
+  });
+
+  test('a negative never hides an old-floor hit', () => {
+    for (const [name, text] of NEGATIVES) expect([name, oldFloorFlags(text)]).toEqual([name, false]);
+  });
+
+  test('every old assignment shape x separator x value stays Secrets', () => {
+    const keywords = [
+      'api key', 'api_key', 'api-key', 'apikey', 'API_KEY', 'Api Key',
+      'access token', 'access_token', 'access-token', 'accesstoken', 'ACCESS_TOKEN',
+      'refresh token', 'refresh_token', 'refreshtoken',
+      'client secret', 'client_secret', 'clientsecret', 'CLIENT_SECRET',
+      'password', 'Password', 'PASSWORD',
+    ];
+    const separators = [': ', ':', '=', ' = ', ' : ', '= "', ': \'', ':\n  ', '=\t', '="'];
+    const values = [
+      '@Moonlight927!', 'correct.horse.battery.staple', 'user.passwordValue', '********************',
+      'xxxxxxxxxxxxxxxx', '${SOME_VARIABLE_X}', '<your-token-here>', 'process.env.DB_PASSWORD_VALUE',
+      'https://auth.example.com/x', '/run/secrets/db_password', 'YOUR_API_KEY_HERE', 'changeme-changeme',
+      'getPasswordFromVault(request)', 'authentication-provider', 'abcdefghijkl', '12345678901234',
+      '%(password_value)s', 'Optional[str]', 'password_confirmation', 'null,null,null,null', '$HOME/.secret/pw',
+      '(hidden-by-admin)', '{{secrets.PW_VALUE}}', 'example_api_key_value', '....................',
+    ];
+    const lost: string[] = [];
+    let checked = 0;
+    for (const keyword of keywords) {
+      for (const separator of separators) {
+        for (const value of values) {
+          const text = `${keyword}${separator}${value}`;
+          if (!oldFloorFlags(text)) continue;
+          checked += 1;
+          if (!newFloorFlags(text)) lost.push(text);
+        }
+      }
+    }
+    expect(lost).toEqual([]);
+    expect(checked).toBeGreaterThan(1000);
+  });
+
+  test('the old non-assignment shapes are unchanged', () => {
+    for (const text of [
+      join('-----BEGIN RSA ', 'PRIVATE KEY-----'),
+      join('-----BEGIN ', 'PRIVATE KEY-----'),
+      join('-----BEGIN ENCRYPTED ', 'PRIVATE KEY-----'),
+      join('AK', 'IA', 'ABCDEFGHIJKLMNOP'),
+      join('xo', 'xp-', '1234567890-abcdefghijklmnop'),
+      join('xo', 'xs-', 'abcdefghijklmnopqrstuvwxyz'),
+      join('s', 'k-', 'abcdefghijklmnopqrstuvwxyz'),
+      join('s', 'k-', 'proj-abcdefghij_klmnopqrstuvwxyz'),
+    ]) {
+      expect([text.length, oldFloorFlags(text), newFloorFlags(text)]).toEqual([text.length, true, true]);
+    }
+  });
+});
+
+describe('Secrets floor: placeholders stay out under every key shape', () => {
+  for (const placeholder of PLACEHOLDER_VALUES) {
+    test(`env-style ${placeholder}`, () => {
+      for (const text of [
+        `DB_PASSWORD=${placeholder}`,
+        `export DB_PASSWORD=${placeholder}`,
+        `DB_PASSWORD="${placeholder}"`,
+        `API_TOKEN=${placeholder}`,
+        `APP_SECRET='${placeholder}'`,
+        `{"password": "${placeholder}"}`,
+        `{"client_secret": "${placeholder}"}`,
+        `passphrase = "${placeholder}"`,
+        `password: |-\n  ${placeholder}`,
+      ]) {
+        expect([text, newFloorFlags(text)]).toEqual([text, false]);
+        expect([text, SHARED_SECRET_PATTERNS.some((spec) => hasSecretPatternHit(text, spec))]).toEqual([text, false]);
+      }
+    });
+    if (placeholder.split(/\s+/)[0]!.length < 12) {
+      test(`plain ${placeholder}`, () => {
+        for (const text of [`db:\n  password: ${placeholder}`, `Password: ${placeholder}`, `password = ${placeholder}`]) {
+          expect([text, newFloorFlags(text)]).toEqual([text, false]);
+        }
+      });
+    }
+  }
+
+  test('an empty value is never a credential', () => {
+    for (const text of ['DB_PASSWORD=', 'DB_PASSWORD=\nHOST=db', 'DB_PASSWORD=""', "DB_PASSWORD=''", 'password:\n', '{"password": ""}']) {
+      expect([text, newFloorFlags(text)]).toEqual([text, false]);
+    }
+  });
+});
+
+describe('Secrets floor: linear-time on adversarial input', () => {
+  const N = 200_000;
+  const cases: Array<[string, string]> = [
+    ['closing-bracket run after a value', `password=a${')'.repeat(N)}z`],
+    ['dot run after a value', `password=a${'.'.repeat(N)}z`],
+    ['mixed trailing punctuation', `password=a${';,)]}.'.repeat(N / 6)}z`],
+    ['comma run', `DB_PASSWORD=a${','.repeat(N)}z`],
+    ['equals run', '='.repeat(N)],
+    ['letter then equals run', `a${'='.repeat(N)}`],
+    ['keyword then equals run', `password${'='.repeat(N)}`],
+    ['colon run', ':'.repeat(N)],
+    ['keyword then colon run', `token${':'.repeat(N)}`],
+    ['keyword then spaces', `password${' '.repeat(N)}z`],
+    ['keyword colon then spaces', `password:${' '.repeat(N)}z`],
+    ['keyword colon then newlines', `password:${'\n'.repeat(N)}z`],
+    ['repeated keyword colon', 'password:'.repeat(N / 9)],
+    ['repeated keyword equals space', 'password= '.repeat(N / 10)],
+    ['repeated keyword', 'password'.repeat(N / 8)],
+    ['repeated env key', 'DB_PASSWORD'.repeat(N / 11)],
+    ['repeated token key then equals', `${'TOKEN'.repeat(N / 5)}=`],
+    ['repeated quoted token', 'token:"'.repeat(N / 7)],
+    ['unclosed quote after keyword', `password: "${'a'.repeat(N)}`],
+    ['backslash run in a quote', `password: "${'\\'.repeat(N)}`],
+    ['word run', 'correct horse battery staple '.repeat(N / 29)],
+    ['word run after a label', `Password: ${'horse '.repeat(N / 6)}`],
+    ['single long word', 'a'.repeat(N)],
+    ['hyphen word', `${'a-'.repeat(N / 2)}!`],
+    ['underscore identifier then bang', `password: ${'a_'.repeat(N / 2)}!`],
+    ['dotted identifier then bang', `password: ${'a.'.repeat(N / 2)}!`],
+    ['line of dashes and spaces', `${'- '.repeat(N / 2)}password: x`],
+    ['block scalar header, many blank lines', `password: |\n${' \n'.repeat(N / 2)}`],
+    ['block scalar header repeated', 'password: |\n'.repeat(N / 12)],
+    ['block scalar with a long first line', `password: |\n  ${'a'.repeat(N)}`],
+    ['AccountKey repeated', 'AccountKey='.repeat(N / 11)],
+    ['AccountKey then a long base64 run', `AccountKey=${'A'.repeat(N)}`],
+    ['sig repeated', '?sig='.repeat(N / 5)],
+    ['sig then a long run', `?sig=${'a'.repeat(N)}`],
+    ['url userinfo run', `postgres://a:${'b'.repeat(N)}`],
+    ['scheme repeated', 'x://a:'.repeat(N / 6)],
+    ['angle run', `password: ${'<'.repeat(N)}`],
+    ['paren run', `password: (${'('.repeat(N)}`],
+    ['dollar run', `password: ${'$'.repeat(N)}`],
+    ['Authorization run', `Authorization: Bearer ${'a'.repeat(N)}`],
+    ['many short pairs', 'a=b '.repeat(N / 4)],
+    ['many short credential pairs', 'DB_PASSWORD=x '.repeat(N / 14)],
+  ];
+  for (const [name, text] of cases) {
+    test(name, () => {
+      const started = performance.now();
+      scanDropboxContentPolicyText({ text });
+      secretLabelsInText(text);
+      const elapsed = performance.now() - started;
+      expect([name, elapsed < 1000]).toEqual([name, true]);
+    });
+  }
 });
