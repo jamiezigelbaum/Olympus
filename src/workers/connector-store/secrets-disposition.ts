@@ -103,8 +103,9 @@ export function settleSecretsCopies(options: {
  * clear the names its extraction jobs captured, for good. Files that do not
  * exist are not created. A side store that cannot be reached does not hold
  * up the copies' fate: it is logged and left as a debt in the ledger, which
- * `retrySecretSideStoreDebts` clears at the next tier tick. Throws only when
- * that debt cannot be written down, so the settlement is made again.
+ * `retrySecretSideStoreDebts` clears at the next tier tick. A Secrets item
+ * whose clearing never finished (nothing written down at all) is found there
+ * too: only a complete clearing marks its generation cleared. Never throws.
  */
 export function forgetSecretInSideStores(options: {
   ledger: TierLedger;
@@ -178,16 +179,15 @@ export function forgetSecretInSideStores(options: {
       owedJobLedgers.push(jobsPath);
     }
   }
-  if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
-    // Owed and not written down, nothing would ever retry it: the Secrets
-    // settlement this is part of fails, and is made again.
-    ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
-  } else {
-    try {
+  try {
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
+    else {
       ledger.clearSecretSideStoreDebt(identity, jobLedgers);
-    } catch {
-      // A debt left in place is only retried once more.
+      ledger.markSecretSideStoresCleared(identity);
     }
+  } catch {
+    // Not written down: a Secrets item not marked cleared is found again at
+    // the next tier tick (`retrySecretSideStoreDebts`).
   }
   if (result.failed > 0) console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
   return result;
@@ -203,12 +203,19 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
     const { jobLedgerPaths, ...item } = identity;
-    try {
-      const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
-      if (result.failed === 0 && result.notDurable === 0) cleared += 1;
-    } catch {
-      // Still owed: tried again next tick.
-    }
+    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+    if (result.failed === 0 && result.notDurable === 0) cleared += 1;
+  }
+  // Secrets whose clearing never finished and was never written down.
+  let unsettled: TierLedgerIdentity[] = [];
+  try {
+    unsettled = ledger.unsettledSecretSideStores(limit);
+  } catch {
+    // Read again next tick.
+  }
+  for (const identity of unsettled) {
+    const result = forgetSecretInSideStores({ ledger, identity });
+    if (result.failed === 0 && result.notDurable === 0) cleared += 1;
   }
   return cleared;
 }
