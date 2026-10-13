@@ -1111,7 +1111,9 @@ export class TierLedger {
    * completed (see `markSecretSideStoresCleared`) and that owe no
    * written-down debt (`secretSideStoreDebts` has those), a bounded page.
    * A scrub begun later than a completed one (a name queued again) leaves
-   * the item here until it too completes.
+   * the item here until it too completes. An item still holding copy rows
+   * is left to its Secrets settlement, which clears its side stores itself
+   * (and may need its queued question to retry: tier-rejudge-signals).
    */
   unsettledSecretSideStores(limit = 100): TierLedgerIdentity[] {
     const rows = this.db.query(`
@@ -1122,6 +1124,11 @@ export class TierLedger {
         AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
       WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
         AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
+        AND NOT EXISTS (
+          SELECT 1 FROM tier_copies c
+          WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+            AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+        )
         AND NOT EXISTS (
           SELECT 1 FROM secret_side_store_debt d
           WHERE d.provider = i.provider AND d.account_scope = i.account_scope
