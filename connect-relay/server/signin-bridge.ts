@@ -1,5 +1,5 @@
 /**
- * `GET /connect/signin?go=<hand-off id>&source=<gmail|google-drive>` on the
+ * `GET /connect/signin?go=<hand-off id>&source=<gmail|google-drive>[&port=<n>]` on the
  * relay: the page a ChatGPT "Connect Gmail" link lands on, which sends the
  * browser to the engine on the owner's own computer,
  * `http://127.0.0.1:<port>/go/<hand-off id>`.
@@ -15,7 +15,7 @@
  * on a phone, it says to open the link on the computer. Connecting Google
  * from a phone is intentionally not offered. The relay stores nothing from
  * the query: it accepts only a well-formed hand-off id and a source from a
- * fixed list, and never echoes anything else.
+ * fixed list, and a loopback port number, and never echoes anything else.
  */
 import { randomBytes } from 'node:crypto';
 import { HANDOFF_PATH_PREFIX, credentialInstallId } from '../shared/tokens.ts';
@@ -41,13 +41,24 @@ function plain(status: number, text: string): Response {
   });
 }
 
+/**
+ * The engine's loopback port, when the engine named one (it may not listen on
+ * the relay's default). Digits only, an unprivileged port, never repeated.
+ */
+function bridgePort(url: URL): number | undefined {
+  const values = url.searchParams.getAll('port');
+  if (values.length !== 1 || !/^[1-9][0-9]{3,4}$/.test(values[0]!)) return undefined;
+  const port = Number(values[0]);
+  return port >= 1024 && port <= 65535 ? port : undefined;
+}
+
 export function signinBridge(url: URL, options: SigninBridgeOptions): Response {
   const go = url.searchParams.get('go') ?? '';
   if (url.searchParams.getAll('go').length !== 1 || !credentialInstallId('handoff', go)) {
     return plain(404, 'This Olympus link has expired or was already used. Go back to ChatGPT and try again.');
   }
   const name = SOURCE_NAMES[url.searchParams.get('source') ?? ''] ?? 'Google';
-  const engineOrigin = `http://127.0.0.1:${options.enginePort}`;
+  const engineOrigin = `http://127.0.0.1:${bridgePort(url) ?? options.enginePort}`;
   const target = `${engineOrigin}${HANDOFF_PATH_PREFIX}${go}`;
   const nonce = randomBytes(16).toString('base64');
   const body = `<!doctype html>

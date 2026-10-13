@@ -25,6 +25,7 @@
  * invalidates them) and are never logged.
  */
 import { HANDOFF_PATH_PREFIX, SIGNIN_BRIDGE_PATH, credentialInstallId, mintCredential } from '../../../connect-relay/shared/tokens.ts';
+import { isLoopbackAddress, requestPeerAddress } from '../../core/request-peer.ts';
 
 export const HANDOFF_TTL_MS = 10 * 60_000;
 const MAX_LIVE = 64;
@@ -111,9 +112,40 @@ export interface ChatGptHandoffHandlerOptions {
    * verified or not, so a doubtful request never spends a `computer` link.
    */
   isRelayed(request: Request): boolean;
+  /**
+   * Whether the request was made on this computer: a loopback Host and a
+   * loopback peer. Only such a visit spends a `computer` link. Defaults to
+   * the peer `withRequestPeer` recorded; an unrecorded peer is remote.
+   */
+  isDirectLoopback?(request: Request): boolean;
+}
+
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+function directLoopbackRequest(request: Request): boolean {
+  const host = (request.headers.get('host') ?? new URL(request.url).host).toLowerCase();
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${host}`).hostname;
+  } catch {
+    return false;
+  }
+  return LOOPBACK_HOSTNAMES.has(hostname) && isLoopbackAddress(requestPeerAddress(request));
+}
+
+/** The engine's loopback port, from the `redirect_uri` the computer sign-in returns to. */
+function loopbackRedirectPort(location: string): string | undefined {
+  try {
+    const redirect = new URL(new URL(location).searchParams.get('redirect_uri') ?? '');
+    if (redirect.protocol !== 'http:' || redirect.hostname !== '127.0.0.1') return undefined;
+    return redirect.port || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const EXPIRED = 'This Olympus link has expired or was already used. Go back to ChatGPT and try again.';
+const ON_COMPUTER = 'Open this link on the computer where Olympus runs. Google sign-in happens there.';
 
 /**
  * `GET /go/<id>`: the stored redirect, once; every other case is one "expired" page.
@@ -133,12 +165,19 @@ export function createChatGptHandoffHandler(
     if (!known) return page(404, EXPIRED);
     if (known.kind === 'computer' && options.isRelayed(request)) {
       // Relative: the relay resolves it against its own origin, the only
-      // non-provider, non-loopback place it lets an install redirect to.
-      const bridge = `${SIGNIN_BRIDGE_PATH}?${new URLSearchParams({ go: id, source: known.source }).toString()}`;
+      // non-provider, non-loopback place it lets an install redirect to. The
+      // port is this engine's, so the bridge reaches it even off 8010.
+      const port = loopbackRedirectPort(known.location);
+      const bridge = `${SIGNIN_BRIDGE_PATH}?${new URLSearchParams({ go: id, source: known.source, ...(port ? { port } : {}) }).toString()}`;
       return new Response(null, {
         status: 302,
         headers: { Location: bridge, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' },
       });
+    }
+    // Anything else that is not a visit made on this computer (another device
+    // on the network, a proxy) leaves a `computer` link unspent.
+    if (known.kind === 'computer' && !(options.isDirectLoopback ?? directLoopbackRequest)(request)) {
+      return page(403, ON_COMPUTER);
     }
     const target = handoffs.take(id);
     if (!target) return page(404, EXPIRED);

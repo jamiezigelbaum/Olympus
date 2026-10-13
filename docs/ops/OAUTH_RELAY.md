@@ -148,9 +148,11 @@ client id, so a release that rotates the client reaches every connection
 link of kind `computer`. When that link arrives through the relay, the engine
 does not spend it: it redirects to the relay's own page
 `/connect/signin?go=<id>&source=<source>`. That page probes the engine on
-`http://127.0.0.1:<port>`, like the approval bridge, and continues to
-`http://127.0.0.1:<port>/go/<id>`; that direct visit spends the link and
-redirects to Google. When the engine does not answer (a phone, another
+`http://127.0.0.1:<port>` (the engine names its port in the redirect), like
+the approval bridge, and continues to `http://127.0.0.1:<port>/go/<id>`. Only
+a visit made on this computer, a loopback Host from a loopback peer, spends
+the link and redirects to Google; any other unrelayed visit (another device on
+the network) leaves it unspent and says to open it on the computer. When the engine does not answer (a phone, another
 computer), the page says **Open this on your computer**. Connecting Google
 from a phone is intentionally not offered. The relay's reviewed approval page
 (`/connect/authorize`) is unchanged. The `/connect/signin` route must be

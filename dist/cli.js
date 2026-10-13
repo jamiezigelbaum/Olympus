@@ -145266,6 +145266,26 @@ function isChatGptHandoffRequest(request) {
 function withChatGptHandoffRoutes(handoff, rest) {
   return (request) => isChatGptHandoffRequest(request) ? handoff(request) : rest(request);
 }
+function directLoopbackRequest(request) {
+  const host = (request.headers.get("host") ?? new URL(request.url).host).toLowerCase();
+  let hostname;
+  try {
+    hostname = new URL(`http://${host}`).hostname;
+  } catch {
+    return false;
+  }
+  return LOOPBACK_HOSTNAMES5.has(hostname) && isLoopbackAddress(requestPeerAddress(request));
+}
+function loopbackRedirectPort(location) {
+  try {
+    const redirect = new URL(new URL(location).searchParams.get("redirect_uri") ?? "");
+    if (redirect.protocol !== "http:" || redirect.hostname !== "127.0.0.1")
+      return;
+    return redirect.port || undefined;
+  } catch {
+    return;
+  }
+}
 function createChatGptHandoffHandler(handoffs, options = { isRelayed: () => false }) {
   return async (request) => {
     if (request.method !== "GET")
@@ -145275,11 +145295,15 @@ function createChatGptHandoffHandler(handoffs, options = { isRelayed: () => fals
     if (!known)
       return page(404, EXPIRED);
     if (known.kind === "computer" && options.isRelayed(request)) {
-      const bridge = `${SIGNIN_BRIDGE_PATH}?${new URLSearchParams({ go: id, source: known.source }).toString()}`;
+      const port = loopbackRedirectPort(known.location);
+      const bridge = `${SIGNIN_BRIDGE_PATH}?${new URLSearchParams({ go: id, source: known.source, ...port ? { port } : {} }).toString()}`;
       return new Response(null, {
         status: 302,
         headers: { Location: bridge, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }
       });
+    }
+    if (known.kind === "computer" && !(options.isDirectLoopback ?? directLoopbackRequest)(request)) {
+      return page(403, ON_COMPUTER);
     }
     const target = handoffs.take(id);
     if (!target)
@@ -145303,10 +145327,12 @@ function page(status, sentence, headers = {}) {
     }
   });
 }
-var HANDOFF_TTL_MS, MAX_LIVE = 64, EXPIRED = "This Olympus link has expired or was already used. Go back to ChatGPT and try again.";
+var HANDOFF_TTL_MS, MAX_LIVE = 64, LOOPBACK_HOSTNAMES5, EXPIRED = "This Olympus link has expired or was already used. Go back to ChatGPT and try again.", ON_COMPUTER = "Open this link on the computer where Olympus runs. Google sign-in happens there.";
 var init_handoff = __esm(() => {
   init_tokens();
+  init_request_peer();
   HANDOFF_TTL_MS = 10 * 60000;
+  LOOPBACK_HOSTNAMES5 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
 // src/workers/chatgpt/setup-backend.ts

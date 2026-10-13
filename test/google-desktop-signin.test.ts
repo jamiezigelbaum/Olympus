@@ -28,7 +28,8 @@ import {
   type EnvCredentialHandleDefinition,
   type EnvOAuth2RefreshDefinition,
 } from '../src/workers/credential-broker/index.ts';
-import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
+import { createChatGptHandoffHandler, createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
+import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { mintCredential } from '../connect-relay/shared/tokens.ts';
 import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
 import { callSetupTool } from '../src/workers/chatgpt/setup-tools.ts';
@@ -280,6 +281,28 @@ describe('ChatGPT hands a Google sign-in to the computer', () => {
     } as never);
     expect(minted).toEqual([{ kind: 'computer', source: 'gmail', location: 'https://accounts.google.com/o/oauth2/v2/auth?x=1' }]);
     expect(JSON.stringify(result)).toContain('on the computer where Olympus runs');
+  });
+});
+
+describe('a computer link is spent only on this computer', () => {
+  test('a visit from another device on the network, or with a spoofed Host, leaves it unspent', async () => {
+    const handoffs = createChatGptHandoffs();
+    const link = handoffs.mint('abcdefghijklmnopqrstuvwxyz234567', { kind: 'computer', source: 'gmail', location: 'https://accounts.google.com/o/oauth2/v2/auth?x=1' });
+    const handler = createChatGptHandoffHandler(handoffs, { isRelayed: () => false });
+    const visit = (host: string, peer: string | undefined) => {
+      const request = new Request(`http://${host}/go/${link.id}`, { headers: { host } });
+      recordRequestPeer(request, peer);
+      return handler(request);
+    };
+    for (const [host, peer] of [['192.168.1.20:8010', '192.168.1.30'], ['127.0.0.1:8010', '192.168.1.30'], ['127.0.0.1:8010', undefined], ['olympus.lan:8010', '127.0.0.1']] as const) {
+      const refused = await visit(host, peer);
+      expect(refused.status, `${host} ${peer}`).toBe(403);
+      expect(await refused.text()).toContain('on the computer where Olympus runs');
+    }
+    const direct = await visit('127.0.0.1:8010', '127.0.0.1');
+    expect(direct.status).toBe(302);
+    expect(direct.headers.get('location')).toBe('https://accounts.google.com/o/oauth2/v2/auth?x=1');
+    expect((await visit('127.0.0.1:8010', '127.0.0.1')).status).toBe(404);
   });
 });
 

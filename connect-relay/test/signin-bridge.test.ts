@@ -18,12 +18,15 @@ import { MemoryInstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import { signinBridge } from '../server/signin-bridge.ts';
 import { createChatGptHandoffHandler, createChatGptHandoffs } from '../../src/workers/chatgpt/handoff.ts';
+import { withRequestPeer } from '../../src/core/request-peer.ts';
 
 setDefaultTimeout(20_000);
 
 const PUBLIC_HOST = 'mcp.olympus.test';
 const INSTALL = 'abcdefghijklmnopqrstuvwxyz234567';
-const GOOGLE = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=c&redirect_uri=http%3A%2F%2F127.0.0.1%3A8010%2Foauth%2Fcallback%2Fgmail&state=s';
+const googleAuthorize = (port: number) =>
+  `https://accounts.google.com/o/oauth2/v2/auth?client_id=c&redirect_uri=http%3A%2F%2F127.0.0.1%3A${port}%2Foauth%2Fcallback%2Fgmail&state=s`;
+const GOOGLE = googleAuthorize(8010);
 const dirs: string[] = [];
 const cleanups: Array<() => unknown> = [];
 
@@ -53,6 +56,17 @@ describe('the sign-in bridge page', () => {
     expect(await page(`?go=${go}&source=google-drive`).text()).toContain('<h1>Sign in to Google Drive on your computer</h1>');
   });
 
+  test('continues to the port the engine named, and ignores a malformed one', async () => {
+    const go = mintCredential('handoff', INSTALL);
+    const named = page(`?go=${go}&source=gmail&port=8123`);
+    expect(await named.text()).toContain(`href="http://127.0.0.1:8123/go/${go}"`);
+    expect(named.headers.get('content-security-policy')).toContain('connect-src http://127.0.0.1:8123');
+    for (const port of ['80', '99999', '8123abc', '0', '-1', '08123']) {
+      expect(await page(`?go=${go}&port=${port}`).text(), port).toContain(`href="http://127.0.0.1:8010/go/${go}"`);
+    }
+    expect(await page(`?go=${go}&port=8123&port=8124`).text()).toContain(`href="http://127.0.0.1:8010/go/${go}"`);
+  });
+
   test('never echoes an unknown source, and refuses anything but one well-formed hand-off id', async () => {
     const go = mintCredential('handoff', INSTALL);
     const html = await page(`?go=${go}&source=${encodeURIComponent('<b>Evil</b>')}`).text();
@@ -70,7 +84,7 @@ describe('a computer sign-in link through a real relay', () => {
   async function linked(): Promise<{ relay: RelayHandle; installId: string; handoffs: ReturnType<typeof createChatGptHandoffs>; port: number }> {
     const handoffs = createChatGptHandoffs();
     const handler = createChatGptHandoffHandler(handoffs, { isRelayed: (request) => request.headers.has(RELAY_HEADER) });
-    const worker = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
+    const worker = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: withRequestPeer(handler) });
     cleanups.push(() => worker.stop(true));
     const relay = await startRelay({ publicHost: PUBLIC_HOST, registry: new MemoryInstallRegistry(), listen: { host: '127.0.0.1', port: 0 } });
     cleanups.push(() => relay.close());
@@ -105,7 +119,7 @@ describe('a computer sign-in link through a real relay', () => {
     for (let visit = 0; visit < 2; visit += 1) {
       const relayed = await fetch(`${relay.url}/go/${link.id}`, { redirect: 'manual' });
       expect(relayed.status).toBe(302);
-      expect(relayed.headers.get('location')).toBe(`${SIGNIN_BRIDGE_PATH}?go=${link.id}&source=gmail`);
+      expect(relayed.headers.get('location')).toBe(`${SIGNIN_BRIDGE_PATH}?go=${link.id}&source=gmail&port=8010`);
     }
     const bridge = await fetch(`${relay.url}${SIGNIN_BRIDGE_PATH}?go=${link.id}&source=gmail`);
     expect(bridge.status).toBe(200);
@@ -117,6 +131,13 @@ describe('a computer sign-in link through a real relay', () => {
     expect(direct.headers.get('location')).toBe(GOOGLE);
     expect((await fetch(`http://127.0.0.1:${port}/go/${link.id}`, { redirect: 'manual' })).status).toBe(404);
     expect((await fetch(`${relay.url}/go/${link.id}`, { redirect: 'manual' })).status).toBe(404);
+  });
+
+  test('the bridge is told the engine\'s own port', async () => {
+    const { relay, installId, handoffs } = await linked();
+    const link = handoffs.mint(installId, { kind: 'computer', source: 'google-drive', location: googleAuthorize(8123) });
+    const relayed = await fetch(`${relay.url}/go/${link.id}`, { redirect: 'manual' });
+    expect(relayed.headers.get('location')).toBe(`${SIGNIN_BRIDGE_PATH}?go=${link.id}&source=google-drive&port=8123`);
   });
 
   test('an ordinary redirect link still goes straight to the provider through the relay', async () => {
