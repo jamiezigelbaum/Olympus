@@ -145,9 +145,28 @@ test('ticket opener passes only a private filename, never either secret, to syst
   const f = fixture(); await f.bridge.openTicket('/dashboard');
   const html = readFileSync(f.opened(), 'utf8'); const value = html.match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
   let argv: readonly string[] = [];
-  await openLinuxOwnerTicketFile(f.opened(), { trustExecutable: () => true, readiness: () => ({ ready: true, kind: 'wayland', environment: { XDG_RUNTIME_DIR: f.root }, displaySocket: '/fixture' }),
+  await openLinuxOwnerTicketFile(f.opened(), { trustExecutable: path => path !== '/usr/bin/omarchy-launch-webapp', readiness: () => ({ ready: true, kind: 'wayland', environment: { XDG_RUNTIME_DIR: f.root }, displaySocket: '/fixture' }),
     launch: async args => { argv = args; return { established: true, stderr: '' }; } });
   expect(argv.slice(-2)).toEqual(['/usr/bin/xdg-open', f.opened()]); expect(argv.join(' ')).not.toContain(value); expect(argv.join(' ')).not.toContain(f.bridge.hostname);
+});
+
+test('on Omarchy the ticket opens in its own app window, and in the browser when that launch fails', async () => {
+  const f = fixture(); await f.bridge.openTicket('/dashboard');
+  const html = readFileSync(f.opened(), 'utf8'); const value = html.match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const readiness = () => ({ ready: true as const, kind: 'wayland' as const, environment: { XDG_RUNTIME_DIR: f.root }, displaySocket: '/fixture' });
+  const launches: (readonly string[])[] = [];
+  await openLinuxOwnerTicketFile(f.opened(), { trustExecutable: () => true, readiness,
+    launch: async args => { launches.push(args); return { established: true, stderr: '' }; } });
+  expect(launches.map(args => args.slice(-2))).toEqual([['/usr/bin/omarchy-launch-webapp', `file://${f.opened()}`]]);
+  expect(launches[0]!.join(' ')).not.toContain(value); expect(launches[0]!.join(' ')).not.toContain(f.bridge.hostname);
+
+  launches.length = 0;
+  await openLinuxOwnerTicketFile(f.opened(), { trustExecutable: () => true, readiness,
+    launch: async args => { launches.push(args); return { established: args.includes('/usr/bin/xdg-open'), stderr: '' }; } });
+  expect(launches.map(args => args.at(-2))).toEqual(['/usr/bin/omarchy-launch-webapp', '/usr/bin/xdg-open']);
+
+  await expect(openLinuxOwnerTicketFile(f.opened(), { trustExecutable: () => true, readiness,
+    launch: async () => ({ established: false, stderr: '' }) })).rejects.toThrow('did not open');
 });
 
 test('real socket auth wrapper still requires CSRF after owner proof', async () => {

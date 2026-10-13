@@ -29033,6 +29033,7 @@ import { accessSync as accessSync2, constants as fsConstants2, lstatSync as lsta
 import { execFile, spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
 import { randomBytes as randomBytes2 } from "node:crypto";
 import { dirname as dirname20, extname, isAbsolute as isAbsolute9, join as join22 } from "node:path";
+import { pathToFileURL as pathToFileURL2 } from "node:url";
 function linuxGraphicalSessionReadiness(dependencies = {}) {
   const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
   const trustExecutable = dependencies.trustExecutable ?? isTrustedExecutable;
@@ -29290,12 +29291,17 @@ async function openLinuxOwnerTicketFile(path, dependencies = {}) {
   const uid = dependencies.uid ?? process.getuid?.();
   if (realpathSync4(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
     throw new Error("Unsafe owner ticket file.");
-  const scopeUnit = `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
-  const result = await (dependencies.launch ?? launchInUserScope)([executables.systemdRun, "--user", "--scope", `--unit=${scopeUnit}`, "--", executables.xdgOpen, path], { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl });
-  if (!result.established)
+  const dispatch = async (opener) => {
+    const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
+    const result = await (dependencies.launch ?? launchInUserScope)([executables.systemdRun, "--user", "--scope", `--unit=${scopeUnit}`, "--", ...opener], { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl });
+    return result.established;
+  };
+  if (trusted(executables.omarchyWebApp) && await dispatch([executables.omarchyWebApp, pathToFileURL2(path).href]))
+    return;
+  if (!await dispatch([executables.xdgOpen, path]))
     throw new Error("Desktop browser did not open the owner ticket.");
 }
-var SYSTEMCTL = "/usr/bin/systemctl", SYSTEMD_RUN = "/usr/bin/systemd-run", XDG_OPEN = "/usr/bin/xdg-open", XDG_MIME = "/usr/bin/xdg-mime", FILE = "/usr/bin/file", COMMAND_TIMEOUT_MS = 3000, LAUNCH_OBSERVATION_MS = 3000, MAX_COMMAND_OUTPUT = 65536, DEFAULT_EXECUTABLES, EXPECTED_MIME_TYPES;
+var SYSTEMCTL = "/usr/bin/systemctl", SYSTEMD_RUN = "/usr/bin/systemd-run", XDG_OPEN = "/usr/bin/xdg-open", XDG_MIME = "/usr/bin/xdg-mime", FILE = "/usr/bin/file", OMARCHY_WEB_APP = "/usr/bin/omarchy-launch-webapp", COMMAND_TIMEOUT_MS = 3000, LAUNCH_OBSERVATION_MS = 3000, MAX_COMMAND_OUTPUT = 65536, DEFAULT_EXECUTABLES, EXPECTED_MIME_TYPES;
 var init_linux_desktop_opener = __esm(() => {
   init_open_target();
   DEFAULT_EXECUTABLES = {
@@ -29303,7 +29309,8 @@ var init_linux_desktop_opener = __esm(() => {
     systemdRun: SYSTEMD_RUN,
     xdgOpen: XDG_OPEN,
     xdgMime: XDG_MIME,
-    file: FILE
+    file: FILE,
+    omarchyWebApp: OMARCHY_WEB_APP
   };
   EXPECTED_MIME_TYPES = Object.freeze({
     pdf: mime("application/pdf"),

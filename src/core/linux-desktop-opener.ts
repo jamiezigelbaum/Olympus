@@ -2,6 +2,7 @@ import { accessSync, constants as fsConstants, lstatSync, realpathSync, type Big
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { dirname, extname, isAbsolute, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { OPENABLE_EXTENSIONS, localOpenArguments } from '../workers/dropbox-files/open-target.ts';
 
 const SYSTEMCTL = '/usr/bin/systemctl';
@@ -9,6 +10,8 @@ const SYSTEMD_RUN = '/usr/bin/systemd-run';
 const XDG_OPEN = '/usr/bin/xdg-open';
 const XDG_MIME = '/usr/bin/xdg-mime';
 const FILE = '/usr/bin/file';
+// Omarchy's own launcher for a page in its own app window (installed by the omarchy package).
+const OMARCHY_WEB_APP = '/usr/bin/omarchy-launch-webapp';
 const COMMAND_TIMEOUT_MS = 3_000;
 const LAUNCH_OBSERVATION_MS = 3_000;
 // `systemctl --user show-environment` exceeds 4 KiB on a stock Omarchy desktop (6.2 KiB measured).
@@ -20,6 +23,7 @@ export interface LinuxDesktopExecutables {
   xdgOpen: string;
   xdgMime: string;
   file: string;
+  omarchyWebApp: string;
 }
 
 const DEFAULT_EXECUTABLES: LinuxDesktopExecutables = {
@@ -28,6 +32,7 @@ const DEFAULT_EXECUTABLES: LinuxDesktopExecutables = {
   xdgOpen: XDG_OPEN,
   xdgMime: XDG_MIME,
   file: FILE,
+  omarchyWebApp: OMARCHY_WEB_APP,
 };
 
 export interface LinuxCommandResult {
@@ -569,10 +574,17 @@ export async function openLinuxOwnerTicketFile(path: string, dependencies: Linux
   const uid = dependencies.uid ?? process.getuid?.();
   if (realpathSync(path) !== path || !stat.isFile() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o777) !== 0o600
     || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 0o777) !== 0o700) throw new Error('Unsafe owner ticket file.');
-  const scopeUnit = `olympus-open-${process.pid}-${randomBytes(8).toString('hex')}`;
-  const result = await (dependencies.launch ?? launchInUserScope)(
-    [executables.systemdRun, '--user', '--scope', `--unit=${scopeUnit}`, '--', executables.xdgOpen, path],
-    { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl },
-  );
-  if (!result.established) throw new Error('Desktop browser did not open the owner ticket.');
+  const dispatch = async (opener: readonly string[]): Promise<boolean> => {
+    const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes(8).toString('hex')}`;
+    const result = await (dependencies.launch ?? launchInUserScope)(
+      [executables.systemdRun, '--user', '--scope', `--unit=${scopeUnit}`, '--', ...opener],
+      { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl },
+    );
+    return result.established;
+  };
+  // On Omarchy the dashboard opens in its own app window, as Omarchy's other
+  // web apps do (owner decision, 2026-10-13). Elsewhere, or when that launch
+  // fails, it opens in the default browser.
+  if (trusted(executables.omarchyWebApp) && await dispatch([executables.omarchyWebApp, pathToFileURL(path).href])) return;
+  if (!await dispatch([executables.xdgOpen, path])) throw new Error('Desktop browser did not open the owner ticket.');
 }

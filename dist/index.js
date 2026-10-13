@@ -14673,6 +14673,7 @@ var SYSTEMD_RUN = "/usr/bin/systemd-run";
 var XDG_OPEN = "/usr/bin/xdg-open";
 var XDG_MIME = "/usr/bin/xdg-mime";
 var FILE = "/usr/bin/file";
+var OMARCHY_WEB_APP = "/usr/bin/omarchy-launch-webapp";
 var COMMAND_TIMEOUT_MS = 3000;
 var MAX_COMMAND_OUTPUT = 65536;
 var DEFAULT_EXECUTABLES = {
@@ -14680,7 +14681,8 @@ var DEFAULT_EXECUTABLES = {
   systemdRun: SYSTEMD_RUN,
   xdgOpen: XDG_OPEN,
   xdgMime: XDG_MIME,
-  file: FILE
+  file: FILE,
+  omarchyWebApp: OMARCHY_WEB_APP
 };
 function linuxGraphicalSessionReadiness(dependencies = {}) {
   const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
