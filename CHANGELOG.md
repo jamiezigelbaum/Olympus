@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-10-13
+
+- **Olympus 1.0.** The first full release, for Mac and for Omarchy Linux.
+- **Olympus on Linux.** A standalone engine that runs as your user (Omarchy
+  first): an installer and uninstaller, an Omarchy launcher and status
+  widget, keys in the desktop keyring, and the same dashboard as on a Mac.
+  Anonymous answers (zkAPI) are not available on Linux yet.
+- **Better sorting for new items.** An item with nothing that marks it as
+  your own record goes to Personal at once, and the local model checks it in
+  the background, moving it up if it is Private. Your privacy settings
+  decide the tiers. Secret detection is stricter about real credentials
+  (including encoded links) and no longer flags ordinary example links.
+- **Google sign-in happens on your computer**, directly with Google.
+- **Secrets keep their location only**, everywhere Olympus stores anything
+  about an item.
 
 - **No Public tier on any new install.** Every privacy posture now sets up
   Personal, Private and Secret only, on OpenClaw as on ChatGPT: anything
