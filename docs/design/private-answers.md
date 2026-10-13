@@ -470,7 +470,7 @@ the route is named, with the fix, and gets no button, since installing would
 not change which program runs.
 
 **Tor Expert Bundle 15.0.24** (the current stable Tor Browser release; the
-binary carries tor 0.4.9.13). Base URL `https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/`.
+binary carries tor 0.4.9.13). Base URL `https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/` (Tor's permanent archive; `dist.torproject.org` drops old releases).
 
 | Platform | Asset | Bytes | SHA-256 |
 |---|---|---|---|

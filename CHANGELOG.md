@@ -8,11 +8,16 @@
   widget, keys in the desktop keyring, and the same dashboard as on a Mac.
   On Omarchy the dashboard opens in its own app window, and the app launcher shows the Olympus mountain icon.
   Anonymous answers (zkAPI) are not available on Linux yet.
+- **Linux full removal cleans up empty cache and state folders** when the
+  installer recorded creating them. Pre-existing folders and other files stay.
+- **Linux install rollback removes the service link it created**, including
+  when the home folder contains spaces and configuration uses a custom folder.
 - **Better sorting for new items.** An item with nothing that marks it as
   your own record goes to Personal at once, and the local model checks it in
   the background, moving it up if it is Private. Your privacy settings
   decide the tiers. Secret detection is stricter about real credentials
   (including encoded links) and no longer flags ordinary example links.
+  New priority checks no longer wait behind a blocked sorting backlog.
 - **Google sign-in happens on your computer**, directly with Google. Google
   connections made with a release candidate need Reconnect Google.
 - **An item that becomes Secret keeps only a record of where it is** in
@@ -21,7 +26,8 @@
   Olympus hid comes back.
 - **Model downloads use bounded memory.** The private and search models
   download in pieces and retry a dropped connection; the private model
-  resumes where it stopped.
+  resumes where it stopped when the server supports it, or safely restarts
+  from zero when it does not.
 - **No Public tier on any new install.** Every privacy posture now sets up
   Personal, Private and Secret only, on OpenClaw as on ChatGPT: anything
   that would have been Public is Personal. Installs made before 1.0 keep

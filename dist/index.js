@@ -1126,9 +1126,171 @@ var init_still_image_formats = __esm(() => {
   IMAGE_MAX_DECLARED_PIXELS = 16384 * 16384;
 });
 
+// src/core/http-timeout.ts
+function untilAborted(work, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => {
+        return;
+      });
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetchImpl(url, init);
+  }
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  try {
+    return await fetchImpl(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+  }
+}
+function isAbortError(error) {
+  return error instanceof Error && error.name === "AbortError";
+}
+function isBoundedResponseTooLargeError(error) {
+  return error instanceof BoundedResponseTooLargeError;
+}
+async function fetchBoundedText(fetchImpl, url, init, options = {}) {
+  const limitBytes = options.limitBytes ?? DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES;
+  const timeoutMs = options.timeoutMs;
+  const deadlineWanted = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+  if (!deadlineWanted) {
+    const response = await fetchImpl(url, init);
+    return { response, text: await readBoundedText(response, limitBytes) };
+  }
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const deadline = new AbortController;
+  timer = setTimeout(() => {
+    controller.abort();
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = "AbortError";
+    deadline.abort(error);
+  }, timeoutMs);
+  let activeReader;
+  try {
+    const response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
+    const read = readBoundedText(response, limitBytes, controller, (reader) => {
+      activeReader = reader;
+    });
+    read.catch(() => {
+      return;
+    });
+    const text2 = await untilAborted(read, deadline.signal);
+    return { response, text: text2 };
+  } finally {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+    if (activeReader) {
+      await Promise.race([
+        releaseBodyReader(activeReader),
+        new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        })
+      ]);
+    }
+  }
+}
+async function releaseBodyReader(reader) {
+  try {
+    await reader.cancel();
+  } catch {}
+  try {
+    reader.releaseLock();
+  } catch {}
+}
+async function readBoundedText(response, limitBytes, controller, onReader) {
+  const body = response.body;
+  if (!body) {
+    const text2 = await response.text();
+    if (new TextEncoder().encode(text2).byteLength > limitBytes) {
+      throw new BoundedResponseTooLargeError(limitBytes);
+    }
+    return text2;
+  }
+  const reader = body.getReader();
+  onReader?.(reader);
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      total += value.byteLength;
+      if (total > limitBytes) {
+        controller?.abort();
+        throw new BoundedResponseTooLargeError(limitBytes);
+      }
+      chunks.push(value);
+    }
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(joined);
+  } finally {
+    await releaseBodyReader(reader);
+  }
+}
+var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
+var init_http_timeout = __esm(() => {
+  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+  DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
+    limitBytes;
+    constructor(limitBytes) {
+      super(`Response body exceeded the ${limitBytes}-byte cap.`);
+      this.name = "BoundedResponseTooLargeError";
+      this.limitBytes = limitBytes;
+    }
+  };
+});
+
 // src/workers/source-index/pinned-download.ts
 var REQUEST_BYTES;
 var init_pinned_download = __esm(() => {
+  init_http_timeout();
   REQUEST_BYTES = 256 * 1024 ** 2;
 });
 
@@ -4419,6 +4581,10 @@ function readLinuxEngineReceipt(path, uid = process.getuid()) {
   const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome }, l.dataDir);
   if (!linuxEngineLayoutsEqual(l, expected) || l.receiptPath !== path)
     throw new Error(`${path} has an inconsistent install layout.`);
+  const parentPaths = new Set([dirname7(l.stateDir), dirname7(l.cacheDir)]);
+  if (receipt.ownedEmptyParents !== undefined && (!Array.isArray(receipt.ownedEmptyParents) || new Set(receipt.ownedEmptyParents.map((entry) => entry?.path)).size !== receipt.ownedEmptyParents.length || receipt.ownedEmptyParents.some((entry) => !entry || !parentPaths.has(entry.path) || !Number.isSafeInteger(entry.device) || entry.device < 0 || !Number.isSafeInteger(entry.inode) || entry.inode <= 0))) {
+    throw new Error(`${path} has invalid empty-directory ownership.`);
+  }
   const allowedLinkParents = new Set([join8(l.configHome, "systemd/user"), join8(l.home, ".config/systemd/user")]);
   if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some((p) => typeof p !== "string" || !isAbsolute5(p) || p === l.unitPath || !allowedLinkParents.has(dirname7(p)) || !p.endsWith("/olympus-engine.service")))
     throw new Error(`${path} has invalid unit links.`);
@@ -5079,157 +5245,6 @@ function assertLocalModelIdNotCloudForwarding(label, modelId) {
 }
 var init_local_model_policy = __esm(() => {
   init_operation_error();
-});
-
-// src/core/http-timeout.ts
-async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return fetchImpl(url, init);
-  }
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  try {
-    return await fetchImpl(url, {
-      ...init,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-  }
-}
-function isAbortError2(error) {
-  return error instanceof Error && error.name === "AbortError";
-}
-function isBoundedResponseTooLargeError(error) {
-  return error instanceof BoundedResponseTooLargeError;
-}
-async function fetchBoundedText(fetchImpl, url, init, options = {}) {
-  const limitBytes = options.limitBytes ?? DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES;
-  const timeoutMs = options.timeoutMs;
-  const deadlineWanted = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
-  if (!deadlineWanted) {
-    const response = await fetchImpl(url, init);
-    return { response, text: await readBoundedText(response, limitBytes) };
-  }
-  const controller = new AbortController;
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  let timer;
-  const deadline = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-      error.name = "AbortError";
-      reject(error);
-    }, timeoutMs);
-  });
-  let activeReader;
-  try {
-    const response = await Promise.race([
-      fetchImpl(url, { ...init, signal: controller.signal }),
-      deadline
-    ]);
-    const read = readBoundedText(response, limitBytes, controller, (reader) => {
-      activeReader = reader;
-    });
-    read.catch(() => {
-      return;
-    });
-    const text2 = await Promise.race([read, deadline]);
-    return { response, text: text2 };
-  } finally {
-    if (timer !== undefined)
-      clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-    if (activeReader) {
-      await Promise.race([
-        releaseBodyReader(activeReader),
-        new Promise((resolve5) => {
-          setTimeout(resolve5, 0);
-        })
-      ]);
-    }
-  }
-}
-async function releaseBodyReader(reader) {
-  try {
-    await reader.cancel();
-  } catch {}
-  try {
-    reader.releaseLock();
-  } catch {}
-}
-async function readBoundedText(response, limitBytes, controller, onReader) {
-  const body = response.body;
-  if (!body) {
-    const text2 = await response.text();
-    if (new TextEncoder().encode(text2).byteLength > limitBytes) {
-      throw new BoundedResponseTooLargeError(limitBytes);
-    }
-    return text2;
-  }
-  const reader = body.getReader();
-  onReader?.(reader);
-  const chunks = [];
-  let total = 0;
-  try {
-    for (;; ) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      if (!value)
-        continue;
-      total += value.byteLength;
-      if (total > limitBytes) {
-        controller?.abort();
-        throw new BoundedResponseTooLargeError(limitBytes);
-      }
-      chunks.push(value);
-    }
-    const joined = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      joined.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(joined);
-  } finally {
-    await releaseBodyReader(reader);
-  }
-}
-var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
-var init_http_timeout = __esm(() => {
-  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
-  DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
-    limitBytes;
-    constructor(limitBytes) {
-      super(`Response body exceeded the ${limitBytes}-byte cap.`);
-      this.name = "BoundedResponseTooLargeError";
-      this.limitBytes = limitBytes;
-    }
-  };
 });
 
 // src/core/sqlite-migrations.ts
@@ -8590,7 +8605,7 @@ function sessionKindFromDefinition(definition) {
   return definition.sessionKind ?? "bearer_token";
 }
 function publisherExchangeTransportError(error) {
-  if (isAbortError2(error)) {
+  if (isAbortError(error)) {
     return new OAuth2TokenEndpointError({
       status: 504,
       providerError: "upstream_timeout",
@@ -8647,7 +8662,7 @@ async function refreshOAuth2AccessToken(options) {
         body
       }, { timeoutMs: options.timeoutMs, limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES }));
     } catch (error) {
-      if (isAbortError2(error)) {
+      if (isAbortError(error)) {
         throw new OAuth2TokenEndpointError({
           status: 504,
           providerError: "upstream_timeout",
@@ -17658,7 +17673,7 @@ class DirectHttpDelphiTransport {
       const cancelled = callerCancellation(init.signal);
       if (cancelled)
         throw cancelled;
-      if (isAbortError(firstError)) {
+      if (isAbortError2(firstError)) {
         throw argusTimeoutError(lane, url, timeoutMs);
       }
       try {
@@ -17667,7 +17682,7 @@ class DirectHttpDelphiTransport {
         const cancelledAgain = callerCancellation(init.signal);
         if (cancelledAgain)
           throw cancelledAgain;
-        if (isAbortError(secondError)) {
+        if (isAbortError2(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }
         if (isModelEndpointRedirectError(secondError))
@@ -17717,7 +17732,7 @@ async function safeText(response) {
     return "";
   }
 }
-function isAbortError(error) {
+function isAbortError2(error) {
   return error instanceof Error && error.name === "AbortError";
 }
 function argusRedirectError(lane, error) {
@@ -18135,7 +18150,7 @@ class DirectHttpEmailTransport {
       const authToken = typeof this.authToken === "function" ? this.authToken() : this.authToken;
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
-      if (isAbortError2(error)) {
+      if (isAbortError(error)) {
         throw new OperationError("email_unreachable", `${workerLaneLabel(url)} timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
       }
       throw new OperationError("email_unreachable", `${workerLaneLabel(url)} is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
@@ -19991,7 +20006,7 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/linux-engine-service.ts
 init_linux_desktop_entry();
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { chmodSync as chmodSync5, closeSync as closeSync5, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync8, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync20, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync6, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync15 } from "node:fs";
+import { chmodSync as chmodSync5, closeSync as closeSync5, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync8, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync20, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync6, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync15, symlinkSync as symlinkSync2 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
 import { basename as basename5, dirname as dirname19, join as join26, relative as relative4, resolve as resolve5, sep as sep5 } from "node:path";
 init_linux_engine_layout();
@@ -25421,6 +25436,9 @@ function optionalAttachmentType(value) {
   throw new OperationError("invalid_params", "attachment_type must be image, video, audio, file, link, or other.");
 }
 
+// src/core/control-ui-gateway.ts
+init_http_timeout();
+
 // src/control-ui-contract.ts
 var OLYMPUS_DASHBOARD_TOOL_METHOD = "olympus.dashboard.tool";
 var OLYMPUS_DASHBOARD_PANEL_PATH = "/olympus/dashboard/panel";
@@ -25902,18 +25920,9 @@ async function readBoundedResponseText(response, maxBytes, signal) {
   const decoder = new TextDecoder;
   let total = 0;
   let text2 = "";
-  let rejectAbort;
-  const aborted = new Promise((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  const onAbort = () => rejectAbort(new DashboardGatewayUnavailableError("Olympus dashboard worker is unavailable."));
-  if (signal.aborted)
-    onAbort();
-  else
-    signal.addEventListener("abort", onAbort, { once: true });
   try {
     while (true) {
-      const { done, value } = await Promise.race([reader.read(), aborted]);
+      const { done, value } = await untilAborted(reader.read(), signal);
       if (done)
         break;
       total += value.byteLength;
@@ -25926,8 +25935,12 @@ async function readBoundedResponseText(response, maxBytes, signal) {
       text2 += decoder.decode(value, { stream: true });
     }
     return text2 + decoder.decode();
+  } catch (error) {
+    if (signal.aborted && error === signal.reason) {
+      throw new DashboardGatewayUnavailableError("Olympus dashboard worker is unavailable.");
+    }
+    throw error;
   } finally {
-    signal.removeEventListener("abort", onAbort);
     if (signal.aborted)
       reader.cancel().catch(() => {
         return;

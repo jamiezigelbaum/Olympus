@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { untilAborted } from '../../core/http-timeout.ts';
 import { closeSync, createReadStream, existsSync, openSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 
 /** Bound fetch's read-ahead even when the runtime does not backpressure it. */
@@ -168,27 +169,6 @@ async function hashPartial(path: string, hash: ReturnType<typeof createHash>, ti
   const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
   try { for await (const bytes of stream) hash.update(bytes); }
   finally { clearTimeout(timer); stream.destroy(); }
-}
-
-/**
- * Settles with `work`, or rejects once `signal` aborts: fetch implementations
- * and synthetic streams do not all honour the signal. Each call has its own
- * listener, removed when `work` settles. Racing every read against one
- * long-lived abort promise kept each chunk reachable until that promise
- * settled; on Bun a 1.5 GB download then peaked at 6.2 GB of memory
- * (Omarchy laptop, 2026-10-13).
- */
-function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    if (signal.aborted) {
-      work.catch(() => undefined);
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = (): void => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
 }
 
 function message(cause: unknown): string { return cause instanceof Error ? cause.message : String(cause); }

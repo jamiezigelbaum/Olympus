@@ -780,3 +780,23 @@ for (const dataLayout of ['legacy', 'xdg'] as const) {
     }, 30_000);
   }
 }
+
+for (const scenario of ['owned', 'unrecorded', 'nonempty', 'replacement', 'symlink'] as const) {
+ test(`purge empty parent directories: ${scenario}`, () => {
+  const h=fixture(), r=h.receipt('xdg'), receipt=JSON.parse(text(r.path));
+  const parents=[dirname(r.stateDir),dirname(r.cacheDir)];
+  receipt.ownedEmptyParents=parents.map(path=>{const info=lstatSync(path);return {path,device:info.dev,inode:info.ino};});
+  if(scenario==='unrecorded')delete receipt.ownedEmptyParents;
+  if(scenario==='nonempty')for(const path of parents)writeFileSync(join(path,'unrelated'),'keep');
+  if(scenario==='replacement')for(const record of receipt.ownedEmptyParents)record.inode+=1;
+  if(scenario==='symlink'){
+   // Empty symlink replacement must never be followed or removed.
+   const path=parents[0]!, moved=path+'-saved';renameSync(path,moved);symlinkSync(moved,path);
+  }
+  writeFileSync(r.path,JSON.stringify(receipt),{mode:0o600});
+  const result=h.uninstall({},['--purge','--yes']);
+  if(scenario==='symlink'){expect(result.status).not.toBe(0);expect(lstatSync(parents[0]!).isSymbolicLink()).toBe(true);return;}
+  expect({status:result.status,error:result.stderr}).toEqual({status:0,error:''});
+  for(const path of parents){expect(existsSync(path)).toBe(scenario!=='owned');if(scenario==='nonempty')expect(text(join(path,'unrelated'))).toBe('keep');}
+ }, 30_000);
+}

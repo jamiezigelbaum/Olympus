@@ -167,6 +167,7 @@ function zkapiAsset(url: string, sha256: string, bytes: number, extra: { require
   };
 }
 
+// Tor's permanent archive: dist.torproject.org drops a release once a newer one ships.
 const TOR_RELEASE = 'https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24';
 
 function torMacAsset(name: string, sha256: string, bytes: number, adhocSign?: readonly string[]): ManagedToolAsset {

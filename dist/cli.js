@@ -1526,6 +1526,244 @@ var init_still_image_formats = __esm(() => {
   IMAGE_MAX_DECLARED_PIXELS = 16384 * 16384;
 });
 
+// src/core/http-timeout.ts
+function untilAborted(work, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => {
+        return;
+      });
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetchImpl(url, init);
+  }
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  try {
+    return await fetchImpl(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+  }
+}
+async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    return fetchImpl(url, init);
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const settle = () => {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = undefined;
+    removeUpstreamAbortListener?.();
+    removeUpstreamAbortListener = undefined;
+  };
+  const deadline = new AbortController;
+  timer = setTimeout(() => {
+    timer = undefined;
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = "AbortError";
+    controller.abort(error);
+    deadline.abort(error);
+  }, timeoutMs);
+  timer.unref?.();
+  let response;
+  try {
+    response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
+  } catch (error) {
+    settle();
+    throw error;
+  }
+  if (!response.body || NULL_BODY_STATUSES.has(response.status)) {
+    settle();
+    return response;
+  }
+  const reader = response.body.getReader();
+  const body = new ReadableStream({
+    async pull(stream) {
+      try {
+        const { done, value } = await untilAborted(reader.read(), deadline.signal);
+        if (done) {
+          settle();
+          stream.close();
+          return;
+        }
+        if (value)
+          stream.enqueue(value);
+      } catch (error) {
+        settle();
+        stream.error(error);
+        reader.cancel().catch(() => {
+          return;
+        });
+      }
+    },
+    cancel(reason) {
+      settle();
+      controller.abort();
+      reader.cancel(reason).catch(() => {
+        return;
+      });
+    }
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
+}
+function isAbortError(error) {
+  return error instanceof Error && error.name === "AbortError";
+}
+function isBoundedResponseTooLargeError(error) {
+  return error instanceof BoundedResponseTooLargeError;
+}
+async function fetchBoundedText(fetchImpl, url, init, options = {}) {
+  const limitBytes = options.limitBytes ?? DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES;
+  const timeoutMs = options.timeoutMs;
+  const deadlineWanted = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+  if (!deadlineWanted) {
+    const response = await fetchImpl(url, init);
+    return { response, text: await readBoundedText(response, limitBytes) };
+  }
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const deadline = new AbortController;
+  timer = setTimeout(() => {
+    controller.abort();
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = "AbortError";
+    deadline.abort(error);
+  }, timeoutMs);
+  let activeReader;
+  try {
+    const response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
+    const read = readBoundedText(response, limitBytes, controller, (reader) => {
+      activeReader = reader;
+    });
+    read.catch(() => {
+      return;
+    });
+    const text2 = await untilAborted(read, deadline.signal);
+    return { response, text: text2 };
+  } finally {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+    if (activeReader) {
+      await Promise.race([
+        releaseBodyReader(activeReader),
+        new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        })
+      ]);
+    }
+  }
+}
+async function releaseBodyReader(reader) {
+  try {
+    await reader.cancel();
+  } catch {}
+  try {
+    reader.releaseLock();
+  } catch {}
+}
+async function readBoundedText(response, limitBytes, controller, onReader) {
+  const body = response.body;
+  if (!body) {
+    const text2 = await response.text();
+    if (new TextEncoder().encode(text2).byteLength > limitBytes) {
+      throw new BoundedResponseTooLargeError(limitBytes);
+    }
+    return text2;
+  }
+  const reader = body.getReader();
+  onReader?.(reader);
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      total += value.byteLength;
+      if (total > limitBytes) {
+        controller?.abort();
+        throw new BoundedResponseTooLargeError(limitBytes);
+      }
+      chunks.push(value);
+    }
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(joined);
+  } finally {
+    await releaseBodyReader(reader);
+  }
+}
+var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
+var init_http_timeout = __esm(() => {
+  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+  DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
+    limitBytes;
+    constructor(limitBytes) {
+      super(`Response body exceeded the ${limitBytes}-byte cap.`);
+      this.name = "BoundedResponseTooLargeError";
+      this.limitBytes = limitBytes;
+    }
+  };
+});
+
 // src/workers/source-index/pinned-download.ts
 import { createHash } from "node:crypto";
 import { closeSync, createReadStream, existsSync as existsSync2, openSync, renameSync, rmSync, statSync as statSync2, writeSync } from "node:fs";
@@ -1696,25 +1934,12 @@ async function hashPartial(path, hash, timeoutMs) {
     stream.destroy();
   }
 }
-function untilAborted(work, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      work.catch(() => {
-        return;
-      });
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
 function message(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 var REQUEST_BYTES, READ_RETRIES = 3, RETRY_DELAY_MS = 250, InterruptedRead;
 var init_pinned_download = __esm(() => {
+  init_http_timeout();
   REQUEST_BYTES = 256 * 1024 ** 2;
   InterruptedRead = class InterruptedRead extends Error {
   };
@@ -6388,6 +6613,10 @@ function readLinuxEngineReceipt(path, uid = process.getuid()) {
   const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome }, l.dataDir);
   if (!linuxEngineLayoutsEqual(l, expected) || l.receiptPath !== path)
     throw new Error(`${path} has an inconsistent install layout.`);
+  const parentPaths = new Set([dirname7(l.stateDir), dirname7(l.cacheDir)]);
+  if (receipt.ownedEmptyParents !== undefined && (!Array.isArray(receipt.ownedEmptyParents) || new Set(receipt.ownedEmptyParents.map((entry) => entry?.path)).size !== receipt.ownedEmptyParents.length || receipt.ownedEmptyParents.some((entry) => !entry || !parentPaths.has(entry.path) || !Number.isSafeInteger(entry.device) || entry.device < 0 || !Number.isSafeInteger(entry.inode) || entry.inode <= 0))) {
+    throw new Error(`${path} has invalid empty-directory ownership.`);
+  }
   const allowedLinkParents = new Set([join10(l.configHome, "systemd/user"), join10(l.home, ".config/systemd/user")]);
   if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some((p) => typeof p !== "string" || !isAbsolute5(p) || p === l.unitPath || !allowedLinkParents.has(dirname7(p)) || !p.endsWith("/olympus-engine.service")))
     throw new Error(`${path} has invalid unit links.`);
@@ -7253,19 +7482,13 @@ async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BOD
   const chunks = [];
   let total = 0;
   let timer;
-  const deadline = options.deadlineMs === undefined ? undefined : new Promise((resolve5) => {
-    timer = setTimeout(() => resolve5("timeout"), options.deadlineMs);
-  });
+  const deadline = new AbortController;
+  const timeout = new Error("request body timeout");
+  if (options.deadlineMs !== undefined)
+    timer = setTimeout(() => deadline.abort(timeout), options.deadlineMs);
   try {
     for (;; ) {
-      const next = deadline ? await Promise.race([reader.read(), deadline]) : await reader.read();
-      if (next === "timeout") {
-        await reader.cancel().catch(() => {
-          return;
-        });
-        return { ok: false, reason: "timeout" };
-      }
-      const { done, value } = next;
+      const { done, value } = options.deadlineMs === undefined ? await reader.read() : await untilAborted(reader.read(), deadline.signal);
       if (done)
         break;
       total += value.byteLength;
@@ -7277,11 +7500,11 @@ async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BOD
       }
       chunks.push(value);
     }
-  } catch {
+  } catch (error) {
     await reader.cancel().catch(() => {
       return;
     });
-    return { ok: false, reason: "unreadable" };
+    return { ok: false, reason: error === timeout ? "timeout" : "unreadable" };
   } finally {
     clearTimeout(timer);
   }
@@ -7304,6 +7527,7 @@ function isJsonContentType(header) {
 }
 var REMOTE_REQUEST_MAX_BODY_BYTES;
 var init_remote_request_body = __esm(() => {
+  init_http_timeout();
   REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
 });
 
@@ -9100,238 +9324,6 @@ var init_worker_service = __esm(() => {
   init_worker_auth();
   WORKER_LOG_TAIL_BYTES = 64 * 1024;
   MANAGED_WORKER_ENV_SECRET_KEYS = ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "OLYMPUS_SERVER_MODE", "OLYMPUS_SERVER_SSH_TARGET", "OLYMPUS_SERVER_AGENT_ROUTE"];
-});
-
-// src/core/http-timeout.ts
-async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return fetchImpl(url, init);
-  }
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  try {
-    return await fetchImpl(url, {
-      ...init,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-  }
-}
-async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    return fetchImpl(url, init);
-  const controller = new AbortController;
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  let timer;
-  const settle = () => {
-    if (timer !== undefined)
-      clearTimeout(timer);
-    timer = undefined;
-    removeUpstreamAbortListener?.();
-    removeUpstreamAbortListener = undefined;
-  };
-  const deadline = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => {
-      timer = undefined;
-      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-      error.name = "AbortError";
-      controller.abort(error);
-      reject(error);
-    }, timeoutMs);
-    timer.unref?.();
-  });
-  deadline.catch(() => {
-    return;
-  });
-  let response;
-  try {
-    response = await Promise.race([fetchImpl(url, { ...init, signal: controller.signal }), deadline]);
-  } catch (error) {
-    settle();
-    throw error;
-  }
-  if (!response.body || NULL_BODY_STATUSES.has(response.status)) {
-    settle();
-    return response;
-  }
-  const reader = response.body.getReader();
-  const body = new ReadableStream({
-    async pull(stream) {
-      try {
-        const { done, value } = await Promise.race([reader.read(), deadline]);
-        if (done) {
-          settle();
-          stream.close();
-          return;
-        }
-        if (value)
-          stream.enqueue(value);
-      } catch (error) {
-        settle();
-        stream.error(error);
-        reader.cancel().catch(() => {
-          return;
-        });
-      }
-    },
-    cancel(reason) {
-      settle();
-      controller.abort();
-      reader.cancel(reason).catch(() => {
-        return;
-      });
-    }
-  });
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers
-  });
-}
-function isAbortError(error) {
-  return error instanceof Error && error.name === "AbortError";
-}
-function isBoundedResponseTooLargeError(error) {
-  return error instanceof BoundedResponseTooLargeError;
-}
-async function fetchBoundedText(fetchImpl, url, init, options = {}) {
-  const limitBytes = options.limitBytes ?? DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES;
-  const timeoutMs = options.timeoutMs;
-  const deadlineWanted = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
-  if (!deadlineWanted) {
-    const response = await fetchImpl(url, init);
-    return { response, text: await readBoundedText(response, limitBytes) };
-  }
-  const controller = new AbortController;
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  let timer;
-  const deadline = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-      error.name = "AbortError";
-      reject(error);
-    }, timeoutMs);
-  });
-  let activeReader;
-  try {
-    const response = await Promise.race([
-      fetchImpl(url, { ...init, signal: controller.signal }),
-      deadline
-    ]);
-    const read = readBoundedText(response, limitBytes, controller, (reader) => {
-      activeReader = reader;
-    });
-    read.catch(() => {
-      return;
-    });
-    const text2 = await Promise.race([read, deadline]);
-    return { response, text: text2 };
-  } finally {
-    if (timer !== undefined)
-      clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-    if (activeReader) {
-      await Promise.race([
-        releaseBodyReader(activeReader),
-        new Promise((resolve5) => {
-          setTimeout(resolve5, 0);
-        })
-      ]);
-    }
-  }
-}
-async function releaseBodyReader(reader) {
-  try {
-    await reader.cancel();
-  } catch {}
-  try {
-    reader.releaseLock();
-  } catch {}
-}
-async function readBoundedText(response, limitBytes, controller, onReader) {
-  const body = response.body;
-  if (!body) {
-    const text2 = await response.text();
-    if (new TextEncoder().encode(text2).byteLength > limitBytes) {
-      throw new BoundedResponseTooLargeError(limitBytes);
-    }
-    return text2;
-  }
-  const reader = body.getReader();
-  onReader?.(reader);
-  const chunks = [];
-  let total = 0;
-  try {
-    for (;; ) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      if (!value)
-        continue;
-      total += value.byteLength;
-      if (total > limitBytes) {
-        controller?.abort();
-        throw new BoundedResponseTooLargeError(limitBytes);
-      }
-      chunks.push(value);
-    }
-    const joined = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      joined.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(joined);
-  } finally {
-    await releaseBodyReader(reader);
-  }
-}
-var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
-var init_http_timeout = __esm(() => {
-  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
-  DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
-    limitBytes;
-    constructor(limitBytes) {
-      super(`Response body exceeded the ${limitBytes}-byte cap.`);
-      this.name = "BoundedResponseTooLargeError";
-      this.limitBytes = limitBytes;
-    }
-  };
 });
 
 // src/core/oauth-relay.ts
@@ -26845,9 +26837,14 @@ class TierSnifferStore {
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const priority = Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority))) : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk())
         return false;
+      const before = this.db.query(`
+        SELECT priority FROM sniffer_questions
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+      `).get(...subjectParams(question.subject), question.pass);
       this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
@@ -26861,7 +26858,10 @@ class TierSnifferStore {
         material = excluded.material,
         priority = excluded.priority,
         flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority))) : 0);
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority);
+      if (priority > 0 && (!before || priority > before.priority)) {
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
+      }
       return true;
     }).immediate();
   }
@@ -67643,7 +67643,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync25, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync41, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync11, renameSync as renameSync13, rmSync as rmSync17, statSync as statSync22 } from "node:fs";
+import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync25, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync41, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync11, renameSync as renameSync13, rmSync as rmSync17, statSync as statSync22, symlinkSync as symlinkSync2 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve11, sep as sep9 } from "node:path";
 import { userInfo } from "node:os";
@@ -68089,6 +68089,34 @@ function durableProgram(layout, source, transaction, options) {
   requireLinuxApprovalTransport(installed);
   return installed;
 }
+function unitLinkCandidates(layout) {
+  return [join65(layout.home, ".config/systemd/user", SYSTEMD_ENGINE_UNIT)].filter((path) => path !== layout.unitPath);
+}
+function ownedUnitLink(layout, path) {
+  const info = lstatSync25(path, { throwIfNoEntry: false });
+  if (!info)
+    return false;
+  assertLinuxManagedPath(dirname46(path), process.getuid(), "directory");
+  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve11(dirname46(path), readlinkSync4(path)) !== layout.unitPath) {
+    throw new Error(`The systemd unit link changed at ${path}; it was retained.`);
+  }
+  return true;
+}
+function restorePriorUnitLinks(layout, transaction) {
+  for (const { path, target } of transaction.priorUnitLinks ?? []) {
+    if (ownedUnitLink(layout, path))
+      continue;
+    assertLinuxManagedPath(dirname46(path), process.getuid(), "directory");
+    symlinkSync2(target, path);
+    syncDirectorySync(dirname46(path));
+  }
+}
+function removeNewUnitLinks(layout, transaction) {
+  for (const path of transaction.newUnitLinks ?? []) {
+    if (ownedUnitLink(layout, path))
+      removeFileDurablySync(path);
+  }
+}
 function transactionPath(layout) {
   return join65(layout.stateDir, "install-transaction.json");
 }
@@ -68129,8 +68157,10 @@ function createInstallTransaction(input) {
     files[path] = writeSnapshot(backupDir, index++, text2, mode);
   }
   const receipt = writeSnapshot(backupDir, index, input.receiptText);
+  const priorUnitLinks = unitLinkCandidates(input.layout).filter((path) => ownedUnitLink(input.layout, path)).map((path) => ({ path, target: readlinkSync4(path) }));
   return {
     schema: "olympus.engine.install-transaction.v1",
+    priorUnitLinks,
     action: input.action,
     phase: input.phase,
     stagingPath: join65(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID18()}`),
@@ -68165,7 +68195,7 @@ function readInstallTransaction(layout) {
   const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname46(resolve11(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve11(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve11(dirname46(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve11(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
@@ -68260,6 +68290,8 @@ function restoreInstallTransaction(layout, exec, options) {
   assertDesktopTransactionTargets(layout, transaction);
   if (transaction.phase === "qualified" || transaction.phase === "recovered" || transaction.phase === "rollback_required")
     return transaction;
+  for (const path of [...transaction.newUnitLinks ?? [], ...(transaction.priorUnitLinks ?? []).map((entry) => entry.path)])
+    ownedUnitLink(layout, path);
   const currentFacts = inspectSystemdEngine(layout, exec);
   assertKnown(currentFacts);
   if (currentFacts.state !== "not_loaded" || currentFacts.enabled !== false)
@@ -68267,6 +68299,7 @@ function restoreInstallTransaction(layout, exec, options) {
   const stoppedFacts = inspectSystemdEngine(layout, exec);
   assertKnown(stoppedFacts);
   removeReleasedWorkerSocket2(layout, currentFacts, stoppedFacts, options);
+  removeNewUnitLinks(layout, transaction);
   for (const [path, snapshot] of Object.entries(transaction.before.files))
     restoreOptionalFile(path, snapshot);
   if (Object.hasOwn(transaction.before.files, linuxDesktopEntryPaths(layout).desktop))
@@ -68281,8 +68314,9 @@ function restoreInstallTransaction(layout, exec, options) {
   systemdMust(exec, ["daemon-reload"]);
   if (transaction.before.enabled)
     systemdMust(exec, ["enable", ...transaction.before.enabledRuntime ? ["--runtime"] : [], layout.unitPath]);
-  else if (transaction.before.files[layout.unitPath].present)
-    systemdMust(exec, ["disable", "--now", SYSTEMD_ENGINE_UNIT]);
+  restorePriorUnitLinks(layout, transaction);
+  if (transaction.priorUnitLinks?.length)
+    systemdMust(exec, ["daemon-reload"]);
   if (transaction.before.active)
     systemdMust(exec, ["restart", SYSTEMD_ENGINE_UNIT]);
   else if (transaction.before.files[layout.unitPath].present)
@@ -68453,6 +68487,8 @@ function installLinuxEngine(options) {
   return locked(l, () => {
     preflightSystemdEngine(l, exec, options.uid);
     preflightLinuxDesktopEntry(l);
+    for (const path of unitLinkCandidates(l))
+      assertLinuxManagedPath(dirname46(path), process.getuid(), "directory");
     assertNoInterruptedInstall(l);
     const before = inspectSystemdEngine(l, exec);
     assertKnown(before);
@@ -68469,6 +68505,16 @@ function installLinuxEngine(options) {
     }
     ensureEngineLinger(exec, options.uid, options.userName, options.notice);
     lifecycleCheckpoint(options, "linger_enabled");
+    for (const parent of new Set([dirname46(l.stateDir), dirname46(l.cacheDir)])) {
+      if (existsSync42(parent))
+        continue;
+      createLinuxPrivateDirectory(dirname46(parent));
+      mkdirSync30(parent, { mode: 448 });
+      syncDirectorySync(dirname46(parent));
+      const info = lstatSync25(parent);
+      const owned = readLinuxEngineReceipt(l.receiptPath)?.ownedEmptyParents ?? [];
+      publishLinuxEngineReceipt(l, { ownedEmptyParents: [...owned.filter((entry) => entry.path !== parent), { path: parent, device: info.dev, inode: info.ino }] });
+    }
     const receiptBeforeInstall = readLinuxEngineReceipt(l.receiptPath);
     const originalReceipt = optionalText(l.receiptPath);
     const lingerPredated = receiptBeforeInstall.lingerPredated ?? observedLinger;
@@ -68527,8 +68573,10 @@ OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
         writePrivateFileAtomicSync(l.unitPath, unit);
       lifecycleCheckpoint(options, "unit_published");
       systemdMust(exec, ["daemon-reload"]);
-      const linkOutput = systemdMust(exec, ["link", l.unitPath]);
-      const links = [...linkOutput.matchAll(/Created symlink (\S+) →/g)].map((m) => m[1].replace(/\.$/, ""));
+      transaction.newUnitLinks = unitLinkCandidates(l).filter((path) => !lstatSync25(path, { throwIfNoEntry: false }));
+      writeInstallTransaction(l, transaction);
+      systemdMust(exec, ["link", l.unitPath]);
+      const links = transaction.newUnitLinks.filter((path) => ownedUnitLink(l, path));
       if (links.length)
         publishLinuxEngineReceipt(l, { ownedUnitLinks: [...new Set([...readLinuxEngineReceipt(l.receiptPath)?.ownedUnitLinks ?? [], ...links])] });
       systemdMust(exec, ["daemon-reload"]);

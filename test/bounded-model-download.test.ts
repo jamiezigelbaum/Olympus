@@ -65,6 +65,49 @@ test('a model larger than 256 MiB uses several bounded 206 requests and verifies
   expect(hash.digest('hex')).toBe(digest(size));
 }, 30_000);
 
+test('a large full 200 response restarts a different saved prefix and verifies the whole file', async () => {
+  const size = CHUNK + 31;
+  const f = fixture(size);
+  mkdirSync(join(f.target, '..'), { recursive: true });
+  // Different bytes make a stale prefix hash fail even if truncation is correct.
+  writeFileSync(`${f.target}.partial`, Buffer.alloc(17, 91));
+  await f.run(() => f.response(0, size - 1, { status: 200 }));
+  expect(f.ranges).toEqual([`bytes=17-${17 + CHUNK - 1}`]);
+  expect(statSync(f.target).size).toBe(size);
+  const hash = createHash('sha256');
+  for await (const bytes of createReadStream(f.target)) hash.update(bytes);
+  expect(hash.digest('hex')).toBe(digest(size));
+  expect(existsSync(`${f.target}.partial`)).toBe(false);
+}, 30_000);
+
+for (const failure of ['oversized', 'short', 'checksum'] as const) {
+  test(`a full 200 response refuses ${failure} bytes and removes the partial`, async () => {
+    const f = fixture();
+    mkdirSync(join(f.target, '..'), { recursive: true });
+    let calls = 0;
+    let written = 0;
+    const message = failure === 'oversized' ? 'larger than its pinned size'
+      : failure === 'short' ? 'did not match its pinned size' : 'did not match its pinned checksum';
+    // Call the downloader itself: the installer independently re-verifies a
+    // finished file and would mask a missing checksum check in this layer.
+    await expect(downloadPinnedFile({
+      fetchImpl: (async () => {
+        calls++;
+        return f.response(0, failure === 'oversized' ? 64 : 63, { status: 200, truncate: failure === 'short' });
+      }) as unknown as typeof fetch,
+      url: 'https://test/model', target: f.target, partial: `${f.target}.partial`, expectedBytes: 64,
+      algorithm: 'sha256', digest: failure === 'checksum' ? '0'.repeat(64) : digest(64), encoding: 'hex', noun: 'test model',
+      stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: true,
+      error: (_reason, message) => new Error(message),
+      onStart: () => {}, onProgress: bytes => { written += bytes; },
+    })).rejects.toThrow(message);
+    expect(calls).toBe(1);
+    if (failure === 'oversized') expect(written).toBe(0);
+    expect(existsSync(f.target)).toBe(false);
+    expect(existsSync(`${f.target}.partial`)).toBe(false);
+  });
+}
+
 test('reader interruption resumes automatically from the bytes already written', async () => {
   const f = fixture();
   await f.run((start, end) => f.response(start, end, { fail: f.ranges.length === 1 }));
@@ -114,7 +157,8 @@ for (const contentRange of ['bytes 1-63/64', 'bytes 0-64/64', 'bytes 0-63/65', '
   });
 }
 
-test('a chunk already written can be freed while the next read is still pending', async () => {
+for (const status of [200, 206])
+test(`a ${status} chunk already written can be freed while the next read is still pending`, async () => {
   // Racing each read against one long-lived abort promise kept every chunk
   // reachable until the range ended: 6.2 GB resident for a 1.5 GB download.
   const root = mkdtempSync(join(tmpdir(), 'olympus-bounded-download-'));
@@ -141,7 +185,7 @@ test('a chunk already written can be freed while the next read is still pending'
         controller.enqueue(new Uint8Array(block));
         controller.close();
       },
-    }), { status: 206, headers: { 'Content-Range': `bytes 0-${size - 1}/${size}` } })) as unknown as typeof fetch,
+    }), { status, headers: status === 206 ? { 'Content-Range': `bytes 0-${size - 1}/${size}` } : {} })) as unknown as typeof fetch,
     url: 'https://test/model', target, partial: `${target}.partial`, expectedBytes: size,
     algorithm: 'sha256', digest: digest(size), encoding: 'hex', noun: 'test model',
     stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: false,
