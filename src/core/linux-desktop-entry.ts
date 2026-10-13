@@ -8,6 +8,8 @@ import { assertLinuxManagedPath, createLinuxPrivateDirectory, readLinuxEngineRec
 import type { EngineExec } from './engine-service.ts';
 
 const ID = 'ai.olympusplugin.Olympus';
+/** The launcher icon; the bar widget keeps its own simple mark. */
+export const LINUX_APP_ICON = 'assets/app-icon.png';
 export function linuxDesktopEntryPaths(layout: LinuxEngineLayout) {
   return {
     desktop: join(layout.dataHome, 'applications', `${ID}.desktop`),
@@ -64,7 +66,7 @@ export function refreshLinuxDesktopCaches(layout: LinuxEngineLayout, exec: Engin
 export function writeLinuxDesktopEntry(layout: LinuxEngineLayout, packageRoot: string, exec?: EngineExec): void {
   preflightLinuxDesktopEntry(layout);
   const paths = linuxDesktopEntryPaths(layout);
-  const icon = readFileSync(join(packageRoot, 'assets/icon.png'));
+  const icon = readFileSync(join(packageRoot, LINUX_APP_ICON));
   for (const path of Object.values(paths)) createLinuxPrivateDirectory(dirname(path));
   writePrivateFileAtomicSync(paths.icon, icon);
   writePrivateFileAtomicSync(paths.desktop, renderLinuxDesktopEntry(layout.launcherPath));

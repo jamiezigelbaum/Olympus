@@ -285,6 +285,7 @@ export const V0_4_CANONICAL_DOCUMENTS = [
 
 export const V0_4_PUBLIC_PACKAGE_FILES = [
   'assets/icon.png',
+  'assets/app-icon.png',
   'assets/olympus-banner.png',
   // Consult gate vocabulary packs (src/core/consult-gate.ts), each beside its
   // licence file, listed one by one; docs/THIRD_PARTY_DATA.md describes them.

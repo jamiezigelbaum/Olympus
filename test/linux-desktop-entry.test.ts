@@ -23,7 +23,7 @@ test('custom XDG install refreshes caches, replaces marked edits, and preserves 
  const exec=(cmd:string)=>{calls.push(cmd);return {status:127,stdout:'',stderr:'missing'};};
  const packageRoot=join(import.meta.dir,'..');
  writeLinuxDesktopEntry(l,packageRoot,exec);
- expect(readFileSync(p.icon)).toEqual(readFileSync(join(packageRoot,'assets/icon.png')));
+ expect(readFileSync(p.icon)).toEqual(readFileSync(join(packageRoot,'assets/app-icon.png')));
  expect(calls).toEqual(['update-desktop-database','gtk-update-icon-cache']);
  publishLinuxEngineReceipt(l,{machineArtifacts:[{path:p.icon,kind:'file',sha256:createHash('sha256').update(readFileSync(p.icon)).digest('hex')}]});
  writeFileSync(p.desktop,'[Desktop Entry]\nName=Edited\nX-Olympus-Managed=true\n');
