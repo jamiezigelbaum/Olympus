@@ -8249,6 +8249,9 @@ var init_messaging_pairing = __esm(() => {
   init_pairing_session_paths();
 });
 
+// src/core/whatsapp-notice.ts
+var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
+
 // src/core/messaging-capture.ts
 import { closeSync as closeSync6, constants as constants2, existsSync as existsSync9, fstatSync as fstatSync2, openSync as openSync6, readFileSync as readFileSync12, rmSync as rmSync5 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
@@ -65840,6 +65843,7 @@ var init_source_dashboard = __esm(() => {
         source: "whatsapp",
         instructions: [
           "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
+          WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
           "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
         ]
       }
@@ -106953,7 +106957,7 @@ ${provenance}
 <p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
 ${mismatchWarning}${loopbackWarning}
-<p>${name} will be able to ask Olympus questions under your privacy rules. Private sources stay private, and you can remove it any time with <code>olympus connections revoke</code>.</p>
+<p>${name} will be able to ask Olympus questions under your privacy rules. For Private items it gets only answers written from them, which can repeat what they say, and nothing Olympus recognizes as a Secret. Labels are automatic and can be wrong. You can remove it any time with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
@@ -106961,6 +106965,7 @@ ${error2}
 <label for="pairing_code">Pairing code</label>
 <input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
 <p class="hint">Get one by running <code>olympus connections pair</code> on the computer running Olympus, or by asking your OpenClaw agent. Codes last 10 minutes and work once.</p>
+${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Approve</button>
 <button class="deny" type="submit" name="action" value="deny" formnovalidate>Deny</button>
@@ -106995,11 +107000,13 @@ ${input.verifiedHost ? `<div class="host">${escapeHtml(input.verifiedHost)}</div
 ${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
 <p><strong>Connecting links Olympus on this Mac to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
-<p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this Mac reasoned out, with each item's title and source.</p>
+${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this Mac or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
+<p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
+${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>
@@ -107101,7 +107108,8 @@ button { flex: 1; font: 600 1rem/1 system-ui, sans-serif; padding: .85rem 1rem; 
 .approve { background: var(--accent); color: #fff; border: 0; }
 .deny { background: transparent; color: var(--fg); border: 1px solid var(--line); }
 p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
-`, DEMO_REFERRER_POLICY = "same-origin";
+p.small a { color: var(--accent); }
+`, TERMS_ASSENT = '<p class="small">By connecting, you agree to the Olympus <a href="https://olympusplugin.ai/terms/" target="_blank" rel="noopener noreferrer">Terms of Service</a> and acknowledge the <a href="https://olympusplugin.ai/privacy/" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</p>', DEMO_REFERRER_POLICY = "same-origin";
 var init_consent_page = () => {};
 
 // src/core/google-pilot-client.ts
@@ -141550,7 +141558,8 @@ function createRemoteOAuthHandler(options) {
       verifiedHost: entry.client.verifiedHost,
       redirectHost: redirectHost(entry.redirectUri),
       redirectOrigin: new URL(entry.redirectUri).origin,
-      loopbackRedirect: isLoopbackRedirectUri(entry.redirectUri)
+      loopbackRedirect: isLoopbackRedirectUri(entry.redirectUri),
+      chatgpt: entry.client.host === "chatgpt"
     }) : renderConsentPage({
       requestId,
       csrf: entry.csrf,
@@ -156195,6 +156204,9 @@ async function runMessagingPairing(source, secretStore, registryPath) {
   const tell = (text5) => writeSync4(terminal, text5);
   try {
     tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.
+`);
+    if (source === "whatsapp")
+      tell(`${WHATSAPP_UNOFFICIAL_CLIENT_NOTICE}
 `);
     const paired = await pairMessagingSource({
       source,

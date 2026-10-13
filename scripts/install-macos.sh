@@ -367,6 +367,9 @@ main() {
 
   say "Installing Olympus $OLYMPUS_VERSION for $(id -un 2>/dev/null || echo you) on this Mac."
   say "It needs no administrator password and changes nothing outside your home folder."
+  say "By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)"
+  say "and acknowledge its Privacy Policy (https://olympusplugin.ai/privacy/)."
+  say "Olympus is provided as is, without warranty. Keep your own backups."
   say ""
   check_mac
   step "This Mac is supported (Apple silicon, macOS $macos)."
