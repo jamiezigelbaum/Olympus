@@ -232,19 +232,25 @@ export function settleUntrackedSecretsCopy(options: {
   return settled;
 }
 
-/** A store with no tier ledger: no sniffer queue sits beside it, so only the job names. */
+/**
+ * A store whose tier ledger could not be opened (every writable store has
+ * one; only a read-only store, which never tombstones, runs without): no
+ * sniffer queue sits beside it, so only the job names, with nowhere to keep
+ * a debt. What could not be made durable is said aloud.
+ */
 function forgetSecretJobNames(identity: SourceItemIdentity): void {
-  let failed = 0;
+  let unsettled = 0;
   for (const jobsPath of extractionJobsDbPaths()) {
     try {
-      clearExtractionJobNames(jobsPath, {
+      const cleared = clearExtractionJobNames(jobsPath, {
         provider: identity.provider,
         accountScope: identity.accountScope,
         providerItemId: identity.providerItemId,
       });
+      if (!cleared.durable) unsettled += 1;
     } catch {
-      failed += 1;
+      unsettled += 1;
     }
   }
-  if (failed > 0) console.warn(`[tier] secrets: ${failed} extraction job ledger(s) could not forget an item's name.`);
+  if (unsettled > 0) console.warn(`[tier] secrets: ${unsettled} extraction job ledger(s) could not durably forget an item's name, and its store has no tier ledger to retry from.`);
 }
