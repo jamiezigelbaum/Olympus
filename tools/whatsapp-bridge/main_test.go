@@ -461,8 +461,11 @@ func TestRecordFromMessageDownloadsAudioAndKeepsRetryFields(t *testing.T) {
 	if rec.MediaPath == "" {
 		t.Fatal("expected media_path for successful download")
 	}
-	if filepath.Base(rec.MediaPath) != "voice_1.ogg" {
-		t.Fatalf("media filename = %q, want voice_1.ogg", filepath.Base(rec.MediaPath))
+	if want := mediaFileStem(rec.ChatJID, "voice:1") + ".ogg"; filepath.Base(rec.MediaPath) != want {
+		t.Fatalf("media filename = %q, want %s", filepath.Base(rec.MediaPath), want)
+	}
+	if !regexp.MustCompile(`^voice_1-[0-9a-f]{16}\.ogg$`).MatchString(filepath.Base(rec.MediaPath)) {
+		t.Fatalf("media filename = %q, want readable id plus chat-scoped hash", filepath.Base(rec.MediaPath))
 	}
 	if rec.MediaMime != "audio/ogg; codecs=opus" || rec.MediaDurationSeconds != 7 || rec.MediaSizeBytes != int64(len(downloader.bytes)) {
 		t.Fatalf("unexpected metadata: %#v", rec)
@@ -558,7 +561,7 @@ func TestAudioMediaStoreEvictsOldestFilesWithinQuota(t *testing.T) {
 		downloader:   &fakeDownloader{bytes: []byte("33333")},
 	}
 
-	rec := store.capture(context.Background(), "new-voice", audioMessage(5))
+	rec := store.capture(context.Background(), "15551234567@s.whatsapp.net", "new-voice", audioMessage(5))
 	if rec.DownloadStatus != "ok" {
 		t.Fatalf("capture status = %q, want ok", rec.DownloadStatus)
 	}
@@ -570,6 +573,125 @@ func TestAudioMediaStoreEvictsOldestFilesWithinQuota(t *testing.T) {
 	}
 	if _, err := os.Stat(rec.MediaPath); err != nil {
 		t.Fatalf("new protected media file missing: %v", err)
+	}
+}
+
+func audioEventInChat(chat types.JID, id string, audio *waE2E.AudioMessage) *events.Message {
+	evt := audioEvent(id, audio)
+	evt.Info.Chat = chat
+	return evt
+}
+
+func newTestAudioStore(dir string, downloader *fakeDownloader) *audioMediaStore {
+	return &audioMediaStore{
+		dir:          dir,
+		maxFileBytes: audioMediaMaxFileBytes,
+		quotaBytes:   audioMediaQuotaBytes,
+		downloader:   downloader,
+	}
+}
+
+func readFileOrFail(t *testing.T, path string) string {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(got)
+}
+
+// A message id is unique only within its chat: the same id and MIME in two
+// chats must land in two files, and the second capture must not overwrite the
+// first one's audio.
+func TestAudioMediaStoreKeepsSameMessageIDInTwoChatsApart(t *testing.T) {
+	downloader := &fakeDownloader{bytes: []byte("first-chat-voice")}
+	store := newTestAudioStore(filepath.Join(t.TempDir(), "audio"), downloader)
+	chatA := types.JID{User: "15551230001", Server: types.DefaultUserServer}
+	chatB := types.NewJID("120363000000000001", types.GroupServer)
+
+	first, ok := recordFromMessage(context.Background(), nil, store, audioEventInChat(chatA, "3EB0SAMEID", audioMessage(16)))
+	if !ok || first.DownloadStatus != "ok" {
+		t.Fatalf("first capture: ok=%v %#v", ok, first)
+	}
+	downloader.bytes = []byte("second-chat-voice")
+	second, ok := recordFromMessage(context.Background(), nil, store, audioEventInChat(chatB, "3EB0SAMEID", audioMessage(17)))
+	if !ok || second.DownloadStatus != "ok" {
+		t.Fatalf("second capture: ok=%v %#v", ok, second)
+	}
+
+	if first.MediaPath == second.MediaPath {
+		t.Fatalf("both chats share media_path %q", first.MediaPath)
+	}
+	if got := readFileOrFail(t, first.MediaPath); got != "first-chat-voice" {
+		t.Fatalf("first chat's audio = %q, want it untouched", got)
+	}
+	if got := readFileOrFail(t, second.MediaPath); got != "second-chat-voice" {
+		t.Fatalf("second chat's audio = %q", got)
+	}
+}
+
+// The chat part of the name is normalized like the TypeScript identity, so a
+// re-delivered message (device suffix, case) reuses its file instead of
+// writing a second copy.
+func TestAudioMediaStoreReusesFileForRedeliveredMessage(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "audio")
+	store := newTestAudioStore(dir, &fakeDownloader{bytes: []byte("voice")})
+
+	first := store.capture(context.Background(), "15551230001@s.whatsapp.net", "3EB0REDELIVER", audioMessage(5))
+	again := store.capture(context.Background(), "15551230001:7@S.WhatsApp.net", "3EB0REDELIVER", audioMessage(5))
+	if first.DownloadStatus != "ok" || again.DownloadStatus != "ok" {
+		t.Fatalf("statuses = %q, %q", first.DownloadStatus, again.DownloadStatus)
+	}
+	if first.MediaPath != again.MediaPath {
+		t.Fatalf("redelivery wrote %q, want reuse of %q", again.MediaPath, first.MediaPath)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("media dir holds %d entries, want 1 (no leftover temp files)", len(entries))
+	}
+}
+
+// A file already at the computed name with different audio (an older file, or
+// a hash collision) is never overwritten: the new audio takes the next free
+// name and its spool line points there. Files saved under the old
+// message-id-only names stay where their spool lines recorded them.
+func TestAudioMediaStoreNeverOverwritesExistingFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "audio")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	chat := "15551230001@s.whatsapp.net"
+	occupied := filepath.Join(dir, mediaFileStem(chat, "3EB0TAKEN")+".ogg")
+	legacy := filepath.Join(dir, safeMediaFileStem("3EB0TAKEN")+".ogg")
+	for path, body := range map[string]string{occupied: "someone-else", legacy: "legacy-voice"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := newTestAudioStore(dir, &fakeDownloader{bytes: []byte("new-voice")})
+
+	rec := store.capture(context.Background(), chat, "3EB0TAKEN", audioMessage(9))
+	if rec.DownloadStatus != "ok" {
+		t.Fatalf("capture status = %q", rec.DownloadStatus)
+	}
+	if want := filepath.Join(dir, mediaFileStem(chat, "3EB0TAKEN")+"-1.ogg"); rec.MediaPath != want {
+		t.Fatalf("media_path = %q, want %q", rec.MediaPath, want)
+	}
+	if got := readFileOrFail(t, rec.MediaPath); got != "new-voice" {
+		t.Fatalf("new audio = %q", got)
+	}
+	if got := readFileOrFail(t, occupied); got != "someone-else" {
+		t.Fatalf("occupied file overwritten: %q", got)
+	}
+	if got := readFileOrFail(t, legacy); got != "legacy-voice" {
+		t.Fatalf("legacy file overwritten: %q", got)
+	}
+	info, err := os.Stat(rec.MediaPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("new media mode: info=%v err=%v", info, err)
 	}
 }
 
