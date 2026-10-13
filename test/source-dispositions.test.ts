@@ -821,7 +821,7 @@ describe('the dashboard entry point', () => {
         castor_visible: true,
       },
     } as never,
-    sovereigntyEngine: { config: { routes: {} } } as never,
+    sovereigntyEngine: { config: { routes: {}, retrieval: { trustDomains: {} } } } as never,
     ingestionDispositionsAvailable: available,
     ...(rules > 0
       ? {
@@ -909,7 +909,7 @@ function dispositionsWorker(rulesPath: string) {
       },
     },
     sourceDashboard: {
-      sovereigntyEngine: { config: { routes: {} } } as never,
+      sovereigntyEngine: { config: { routes: {}, retrieval: { trustDomains: {} } } } as never,
       registryPath: join(tempDir('olympus-dispositions-registry-'), 'handles.json'),
       ingestionDispositions: () => ({
         rulesPath,

@@ -129,6 +129,7 @@ import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
 import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
+  reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
   relayProcessRunning,
   remoteAccessDirForCli,
@@ -893,10 +894,21 @@ function validateRequired(operation: Operation, params: Record<string, unknown>)
 
 function makeContext(): OperationContext {
   const config = loadConfig();
+  let email: EmailClient;
+  try {
+    config.email.baseUrl = cliWorkerApiBase(config);
+    email = new EmailClient(config, createEmailTransport(config));
+  } catch (error) {
+    // Not every operation reaches the worker, so a worker that resolves off
+    // this computer refuses at the first worker request, and no path holds
+    // the bearer meanwhile.
+    config.worker.authTokenSecretRefUnresolved = true;
+    email = new EmailClient(config, { async requestJson() { throw error; } });
+  }
   return {
     config,
     delphi: new DelphiClient(config, createDelphiTransport(config)),
-    email: new EmailClient(config, createEmailTransport(config)),
+    email,
     caller: { surface: 'cli', displayName: 'Olympus CLI' },
   };
 }
@@ -1022,7 +1034,7 @@ export function parseTerminalContentRequalifyArgs(args: string[]): TerminalConte
 async function runTerminalContentRequalify(options: TerminalContentRequalifyCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1101,7 +1113,7 @@ export function parseQueuedContentRetargetArgs(args: string[]): QueuedContentRet
 async function runQueuedContentRetarget(options: QueuedContentRetargetCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1176,7 +1188,7 @@ export function parseEvalShardExportArgs(args: string[]): EvalShardExportCliOpti
 async function runEvalShardExport(options: EvalShardExportCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1252,7 +1264,7 @@ export function parseOwnerTierOverrideArgs(args: string[]): OwnerTierOverrideCli
 async function runOwnerTierOverride(options: OwnerTierOverrideCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1853,8 +1865,13 @@ export async function runWorkerForeground(options: {
 
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {
   const config = loadConfig();
-  const baseUrl = config.email.baseUrl;
-  const workerRoot = baseUrl.replace(/\/v1\/?$/, '');
+  let workerRoot: string;
+  try {
+    workerRoot = cliWorkerRoot(config);
+  } catch (error) {
+    return { reachable: false, base_url: config.email.baseUrl, error: cliErrorDetail(error) };
+  }
+  const baseUrl = `${workerRoot}/v1`;
   const authToken = workerAuthTokenFromConfig(config);
   try {
     const health = await fetchJson(`${baseUrl}/health`, { method: 'GET' });
@@ -2818,6 +2835,36 @@ function remoteAccessUrlsForCli(env: Record<string, string | undefined>): Remote
   });
 }
 
+/**
+ * This computer's worker root, for every CLI path that sends it the worker
+ * bearer. loadConfig() alone ignores worker.env, so an engine whose worker.env
+ * moves it off :8010 had `olympus dashboard` send its token to :8010
+ * (2026-10-13); this resolves the origin the way `connect finish` does
+ * (remoteAccessUrlsForCli: an explicit OLYMPUS_EMAIL_BASE_URL, the relay's
+ * reported local_url, worker.env's OLYMPUS_EMAIL_SOURCE_HOST/PORT, then
+ * email.baseUrl). An engine bound to every address is reached on its
+ * loopback; any other origin is refused, so the bearer stays on this computer.
+ */
+function cliWorkerRoot(config: OlympusConfig, env: Record<string, string | undefined> = process.env): string {
+  // The configured value is still checked (no embedded credentials, /v1 or root path).
+  workerRootBaseUrl(config.email.baseUrl);
+  const local = remoteAccessUrlsForCli(env).local_url;
+  const origin = reachableLoopbackWorkerOrigin(local);
+  if (!origin) {
+    throw new OperationError(
+      'config_error',
+      `The Olympus worker resolves to ${local}, which is not a local address on this computer, so the worker token was not sent.`,
+      'Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1 for the worker on this computer.',
+    );
+  }
+  return origin;
+}
+
+/** The worker's /v1 API base on this computer; see cliWorkerRoot. */
+function cliWorkerApiBase(config: OlympusConfig, env: Record<string, string | undefined> = process.env): string {
+  return `${cliWorkerRoot(config, env)}/v1`;
+}
+
 function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
   return {
     url: urls.mcp_url,
@@ -2904,7 +2951,7 @@ export async function runDashboardCommand(
   dependencies: DashboardCommandDependencies = {},
 ): Promise<{ url: string; opened: boolean; hint: string }> {
   const config = loadConfig();
-  const base = workerRootBaseUrl(config.email.baseUrl);
+  const base = cliWorkerRoot(config);
   const token = resolveWorkerAuthToken(process.env, config);
   const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
   let opened = false;
@@ -2966,7 +3013,7 @@ function runDashboardReadOnlyCommand(
   dependencies: Pick<DashboardCommandDependencies, 'noOpen' | 'openImpl'> = {},
 ): { url: string; opened: boolean; hint: string } {
   const config = loadConfig();
-  const base = workerRootBaseUrl(config.email.baseUrl);
+  const base = cliWorkerRoot(config);
   const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config));
   const openUrl = dashboardToken
     ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}`

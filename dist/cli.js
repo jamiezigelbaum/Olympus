@@ -13158,10 +13158,10 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
       signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
     });
   } catch {
-    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${hint} worker status) and run this again.`);
+    throw new OperationError("email_unreachable", `The Olympus worker at ${base} did not answer the opening request.`, `Start the worker (${hint} worker status) and run this again.`);
   }
   if (!response.ok) {
-    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
+    throw new OperationError("email_unreachable", `The Olympus worker at ${base} refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
   }
   let ticket;
   try {
@@ -23393,6 +23393,7 @@ __export(exports_remote_access, {
   remoteAccessDir: () => remoteAccessDir,
   relayProcessRunning: () => relayProcessRunning,
   readRemoteAccessStatus: () => readRemoteAccessStatus,
+  reachableLoopbackWorkerOrigin: () => reachableLoopbackWorkerOrigin,
   olympusDataDir: () => olympusDataDir,
   loopbackWorkerOrigin: () => loopbackWorkerOrigin,
   isRelayedRequest: () => isRelayedRequest,
@@ -23645,7 +23646,7 @@ function localWorkerOrigin(input) {
     return reported;
   const port = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
   if (port && /^\d{1,5}$/.test(port)) {
-    const host = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+    const host = input.layeredEnv.OLYMPUS_WORKER_BIND_HOST?.trim() || input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
     const origin = originOf(`http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`);
     if (origin)
       return origin;
@@ -23661,6 +23662,17 @@ function originOf(value) {
   } catch {
     return;
   }
+}
+function reachableLoopbackWorkerOrigin(value) {
+  const origin = originOf(value);
+  if (!origin)
+    return;
+  const url = new URL(origin);
+  if (url.hostname === "0.0.0.0")
+    url.hostname = "127.0.0.1";
+  else if (url.hostname === "[::]")
+    url.hostname = "[::1]";
+  return loopbackWorkerOrigin(url.origin);
 }
 function loopbackWorkerOrigin(value) {
   const origin = originOf(value);
@@ -64846,6 +64858,7 @@ __export(exports_source_dashboard, {
   publisherConnectIntro: () => publisherConnectIntro,
   isGoogleOAuthSource: () => isGoogleOAuthSource2,
   defaultSourceDashboardHistoryDbPath: () => defaultSourceDashboardHistoryDbPath,
+  dashboardSensitivityTiers: () => dashboardSensitivityTiers,
   dashboardSchedulerTaskFailing: () => dashboardSchedulerTaskFailing,
   dashboardManualSyncOutcome: () => dashboardManualSyncOutcome,
   dashboardLiveManualSync: () => dashboardLiveManualSync,
@@ -64946,6 +64959,14 @@ function dashboardGuidedSessionAgentPrompt(source) {
     return "Connect Telegram to Olympus using the packaged olympus connect telegram --pair command. The dashboard has no Connect/Pair button or login form; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.";
   }
   return "Connect WhatsApp to Olympus using the packaged olympus connect whatsapp --pair command. The dashboard has no Connect/Pair button or QR display; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.";
+}
+function dashboardSensitivityTiers(sovereigntyEngine) {
+  if (!isPublicTierRetired(sovereigntyEngine.config))
+    return DASHBOARD_SENSITIVITY_TIERS;
+  return {
+    ...DASHBOARD_SENSITIVITY_TIERS,
+    tiers: DASHBOARD_SENSITIVITY_TIERS.tiers.filter((tier) => tier.tier_label !== "S0")
+  };
 }
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join56(homedir40(), ".local", "share");
@@ -65277,7 +65298,7 @@ function buildSourceDashboardViewModel(options) {
     where_your_data_lives: trustCards,
     unassigned_corpora: unassignedCorpora,
     excluded_by_configuration: excludedByConfiguration,
-    sensitivity_tiers: DASHBOARD_SENSITIVITY_TIERS,
+    sensitivity_tiers: dashboardSensitivityTiers(options.sovereigntyEngine),
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
@@ -66776,11 +66797,12 @@ function withActiveStep(steps) {
   }));
 }
 function trustDomainCards(sourceCards, unassigned, sovereigntyEngine) {
+  const productDomains = isPublicTierRetired(sovereigntyEngine.config) ? DASHBOARD_TRUST_DOMAINS.filter((trustDomain) => trustDomain !== "public_safe") : DASHBOARD_TRUST_DOMAINS;
   const extraDomains = [
     ...sourceCards.flatMap((card) => card.tier_composition.map((tier) => tier.trust_domain)),
     ...unassigned.entries.map((entry) => entry.trust_domain)
-  ].filter((trustDomain) => !DASHBOARD_TRUST_DOMAINS.includes(trustDomain));
-  return [...DASHBOARD_TRUST_DOMAINS, ...new Set(extraDomains)].map((trustDomain) => {
+  ].filter((trustDomain) => !productDomains.includes(trustDomain));
+  return [...productDomains, ...new Set(extraDomains)].map((trustDomain) => {
     const tiers = sourceCards.flatMap((card) => card.tier_composition.filter((tier) => tier.trust_domain === trustDomain));
     const unassignedInTier = unassigned.entries.filter((entry) => entry.trust_domain === trustDomain);
     const sourcesWithTier = sourceCards.filter((card) => card.tier_composition.some((tier) => tier.trust_domain === trustDomain && (tier.indexed_items > 0 || tier.content_ready_items > 0)));
@@ -66916,6 +66938,7 @@ var init_source_dashboard = __esm(() => {
   init_ingestion_throughput();
   init_source_corpus_registry();
   init_types();
+  init_sovereignty();
   init_scheduler_markers();
   init_source_failure();
   init_answer_ready_coverage();
@@ -78735,10 +78758,16 @@ async function readEngineBrief(deps) {
     if (pluginConfig)
       config = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
   } catch {}
-  const baseUrl = config.email.baseUrl || DEFAULT_BASE_URL;
-  const token = workerAuthTokenFromConfig(config, { env, homeDir });
+  const local = resolveRemoteAccessUrls({
+    layeredEnv: environmentWithWorkerSetupEnv({ env, homeDir }),
+    env,
+    status: readRemoteAccessStatus(remoteAccessDirForCli(env)),
+    configuredWorkerBaseUrl: config.email.baseUrl || DEFAULT_BASE_URL
+  }).local_url;
+  const loopback = reachableLoopbackWorkerOrigin(local);
+  const token = loopback ? workerAuthTokenFromConfig(config, { env, homeDir }) : undefined;
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const root = baseUrl.replace(/\/$/, "");
+  const root = `${loopback ?? local}/v1`;
   const [reachable, brief] = await Promise.all([
     probeHealth(fetchImpl, `${root}/health`, deps.healthTimeoutMs ?? 1000),
     token ? fetchBrief(fetchImpl, `${root}${ENGINE_BRIEF_PATH}`, token, deps.briefTimeoutMs ?? 2500) : Promise.resolve({ kind: "failed", detail: DETAIL.noAccess })
@@ -78818,6 +78847,7 @@ var ENGINE_BRIEF_SCHEMA = "olympus.engine.brief.v1", ENGINE_BRIEF_PATH = "/engin
 var init_engine_brief = __esm(() => {
   init_config();
   init_engine_service();
+  init_remote_access();
   init_worker_auth();
   UNITS = new Set(["files", "messages", "items"]);
   PHASES = new Set(["initial", "refresh"]);
@@ -80173,7 +80203,7 @@ function workerOrigin(config, env) {
   if (!config.worker.service.enabled) {
     const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
     if (port && /^\d{1,5}$/.test(port)) {
-      const host = env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
       return loopbackWorkerOrigin(`http://${host === "::1" ? "[::1]" : host}:${port}`);
     }
   }
@@ -156801,10 +156831,20 @@ function validateRequired(operation, params) {
 }
 function makeContext2() {
   const config2 = loadConfig();
+  let email2;
+  try {
+    config2.email.baseUrl = cliWorkerApiBase(config2);
+    email2 = new EmailClient(config2, createEmailTransport(config2));
+  } catch (error2) {
+    config2.worker.authTokenSecretRefUnresolved = true;
+    email2 = new EmailClient(config2, { async requestJson() {
+      throw error2;
+    } });
+  }
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
-    email: new EmailClient(config2, createEmailTransport(config2)),
+    email: email2,
     caller: { surface: "cli", displayName: "Olympus CLI" }
   };
 }
@@ -156900,7 +156940,7 @@ function parseTerminalContentRequalifyArgs(args) {
 async function runTerminalContentRequalify(options) {
   const config2 = loadConfig();
   const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config2)}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
@@ -156978,7 +157018,7 @@ function parseQueuedContentRetargetArgs(args) {
 async function runQueuedContentRetarget(options) {
   const config2 = loadConfig();
   const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config2)}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
@@ -157040,7 +157080,7 @@ function parseEvalShardExportArgs(args) {
 async function runEvalShardExport(options) {
   const config2 = loadConfig();
   const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config2)}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
@@ -157107,7 +157147,7 @@ function parseOwnerTierOverrideArgs(args) {
 async function runOwnerTierOverride(options) {
   const config2 = loadConfig();
   const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
+  const response = await fetch(`${cliWorkerApiBase(config2)}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
@@ -157611,8 +157651,13 @@ async function runWorkerForeground(options = {}) {
 }
 async function readWorkerHttpState() {
   const config2 = loadConfig();
-  const baseUrl = config2.email.baseUrl;
-  const workerRoot = baseUrl.replace(/\/v1\/?$/, "");
+  let workerRoot;
+  try {
+    workerRoot = cliWorkerRoot(config2);
+  } catch (error2) {
+    return { reachable: false, base_url: config2.email.baseUrl, error: cliErrorDetail(error2) };
+  }
+  const baseUrl = `${workerRoot}/v1`;
   const authToken = workerAuthTokenFromConfig(config2);
   try {
     const health = await fetchJson(`${baseUrl}/health`, { method: "GET" });
@@ -158442,6 +158487,18 @@ function remoteAccessUrlsForCli(env) {
     configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl
   });
 }
+function cliWorkerRoot(config2, env = process.env) {
+  workerRootBaseUrl(config2.email.baseUrl);
+  const local = remoteAccessUrlsForCli(env).local_url;
+  const origin = reachableLoopbackWorkerOrigin(local);
+  if (!origin) {
+    throw new OperationError("config_error", `The Olympus worker resolves to ${local}, which is not a local address on this computer, so the worker token was not sent.`, "Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1 for the worker on this computer.");
+  }
+  return origin;
+}
+function cliWorkerApiBase(config2, env = process.env) {
+  return `${cliWorkerRoot(config2, env)}/v1`;
+}
 function remoteUrlFields(urls) {
   return {
     url: urls.mcp_url,
@@ -158484,7 +158541,7 @@ function runDashboardTokenCommand(env = process.env) {
 }
 async function runDashboardCommand(dependencies = {}) {
   const config2 = loadConfig();
-  const base = workerRootBaseUrl(config2.email.baseUrl);
+  const base = cliWorkerRoot(config2);
   const token = resolveWorkerAuthToken(process.env, config2);
   const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint2() });
   let opened = false;
@@ -158513,7 +158570,7 @@ async function runOpenCommand(args, dependencies = {}) {
 }
 function runDashboardReadOnlyCommand(dependencies = {}) {
   const config2 = loadConfig();
-  const base = workerRootBaseUrl(config2.email.baseUrl);
+  const base = cliWorkerRoot(config2);
   const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config2));
   const openUrl = dashboardToken ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}` : "";
   if (!openUrl) {
