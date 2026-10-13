@@ -128,7 +128,10 @@ connection that you approve on that computer.
 Install Olympus on your computer first ([Get started](#get-started)). Then,
 in the ChatGPT desktop app, add **Olympus** from the plugin directory and ask
 *"Connect Olympus"*. ChatGPT's setup skill shows the install command if
-Olympus is not on your computer yet; it never runs commands itself.
+Olympus is not on your computer yet; it never runs commands itself. ChatGPT's
+setup steps and its plugin listing still say Mac only until the plugin's next
+directory update: on Omarchy, install Olympus with the Linux command first, then
+connect.
 
 ### 2. Approve ChatGPT on your computer
 
