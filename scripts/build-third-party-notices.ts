@@ -9,10 +9,13 @@
  *
  *   bun scripts/build-third-party-notices.ts
  *
- * test/third-party-notices.test.ts fails when `dist/` bundles a package this
- * file does not cover. Vocabulary data has its own notices
- * (docs/THIRD_PARTY_DATA.md); models and tools that the user's computer
- * downloads are not bundled and are not listed here.
+ * test/third-party-notices.test.ts fails when this file is out of date. A
+ * package published without a licence file gets its upstream licence from
+ * scripts/third-party-licences/<package>.txt (see UPSTREAM_LICENCES); without
+ * one, generation fails rather than ship a notice with no licence text.
+ * Vocabulary data has its own notices (docs/THIRD_PARTY_DATA.md); models and
+ * tools that the user's computer downloads are not bundled and are not listed
+ * here.
  */
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,6 +29,12 @@ export const BUNDLED_OUTPUTS = [
 ] as const;
 
 export const NOTICES_FILE = 'THIRD_PARTY_NOTICES.md';
+
+/** Packages published without a licence file, and where their upstream licence was copied from. */
+export const UPSTREAM_LICENCES: Record<string, string> = {
+  'franc-min': 'https://github.com/wooorm/franc/blob/main/license',
+  'stopwords-iso': 'https://github.com/stopwords-iso/stopwords-iso/blob/master/LICENSE',
+};
 
 /** Bun marks each inlined module with a `// node_modules/<package>/<file>` comment. */
 const MODULE_MARKER = /^\/\/ node_modules\/((?:@[^/\s]+\/)?[^/\s]+)\//gm;
@@ -50,6 +59,13 @@ function licenceFile(dir: string): string | undefined {
   return name ? readFileSync(join(dir, name), 'utf8').trim() : undefined;
 }
 
+function upstreamLicence(root: string, name: string): string | undefined {
+  const source = UPSTREAM_LICENCES[name];
+  if (!source) return undefined;
+  const text = readFileSync(join(root, 'scripts/third-party-licences', `${name.replace('/', '__')}.txt`), 'utf8').trim();
+  return `${text}\n\n(The package ships without a licence file; this is its upstream licence, from ${source}.)`;
+}
+
 function declaredLicence(manifest: Record<string, unknown>): string {
   const licence = manifest.license;
   if (typeof licence === 'string') return licence;
@@ -57,20 +73,13 @@ function declaredLicence(manifest: Record<string, unknown>): string {
   return 'not declared';
 }
 
-function author(manifest: Record<string, unknown>): string | undefined {
-  const value = manifest.author;
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && typeof (value as { name?: unknown }).name === 'string') return (value as { name: string }).name;
-  return undefined;
-}
-
 export function renderNotices(root: string): string {
   const sections = bundledPackages(root).map((name) => {
     const dir = join(root, 'node_modules', name);
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, unknown>;
     const licence = declaredLicence(manifest);
-    const text = licenceFile(dir)
-      ?? `The package includes no licence file. Its package.json declares the ${licence} licence${author(manifest) ? `, author ${author(manifest)}` : ''}.`;
+    const text = licenceFile(dir) ?? upstreamLicence(root, name);
+    if (!text) throw new Error(`${name} ships no licence file; add its upstream licence to scripts/third-party-licences and UPSTREAM_LICENCES.`);
     return [
       `## ${name} ${String(manifest.version)}`,
       '',
