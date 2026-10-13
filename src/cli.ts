@@ -1,4 +1,5 @@
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
+import { PastedCallbackError, finishPastedOAuthCallback } from './core/oauth-callback-paste.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
@@ -1304,6 +1305,7 @@ function printHelp(): void {
   console.log('  olympus connect venice|readwise --api-key-prompt');
   console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
+  console.log('  olympus connect finish <address>');
   console.log('  olympus connections add <name>');
   console.log('  olympus connections pair');
   console.log('  olympus connections list');
@@ -1342,6 +1344,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect readwise': 'olympus connect readwise --api-key-prompt',
   'connect gemini': 'olympus connect gemini --api-key-prompt',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
+  'connect finish': 'olympus connect finish <address>',
   'connections add': 'olympus connections add <name>',
   'connections pair': 'olympus connections pair',
   'connections list': 'olympus connections list',
@@ -2251,8 +2254,22 @@ async function runConnect(args: string[]): Promise<unknown> {
         'olympus connect venice|readwise --api-key-prompt',
         'olympus connect gemini --api-key-prompt',
         'olympus connect status [google|gmail|google-drive|dropbox]',
+        'olympus connect finish <address>',
       ],
     };
+  }
+  if (rawSource === 'finish') {
+    // Google sign-in on a server whose browser is on another computer: the
+    // page Google returned to did not load, and its address is pasted here.
+    const address = args[1] && !args[1].startsWith('--') ? args[1] : await readApiKeyFromStdin();
+    try {
+      // The callback route sits at the running worker's root (its port from
+      // worker.env or its status, whatever path its API base carries).
+      return await finishPastedOAuthCallback(address, { workerRoot: remoteAccessUrlsForCli(process.env).local_url });
+    } catch (error) {
+      if (error instanceof PastedCallbackError) throw new OperationError('invalid_params', error.message);
+      throw error;
+    }
   }
   if (rawSource === 'status') {
     const rawStatusSource = args[1] && !args[1]!.startsWith('--') ? args[1] : undefined;

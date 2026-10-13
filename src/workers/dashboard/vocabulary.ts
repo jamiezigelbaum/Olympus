@@ -1368,6 +1368,18 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
   fixOnMac: 'Open Olympus on your computer to fix this.',
   privateMatches: 'Some matching items are private and stay on your computer.',
   changeModelsOnMac: 'Change models in Olympus on your computer.',
+  /**
+   * A working Google connection made before sign-in moved onto the computer
+   * (2026-10-13). Optional: the row's Reconnect Google switches it.
+   */
+  googleSigninMoved: 'Google sign-in now happens on your computer. Reconnect once to switch.',
+  reconnectGoogle: 'Reconnect Google',
+  /**
+   * A Google sign-in in progress while Olympus runs on a server: Google
+   * returns to the server's loopback, which a browser elsewhere reaches only
+   * through the SSH tunnel; otherwise the address is pasted on the server.
+   */
+  googleConnectingOnServer: 'Waiting for you to finish signing in… If Google ends on a page that does not load, copy its address and run olympus connect finish \'<address>\' on the server.',
 } as const;
 
 /**

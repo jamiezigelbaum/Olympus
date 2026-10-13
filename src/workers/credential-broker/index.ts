@@ -19,7 +19,7 @@ import {
   isBoundedResponseTooLargeError,
 } from '../../core/http-timeout.ts';
 import { googlePublisherExchangeRefreshUrl } from '../../core/oauth-relay.ts';
-import { isGooglePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
+import { googleDesktopClientSecret, isGooglePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 import {
   googleServiceAccountTokenUrl,
@@ -1345,7 +1345,12 @@ export class EnvCredentialBroker implements CredentialBroker {
       oauth2.clientIdEnvNames,
       oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : [],
     );
-    const clientSecret = await this.resolveFirstSecret(
+    // Olympus's own Google Desktop client keeps its secret in source, never
+    // per credential (`core/publisher-oauth-client.ts`), so a connection made
+    // through it has no secret ref and finds the secret here by its client id.
+    // It comes first: any other configured secret belongs to another client
+    // and would not pair with this id.
+    const clientSecret = googleDesktopClientSecret(clientId, this.env) ?? await this.resolveFirstSecret(
       oauth2.clientSecretEnvNames ?? [],
       oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : [],
     );

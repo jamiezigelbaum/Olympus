@@ -6276,10 +6276,26 @@ function isGooglePublisherWebClientId(clientId, env = process.env) {
     return true;
   return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
 }
-var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS;
+function googleDesktopClientSecret(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return;
+  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret)
+      return overrideSecret;
+  }
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  return known?.secret.trim() || undefined;
+}
+var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
 var init_publisher_oauth_client = __esm(() => {
   GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
     DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
+  ];
+  GOOGLE_DESKTOP_CLIENTS = [
+    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
   ];
 });
 
@@ -6951,7 +6967,7 @@ class EnvCredentialBroker {
       storedState = resolved.state;
     }
     const clientId = await this.resolveFirstSecret(oauth2.clientIdEnvNames, oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : []);
-    const clientSecret = await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
+    const clientSecret = googleDesktopClientSecret(clientId, this.env) ?? await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
     const refreshToken = await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? storedState?.refreshToken?.trim();
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
@@ -11964,6 +11980,22 @@ class TierLedger {
       LIMIT ?
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
     return rows.map(recordFromRow);
+  }
+  secretsIdentities() {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, metadata_tier FROM tier_items
+      WHERE metadata_tier = 'secrets' OR content_tier = 'secrets'
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all();
+    return rows.map((row) => ({
+      identity: {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+      },
+      names: row.metadata_tier === "secrets"
+    }));
   }
   isRouted(identity) {
     return this.readRow(identity)?.routed === true;
@@ -17740,6 +17772,64 @@ var init_local_index = __esm(() => {
             metadata: {},
             fetchedAt: startedAt
           }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+        })();
+      } finally {
+        if (!this.db.inTransaction)
+          this.releaseUnreferencedChunkMedia();
+      }
+    }
+    tombstoneSecretsExtraction(identity, options) {
+      const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
+      try {
+        return this.db.transaction(() => {
+          const disposition = this.exclusions.evaluateMetadata(options.metadata);
+          if (disposition.excluded)
+            return "excluded";
+          if (disposition.disposition === "metadata_only")
+            return "metadata_only";
+          const existing = this.db.query(`
+          SELECT
+            COUNT(*) AS matching_provider_id_rows,
+            SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
+            MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
+          FROM items
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        `).get(normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), identity.provider, identity.accountScope, identity.providerItemId);
+          if (existing.matching_provider_id_rows > 1)
+            return "ambiguous";
+          if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1)
+            return "missing";
+          if (identity.sourceVersion && existing.source_version !== null && existing.source_version !== identity.sourceVersion)
+            return "stale_version";
+          if (options.skipOwner) {
+            const owned = this.db.query(`
+            SELECT 1 AS present FROM item_owners
+            WHERE item_pk = ? AND connector_id = ? AND ownership_kind = ?
+            LIMIT 1
+          `).get(existing.item_pk, options.skipOwner.connectorId, options.skipOwner.ownershipKind);
+            if (owned?.present === 1)
+              return "owned_elsewhere";
+          }
+          if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
+            return "stale_claim";
+          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const startedAt = nowIso();
+          this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 1, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+          this.tombstoneItem({
+            identity,
+            mimeType: "application/octet-stream",
+            content: { kind: "metadata_only" },
+            metadata: {},
+            fetchedAt: startedAt
+          }, options.connectorId, "observed", syncRunId, "S5", true);
+          return "tombstoned";
         })();
       } finally {
         if (!this.db.inTransaction)
@@ -26548,6 +26638,11 @@ var init_drive = __esm(() => {
   FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
 });
 
+// src/workers/connector-store/capture-spool-secrets.ts
+var init_capture_spool_secrets = __esm(() => {
+  init_engine();
+});
+
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
   init_reactions();
@@ -26555,6 +26650,7 @@ var init_reaction_index = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 var init_live_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_reaction_index();
 });
 
@@ -26572,6 +26668,7 @@ var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_P
 var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
@@ -27893,6 +27990,7 @@ var init_corpus_adapter4 = __esm(() => {
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
 var init_capture_spool_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
@@ -27907,6 +28005,7 @@ var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync2 = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -28098,7 +28197,10 @@ var init_vocabulary = __esm(() => {
     diskFreeUpUnknown: "Free up some space, then Try again.",
     fixOnMac: "Open Olympus on your computer to fix this.",
     privateMatches: "Some matching items are private and stay on your computer.",
-    changeModelsOnMac: "Change models in Olympus on your computer."
+    changeModelsOnMac: "Change models in Olympus on your computer.",
+    googleSigninMoved: "Google sign-in now happens on your computer. Reconnect once to switch.",
+    reconnectGoogle: "Reconnect Google",
+    googleConnectingOnServer: "Waiting for you to finish signing in… If Google ends on a page that does not load, copy its address and run olympus connect finish '<address>' on the server."
   };
   DASHBOARD_CHATGPT_CONNECTION_COPY = {
     not_connected: {
@@ -28784,6 +28886,7 @@ var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_P
 var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
   init_google_signin_full_copy();
+  init_publisher_oauth_client();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -34736,6 +34839,7 @@ init_tier_classifier();
 init_bounded_text();
 
 // src/workers/file-extraction/store-sink.ts
+init_engine();
 init_tier_classifier();
 init_source_ingestion_exclusions();
 init_connector_store();
@@ -34747,12 +34851,14 @@ var EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous";
 var EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only";
 var EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued";
 var EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
+var EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale";
 var EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
 
 // src/workers/file-extraction/runner.ts
 var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
   [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
+  [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: "failed_terminal",
   [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",

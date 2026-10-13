@@ -19,7 +19,7 @@ import { join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
 import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
-import { dropboxPublisherAppKey, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
+import { dropboxPublisherAppKey, googleDesktopClient, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 import {
   createOAuthRelayNonce,
   createOAuthRelayStateKeys,
@@ -605,6 +605,12 @@ export interface EmailSourceWorkerOptions {
      * relay hand-back on this worker.
      */
     oauthHandback?: () => { origin: string; installId: string } | undefined;
+    /**
+     * The port this engine listens on, for a Google sign-in started from a
+     * dashboard that is not itself on loopback (`dashboardGoogleLoopbackOrigin`).
+     * Absent: 8010, the engine's default.
+     */
+    loopbackPort?: number;
     fileSourceScopes?: {
       summaries(): SourceFolderScopeSummary[];
       browse(input: {
@@ -1488,13 +1494,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // the URL the provider redirected to left `code` and `state` sitting in
         // this tab's browser history despite `Cache-Control: no-store`, which
         // only keeps a response out of the disk cache, not out of history. This
-        // route takes no query parameters and reads no attempt — it exists only
-        // to be a clean URL to redirect a browser to after the code is already
-        // spent — so it matches on source alone.
+        // route reads no attempt and no credential — it exists only to be a
+        // clean URL to redirect a browser to after the code is already spent —
+        // so it matches on source alone, plus one fixed `return=chatgpt` flag.
         const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
         if (request.method === 'GET' && oauthCallbackDone) {
           const source = parseDashboardOAuthSource(decodeURIComponent(oauthCallbackDone[1]!));
-          return dashboardOAuthCompleteHtml({ source, returnTo: dashboardReturnTo() });
+          // One fixed flag, never a URL: a sign-in ChatGPT handed to this
+          // computer ends with "go back to ChatGPT" instead.
+          const returnTo = url.searchParams.get('return') === 'chatgpt' ? CHATGPT_RETURN_TO : dashboardReturnTo();
+          return dashboardOAuthCompleteHtml({ source, returnTo });
         }
 
         if (request.method === 'GET' && url.pathname.startsWith('/oauth/callback/')) {
@@ -1660,6 +1669,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (attempt.relay?.handbackOrigin) {
             return dashboardOAuthCompleteHtml({ source, returnTo: CHATGPT_RETURN_TO });
           }
+          const chatgptDone = attempt.returnTo === CHATGPT_RETURN_TO ? '?return=chatgpt' : '';
           // MINOR 2 (Codex round 2): redirect to the query-free `/done` route
           // above rather than rendering the "Connected" page at this URL, which
           // still carries the now-spent `code` and `state` in its own address —
@@ -1672,7 +1682,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return new Response(null, {
             status: 303,
             headers: {
-              Location: `/oauth/callback/${encodeURIComponent(source)}/done`,
+              Location: `/oauth/callback/${encodeURIComponent(source)}/done${chatgptDone}`,
               'Referrer-Policy': 'no-referrer',
             },
           });
@@ -1696,7 +1706,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // and the first sync after connect both check readiness, so indexing
           // simply waits for the models (owner live test, 2026-10-01: a Venice
           // analyst without a key refused Connect from ChatGPT).
-          if (record.handback !== 'relay') assertDashboardModelsReady();
+          //
+          // A sign-in ChatGPT handed to this computer (handback: computer,
+          // from the `/go/<id>` hand-off's loopback leg) is the same case.
+          if (record.handback !== 'relay' && record.handback !== 'computer') assertDashboardModelsReady();
           const secretStore = dashboardSecretStore(sourceDashboard);
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);
@@ -1706,7 +1719,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // install (the state's nonce carries the install id the relay routes
           // on). Only the publisher apps' relay callback can do that.
           const handback = record.handback === 'relay' ? sourceDashboard.oauthHandback?.() : undefined;
-          if (record.handback !== undefined && !handback) {
+          // A Google sign-in ChatGPT handed to this computer: it started on
+          // loopback here and returns here, and only its last page differs.
+          const computerHandback = record.handback === 'computer';
+          if (record.handback !== undefined && !handback && !computerHandback) {
             throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This sign-in cannot return through the relay on this install.');
           }
           const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
@@ -1734,6 +1750,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           if (handback && (submittedClientId || publisher?.relay !== true)) {
             throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This source uses your own app registration; connect it in Olympus on your Mac.');
+          }
+          if (computerHandback && (submittedClientId || publisher?.loopback !== true)) {
+            throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This source does not sign in on this computer; connect it in the Olympus dashboard.');
           }
           const clientId = submittedClientId
             ?? publisher?.clientId
@@ -1778,9 +1797,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // ONE redirect URI per flow, and the same string reaches the token
           // exchange: `startExternalOAuthSourceConnection` keeps it on the
           // prepared flow and sends it back at exchange time, which is what the
-          // providers' exact-string matching requires.
-          const redirectUri = publisher?.redirectUri
-            ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
+          // providers' exact-string matching requires. Google's Desktop client
+          // returns to this engine on loopback (`dashboardGoogleLoopbackOrigin`).
+          const redirectUri = publisher?.loopback
+            ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}`
+            : publisher?.redirectUri
+              ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
           // The relay bounces the browser to whatever origin the state names,
           // so a relay flow's state is signed and carries that origin. Minted
           // here, inside an authenticated control-session route, and never from
@@ -1833,7 +1855,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           dashboardOAuthAttempts.set(source, {
             source,
             pending,
-            returnTo: handback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
+            returnTo: handback || computerHandback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
             startedAt: startedAtDate.toISOString(),
             expiresAt,
             ...(relayNonce ? { relay: { nonce: relayNonce, ...(handback ? { handbackOrigin: handback.origin } : {}) } } : {}),
@@ -6191,7 +6213,7 @@ async function dashboardStoredClientIdIsPublisherOwned(
 function dashboardCurrentPublisherClientIds(source: DashboardOAuthSource | 'google'): string[] {
   if (source === 'x') return [];
   if (dashboardGoogleOAuthSource(source)) {
-    return [dashboardGooglePilotClientId(), googlePublisherWebClientId()]
+    return [dashboardGooglePilotClientId(), googlePublisherWebClientId(), googleDesktopClient()?.clientId]
       .filter((id): id is string => Boolean(id));
   }
   const appKey = dropboxPublisherAppKey();
@@ -6224,10 +6246,11 @@ function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey: string): st
  *   that matches a CURRENT publisher key). Reading "is a client_id present"
  *   instead stuck a completed publisher connection in bring-your-own the
  *   moment it needed reauthentication (Codex round 3 on e75598f7).
- * - **Publisher Google always uses the Web client and relay.** This includes
- *   HTTP and HTTPS loopback dashboards: one publisher client, one registered
- *   relay redirect, and one publisher-side exchange keep the confidential Web
- *   client secret out of every Olympus install.
+ * - **Publisher Google signs in on this computer** (owner, 2026-10-13): the
+ *   Desktop client, a loopback redirect to this engine, PKCE, and a direct
+ *   token exchange with Google, so no Olympus server is in the token path.
+ *   Until a Desktop client is configured it keeps the Web client, relay and
+ *   publisher exchange it used before.
  * - **Publisher Dropbox also goes through the relay** with `redirect_uri` =
  *   the one registered relay URL and a signed state naming this dashboard's
  *   origin.
@@ -6240,9 +6263,12 @@ function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey: string): st
  */
 interface DashboardPublisherOAuthFlow {
   clientId: string;
-  redirectUri: string;
+  /** The publisher relay, for a relay flow; a loopback flow builds its own from the dashboard origin. */
+  redirectUri?: string;
   /** True when the redirect is the publisher relay and the state must be signed. */
   relay: boolean;
+  /** True for Google's Desktop client: the provider returns to this engine on loopback. */
+  loopback?: boolean;
 }
 
 function dashboardPublisherOAuthFlow(
@@ -6252,6 +6278,8 @@ function dashboardPublisherOAuthFlow(
   if (source === 'x') return undefined;
   if (ownClientId) return undefined;
   if (dashboardGoogleOAuthSource(source)) {
+    const desktop = googleDesktopClient();
+    if (desktop) return { clientId: desktop.clientId, relay: false, loopback: true };
     const webClientId = googlePublisherWebClientId();
     return webClientId ? { clientId: webClientId, redirectUri: oauthRelayUrl(), relay: true } : undefined;
   }
@@ -6417,6 +6445,35 @@ async function dashboardGoogleOAuthClientSecret(
   }
   return undefined;
 }
+
+/**
+ * Where Google's Desktop client returns: this engine on the loopback address.
+ *
+ * Google accepts any port on `http://127.0.0.1` for a Desktop client and
+ * nothing else, so the host is always that literal. The port is the one the
+ * browser already reached this dashboard on when the dashboard itself is on
+ * loopback (`localhost`, `127.0.0.1`, `[::1]`, or a `*.localhost` desktop
+ * origin): that is right on the Mac, on a Linux desktop, and through an SSH
+ * tunnel whose local port differs from the engine's. Any other dashboard
+ * origin (a tunnel name, a gateway) cannot be reached that way, so the
+ * redirect names the engine's own port, and a browser on another machine
+ * shows an unreachable page whose address `olympus connect finish` takes
+ * (docs/ops/OAUTH_RELAY.md, "Google sign-in on the computer").
+ */
+function dashboardGoogleLoopbackOrigin(dashboardOrigin: string, enginePort: number | undefined): string {
+  try {
+    const origin = new URL(dashboardOrigin);
+    const host = origin.hostname.toLowerCase();
+    const loopbackHost = host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host.endsWith('.localhost');
+    if (origin.protocol === 'http:' && loopbackHost) return `http://127.0.0.1:${origin.port || '80'}`;
+  } catch {
+    // Fall through to the engine's own port.
+  }
+  return `http://127.0.0.1:${enginePort ?? DASHBOARD_DEFAULT_ENGINE_PORT}`;
+}
+
+/** The engine's port when the server did not say (OLYMPUS_EMAIL_SOURCE_PORT's default). */
+const DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 
 function dashboardGooglePilotClientId(): string | undefined {
   return process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID?.trim() || packagedGooglePilotClientId();

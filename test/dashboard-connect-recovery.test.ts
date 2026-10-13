@@ -15,7 +15,7 @@ import {
 } from '../src/core/sovereignty.ts';
 import type { ExternalPendingOAuthConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
-import { DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID } from '../src/core/publisher-oauth-client.ts';
+import { DEFAULT_GOOGLE_DESKTOP_CLIENT_ID } from '../src/core/publisher-oauth-client.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
@@ -132,15 +132,16 @@ describe('a Google reconnect keeps the client secret its own registration was is
     });
 
     try {
-      // HTTP loopback uses the publisher Web flow too, even when a legacy
-      // Desktop client is configured. No local secret accompanies the request.
+      // The shipped Desktop client starts the flow, not the legacy pilot
+      // client, and no local secret accompanies the request: its own secret
+      // is found by client id at exchange time (publisher-oauth-client.ts).
       const response = await worker.fetch(new Request('http://127.0.0.1:8010/dashboard/connect/oauth/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'gmail' }),
       }));
       expect(response.status).toBe(200);
-      expect(starts).toEqual([{ clientId: DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID }]);
+      expect(starts).toEqual([{ clientId: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID }]);
     } finally {
       if (previous === undefined) delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
       else process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = previous;
