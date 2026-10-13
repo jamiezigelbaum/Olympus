@@ -33479,7 +33479,7 @@ function sweepOwnerRuleRaises(options) {
   if (!classification || classification.unavailableReason)
     return report;
   const ledger = set.ledger;
-  const raising = (classification.rules ?? []).filter(isRaisingRule);
+  const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
   const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
   const state = readState(ledger.readMeta(SWEEP_META_KEY));
   const done = state.done.filter((key2) => keyed.has(key2));
@@ -33490,77 +33490,233 @@ function sweepOwnerRuleRaises(options) {
     return report;
   }
   const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
-  const resume = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending.after : undefined;
+  const progress = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending : undefined;
+  const held = [...progress?.held ?? []];
+  let overflow = progress?.overflow === true;
+  const attempt = (record) => {
+    report.scanned += 1;
+    let raised;
+    try {
+      raised = raiseRoutedItem(set, record, pendingRules, classification);
+    } catch {
+      raised = "deferred";
+    }
+    if (raised === "raised")
+      report.raised += 1;
+    else if (raised === "secrets")
+      report.secrets += 1;
+    else if (raised === "deferred") {
+      if (held.length < MAX_HELD_ITEMS)
+        held.push(identityOf3(record));
+      else
+        overflow = true;
+    }
+  };
+  if (progress?.retry && !progress.overflow) {
+    const retrying = held.splice(0);
+    for (const identity of retrying) {
+      const record = ledger.getCurrent(identity);
+      if (record?.routed)
+        attempt(record);
+    }
+    if (held.length === 0) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+    return report;
+  }
+  const resume = progress?.after;
   const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
   const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
-  for (const record of rows) {
-    report.scanned += 1;
-    try {
-      raiseIfMatched(set, record, pendingRules, classification);
-    } catch {
-      continue;
-    }
-  }
+  for (const record of rows)
+    attempt(record);
   if (rows.length < limit) {
-    writeState(ledger, { done: [...done, ...pendingKeys] });
+    if (held.length === 0 && !overflow) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, overflow ? { done } : { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
   } else {
     report.complete = false;
-    writeState(ledger, { done, pending: { rules: pendingKeys, after: identityOf3(rows.at(-1)) } });
+    writeState(ledger, {
+      done,
+      pending: { rules: pendingKeys, after: identityOf3(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+    });
   }
   return report;
-  function raiseIfMatched(set2, record, rules, inputs) {
-    if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
-      return;
-    const identity = identityOf3(record);
-    if (set2.ledger.getOverride(identity))
-      return;
-    const current2 = set2.ledger.copies(identity).filter((copy) => copy.state === "current");
-    const names = copyServingLayer(current2, "metadata");
-    const domain = names ? set2.domainForCorpus(names.corpusId) : undefined;
-    const exported = domain ? set2.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      return;
-    const signals = storedSignals(exported);
-    const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
-    if (matched.length === 0)
-      return;
-    const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-    const metadataTier = maxTier(record.metadataTier, ruleTier);
-    if (tierRank(metadataTier) <= tierRank(record.metadataTier))
-      return;
-    const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
-      rules: [...inputs.rules ?? []],
-      ...inputs.retirePublic ? { retirePublic: true } : {}
-    });
-    const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-    const contentTier = maxTier(record.contentTier, metadataTier);
-    const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
-    const decision = {
-      metadataTier,
-      contentTier,
-      decidedBy: "owner_rule",
-      reasons: [
-        ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
-        ...record.reasons.filter((reason) => reason.startsWith("content:"))
-      ],
-      state: contentPending ? "pending" : "current",
-      contentRead: record.contentRead,
-      metadataPending: false,
-      contentPending,
-      metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
-      metadataFlagged: record.metadataFlagged,
-      engineVersion: record.engineVersion,
-      mapRevision: record.mapRevision,
-      snifferId: classified.snifferId
-    };
-    if (metadataTier === "secrets") {
-      if (settleRoutedSecrets(set2, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
-        report.secrets += 1;
-      return;
-    }
-    set2.ledger.recordRoutedPlacement(identity, decision, set2.placementFor(decision));
-    report.raised += 1;
+}
+function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
+  if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return "unchanged";
+  const identity = identityOf3(record);
+  if (set.ledger.getOverride(identity))
+    return "unchanged";
+  const current2 = set.ledger.copies(identity).filter((copy) => copy.state === "current");
+  const names = copyServingLayer(current2, "metadata");
+  const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
+  const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+  const signals = { ...exported ? storedSignals(exported) : {}, ...extraSignals };
+  const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
+  if (matched.length === 0)
+    return "unchanged";
+  const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
+  if (record.state === "moving") {
+    const heading = maxTier(record.metadataTier, record.targetMetadataTier ?? record.metadataTier);
+    return tierRank(heading) >= tierRank(ruleTier) ? "unchanged" : "deferred";
   }
+  if (!exported)
+    return current2.length > 0 ? "deferred" : "unchanged";
+  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  if (tierRank(metadataTier) <= tierRank(record.metadataTier))
+    return "unchanged";
+  const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
+    rules: [...inputs.rules ?? []],
+    ...inputs.retirePublic ? { retirePublic: true } : {}
+  });
+  const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
+  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
+  const decision = {
+    metadataTier,
+    contentTier,
+    decidedBy: "owner_rule",
+    reasons: [
+      ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...record.reasons.filter((reason) => reason.startsWith("content:"))
+    ],
+    state: contentPending ? "pending" : "current",
+    contentRead: record.contentRead,
+    metadataPending: false,
+    contentPending,
+    metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: classified.snifferId
+  };
+  if (metadataTier === "secrets") {
+    return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
+  }
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return "raised";
+}
+async function sweepLabelRuleRaises(options) {
+  const report = { rules: 0, scanned: 0, raised: 0, secrets: 0, pending: 0 };
+  const { set, provider, accountScope, source } = options;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return report;
+  const ledger = set.ledger;
+  const keyed = new Map;
+  for (const rule of classification.rules ?? []) {
+    if (!isRaisingRule(rule) || !isLabelRule(rule))
+      continue;
+    if (rule.source !== undefined && rule.source !== provider)
+      continue;
+    keyed.set(ruleKey(rule), rule);
+  }
+  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  let written = ledger.readMeta(metaKey);
+  const stored = readLabelState(written);
+  const done = new Set(stored.done.filter((key2) => keyed.has(key2)));
+  let walk = stored.walk && keyed.has(stored.walk.rule) && !done.has(stored.walk.rule) ? stored.walk : undefined;
+  const save = () => {
+    const state = { done: [...done].sort(), ...walk ? { walk } : {} };
+    const next = JSON.stringify(state);
+    if (next === written || written === undefined && done.size === 0 && !walk)
+      return;
+    ledger.writeMeta(metaKey, next);
+    written = next;
+  };
+  const queue = [...keyed.keys()].filter((key2) => options.recheck === true || !done.has(key2)).sort();
+  let pagesLeft = Math.max(1, options.maxPages ?? DEFAULT_LABEL_SWEEP_PAGES);
+  try {
+    for (const key2 of queue) {
+      if (pagesLeft <= 0)
+        break;
+      const rule = keyed.get(key2);
+      const wasPending = !done.has(key2);
+      const resumed = wasPending && walk?.rule === key2 ? walk : undefined;
+      let pageToken = resumed?.pageToken;
+      let deferred = resumed?.deferred === true;
+      report.rules += 1;
+      let finished = false;
+      let firstPage = true;
+      while (pagesLeft > 0) {
+        pagesLeft -= 1;
+        let page;
+        try {
+          page = await source.listLabelled(rule.match.value, pageToken !== undefined ? { pageToken } : {});
+        } catch (error) {
+          if (error instanceof LabelPageRejectedError && firstPage && resumed)
+            walk = undefined;
+          throw error;
+        }
+        firstPage = false;
+        for (const id of page.ids) {
+          report.scanned += 1;
+          const outcome = raiseLabelled(set, { provider, accountScope, providerItemId: id }, rule, classification);
+          if (outcome === "raised")
+            report.raised += 1;
+          else if (outcome === "secrets")
+            report.secrets += 1;
+          else if (outcome === "deferred")
+            deferred = true;
+        }
+        pageToken = page.nextPageToken || undefined;
+        if (pageToken === undefined) {
+          finished = true;
+          break;
+        }
+        if (wasPending) {
+          walk = { rule: key2, pageToken, ...deferred ? { deferred: true } : {} };
+          save();
+        }
+      }
+      if (!finished)
+        break;
+      if (deferred)
+        done.delete(key2);
+      else
+        done.add(key2);
+      if (walk?.rule === key2)
+        walk = undefined;
+      save();
+    }
+  } catch {}
+  save();
+  report.pending = [...keyed.keys()].filter((key2) => !done.has(key2)).length;
+  return report;
+}
+function raiseLabelled(set, identity, rule, classification) {
+  try {
+    const record = set.ledger.getCurrent(identity);
+    if (!record || !record.routed)
+      return "unchanged";
+    return raiseRoutedItem(set, record, [rule], classification, { labels: [rule.match.value] });
+  } catch {
+    return "deferred";
+  }
+}
+function readLabelState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const walk = parsed.walk;
+    return {
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
+      ...walk && typeof walk.rule === "string" && typeof walk.pageToken === "string" ? { walk: { rule: walk.rule, pageToken: walk.pageToken, ...walk.deferred === true ? { deferred: true } : {} } } : {}
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function isLabelRule(rule) {
+  return rule.match.kind === "label";
 }
 function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
@@ -33599,13 +33755,26 @@ function readState(raw) {
     return { done: [] };
   try {
     const parsed = JSON.parse(raw);
+    const pending = parsed.pending;
     return {
       done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
-      ...parsed.pending && Array.isArray(parsed.pending.rules) ? { pending: parsed.pending } : {}
+      ...pending && Array.isArray(pending.rules) ? {
+        pending: {
+          rules: pending.rules,
+          ...pending.after ? { after: pending.after } : {},
+          ...Array.isArray(pending.held) ? { held: pending.held.filter(isIdentity) } : {},
+          ...pending.retry === true ? { retry: true } : {},
+          ...pending.overflow === true ? { overflow: true } : {}
+        }
+      } : {}
     };
   } catch {
     return { done: [] };
   }
+}
+function isIdentity(value) {
+  const record = value;
+  return typeof record === "object" && record !== null && typeof record.provider === "string" && typeof record.accountScope === "string" && typeof record.providerItemId === "string" && (record.providerConversationId === undefined || typeof record.providerConversationId === "string");
 }
 function writeState(ledger, state) {
   ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
@@ -33621,11 +33790,17 @@ function identityOf3(record) {
     ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
   };
 }
-var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep";
+var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", LABEL_SWEEP_META_KEY = "owner_rules_label_sweep", DEFAULT_LABEL_SWEEP_PAGES = 20, MAX_HELD_ITEMS = 200, LabelPageRejectedError;
 var init_tier_rules_sweep = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rejudge();
+  LabelPageRejectedError = class LabelPageRejectedError extends Error {
+    constructor() {
+      super("The provider no longer accepts the saved label page.");
+      this.name = "LabelPageRejectedError";
+    }
+  };
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -41856,6 +42031,41 @@ class GoogleGmailSourceConnector {
     return parts.length > 0 ? parts.join(" ") : undefined;
   }
 }
+function gmailLabelledMessageSource(getClient) {
+  let known;
+  return {
+    async listLabelled(label, page) {
+      const client = await getClient();
+      let labelId = label.trim();
+      if (client.listLabels) {
+        known ??= await client.listLabels();
+        const wanted = labelId.toLowerCase();
+        const match = known.find((candidate) => candidate.id === labelId) ?? known.find((candidate) => candidate.id.trim().toLowerCase() === wanted);
+        if (!match)
+          return { ids: [] };
+        labelId = match.id;
+      }
+      let response;
+      try {
+        response = await client.listMessages({
+          maxResults: GMAIL_LABEL_PAGE_SIZE,
+          labelIds: [labelId],
+          includeSpamTrash: true,
+          ...page.pageToken ? { pageToken: page.pageToken } : {}
+        });
+      } catch (error) {
+        if (page.pageToken && error instanceof Error && /Gmail API request failed \((?:400|404)\)/.test(error.message)) {
+          throw new GmailPageTokenRejectedError;
+        }
+        throw error;
+      }
+      return {
+        ids: response.messages.map((message) => message.id).filter((id) => id),
+        ...response.nextPageToken ? { nextPageToken: response.nextPageToken } : {}
+      };
+    }
+  };
+}
 function gmailConnectorStoreClassification(ownerRules = []) {
   return {
     baselineTrustTier: "S3",
@@ -42037,12 +42247,14 @@ class RestGmailApiClient {
   async listMessages(request) {
     const params = new URLSearchParams({
       maxResults: String(request.maxResults),
-      includeSpamTrash: "false"
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
     });
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     if (request.query)
       params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
     const record = asRecord6(json, "Gmail messages list response");
     return {
@@ -42277,13 +42489,19 @@ function safeProviderDetail(value) {
 function hashString3(value) {
   return createHash22("sha256").update(value).digest("hex");
 }
-var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
   init_ingest_filter();
   init_request_budget();
+  GmailPageTokenRejectedError = class GmailPageTokenRejectedError extends Error {
+    constructor() {
+      super("Gmail rejected the saved page token.");
+      this.name = "GmailPageTokenRejectedError";
+    }
+  };
   GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
 });
 
@@ -42363,6 +42581,32 @@ function createGmailConnectorStoreSyncHandler(options) {
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened(store) } : {}
   });
+  const sweepLabelRules = async (connector, recheck = false) => {
+    try {
+      const labelled = gmailLabelledMessageSource(() => connector.apiClientForTooling());
+      const report = await sweepLabelRuleRaises({
+        set: tierSet,
+        provider: GMAIL_PROVIDER,
+        accountScope: account,
+        ...recheck ? { recheck: true } : {},
+        source: {
+          async listLabelled(label, page) {
+            let answer;
+            try {
+              answer = await labelled.listLabelled(label, page);
+            } catch (error) {
+              throw error instanceof GmailPageTokenRejectedError ? new LabelPageRejectedError : error;
+            }
+            options.assertScopeCurrent?.();
+            return answer;
+          }
+        }
+      });
+      return report.pending > 0 ? [GMAIL_LABEL_RULES_PENDING_WARNING] : [];
+    } catch {
+      return [GMAIL_LABEL_RULES_PENDING_WARNING];
+    }
+  };
   const runBothStores = async (input) => {
     const traversal = scopedTraversal(input.connector, connectorId, options.assertScopeCurrent);
     const sync = {
@@ -42388,11 +42632,13 @@ function createGmailConnectorStoreSyncHandler(options) {
   return {
     async sync(request = {}) {
       const maxMessages = request.max_messages ?? options.maxMessages;
+      const connector = buildConnector({
+        ...maxMessages !== undefined ? { maxMessages } : {},
+        ...request.query ? { query: request.query } : {}
+      });
+      await sweepLabelRules(connector);
       const run = await runBothStores({
-        connector: buildConnector({
-          ...maxMessages !== undefined ? { maxMessages } : {},
-          ...request.query ? { query: request.query } : {}
-        }),
+        connector,
         ...maxMessages !== undefined ? { maxItems: maxMessages } : {}
       });
       return {
@@ -42412,6 +42658,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         warnings.push(GMAIL_RESUME_REJECTED_WARNING);
       const provenance = sourceInvocationProvenance(request.provenance);
       let connector = buildConnector({ maxMessages: maxItems, provenance });
+      warnings.push(...await sweepLabelRules(connector));
       let head;
       try {
         head = await runBothStores({
@@ -42446,6 +42693,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         maxMessages: MAX_RECONCILE_MESSAGES,
         provenance: sourceInvocationProvenance(request.provenance)
       });
+      const warnings = await sweepLabelRules(connector, true);
       const head = await runBothStores({ connector, reconcile: true });
       return taskOutcome({
         kind: GMAIL_STORE_RECONCILE_RECEIPT_KIND,
@@ -42454,7 +42702,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         usage: connector.requestBudgetStatus(),
         resumed: false,
         checkpoint: null,
-        warnings: []
+        warnings
       });
     },
     lastStoreRunCompletedAt: () => latestCompletedAt([
@@ -42625,9 +42873,10 @@ function boundedMaxItems(value, fallback) {
 function latestCompletedAt(values) {
   return values.filter((value) => Boolean(value)).sort().at(-1);
 }
-var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, GMAIL_SCOPED_CONNECTOR_PREFIX;
+var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", GMAIL_LABEL_RULES_PENDING_WARNING = "gmail_label_rules_pending", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_rules_sweep();
   init_embeddings();
   init_gmail();
   init_gmail_live_control();
