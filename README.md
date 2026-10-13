@@ -138,17 +138,12 @@ connection that you approve on that computer.
 ### 1. Add Olympus in ChatGPT
 
 Install Olympus on your computer first ([Get started](#get-started)).
-Olympus is on its way to ChatGPT's app directory. Until it is listed, you can
-add it in Developer mode. OpenAI decides who has Developer mode: its
-[help article](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)
-offers it on ChatGPT on the web to Business workspace admins and owners, to
-Enterprise and Edu members an admin allows, and to Pro with read-only tools
-only, not to Plus. On Pro, ChatGPT can search and answer from Olympus, but
-setup and the private answer panel may not be available there; use the
-dashboard on your computer (`olympus dashboard`) instead. With Developer mode
-on (**Settings**, then **Apps**, then **Advanced settings**), create a
-connector, name it Olympus, choose OAuth, and paste
-`https://mcp.olympusplugin.ai/mcp` as the URL. Step by step:
+Olympus is on its way to ChatGPT's app directory. Until it is listed, add it
+in Developer mode: in ChatGPT, open **Settings**, then **Apps**, and turn on
+**Developer mode** under **Advanced settings**. Then create a connector, name
+it Olympus, choose OAuth, and paste `https://mcp.olympusplugin.ai/mcp` as the
+URL. OpenAI decides which accounts have Developer mode; in a work or school
+workspace, an admin may need to allow it. Step by step:
 <https://olympusplugin.ai/install/chatgpt/>. On Omarchy,
 ChatGPT may still say Olympus needs a Mac; it works on Omarchy too.
 
