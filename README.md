@@ -135,13 +135,14 @@ connection that you approve on that computer.
 
 ### 1. Add Olympus in ChatGPT
 
-Install Olympus on your computer first ([Get started](#get-started)). Then,
-in the ChatGPT desktop app, add **Olympus** from the plugin directory and ask
-*"Connect Olympus"*. ChatGPT's setup skill shows the install command if
-Olympus is not on your computer yet; it never runs commands itself. ChatGPT's
-setup steps and its plugin listing still say Mac only until the plugin's next
-directory update: on Omarchy, install Olympus with the Linux command first, then
-connect.
+Install Olympus on your computer first ([Get started](#get-started)).
+Olympus is on its way to ChatGPT's app directory. Until it is listed, add it
+in Developer mode, which ChatGPT offers on Plus, Pro, Business, Enterprise and
+Edu plans: in ChatGPT, open **Settings**, then **Apps**, and turn on
+**Developer mode** under **Advanced settings**. Then create a connector, name
+it Olympus, choose OAuth, and paste `https://mcp.olympusplugin.ai/mcp` as the
+URL. Step by step: <https://olympusplugin.ai/install/chatgpt/>. On Omarchy,
+ChatGPT may still say Olympus needs a Mac; it works on Omarchy too.
 
 ### 2. Approve ChatGPT on your computer
 
@@ -346,7 +347,7 @@ flowchart LR
 ```
 
 Olympus uses **Personal** (ordinary personal and work content), **Private**
-(sensitive material), and **Secrets** (never model input). A ChatGPT
+(sensitive material), and **Secrets** (once recognized, never model input). A ChatGPT
 install, and any install on the `no-sensitive` posture, has no Public tier:
 anything that would have been Public is Personal. The other OpenClaw
 postures, and installs made before 1.0, keep a **Public** tier too. See the
@@ -373,11 +374,11 @@ questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private
 lane your posture approved answers it and your agent receives only the checked,
-cited answer. Secrets are never searched by content: Olympus can tell you where
+cited answer. Secrets Olympus recognizes are never searched by content: it can tell you where
 one lives, never what it says.
 
 Some rules are not configurable, by design: secure content never routes to
-ordinary cloud models, secrets are denied to every lane, and an
+ordinary cloud models, recognized secrets are denied to every lane, and an
 exhausted policy chain refuses rather than silently downgrading.
 
 ## Get started with OpenClaw
@@ -506,10 +507,13 @@ OpenClaw runtime config.
 Olympus is built on the assumption that the boundary *is* the product:
 
 - **Local-first ingestion.** Raw source content lands in local SQLite
-  indexes before any model sees anything. Classification happens at home.
-- **Sanitized handoffs.** Agents receive answer text, citations, and audit
-  counts — typed wire shapes with `raw_source_exposed: false`, re-validated
-  client-side. Raw documents, embeddings, cursors, and tokens never cross.
+  indexes before any model sees anything. Classification happens on your
+  computer unless you choose Venice for it.
+- **Sanitized handoffs.** Agents receive answer text, excerpts of Personal
+  items, citations, and audit counts — typed wire shapes with
+  `raw_source_exposed: false`, re-validated client-side. Embeddings, cursors,
+  and tokens never cross. Private items reach an agent only as answers
+  written from them, which can repeat what they say; ChatGPT's model gets none.
 - **A hard membrane.** Any evidence pack containing sensitive material is
   barred from standard cloud lanes by two independent checks — policy
   validation at config load, and a runtime re-check on every request.
@@ -643,7 +647,8 @@ supported Hermes configuration narrows that server to exactly `source_answer`,
 per-server tool allowlist.
 
 `ask_anonymously` sends one typed question to a frontier model through zkAPI
-(paid per question from the user's own balance; nothing identifies them). The
+(paid per question, anonymously, from the user's own balance; what the
+question says can still identify them). The
 first call with no `level` returns `needs_choice`: the agent asks the user once
 for Strict (their own model rewrites the question into general questions before
 it leaves) or Standard (their words, prepared as written, lightly cleaned up or
@@ -758,7 +763,7 @@ remain at input boundaries do not select another runtime or store.
 
 Olympus is TypeScript on Bun: one plugin package, stable versioned architecture
 contracts (`SourceConnector` / `EvidencePack` / `Analyst` — only the
-connector is per-source), and 1,400+ tests including an architecture guard
+connector is per-source), and 3,400+ tests including an architecture guard
 that keeps per-source answer logic out of the shared spine.
 
 ```bash
