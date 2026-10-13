@@ -27,7 +27,7 @@
   <main id="main">
     <div class="wrap">
       <h1>Fix it on your computer</h1>
-      <p class="lede">A few things can only be set up on your computer, because they need a key, a pairing or your private things, none of which go through ChatGPT or any other AI app. When Olympus says to do something on your computer, this page says what and where.</p>
+      <p class="lede">A few things can only be set up on your computer, because they need a key, a pairing or your private things, none of which go through your AI app. When Olympus says to do something on your computer, this page says what and where.</p>
 
       <h2 id="only-here">What is only on your computer</h2>
       <p>These live only in Olympus on your computer, under <strong>On this computer</strong>. No AI app can show them or change them.</p>
@@ -40,9 +40,9 @@
       <p>To reach them, <a href="#open-olympus">open Olympus on your computer</a>, then choose <strong>Open</strong> next to the one you want under <strong>On this computer</strong>.</p>
 
       <h2 id="open-olympus">Open Olympus on your computer</h2>
-      <p>On the computer running Olympus, go to <a href="/open/dashboard/">olympusplugin.ai/open/dashboard</a> and choose <strong>Open Olympus</strong>; if your browser asks whether to open Olympus, choose <strong>Open</strong>. From the Olympus dashboard in ChatGPT, <strong>Connect</strong> and <strong>Fix this on your computer</strong> do the same for you. If nothing opens (on a phone, or with an older Olympus), open Terminal on your computer and run:</p>
+      <p>On the computer running Olympus, go to <a href="/open/dashboard/">olympusplugin.ai/open/dashboard</a> and choose <strong>Open Olympus</strong>; if your browser asks whether to open Olympus, choose <strong>Open</strong>. In ChatGPT, <strong>Connect</strong> and <strong>Fix this on your computer</strong> in the Olympus dashboard do the same for you. If nothing opens (on a phone, or with an older Olympus), open a terminal on your computer and run:</p>
       <pre><code>olympus dashboard</code></pre>
-      <p>It opens the Olympus dashboard in your computer's browser. The link works once, for 15 minutes; run the command again for a new one. If Terminal says Olympus is not running, see <a href="/help/mac-offline/">ChatGPT says your computer is offline</a>.</p>
+      <p>It opens the Olympus dashboard in your computer's browser. The link works once, for 15 minutes; run the command again for a new one. If the terminal says Olympus is not running, see <a href="/help/mac-offline/">Your AI says your computer is offline</a>.</p>
 
       <h3 id="headless">On a Linux computer without a screen</h3>
       <p>If Olympus runs on an Omarchy computer you reach over SSH, only your own account there can open Olympus or approve an AI app. From the computer you sit at, open a secure tunnel to it (<code>olympus doctor</code> on that computer prints the exact path for your user; it looks like this):</p>
@@ -57,18 +57,18 @@
       <p>Google sign-in happens on the computer where Olympus runs, so your Google account connects straight to it. In ChatGPT, <strong>Connect</strong> gives you a link: open it on that computer and it continues to Google. On a phone the link says to open it on your computer instead; Gmail and Google Drive cannot be connected from a phone. If Olympus runs on a computer you reach over SSH, see <a href="#headless">On a Linux computer without a screen</a>.</p>
       <p>If you connected Google before Olympus 1.1.0, it keeps working. The dashboard offers <strong>Reconnect Google</strong> once, to move the connection to sign-in on your computer.</p>
 
-      <h2 id="connect">Connect a source ChatGPT can't connect</h2>
-      <p>ChatGPT connects Gmail, Google Drive and Dropbox. These sources are connected on your computer instead:</p>
+      <h2 id="connect">Connect your sources</h2>
+      <p>Every source can be connected from the Olympus dashboard on your computer. In ChatGPT, Gmail, Google Drive and Dropbox can also be connected from the Olympus dashboard there. These are only ever connected on your computer:</p>
       <ul>
         <li><strong>X bookmarks</strong> use an X developer app of your own.</li>
         <li><strong>Readwise</strong> uses your Readwise access token, pasted on your computer.</li>
         <li><strong>Telegram</strong> and <strong>WhatsApp</strong> pair with your computer.</li>
       </ul>
-      <p><a href="#open-olympus">Open Olympus on your computer</a>, find the source under <strong>Sources</strong> and choose <strong>Connect</strong>; the page walks you through it. Then choose <strong>Check again</strong> in the dashboard in ChatGPT.</p>
+      <p><a href="#open-olympus">Open Olympus on your computer</a>, find the source under <strong>Sources</strong> and choose <strong>Connect</strong>; the page walks you through it. In ChatGPT, then choose <strong>Check again</strong> in the Olympus dashboard there.</p>
       <p><strong>Gmail and Google Drive, when Google sign-in is full.</strong> Google limits how many people can sign in through Olympus's own Google app. When the dashboard says Google sign-in is full for the moment, connect Gmail and Google Drive with a Google app of your own instead: <a href="#open-olympus">open Olympus on your computer</a>, choose <strong>Set up</strong> next to Gmail or Google Drive and follow the steps. When Google asks, publish your app to production; an app left in testing stops signing in after 7 days.</p>
 
       <h2 id="reconnect">Reconnect a source</h2>
-      <p>When X bookmarks or Readwise stop syncing because their sign-in or token expired, <a href="#open-olympus">open Olympus on your computer</a>, find the source under <strong>Sources</strong> and reconnect it (for Readwise, paste a new token). Gmail, Google Drive and Dropbox reconnect from ChatGPT with <strong>Reconnect</strong>.</p>
+      <p>When X bookmarks or Readwise stop syncing because their sign-in or token expired, <a href="#open-olympus">open Olympus on your computer</a>, find the source under <strong>Sources</strong> and reconnect it (for Readwise, paste a new token). Gmail, Google Drive and Dropbox reconnect the same way, or in ChatGPT with <strong>Reconnect</strong> in the Olympus dashboard.</p>
 
       <h2 id="private">Answer private questions, or turn on anonymous answers</h2>
       <p>Both are on the <strong>Private answers</strong> page on your computer: <a href="/open/private/">open Private answers</a>, or <a href="#open-olympus">open Olympus on your computer</a> and choose <strong>Open</strong> next to <strong>Private answers</strong> under <strong>On this computer</strong>. Not under <strong>Models</strong>: that is only for changing models.</p>
@@ -84,13 +84,13 @@
         <li>If you use <strong>Venice</strong>, check that your account has credit, and that its key is still valid: keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. Paste a new key there if needed.</li>
         <li>If you use a <strong>local model</strong>, make sure the model server it names is running on your computer.</li>
       </ul>
-      <p>Then choose <strong>Check again</strong> in the dashboard in ChatGPT. Personal answers in ChatGPT keep working meanwhile.</p>
+      <p>Then choose <strong>Check again</strong> (in ChatGPT, in the Olympus dashboard there). Personal answers keep working meanwhile.</p>
 
       <h2 id="search">Search has stopped working</h2>
       <p>Your computer uses a custom search (embedding) model that cannot be reached. Make sure the model server it names under <strong>Models</strong> is running on your computer, then choose <strong>Check again</strong>. Changing the search model means indexing everything again, so Olympus only does that on your computer, when you ask.</p>
 
       <h2 id="models">Change models</h2>
-      <p>Models are set up on your computer, never in ChatGPT: <a href="/open/fix/models/">open Models on your computer</a>, or <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. Their keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. The built-in models need no setup. Anonymous answers are not here: they are on <a href="#private">Private answers</a>.</p>
+      <p>Models are set up on your computer, never in your AI app: <a href="/open/fix/models/">open Models on your computer</a>, or <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. Their keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. The built-in models need no setup. Anonymous answers are not here: they are on <a href="#private">Private answers</a>.</p>
 
       <h2>Still stuck?</h2>
       <p><a href="/support/">Contact support</a> and include the output of <code>olympus engine status</code>. Check it first: it contains file paths on your computer, but no message content.</p>

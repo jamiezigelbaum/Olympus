@@ -42,7 +42,7 @@
           <pre><code>https://mcp.olympusplugin.ai/mcp</code></pre></li>
         <li><strong>Sign in.</strong> Continue to sign in.</li>
         <li><strong>Approve on your computer.</strong> A page opens in your computer's browser asking to connect Grok to Olympus. Choose <strong>Connect</strong>. That click is how Olympus knows the computer is yours.</li>
-        <li><strong>Ask.</strong> Ask about your own things in plain words. Grok answers from what is Public and Personal, with citations. For your Private things it gets only an answer written on your computer, by the model built into Olympus (or Venice, if you set it up), never the things themselves. If that answer can't be given, the question waits on your computer and <strong>Needs you</strong> says so: <a href="/open/private/">open Private answers</a> on the computer to answer it there.</li>
+        <li><strong>Ask.</strong> Ask about your own things in plain words. Grok answers from what is Personal, with citations. For your Private things it gets only an answer written on your computer, by the model built into Olympus (or Venice, if you set it up), never the things themselves, though that answer can repeat what they say. If that answer can't be given, the question waits on your computer and <strong>Needs you</strong> says so: <a href="/open/private/">open Private answers</a> on the computer to answer it there.</li>
       </ol>
 
       <h2 id="grok-bot">Grok Bot</h2>
@@ -52,7 +52,7 @@
       <ul>
         <li>If the approval page says <em>Olympus did not answer on this computer</em>, it opened somewhere other than the computer where Olympus runs. Start again from Grok on that computer.</li>
         <li>Your computer needs to be awake and online for Grok to reach Olympus. It opens no ports; it only makes an outgoing connection. <a href="/help/mac-offline/">If Grok says your computer is offline</a>.</li>
-        <li>The relay passes requests between Grok and your computer. It stores and logs no questions, answers or tokens.</li>
+        <li>The relay passes requests between Grok and your computer. It stores and logs no questions, answers or tokens, but like any HTTPS service it handles them in transit.</li>
         <li>To disconnect, remove the Olympus connector at grok.com/connectors. On the computer, the dashboard's <strong>Agents</strong> page (under <strong>On this computer</strong>) lists connected apps, each with <strong>Revoke</strong>.</li>
       </ul>
     </div>

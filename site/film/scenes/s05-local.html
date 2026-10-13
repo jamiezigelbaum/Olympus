@@ -40,7 +40,7 @@
           <div class="ans" id="s05-local-ans">Your accountant flagged the $35,000 loss.</div>
           <div class="ns" id="s05-local-ns">Not sent to the cloud.</div></div>`);
       // FACTS.md: the four small models built in
-      const MODELS = [["Qwen3.5 4B", "private answers"], ["EmbeddingGemma 2", "search · photos"], ["Qwen3-ASR", "voice notes"], ["Apple Vision · Tesseract", "scans"]];
+      const MODELS = [["Qwen3.5", "private answers"], ["EmbeddingGemma 2", "search · photos"], ["Qwen3-ASR", "voice notes"], ["Apple Vision · Tesseract", "scans"]];
       const rows = MODELS.map(([nm, use], i) => {
         const r = O.make("div", "s05-row", S, `<div class="rule"></div><div class="nm">${nm}</div><div class="use">${use}</div>`);
         gsap.set(r, { top: 418 + i * 74 });
