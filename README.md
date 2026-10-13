@@ -51,7 +51,7 @@ private models if you choose a Venice-only setup.
   answer; other apps get an answer written from it, which can repeat what it
   says.
 - **Secret:** passwords, recovery codes and keys that Olympus recognizes are
-  never sent, and their contents are not stored.
+  never sent or answered from.
 
 Labels are automatic and can be wrong.
 
@@ -178,8 +178,7 @@ Olympus sorts every item, one by one, into one of three tiers:
   matters. What they say is never sent to ChatGPT. Olympus answers from
   them on your computer, in the private answer panel (below).
 - **Secret**: passwords, recovery codes and keys. What Olympus recognizes as a
-  Secret never reaches a model, is never answered from, and its contents are
-  not stored.
+  Secret never reaches a model and is never answered from.
   Recognition looks for common forms (private keys, API keys, labeled
   passwords) and can miss others.
 
