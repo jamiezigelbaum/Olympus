@@ -143,8 +143,9 @@ const GOOGLE_DESKTOP_CLIENTS: ReadonlyArray<{ id: string; secret: string }> = [
 
 /**
  * The Desktop client a NEW Google sign-in uses, or `undefined` when none is
- * configured. An environment override must name both halves: an id without
- * its own secret would only earn `invalid_client` after consent.
+ * configured. An environment override must name both halves, unless its id
+ * is a shipped client: an id without its secret would only earn
+ * `invalid_client` after consent.
  */
 export function googleDesktopClient(
   env: Record<string, string | undefined> = process.env,
@@ -153,7 +154,8 @@ export function googleDesktopClient(
   // `none` turns it off: new sign-ins use the Web client, relay and exchange.
   if (overrideId === 'none') return undefined;
   if (overrideId) {
-    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    // An override naming a shipped client needs no secret of its own.
+    const overrideSecret = googleDesktopClientSecret(overrideId, env);
     return overrideSecret ? { clientId: overrideId, clientSecret: overrideSecret } : undefined;
   }
   const id = DEFAULT_GOOGLE_DESKTOP_CLIENT_ID.trim();
@@ -174,7 +176,10 @@ export function googleDesktopClientSecret(
   const candidate = clientId?.trim();
   if (!candidate) return undefined;
   const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
-  if (overrideId && candidate === overrideId) return env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim() || undefined;
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret) return overrideSecret;
+  }
   const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== '' && client.id.trim() === candidate);
   return known?.secret.trim() || undefined;
 }

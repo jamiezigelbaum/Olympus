@@ -2261,9 +2261,9 @@ async function runConnect(args: string[]): Promise<unknown> {
     // page Google returned to did not load, and its address is pasted here.
     const address = args[1] && !args[1].startsWith('--') ? args[1] : await readApiKeyFromStdin();
     try {
-      // The callback route sits at the worker's root whatever path its API
-      // base carries (`/v1` by default, or a custom one).
-      return await finishPastedOAuthCallback(address, { workerRoot: new URL(loadConfig().email.baseUrl).origin });
+      // The callback route sits at the running worker's root (its port from
+      // worker.env or its status, whatever path its API base carries).
+      return await finishPastedOAuthCallback(address, { workerRoot: remoteAccessUrlsForCli(process.env).local_url });
     } catch (error) {
       if (error instanceof PastedCallbackError) throw new OperationError('invalid_params', error.message);
       throw error;

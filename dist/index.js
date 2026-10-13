@@ -5738,8 +5738,11 @@ function googleDesktopClientSecret(clientId, env = process.env) {
   if (!candidate)
     return;
   const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
-  if (overrideId && candidate === overrideId)
-    return env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim() || undefined;
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret)
+      return overrideSecret;
+  }
   const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
   return known?.secret.trim() || undefined;
 }

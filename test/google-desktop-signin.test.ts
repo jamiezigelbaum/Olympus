@@ -99,6 +99,13 @@ describe('the Desktop client configuration', () => {
     expect(shipped?.clientSecret).toMatch(/^GOCSPX-/);
     expect(googleDesktopClientSecret(shipped?.clientId, {})).toBe(shipped?.clientSecret);
   });
+
+  test('an override naming the shipped client keeps the shipped secret', () => {
+    const shipped = googleDesktopClient({})!;
+    const env = { OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID: shipped.clientId };
+    expect(googleDesktopClient(env)).toEqual(shipped);
+    expect(googleDesktopClientSecret(shipped.clientId, env)).toBe(shipped.clientSecret);
+  });
 });
 
 interface Fixture {

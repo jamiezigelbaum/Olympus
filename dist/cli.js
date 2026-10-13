@@ -3098,7 +3098,7 @@ function googleDesktopClient(env = process.env) {
   if (overrideId === "none")
     return;
   if (overrideId) {
-    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    const overrideSecret = googleDesktopClientSecret(overrideId, env);
     return overrideSecret ? { clientId: overrideId, clientSecret: overrideSecret } : undefined;
   }
   const id = DEFAULT_GOOGLE_DESKTOP_CLIENT_ID.trim();
@@ -3110,8 +3110,11 @@ function googleDesktopClientSecret(clientId, env = process.env) {
   if (!candidate)
     return;
   const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
-  if (overrideId && candidate === overrideId)
-    return env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim() || undefined;
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret)
+      return overrideSecret;
+  }
   const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
   return known?.secret.trim() || undefined;
 }
@@ -156259,7 +156262,7 @@ async function runConnect(args) {
   if (rawSource === "finish") {
     const address = args[1] && !args[1].startsWith("--") ? args[1] : await readApiKeyFromStdin();
     try {
-      return await finishPastedOAuthCallback(address, { workerRoot: new URL(loadConfig().email.baseUrl).origin });
+      return await finishPastedOAuthCallback(address, { workerRoot: remoteAccessUrlsForCli(process.env).local_url });
     } catch (error2) {
       if (error2 instanceof PastedCallbackError)
         throw new OperationError("invalid_params", error2.message);
