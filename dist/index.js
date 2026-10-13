@@ -12439,9 +12439,15 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
+// src/workers/connector-store/capture-spool-secrets.ts
+var init_capture_spool_secrets = __esm(() => {
+  init_engine();
+});
+
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
 var init_capture_spool_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
@@ -12455,6 +12461,7 @@ var init_capture_spool_connector = __esm(() => {
 var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -12745,6 +12752,7 @@ var init_reaction_index = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 var init_live_connector = __esm(() => {
+  init_capture_spool_secrets();
   init_reaction_index();
 });
 
@@ -12753,6 +12761,7 @@ var WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
+  init_capture_spool_secrets();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
