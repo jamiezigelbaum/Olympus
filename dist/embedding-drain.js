@@ -11801,6 +11801,20 @@ class TierLedger {
       scrubRevision: this.secretScrubRevision(identity)
     }))();
   }
+  noteJobLedgerPaths(paths) {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const upsert = this.db.query(`
+        INSERT INTO known_job_ledgers (path, seen_at) VALUES (?, ?)
+        ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
+      `);
+      for (const path of paths)
+        upsert.run(path, now);
+    })();
+  }
+  knownJobLedgerPaths() {
+    return this.db.query("SELECT path FROM known_job_ledgers ORDER BY path").all().map((row) => row.path);
+  }
   noteSecretScrub(identity) {
     this.db.query(`
       INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
@@ -13445,6 +13459,12 @@ function tierLedgerMigrations() {
       name: "secret_side_store_scrubs",
       up(db) {
         db.exec(`
+          -- The extraction job ledgers the worker has open, noted each tier
+          -- tick, so another process (the tier set command) clears them too.
+          CREATE TABLE IF NOT EXISTS known_job_ledgers (
+            path TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+          );
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
@@ -15275,10 +15295,12 @@ function forgetSecretInSideStores(options) {
     }
   }
   let owedBefore = [];
+  let known = [];
   try {
     owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
+    known = ledger.knownJobLedgerPaths();
   } catch {}
-  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...owedBefore, ...options.jobLedgerPaths ?? []])];
+  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...known, ...owedBefore, ...options.jobLedgerPaths ?? []])];
   for (const jobsPath of jobLedgers) {
     try {
       const cleared = clearExtractionJobNames(jobsPath, {
@@ -15297,23 +15319,29 @@ function forgetSecretInSideStores(options) {
       owedJobLedgers.push(jobsPath);
     }
   }
-  try {
-    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker)
-      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
-    else
+  if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
+    ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
+  } else {
+    try {
       ledger.clearSecretSideStoreDebt(identity, jobLedgers);
-  } catch {}
+    } catch {}
+  }
   if (result.failed > 0)
     console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
   return result;
 }
 function retrySecretSideStoreDebts(ledger, limit = 100) {
+  try {
+    ledger.noteJobLedgerPaths(extractionJobsDbPaths());
+  } catch {}
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
     const { jobLedgerPaths, ...item } = identity;
-    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
-    if (result.failed === 0 && result.notDurable === 0)
-      cleared += 1;
+    try {
+      const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+      if (result.failed === 0 && result.notDurable === 0)
+        cleared += 1;
+    } catch {}
   }
   return cleared;
 }
@@ -25007,6 +25035,8 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
     }
     if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === "secrets") {
       forgetSecretInSideStores({ ledger, identity });
+      if (secretsDisposition() === "tombstone_now")
+        ledger.removeCopies(identity);
       report.secrets += 1;
     }
     return;
