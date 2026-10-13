@@ -773,8 +773,7 @@ Deep-dive docs: [contracts and architecture](docs/CONTRACTS.md) ·
 as is, without warranty; keep your own backups. Olympus is published by Open
 Coordination Unlimited, Inc. Its hosted relay is governed by the
 [Terms of Service](https://olympusplugin.ai/terms/) and
-[Privacy Policy](https://olympusplugin.ai/privacy/). Third-party code and data
-notices: `THIRD_PARTY_NOTICES.md` and
+[Privacy Policy](https://olympusplugin.ai/privacy/). Third-party data notices:
 [docs/THIRD_PARTY_DATA.md](docs/THIRD_PARTY_DATA.md).
 
 Want to suggest a change? See [CONTRIBUTING.md](CONTRIBUTING.md): fork,
