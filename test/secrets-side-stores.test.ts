@@ -370,6 +370,24 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
   });
 
+  test('marked Secret from the command while the worker is stopped: a ledger at a configured path the worker noted is cleared at once', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const runtime = new LocalFileExtractionJobStore(runtimePath);
+    const [gardenJob] = runtime.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    // A worker tick while the runtime holds its ledger open notes the path.
+    applyOwnerOverrides({ set: fx.set });
+    expect(fx.ledger.knownJobLedgerPaths()).toContain(runtimePath);
+    runtime.close();
+
+    expect(runTierSet(['garden', 'secrets'], { storePaths: storePaths(fx) }))
+      .toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
+    expect(rawJobName(runtimePath, gardenJob!)).toBeNull();
+  });
+
   test('a ledger only a runtime knew, unreachable when the item became Secret, is still cleared after that runtime is gone', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
@@ -644,6 +662,35 @@ describe('a side store that cannot be reached when the item becomes Secret', () 
     // The next tick: no listing, no override change.
     applyOwnerOverrides({ set: fx.set });
     expect(reader()?.ref.name).toBeUndefined();
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+  });
+});
+
+describe('a Secret whose side stores could not be cleared and whose debt could not be written down', () => {
+  test('is not settled: its copies are kept for the next pass, which clears both', async () => {
+    const dir = workspace('olympus-secret-side-debt-');
+    const fx = fixture(dir);
+    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
+    pointJobsEnvAt(jobsPath);
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [{ id: 'keys', name: 'keys.txt', text: 'Weekly notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    writeFileSync(jobsPath, 'not a database');
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const record = spyOn(TierLedger.prototype, 'recordSecretSideStoreDebt').mockImplementation(() => {
+      throw new Error('database is locked');
+    });
+    try {
+      fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+      expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 0 });
+    } finally {
+      record.mockRestore();
+      warn.mockRestore();
+    }
+    expect(fx.ledger.copies(identityOf('keys')).length).toBeGreaterThan(0);
+
+    rmSync(jobsPath);
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+    expect(fx.ledger.copies(identityOf('keys'))).toEqual([]);
     expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
   });
 });

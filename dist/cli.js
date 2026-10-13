@@ -18734,6 +18734,20 @@ class TierLedger {
       scrubRevision: this.secretScrubRevision(identity)
     }))();
   }
+  noteJobLedgerPaths(paths) {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const upsert = this.db.query(`
+        INSERT INTO known_job_ledgers (path, seen_at) VALUES (?, ?)
+        ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
+      `);
+      for (const path of paths)
+        upsert.run(path, now);
+    })();
+  }
+  knownJobLedgerPaths() {
+    return this.db.query("SELECT path FROM known_job_ledgers ORDER BY path").all().map((row) => row.path);
+  }
   noteSecretScrub(identity) {
     this.db.query(`
       INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
@@ -19699,19 +19713,6 @@ class TierLedger {
   settleSecretRedactionRetirement(id) {
     this.db.query("DELETE FROM secret_redaction_retirement WHERE id = ?").run(id);
   }
-  noteExtractionJobLedgerPaths(paths) {
-    if (paths.length === 0)
-      return;
-    const now = this.now().toISOString();
-    this.db.transaction(() => {
-      for (const path of paths) {
-        this.db.query("INSERT OR IGNORE INTO extraction_job_ledger_paths (path, noted_at) VALUES (?, ?)").run(path, now);
-      }
-    })();
-  }
-  extractionJobLedgerPaths() {
-    return this.db.query("SELECT path FROM extraction_job_ledger_paths ORDER BY path").all().map((row) => row.path);
-  }
   providerItemIsSecret(item) {
     const keys = [item.provider, item.accountScope, item.providerItemId];
     return this.db.transaction(() => {
@@ -20440,6 +20441,12 @@ function tierLedgerMigrations() {
       name: "secret_side_store_scrubs",
       up(db) {
         db.exec(`
+          -- The extraction job ledgers the worker has open, noted each tier
+          -- tick, so another process (the tier set command) clears them too.
+          CREATE TABLE IF NOT EXISTS known_job_ledgers (
+            path TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+          );
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
@@ -20469,10 +20476,6 @@ function tierLedgerMigrations() {
             job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
             recorded_at TEXT NOT NULL,
             UNIQUE (provider, account_scope, conversation_key, provider_item_id)
-          );
-          CREATE TABLE IF NOT EXISTS extraction_job_ledger_paths (
-            path TEXT PRIMARY KEY,
-            noted_at TEXT NOT NULL
           );
           CREATE TRIGGER IF NOT EXISTS tier_items_left_secrets
           AFTER UPDATE OF metadata_tier, content_tier, target_metadata_tier, target_content_tier ON tier_items
@@ -24357,10 +24360,12 @@ function forgetSecretInSideStores(options) {
     }
   }
   let owedBefore = [];
+  let known = [];
   try {
     owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
+    known = ledger.knownJobLedgerPaths();
   } catch {}
-  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...owedBefore, ...options.jobLedgerPaths ?? []])];
+  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...known, ...owedBefore, ...options.jobLedgerPaths ?? []])];
   for (const jobsPath of jobLedgers) {
     try {
       const cleared = clearExtractionJobNames(jobsPath, {
@@ -24383,25 +24388,31 @@ function forgetSecretInSideStores(options) {
     }
   }
   try {
-    ledger.noteExtractionJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync24(path)));
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync24(path)));
   } catch {}
-  try {
-    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker)
-      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
-    else
+  if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
+    ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
+  } else {
+    try {
       ledger.clearSecretSideStoreDebt(identity, jobLedgers);
-  } catch {}
+    } catch {}
+  }
   if (result.failed > 0)
     console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
   return result;
 }
 function retrySecretSideStoreDebts(ledger, limit = 100) {
+  try {
+    ledger.noteJobLedgerPaths(extractionJobsDbPaths());
+  } catch {}
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
     const { jobLedgerPaths, ...item } = identity;
-    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths, onlyWhileOwed: true });
-    if (result.failed === 0 && result.notDurable === 0)
-      cleared += 1;
+    try {
+      const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths, onlyWhileOwed: true });
+      if (result.failed === 0 && result.notDurable === 0)
+        cleared += 1;
+    } catch {}
   }
   return cleared;
 }
@@ -24420,7 +24431,7 @@ function retireSecretRedactions(ledger, options = {}) {
   }
   let knownJobLedgers = [];
   try {
-    knownJobLedgers = ledger.extractionJobLedgerPaths();
+    knownJobLedgers = ledger.knownJobLedgerPaths();
   } catch {}
   let retired = 0;
   for (const retirement of pending) {
@@ -24467,10 +24478,15 @@ function settleUntrackedSecretsCopy(options) {
     } catch {
       ledger = undefined;
     }
-    if (ledger)
-      forgetSecretInSideStores({ ledger, identity: options.identity });
-    else
+    if (!ledger)
       forgetSecretJobNames(options.identity);
+    else {
+      try {
+        forgetSecretInSideStores({ ledger, identity: options.identity });
+      } catch {
+        console.warn("[tier] secrets: an item's side stores could not be cleared and the retry could not be recorded.");
+      }
+    }
   }
   return settled;
 }
@@ -35515,6 +35531,8 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
     }
     if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === "secrets") {
       forgetSecretInSideStores({ ledger, identity });
+      if (secretsDisposition() === "tombstone_now")
+        ledger.removeCopies(identity);
       report.secrets += 1;
     }
     return;

@@ -1077,6 +1077,23 @@ export class TierLedger {
     }))();
   }
 
+  /** Note the extraction job ledgers this process has open (see `knownJobLedgerPaths`). */
+  noteJobLedgerPaths(paths: readonly string[]): void {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const upsert = this.db.query(`
+        INSERT INTO known_job_ledgers (path, seen_at) VALUES (?, ?)
+        ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
+      `);
+      for (const path of paths) upsert.run(path, now);
+    })();
+  }
+
+  /** Every extraction job ledger a worker noted here, so a Secret is cleared in each. */
+  knownJobLedgerPaths(): string[] {
+    return (this.db.query('SELECT path FROM known_job_ledgers ORDER BY path').all() as Array<{ path: string }>).map((row) => row.path);
+  }
+
   /** Note that a Secret's side stores are about to be cleared (see `classificationRead`). */
   noteSecretScrub(identity: TierLedgerIdentity): void {
     this.db.query(`
@@ -2550,23 +2567,6 @@ export class TierLedger {
     this.db.query('DELETE FROM secret_redaction_retirement WHERE id = ?').run(id);
   }
 
-  /** Remember job ledgers a Secret's names were cleared in (see `extractionJobLedgerPaths`). */
-  noteExtractionJobLedgerPaths(paths: readonly string[]): void {
-    if (paths.length === 0) return;
-    const now = this.now().toISOString();
-    this.db.transaction(() => {
-      for (const path of paths) {
-        this.db.query('INSERT OR IGNORE INTO extraction_job_ledger_paths (path, noted_at) VALUES (?, ?)').run(path, now);
-      }
-    })();
-  }
-
-  /** Every job ledger a Secret's names were ever cleared in through this ledger. */
-  extractionJobLedgerPaths(): string[] {
-    return (this.db.query('SELECT path FROM extraction_job_ledger_paths ORDER BY path').all() as Array<{ path: string }>)
-      .map((row) => row.path);
-  }
-
   /**
    * Whether any item with this provider item id is Secrets here (in any
    * conversation: the extraction job ledger keys an item without one), by
@@ -3672,6 +3672,12 @@ function tierLedgerMigrations(): SqliteMigration[] {
       name: 'secret_side_store_scrubs',
       up(db) {
         db.exec(`
+          -- The extraction job ledgers the worker has open, noted each tier
+          -- tick, so another process (the tier set command) clears them too.
+          CREATE TABLE IF NOT EXISTS known_job_ledgers (
+            path TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+          );
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
@@ -3690,9 +3696,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // never writes a marker back. Triggers, so every write that changes an
       // item's tiers (a listing, an override, a move landing, a legacy
       // decision, another process) is caught in its own transaction. Becoming
-      // Secrets again cancels a retirement not yet carried out. Every job
-      // ledger a Secret was cleared in is remembered, so a retirement still
-      // reaches one whose runtime has since closed it.
+      // Secrets again cancels a retirement not yet carried out.
       version: TIER_LEDGER_SCHEMA_VERSION,
       name: 'secret_redaction_retirement',
       up(db) {
@@ -3710,10 +3714,6 @@ function tierLedgerMigrations(): SqliteMigration[] {
             job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
             recorded_at TEXT NOT NULL,
             UNIQUE (provider, account_scope, conversation_key, provider_item_id)
-          );
-          CREATE TABLE IF NOT EXISTS extraction_job_ledger_paths (
-            path TEXT PRIMARY KEY,
-            noted_at TEXT NOT NULL
           );
           CREATE TRIGGER IF NOT EXISTS tier_items_left_secrets
           AFTER UPDATE OF metadata_tier, content_tier, target_metadata_tier, target_content_tier ON tier_items
