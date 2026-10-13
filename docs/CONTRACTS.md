@@ -345,6 +345,11 @@ section consolidates and supersedes all other policy wording.
   real-corpus eval remains required before rollout (precision improves and
   Private recall stays at least 99%); a missed own-record signal can expose
   content before the model raises it, which cannot recall an earlier cloud use.
+  The steering screen is a heuristic over shared canonical text and bounded
+  instruction/schema structure. A successful steer can affect only the
+  steering item's own tier, never another item: each model call judges one
+  quoted item. The worst case is the email's own content being treated as
+  Personal. The screen cannot prove that semantic steering is absent.
   Critical-review gate: PR #330 remains a critical classification change and
   needs fresh independent review of its current head and this release boundary
   before merge, alongside required CI under `docs/ENGINEERING_PROCESS.md`.

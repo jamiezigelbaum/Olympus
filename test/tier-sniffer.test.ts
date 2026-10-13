@@ -1059,6 +1059,7 @@ test('a large moving backlog has bounded examination and still serves aged eligi
 });
 
 for (const path of [
+  '?&#97;ccess&#95;&#116;oken=', '#&#x61;ccess&lowbar;token=',
   '?%70ass%77ord=%26', '#%61ccess%5F%74oken=', '?%2561ccess%255F%2574oken=',
   '?view=1&amp;%61ccess%5F%74oken=', '#/route?%61ccess%5F%74oken=',
 ]) test(`normalized credential URL ${path} never queues or dispatches`, async () => {

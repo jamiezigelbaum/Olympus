@@ -25,6 +25,7 @@
 //   from a fixed vocabulary, and the confidence.
 
 import { createHash } from 'node:crypto';
+import { canonicalizeScreeningText } from '../../core/secret-patterns.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 import { isUnitConfidence, parseStrictJsonObject } from './delphi-scorer.ts';
 import {
@@ -126,16 +127,56 @@ export function cachedSnifferVerdictHolds(verdict: Pick<StoredSnifferVerdict, 'c
   return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
 }
 
-/** Defense in depth, not a proof of safety. Require classifier-directed steering;
- * email imperatives, vendor role labels and arbitrary JSON fields are data.
- * Per-item isolation and quoted material remain the structural defense. */
+/**
+ * Heuristic defense in depth: schema-directed instructions or tier-valued
+ * instruction objects, not ordinary email imperatives. Canonicalization closes
+ * encoding/quote variants, but cannot prove the absence of semantic steering.
+ * A successful steer can affect only this item's own tier: the worst case is
+ * this email's own content being treated as Personal. Each model call judges
+ * one quoted item, never another item or a batch; that isolation is structural.
+ */
 const INJECTION_RULES: ReadonlyArray<readonly [string, RegExp]> = [
   ['role_boundary', /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
   ['instruction_override', /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
   ['forged_verdict', /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-  ['tier_steering', /\b(?:reply|respond|answer|output|return)\b[^.!?;]{0,50}\b(?:personal|private|public)\s+(?:tier|verdict)\b|\b(?:classify|label|mark|treat|tag|rate)\s+(?:(?:this|the|that|every|each|all)\s+(?:items?|files?|documents?|messages?|entries|list|batch)|(?:it|this|these|them))\s+(?:as\s+)?(?:personal|private|public|not private)\b|\b(?:classifier|sniffer)\b[^.!?;]{0,35}\b(?:classify|label|mark|treat|tag|rate)\b[^.!?;]{0,30}\b(?:personal|private|public)\b|\b(?:your verdict|verdict for this (?:file|item|document))\b[^.!?;]{0,40}\b(?:personal|private|public)\b|\b(?:classify|label|mark)\s+as\s+(?:personal|private|public)\b|\b(?:reply|answer|respond|return|output)\s*(?::\s*|(?:only\s+)?with\s+(?:only\s+)?|only\s+)?["']?(?:personal|private|public)["']?(?=\s*(?:[.,;:!?]|$|(?:tier|verdict|regardless)\b|\/[a-z_]+\/(?:0(?:\.\d+)?|1(?:\.0+)?)\b|with\s+(?:confidence|ownrecord|privatekind)\b|and\s+(?:set|return|output)\s+["']?(?:ownrecord|privatekind|confidence)\b))/],
   ['cross_item_steering', /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/],
 ];
+
+// Recognize instruction structure with a bounded word window rather than a
+// growing list of complete example sentences. A tier used as an adjective
+// ("public transport", "personal preferences") is not a verdict object.
+const INSTRUCTION_VERBS = new Set(['reply', 'answer', 'respond', 'output', 'return', 'mark', 'set', 'label', 'classify', 'treat', 'tag', 'rate', 'assign', 'choose', 'use', 'emit', 'produce', 'make']);
+const VERDICT_SCHEMA = /^(?:ownrecord|privatekind|confidence|tier|category|verdicts?|classif[a-z]*)$/;
+const TIER_WORD = /^(?:personal|public|private)$/;
+const OBJECT_GLUE = new Set(['only', 'with', 'as', 'to', 'be', 'is', 'the', 'a', 'an', 'this', 'that', 'it', 'these', 'them', 'every', 'each', 'all', 'item', 'items', 'file', 'files', 'document', 'documents', 'message', 'messages', 'entry', 'entries', 'list', 'batch', 'not']);
+function hasClassifierInstruction(text: string): boolean {
+  const words = [...text.matchAll(/[a-z][a-z0-9_]*/g)];
+  for (let i = 0; i < words.length; i++) {
+    const verb = words[i]!;
+    if (!INSTRUCTION_VERBS.has(verb[0])) continue;
+    // Schema references on either side of the instruction, in the same short
+    // clause. Do not count "classify" itself as its own schema reference.
+    for (let j = Math.max(0, i - 12); j < Math.min(words.length, i + 13); j++) {
+      if (j === i || !VERDICT_SCHEMA.test(words[j]![0])) continue;
+      const left = Math.min(verb.index!, words[j]!.index!);
+      const right = Math.max(verb.index!, words[j]!.index!);
+      if (right - left <= 100 && !/[.!?;]/.test(text.slice(left, right))) return true;
+    }
+    for (let j = i + 1; j < Math.min(words.length, i + 13); j++) {
+      const object = words[j]!;
+      if (object.index! - verb.index! > 100 || /[.!?;]/.test(text.slice(verb.index!, object.index!))) break;
+      if (TIER_WORD.test(object[0])) {
+        const tail = text.slice(object.index! + object[0].length);
+        if (/^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail)
+          || /^\s+(?:tier|verdict|regardless)\b/.test(tail)) return true;
+        break;
+      }
+      if (!OBJECT_GLUE.has(object[0])) break;
+    }
+  }
+  // A declared verdict is also output-shaped even without an imperative.
+  return /\byour verdict\b[^.!?;]{0,60}\b(?:personal|private|public)\b/.test(text);
+}
 
 /** Common Cyrillic/Greek look-alikes and their Latin reading, position by position. */
 const CONFUSABLE_FROM = 'авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı';
@@ -143,6 +184,10 @@ const CONFUSABLE_TO = 'abeekmhopctyxiijsdqwgiabenikvoptuxywvli';
 
 /** NFKC, format/zero-width characters and marks removed, look-alikes mapped to Latin, lower case. */
 export function normalizeSnifferMaterial(material: string): string {
+  return normalizeSnifferSurface(canonicalizeScreeningText(material));
+}
+
+function normalizeSnifferSurface(material: string): string {
   const folded = material.normalize('NFKC').toLowerCase().normalize('NFKD')
     .replace(/[\p{Cf}\p{Mn}\p{Me}͏ᅟᅠㅤﾠ]/gu, '');
   let mapped = '';
@@ -157,10 +202,11 @@ export function normalizeSnifferMaterial(material: string): string {
 export function snifferInjectionRule(material: string): string | undefined {
   const normalized = normalizeSnifferMaterial(material);
   // Decode letter spacing only when the resulting text contains a full steering phrase.
-  const variants = [normalized, normalized.replace(/(?:\b[a-z]\s+){3,}[a-z]\b/g, run => run.replace(/\s/g, ''))];
+  const variants = [normalizeSnifferSurface(material), normalized, normalized.replace(/(?:\b[a-z]\s+){3,}[a-z]\b/g, run => run.replace(/\s/g, ''))];
   for (const [id, pattern] of INJECTION_RULES) {
     if (variants.some(value => pattern.test(value))) return id;
   }
+  if (variants.some(hasClassifierInstruction)) return 'tier_steering';
   return undefined;
 }
 

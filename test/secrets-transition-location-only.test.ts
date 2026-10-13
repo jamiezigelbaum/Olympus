@@ -264,6 +264,8 @@ describe('a stored item a later reading raises to S5 (one store, declared placem
 
 
 for (const locator of [
+  `https://example.test/?&#97;ccess&#95;&#116;oken=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
+  `https://example.test/#&#x73;ig=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
   `https://example.test/#%61ccess%5F%74oken=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
   `https://example.test/?view=1&amp;%2561ccess%255F%2574oken=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
 ]) test('Secrets tombstones discard encoded credential locators', async () => {

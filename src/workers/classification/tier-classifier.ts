@@ -23,7 +23,8 @@
 //   steps put it and marks the item pending until the background pass
 //   (sniffer-resolver.ts) asks the privacy-safe model.
 
-import { isPlaceholderValue, normalizeCredentialUrlPart } from '../../core/secret-patterns.ts';
+import { hasCredentialUrl } from '../../core/secret-patterns.ts';
+export { hasCredentialUrl } from '../../core/secret-patterns.ts';
 import { createHash } from 'node:crypto';
 import type {
   SourceClassificationSignals,
@@ -871,33 +872,6 @@ function contentPass(args: {
   if (reasons.length === 0) reasons.push('content:no_raise');
   if (imageOrdinary) reasons.unshift(IMAGE_ORDINARY_REASON);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
-}
-
-/** Shared by classification, sniffer dispatch and location storage. */
-export function hasCredentialUrl(material: string): boolean {
-  const normalized = normalizeCredentialUrlPart(material, false);
-  // Try a whole locator first; userinfo can contain spaces or apostrophes.
-  const candidates = [normalized.trim(), ...Array.from(normalized.matchAll(/https?:\/\/[^\s<>]+/gi), match => match[0])];
-  const credential = (value: string): boolean => !isPlaceholderValue(normalizeCredentialUrlPart(value));
-  for (const candidate of candidates) {
-    try {
-      const url = new URL(candidate);
-      const userinfo = normalizeCredentialUrlPart(url.password || url.username);
-      if (userinfo && credential(userinfo) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(userinfo)) return true;
-      for (const part of [url.search.slice(1), url.hash.slice(1).replace(/^[^?]*\?/, '')]) {
-        // Parse first so encoded '&' or '=' inside a value stays a value.
-        // Also inspect nested whole-parameter encodings without discarding
-        // the original parse and its intact credential.
-        for (const variant of new Set([part, normalizeCredentialUrlPart(part)])) {
-          for (const [key, value] of new URLSearchParams(variant)) {
-            if (/^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(normalizeCredentialUrlPart(key))
-              && credential(value)) return true;
-          }
-        }
-      }
-    } catch { /* Not a URL; the regular credential detector still applies. */ }
-  }
-  return false;
 }
 
 /** Source-neutral evidence of a populated record, never a topic classifier. */

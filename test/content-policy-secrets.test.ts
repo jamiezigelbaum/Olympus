@@ -52,6 +52,10 @@ const AZURE_SAS = join(
 );
 
 const POSITIVES: Array<[string, string]> = [
+  // Owner ruling, PR #330 round 3: populated token and sig parameters are credentials.
+  ['query string token', 'Open https://news.example.org/view?token=8f14e45fceea167a5a36dedd4bea2543 in your browser'],
+  ['sig short', 'https://example.com/share?sig=abc123'],
+
   // Environment-style assignments: the keyword is the END of the key name.
   ['DB_PASSWORD env', 'DB_PASSWORD=hunter2hunter2hunter2'],
   ['STRIPE_API_KEY env', `STRIPE_API_KEY=${STRIPE_SK}`],
@@ -226,7 +230,6 @@ const NEGATIVES: Array<[string, string]> = [
   ['token_type', 'token_type: authentication'],
   ['page token', 'nextPageToken: CAEQAxjBt7eeqeSLhgM4oMAmQg1'],
   ['csrf token', 'csrf_token: 3f8a2b1c9d7e6f5a4b3c2d1e'],
-  ['query string token', 'Open https://news.example.org/view?token=8f14e45fceea167a5a36dedd4bea2543 in your browser'],
   ['bare secret all letters', 'secret: authentication-provider'],
   ['bare token all letters', 'token: authentication'],
   // Code assigning one identifier to another is not a credential.
@@ -277,7 +280,6 @@ const NEGATIVES: Array<[string, string]> = [
   ['Azure AccountKey short', 'AccountKey=abc123'],
   ['Azure AccountKey masked', `AccountKey=${'x'.repeat(88)}`],
   ['Azure AccountKey variable', 'AccountKey=${STORAGE_KEY}'],
-  ['sig short', 'https://example.com/share?sig=abc123'],
   ['sig not a query parameter', 'the sig=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa was in the text'],
 ];
 
