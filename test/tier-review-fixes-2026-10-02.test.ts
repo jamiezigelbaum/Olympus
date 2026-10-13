@@ -44,6 +44,8 @@ import {
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
+import { snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { runTierCommand, runTierSet } from '../src/workers/classification/tier-cli.ts';
 import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
@@ -62,6 +64,7 @@ import {
 import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-store/tier-move.ts';
 import { defaultStoreTrustTier } from '../src/workers/connector-store/tier-placement.ts';
 import { settleNamesOnlyItems } from '../src/workers/connector-store/tier-names-only-settle.ts';
+import { rejudgeStoredContent, emptyTierRejudgeReport } from '../src/workers/connector-store/tier-rejudge.ts';
 import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -1124,4 +1127,73 @@ test('a queued secret settles a routed item through the existing Secrets disposi
   expect(install.lane.ledger.copies(garden)).toHaveLength(0);
   expect(model.prompts.every(p => !p.prompt.includes(FAKE_AWS_KEY))).toBe(true);
   expect(queue.questionFor(garden, 'content')).toBeUndefined();
+});
+
+for (const authority of ['model', 'model-private-body', 'model-waiting-body', 'owner-rule', 'override'] as const) {
+  test(`old Private metadata is rejudged only when decided by the model (${authority})`, async () => {
+    const { install } = await gardenSettledPersonal();
+    const ledger = install.lane.ledger;
+    const old: TierDecision = {
+      ...classifyItemTiers({ signals: { title: 'orchard-plan.pdf' }, text: 'ordinary notes' }),
+      metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer',
+      engineVersion: TIER_CLASSIFIER_VERSION,
+      reasons: [authority === 'owner-rule' ? 'metadata:owner_rule:pathPrefix:keep:prior' : 'metadata:sniffer:local:old-prompt:financial:0.95', 'content:metadata_floor'],
+    };
+    ledger.recordRoutedPlacement(garden, old, install.lane.set.placementFor(old));
+    await moveTieredItem({ set: install.lane.set, identity: { ...garden, family: 'file', localItemId: 'personal:id:garden' }, decision: old, replaceOwnSupersededCopy: true });
+    if (authority === 'override') ledger.setOverride(garden, { kind: 'tier', tier: 'secure' });
+    ownerWords = 'Routine notices are shareable; personal records are private.';
+    const model = registeredBuiltIn(request => {
+      if (request.prompt.includes('is the NAMES')) return PERSONAL_VERDICT;
+      if (authority === 'model-waiting-body') throw new Error('body judgment unavailable');
+      return authority === 'model-private-body' ? PRIVATE_VERDICT : PERSONAL_VERDICT;
+    });
+    const service = snifferFor(install, model.builtIn);
+    for (let pass = 0; pass < 4; pass++) await service.runOnce();
+    if (authority.startsWith('model')) {
+      expect(model.prompts.some(p => p.prompt.includes('NAMES') && p.prompt.includes('orchard-plan'))).toBe(true);
+      expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current',
+        metadataTier: authority === 'model-waiting-body' ? 'secure' : 'private',
+        contentTier: authority === 'model' ? 'private' : 'secure' });
+      if (authority === 'model') expect(await olympusSearch(install, 'orchard')).toContain('pruning plan');
+      else expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+    } else {
+      expect(model.prompts.some(p => p.prompt.includes('orchard-plan'))).toBe(false);
+      expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    }
+  });
+}
+
+test('metadata rejudges bind the full names even when the model excerpt is identical', async () => {
+  const { install } = await gardenSettledPersonal();
+  const store = install.lane.internal.current()!;
+  const original = store.exportItemCopy(garden)!;
+  const requests: import('../src/workers/classification/tier-classifier.ts').TierSnifferRequest[] = [];
+  const queue = install.installed.snifferStoreForLedger(install.lane.ledger.dbPath);
+  const cached = new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE);
+  const metadataAnswers: string[] = [];
+  const record = { ...install.lane.ledger.getCurrent(garden)!, reasons: ['metadata:sniffer:local:old-prompt:financial:0.95'] };
+  for (const suffix of ['old notice', 'new record']) {
+    store.importItemCopy({ ...original, columns: { ...original.columns, title: `${'Shared long title '.repeat(40)}${suffix}` } }, {
+      trustTier: defaultStoreTrustTier('internal'), syncConnectorId: 'test-resync',
+    });
+    rejudgeStoredContent(install.lane.set, record, { autoMoves: true, report: emptyTierRejudgeReport(),
+      sniffer: { id: cached.id, judge(request) {
+        requests.push(request);
+        const answer = cached.judge(request);
+        if (request.pass === 'metadata') metadataAnswers.push(answer.verdict);
+        return answer;
+      } },
+    });
+    const request = requests.find(request => request.pass === 'metadata')!;
+    queue.putVerdict({ materialHash: request.materialHash ?? snifferMaterialHash('metadata', request.material!),
+      modelId: snifferCacheModelId(BUILT_IN_SNIFFER_LANE), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'personal', category: 'ordinary', confidence: 1, failSafe: false });
+  }
+  const names = requests.filter(request => request.pass === 'metadata');
+  expect(names).toHaveLength(2);
+  expect(names[0]!.material).toBe(names[1]!.material);
+  expect(names[0]!.materialHash).toBeDefined();
+  expect(names[0]!.materialHash).not.toBe(names[1]!.materialHash);
+  expect(metadataAnswers).toEqual(['undecided', 'undecided']);
 });

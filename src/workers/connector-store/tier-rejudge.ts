@@ -40,6 +40,10 @@
 
 import {
   classifyContentTier,
+  classifyItemTiers,
+  HELD_RECORD_PRIORITY,
+  SNIFFER_NAMES_MAX_CHARS,
+  tierSnifferInputHash,
   maxTier,
   namesDecidedByOwner,
   TIER_CLASSIFIER_VERSION,
@@ -176,12 +180,13 @@ export function rejudgeStoredContent(
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
   const mimeType = columnString(exported.columns['mime_type']);
+  const metadata = rejudgeMetadata(record, options.sniffer, { title, path, sender }, identity);
   const content = classifyContentTier(
     {
       text,
-      metadataTier: record.metadataTier,
-      metadataForced: record.metadataForced,
-      metadataFlagged: record.metadataFlagged,
+      metadataTier: metadata.metadataTier,
+      metadataForced: metadata.metadataForced,
+      metadataFlagged: metadata.metadataFlagged,
       metadataOwnerDecided: namesDecidedByOwner(record.reasons),
       ...(title ? { title } : {}),
       ...(path ? { path } : {}),
@@ -196,19 +201,19 @@ export function rejudgeStoredContent(
     },
   );
   const decision: TierDecision = {
-    metadataTier: record.metadataTier,
-    contentTier: maxTier(content.contentTier, record.metadataTier),
+    metadataTier: metadata.metadataTier,
+    contentTier: maxTier(content.contentTier, metadata.metadataTier),
     decidedBy: content.decidedBy,
     reasons: [
-      ...record.reasons.filter((reason) => !reason.startsWith('content:')),
+      ...metadata.reasons,
       ...content.reasons,
     ],
-    state: record.metadataPending || content.contentPending ? 'pending' : 'current',
+    state: metadata.metadataPending || content.contentPending ? 'pending' : 'current',
     contentRead: true,
-    metadataPending: record.metadataPending,
+    metadataPending: metadata.metadataPending,
     contentPending: content.contentPending,
-    metadataForced: record.metadataForced,
-    metadataFlagged: record.metadataFlagged,
+    metadataForced: metadata.metadataForced,
+    metadataFlagged: metadata.metadataFlagged,
     engineVersion: content.engineVersion,
     mapRevision: content.mapRevision,
     snifferId: content.snifferId,
@@ -230,7 +235,7 @@ export function rejudgeStoredContent(
     report.asked += 1;
     return;
   }
-  if (content.contentPending) {
+  if (content.contentPending || metadata.metadataPending) {
     // Asked, not hidden: the item stays where it is until the answer.
     if (ledger.openRejudgeQuestion(identity, {
       expectedGeneration: record.generation,
@@ -255,6 +260,47 @@ export function rejudgeStoredContent(
   if (key) ledger.markRejudged(identity, key);
   if (recorded.outcome === 'queued_move') report.movesQueued += 1;
   else report.updated += 1;
+}
+
+/** Only a model's obsolete names verdict may be replaced here. Owner rules,
+ * overrides and provider floors retain their authority. The old placement
+ * stays in force while these new names and content questions are answered. */
+function rejudgeMetadata(
+  record: TierLedgerRecord,
+  sniffer: TierSniffer | undefined,
+  names: { title: string | undefined; path: string | undefined; sender: string | undefined },
+  subject: TierLedgerIdentity,
+): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
+  const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
+  if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
+    || !record.reasons.some(reason => reason.startsWith('metadata:sniffer:') && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`))) return previous;
+  const signals = {
+    ...(names.title ? { title: names.title } : {}),
+    ...(names.path ? { path: names.path } : {}),
+    ...(names.sender ? { sender: names.sender } : {}),
+  };
+  const fresh = classifyItemTiers({ signals, namesOnly: true });
+  // A stored reason does not encode the provider's floor tier. Retain it
+  // conservatively when the provider facts cannot be reconstructed.
+  const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason));
+  const baseline = maxTier(fresh.metadataTier, providerReasons.length ? record.metadataTier : 'private');
+  if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
+  const material = [names.title, names.path, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const verdict = sniffer.judge({ pass: 'metadata', material, flags: ['names:rejudge'], subject,
+    materialHash: tierSnifferInputHash('metadata', signals),
+    mapRevision: fresh.mapRevision, priority: HELD_RECORD_PRIORITY });
+  const pending = verdict.verdict === 'undecided';
+  return {
+    metadataTier: pending ? baseline : maxTier(baseline, verdict.tier),
+    metadataForced: false,
+    metadataFlagged: pending || fresh.metadataFlagged,
+    metadataPending: pending,
+    reasons: [
+      ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')),
+      ...providerReasons,
+      `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
+    ],
+  };
 }
 
 /**

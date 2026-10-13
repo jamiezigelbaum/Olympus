@@ -254,7 +254,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (applied?.outcome === 'stale_map') {
       // The map changed while this was being asked: re-ask under the new one.
       const row = item.target.ledger.getCurrent(item.question);
-      const rejudge = item.question.pass === 'content' ? item.target.ledger.rejudgeQuestion(item.question) : undefined;
+      const rejudge = item.target.ledger.rejudgeQuestion(item.question);
       if (row) item.target.sniffer.rekey(item.question, item.question.pass, rejudge?.decision.mapRevision ?? row.mapRevision);
       report.staleRekeyed += 1;
       return;
@@ -297,10 +297,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (row === undefined || row.decidedBy === 'override') return false;
     let expectedMap = row.mapRevision;
     let open = row.state === 'pending' && openPasses(row).includes(question.pass);
-    if (!open && question.pass === 'content' && row.state === 'current') {
+    if (row.state === 'current') {
       const rejudge = target.ledger.rejudgeQuestion(question);
       if (rejudge) {
-        open = true;
+        open = question.pass === 'metadata' ? rejudge.decision.metadataPending : rejudge.decision.contentPending;
         expectedMap = rejudge.decision.mapRevision;
       }
     }
@@ -325,7 +325,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       // Queued material whose question is no longer open (the item was
       // re-synced, overridden, deleted or re-decided) must not linger.
       if (!stillOpen(target, question)) {
-        target.sniffer.deleteQuestion(question, question.pass);
+        target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
         report.staleDropped += 1;
         continue;
       }
@@ -390,7 +390,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const pass = next.question.pass;
     if (!stillOpen(next.target, next.question)) {
       if (!midMove(next.target, next.question)) {
-        next.target.sniffer.deleteQuestion(next.question, pass);
+        next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
         report.staleDropped += 1;
       }
       continue;

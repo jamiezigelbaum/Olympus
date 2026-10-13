@@ -412,12 +412,10 @@ export class TierLedger {
         outcome = 'stale_question';
         return;
       }
-      if (verdict.pass === 'content') {
-        const question = this.rejudgeQuestion(identity);
-        if (question) {
-          outcome = this.answerRejudgeQuestion(identity, question, verdict, options);
-          return;
-        }
+      const question = this.rejudgeQuestion(identity);
+      if (question) {
+        outcome = this.answerRejudgeQuestion(identity, question, verdict, options);
+        return;
       }
       if (existing.state === 'moving') {
         outcome = 'held_moving';
@@ -505,7 +503,7 @@ export class TierLedger {
   private answerRejudgeQuestion(
     identity: TierLedgerIdentity,
     question: TierRejudgeQuestion,
-    verdict: { tier: 'private' | 'secure'; reason: string; modelId: string; mapRevision?: string },
+    verdict: { pass: 'metadata' | 'content'; tier: 'private' | 'secure'; reason: string; modelId: string; mapRevision?: string },
     options: { placementFor?: (decision: TierDecision) => TierPlacementPlan },
   ): SnifferVerdictOutcome {
     const base = question.decision;
@@ -520,15 +518,30 @@ export class TierLedger {
     }
     if (verdict.mapRevision !== undefined && verdict.mapRevision !== base.mapRevision) return 'stale_map';
     if (!options.placementFor) return 'needs_placement';
+    if (!(verdict.pass === 'metadata' ? base.metadataPending : base.contentPending)) return 'unchanged';
+    const metadataTier = verdict.pass === 'metadata' ? maxTier(base.metadataTier, verdict.tier) : base.metadataTier;
     const contentTier = maxTier(base.contentTier, verdict.tier);
+    const metadataPending = verdict.pass === 'metadata' ? false : base.metadataPending;
+    const contentPending = verdict.pass === 'content' || metadataTier === 'secure' ? false : base.contentPending;
     const decision: TierDecision = {
       ...base,
+      metadataTier,
       contentTier,
-      decidedBy: contentTier !== base.contentTier ? 'sniffer' : base.decidedBy,
-      reasons: [...base.reasons.filter((reason) => !isOpenSnifferReason(reason, 'content')), verdict.reason],
-      contentPending: false,
-      state: base.metadataPending ? 'pending' : 'current',
+      decidedBy: 'sniffer',
+      reasons: [...base.reasons.filter(reason => !isOpenSnifferReason(reason, verdict.pass)
+        && !(metadataTier === 'secure' && isOpenSnifferReason(reason, 'content'))), verdict.reason],
+      metadataPending,
+      contentPending,
+      state: metadataPending || contentPending ? 'pending' : 'current',
     };
+    if (decision.state === 'pending') {
+      // Keep the previous placement until both questions are settled. A
+      // Personal names answer alone must never release the held body.
+      this.db.query(`UPDATE tier_items SET rejudge_json = json_set(rejudge_json, '$.decision', json(?))
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`)
+        .run(JSON.stringify(decision), ...idParams(identity));
+      return 'updated';
+    }
     this.db.query(`
       UPDATE tier_items SET rejudge_json = NULL
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -799,6 +812,7 @@ export class TierLedger {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
     const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
+    const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
     const key = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after
       ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
@@ -840,6 +854,7 @@ export class TierLedger {
           AND (
             i.state = 'pending'
             OR i.engine_version != ?
+            OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
               AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
               AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
@@ -854,6 +869,8 @@ export class TierLedger {
       key,
       key,
       options.engineVersion,
+      metadataMarker,
+      metadataMarker ?? '',
       snifferMarker,
       snifferMarker ?? '',
     ) as Array<TierItemRow & { rejudge_candidate: number }>;

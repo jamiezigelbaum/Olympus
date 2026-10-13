@@ -195,6 +195,15 @@ export function snifferContentMaterial(names: string, excerpt: string): string {
   return trimmed ? `Names: ${trimmed}\nExcerpt: ${excerpt}` : excerpt;
 }
 
+/** Cache/queue identity covers the complete input, not the bounded prompt.
+ * Shared by listing, extraction and stored-item rejudges. */
+export function tierSnifferInputHash(pass: 'metadata' | 'content', signals: SourceClassificationSignals, text?: string): string {
+  return createHash('sha256').update(JSON.stringify([
+    pass, signals.title ?? null, signals.path ?? null, signals.folderKeys ?? [],
+    signals.labels ?? [], signals.sender ?? null, text ?? null,
+  ])).digest('hex');
+}
+
 // --- Input / output -----------------------------------------------------------
 
 export interface TierClassificationInput {
@@ -508,7 +517,11 @@ export function classifyContentTier(
   }
   const text = input.text.trim() ? input.text : undefined;
   const content = contentPass({
-    signals: {},
+    signals: {
+      ...(input.title ? { title: input.title } : {}),
+      ...(input.path ? { path: input.path } : {}),
+      ...(input.sender ? { sender: input.sender } : {}),
+    },
     text,
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
     ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
@@ -687,7 +700,7 @@ function metadataPass(args: {
       priority: HELD_RECORD_PRIORITY,
       flags,
       material: snifferNames(signals),
-      materialHash: createHash('sha256').update(JSON.stringify(['metadata', names])).digest('hex'),
+      materialHash: tierSnifferInputHash('metadata', signals),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
@@ -827,7 +840,7 @@ function contentPass(args: {
       priority: recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
-      materialHash: createHash('sha256').update(JSON.stringify(['content', args.names, text])).digest('hex'),
+      materialHash: tierSnifferInputHash('content', args.signals, text),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });

@@ -956,3 +956,29 @@ test('a built-in weights change cannot bypass an owner revocation', async () => 
     expect(model.requests).toHaveLength(0);
   } finally { installed.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a changed document tail invalidates an in-flight answer even when its excerpt is unchanged', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+    const classify = (suffix: string) => {
+      const decision = classifyItemTiers({ signals: { title: 'Record' },
+        text: `Patient name: Morgan Example. ${'Ordinary detail. '.repeat(300)}${suffix}`, subject: subject(1) }, { sniffer });
+      ledger.recordDecision(subject(1), decision);
+    };
+    classify('Revision A.');
+    const first = store.questionFor(subject(1), 'content')!;
+    const model = spyModel((_, items) => {
+      classify('Revision B.');
+      return verdictsFor(items, { tier: 'personal', category: 'ordinary', confidence: 1 });
+    });
+    const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+    const next = store.questionFor(subject(1), 'content')!;
+    expect(next.material).toBe(first.material);
+    expect(next.materialHash).not.toBe(first.materialHash);
+    expect(result.verdictsApplied).toBe(0);
+    classify('Revision B.'); // The cached old answer cannot settle the new input either.
+    expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true });
+  } finally { store.close(); ledger.close(); }
+});
