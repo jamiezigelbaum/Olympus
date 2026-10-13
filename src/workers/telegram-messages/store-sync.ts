@@ -10,6 +10,13 @@ import {
 } from '../connector-store/index.ts';
 import { createLaneTieredStoreSet, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import {
+  addCaptureSpoolRedactions,
+  createSpoolSecretJudge,
+  sweepCaptureSpoolWhenSecretsChange,
+  type CaptureSpoolRedactionResult,
+} from '../connector-store/capture-spool-secrets.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -25,6 +32,7 @@ import {
   createTelegramCaptureSpoolConnector,
   defaultTelegramCaptureSpoolDir,
   readTelegramCaptureSpool,
+  redactTelegramCaptureSpoolSecrets,
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
 
@@ -32,6 +40,9 @@ export const TELEGRAM_MESSAGES_SOURCE_ID = 'telegram.messages';
 export const TELEGRAM_PERSONAL_ACCOUNT_SCOPE = 'telegram.personal';
 export const TELEGRAM_MALFORMED_SPOOL_WARNING = 'telegram_malformed_spool_records';
 export const TELEGRAM_TRUST_CONFLICT_WARNING = 'telegram_trust_conflict_items';
+export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_redaction_failed';
+// Where the full-spool Secrets pass stands, kept in the set's tier ledger.
+export const TELEGRAM_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:telegram';
 export const DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500;
 const MAX_TELEGRAM_PULL_MAX_ITEMS = 10_000;
 
@@ -65,6 +76,11 @@ export interface TelegramConnectorStoreSyncReceipt {
      * looser lane before the disagreement surfaced.
      */
     trust_conflict_evictions: number;
+    /**
+     * Spool records whose item was judged Secrets and that this pull
+     * rewrote without their text (blanked ones included).
+     */
+    spool_records_redacted: number;
   };
   warnings?: string[];
   policy: {
@@ -283,12 +299,36 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       ]);
       const internal = run.byDomain.internal!.sync;
       const secureLocal = run.byDomain.secure_local!.sync;
+
+      // Every record both lanes have now read has been judged. Any whose
+      // item is Secrets loses its text from the spool here, and a whole-spool
+      // pass runs when the set of Secrets changed (an owner marking an old
+      // message, a chat rule). The stores already hold none of it, so a
+      // failure here costs ingestion nothing: it is reported and retried on
+      // the next pull, where the same records are judged again.
+      let redacted: CaptureSpoolRedactionResult | undefined;
+      let redactionFailed = false;
+      try {
+        redacted = clearTelegramSpoolSecrets({
+          spoolDir,
+          ledger: tierSet.ledger,
+          ...(preflightCursor ? { from: preflightCursor } : {}),
+          through: lanesReadThrough(options.stores),
+        });
+      } catch (error) {
+        redactionFailed = true;
+        console.error(
+          `[olympus:telegram] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
+        );
+      }
       return telegramSyncReceipt(
         internal,
         secureLocal,
         preflight.malformedRecords,
         conflictedItemIds.size,
         eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished,
+        redacted,
+        redactionFailed,
       );
     },
 
@@ -303,6 +343,49 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       return internal < secureLocal ? internal : secureLocal;
     },
   };
+}
+
+/**
+ * Clear the Secrets out of the spool records both lanes have read: the pull's
+ * own window, judged by the ledger and by the Secrets floor on each record's
+ * text (an earlier version of an edited message is judged on its own text),
+ * then a whole-spool pass when the ledger's Secrets changed. `through`
+ * absent means a lane has read nothing yet, so nothing is judged.
+ */
+export function clearTelegramSpoolSecrets(options: {
+  spoolDir: string;
+  ledger: TierLedger;
+  from?: string;
+  through: string | undefined;
+}): CaptureSpoolRedactionResult {
+  const through = options.through;
+  if (!through) return addCaptureSpoolRedactions();
+  const window = redactTelegramCaptureSpoolSecrets({
+    spoolDir: options.spoolDir,
+    ...(options.from ? { from: options.from } : {}),
+    through,
+    judge: createSpoolSecretJudge({ ledger: options.ledger, floor: true }),
+  });
+  const sweep = sweepCaptureSpoolWhenSecretsChange({
+    ledger: options.ledger,
+    stateKey: TELEGRAM_SPOOL_REDACTION_STATE_KEY,
+    sweep: (judge) => redactTelegramCaptureSpoolSecrets({ spoolDir: options.spoolDir, through, judge }),
+  });
+  return addCaptureSpoolRedactions(window, sweep);
+}
+
+/**
+ * The spool position both lanes have read up to: every record before it was
+ * listed by its own lane and judged.
+ */
+function lanesReadThrough(stores: TelegramConnectorStores): string | undefined {
+  const internal = sanitizeTelegramCaptureCursor(
+    stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor,
+  );
+  const secureLocal = sanitizeTelegramCaptureCursor(
+    stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor,
+  );
+  return internal && secureLocal ? earlierCursor(internal, secureLocal) : undefined;
 }
 
 export function telegramPullMaxItems(value: number | undefined): number {
@@ -375,6 +458,8 @@ function telegramSyncReceipt(
   malformedRecords: number,
   trustConflictItems: number,
   trustConflictEvictions: number,
+  redacted: CaptureSpoolRedactionResult | undefined,
+  redactionFailed: boolean,
 ): TelegramConnectorStoreSyncReceipt {
   const runs = [internal, secureLocal];
   const counts = {
@@ -391,10 +476,12 @@ function telegramSyncReceipt(
     malformed_spool_records: malformedRecords,
     trust_conflict_items: trustConflictItems,
     trust_conflict_evictions: trustConflictEvictions,
+    spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
   };
   const warnings = [
     ...(malformedRecords > 0 ? [TELEGRAM_MALFORMED_SPOOL_WARNING] : []),
     ...(trustConflictItems > 0 ? [TELEGRAM_TRUST_CONFLICT_WARNING] : []),
+    ...(redactionFailed ? [TELEGRAM_SPOOL_REDACTION_FAILED_WARNING] : []),
   ];
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? 'progress' : 'idle',

@@ -1345,6 +1345,30 @@ export class TierLedger {
     return (rows as TierItemRow[]).map(recordFromRow);
   }
 
+  /**
+   * Every item judged Secrets in either layer, in key order: what a lane
+   * that keeps a raw copy outside the stores (a capture spool) must clear.
+   * Identities only, never content; the list is small by nature.
+   */
+  secretsIdentities(): TierLedgerIdentity[] {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+      WHERE metadata_tier = 'secrets' OR content_tier = 'secrets'
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all() as Array<{
+      provider: string;
+      account_scope: string;
+      conversation_key: string;
+      provider_item_id: string;
+    }>;
+    return rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+    }));
+  }
+
   isRouted(identity: TierLedgerIdentity): boolean {
     return this.readRow(identity)?.routed === true;
   }

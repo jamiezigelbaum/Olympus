@@ -42,9 +42,14 @@
 // - Duplicate ids can occur (the daemon re-spools offline re-deliveries).
 //   Each occurrence lists normally; downstream upserts collapse them, and
 //   fetchItem returns the LAST occurrence (the newest version).
+// - A line whose message was judged Secrets is rewritten in place without its
+//   text, preview, re-download keys or saved audio, and carries
+//   "secret_redacted": true (connector-store/capture-spool-secrets.ts). It
+//   reads back as a metadata_only item with a Secrets floor, so a replay or a
+//   reaction re-emit judges it Secrets again.
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { join, relative, isAbsolute } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -54,6 +59,11 @@ import type {
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
 import type { SourceReaction } from '../../core/source-index/reactions.ts';
+import {
+  redactCaptureSpoolLines,
+  type CaptureSpoolRedactionResult,
+  type SpoolSecretJudge,
+} from '../connector-store/capture-spool-secrets.ts';
 import {
   buildSourceSensitivity,
   type SourceItemIdentity,
@@ -76,6 +86,7 @@ const DEFAULT_PAGE_LIMIT = 500;
 const MAX_PAGE_LIMIT = 2_000;
 export const WHATSAPP_TRANSCRIPT_EXTRACTOR_KIND = 'whisper_transcription';
 export const WHATSAPP_TRANSCRIPT_EXTRACTOR_VERSION = '2026-07-05-whatsapp-local-asr';
+export const WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = 'capture:secret_redacted';
 
 export interface WhatsAppLiveSourceConnectorOptions {
   spoolDir: string;
@@ -135,6 +146,7 @@ interface SpoolMessage {
   reactionTargetChatJid?: string;
   reactionKey?: string;
   reactionRemoved?: boolean;
+  secretRedacted?: boolean;
 }
 
 interface SpoolPosition {
@@ -221,6 +233,9 @@ export function createWhatsAppLiveSourceConnector(
       // placement until an owner chat rule replaces it.
       return compactClassificationSignals({
         prior: trustDomainPrior('secure_local', 'source_default'),
+        ...(item.metadata['secretRedacted'] === true
+          ? { floor: { tier: 'secrets' as const, basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } }
+          : {}),
         title: signalText(item.metadata, 'chat'),
         sender: signalText(item.metadata, 'sender'),
         folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
@@ -573,6 +588,7 @@ function parseSpoolLine(line: string): SpoolMessage | undefined {
   const reactionTargetChatJid = nonEmptyString(record['reaction_target_chat_jid']);
   const reactionKey = nonEmptyString(record['reaction_key']);
   const reactionRemoved = record['reaction_removed'];
+  const secretRedacted = record['secret_redacted'] === true;
   return {
     id,
     chatJid,
@@ -601,6 +617,7 @@ function parseSpoolLine(line: string): SpoolMessage | undefined {
     ...(reactionTargetChatJid === undefined ? {} : { reactionTargetChatJid }),
     ...(reactionKey === undefined ? {} : { reactionKey }),
     ...(typeof reactionRemoved !== 'boolean' ? {} : { reactionRemoved }),
+    ...(secretRedacted ? { secretRedacted } : {}),
   };
 }
 
@@ -640,13 +657,13 @@ function rawItemFromSpoolMessage(
     sourceVersion: message.timestamp,
   };
   const isMedia = message.mediaType !== undefined;
-  const text = resolveMentionText(message.text, message.mentions);
-  const enrichedText = enrichWithLinkPreview(text, message);
-  const hasPreviewEnrichment = enrichedText !== text;
+  const redacted = message.secretRedacted === true;
+  const text = spoolMessageText(message);
+  const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
   return {
     identity,
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
-    content: isMedia ? { kind: 'metadata_only' } : { kind: 'text', text: enrichedText },
+    content: isMedia || redacted ? { kind: 'metadata_only' } : { kind: 'text', text },
     metadata: Object.freeze({
       chat: message.chatName || message.chatJid,
       sender: message.senderName || message.senderJid,
@@ -659,13 +676,107 @@ function rawItemFromSpoolMessage(
       // what is stored; an empty array is how a message whose reactions were
       // all taken back clears them.
       ...(reactions === undefined ? {} : { reactions }),
-      ...(hasPreviewEnrichment ? { searchText: enrichedText } : {}),
+      ...(hasPreviewEnrichment && !redacted ? { searchText: text } : {}),
+      ...(redacted ? { secretRedacted: true } : {}),
       ...(message.mentions === undefined ? {} : { mentions: message.mentions }),
       ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
       ...mediaMetadata(message),
     }),
     fetchedAt,
   };
+}
+
+/**
+ * A message's readable text: its body with mentions resolved, plus its link
+ * preview. What a text item is indexed by, and what a spool line is judged by.
+ */
+function spoolMessageText(message: SpoolMessage): string {
+  return enrichWithLinkPreview(resolveMentionText(message.text, message.mentions), message);
+}
+
+/**
+ * Rewrite, in place, every message line in `[from, through)` whose item the
+ * judge says is Secrets: its text, link preview and media re-download keys go
+ * (and the chat and sender names and mentions when the names themselves were
+ * judged Secrets), and the audio it saved under `mediaDir` is deleted. Its id,
+ * chat, time and media type stay, and it is flagged so a replay judges it
+ * Secrets again. Reaction lines name another message and are left alone.
+ * Cursors are this spool's `<file>:<lines>`.
+ */
+export function redactWhatsAppLiveSpoolSecrets(options: {
+  spoolDir: string;
+  account?: string;
+  from?: string;
+  through?: string;
+  judge: SpoolSecretJudge;
+  /** Where the bridge saves audio; a media path outside it is never deleted. */
+  mediaDir?: string;
+}): CaptureSpoolRedactionResult {
+  const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
+  const from = positionFromCursor(options.from);
+  const through = positionFromCursor(options.through);
+  const mediaRoot = options.mediaDir ? existingRealPath(options.mediaDir) : undefined;
+  return redactCaptureSpoolLines({
+    dir: options.spoolDir,
+    files: listSpoolFiles(options.spoolDir),
+    ...(from ? { from } : {}),
+    ...(through ? { through } : {}),
+    redact: (line) => {
+      const message = parseSpoolLine(line);
+      if (message === undefined || isWhatsAppStatusBroadcast(message.chatJid)) return undefined;
+      if (isWhatsAppReactionLine(message)) return undefined;
+      const identity = {
+        provider: PROVIDER,
+        accountScope: account,
+        providerItemId: message.id,
+        providerConversationId: message.chatJid,
+      };
+      // An already-redacted line is judged no further, but its audio is
+      // deleted again in case an earlier pass could not.
+      if (message.secretRedacted === true) {
+        deleteSavedMedia(message.mediaPath, mediaRoot);
+        return undefined;
+      }
+      const redaction = options.judge(identity, message.mediaType === undefined ? spoolMessageText(message) : undefined);
+      if (!redaction) return undefined;
+      deleteSavedMedia(message.mediaPath, mediaRoot);
+      const record = JSON.parse(line) as Record<string, unknown>;
+      record['text'] = '';
+      for (const key of ['preview_title', 'preview_description', 'preview_url', 'media_key', 'media_direct_path']) {
+        delete record[key];
+      }
+      if (redaction === 'names') {
+        record['chat_name'] = '';
+        record['sender_name'] = '';
+        delete record['mentions'];
+      }
+      record['secret_redacted'] = true;
+      return JSON.stringify(record);
+    },
+  });
+}
+
+function existingRealPath(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Delete a saved media file, only when it really lives under the bridge's
+ * media directory: a spool line is data, and must never be able to name some
+ * other file for deletion.
+ */
+function deleteSavedMedia(mediaPath: string | undefined, mediaRoot: string | undefined): void {
+  if (!mediaPath || !mediaRoot) return;
+  const real = existingRealPath(mediaPath);
+  if (!real) return;
+  const inside = relative(mediaRoot, real);
+  if (!inside || inside.startsWith('..') || isAbsolute(inside)) return;
+  if (!statSync(real).isFile()) return;
+  rmSync(real, { force: true });
 }
 
 function enrichWithLinkPreview(text: string, message: SpoolMessage): string {
