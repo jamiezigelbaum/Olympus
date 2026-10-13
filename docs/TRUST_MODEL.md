@@ -453,7 +453,10 @@ Rules:
   (the owner marks it, or a re-judge finds a secret) keeps no more: each
   stored copy is tombstoned with its title, search text, sender, reactions
   and dates cleared and its locator kept only if it passes the same scan;
-  the tombstone row stays so a later sync cannot resurrect it. A copy a move leaves behind is superseded: kept,
+  the tombstone row stays so a later sync cannot resurrect it. The side
+  stores that held its names or an excerpt keep none either: its queued
+  sniffer questions are deleted and its extraction jobs' captured names
+  cleared, at once, even while the engine is not running. A copy a move leaves behind is superseded: kept,
   never searched, served, counted or exported; cloud vectors of an item raised
   to Private are kept that way, hidden, until the owner approves a purge.
   Everything stored before P1b stays exactly where it is until the

@@ -93,7 +93,7 @@ import {
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
-import { secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
@@ -1213,7 +1213,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         this.counts.itemsSecrets += 1;
         // The ledger write above hid every copy. The one Secrets policy
         // (secrets-disposition.ts) decides whether they are tombstoned now or
-        // kept, hidden, for an owner-approved purge.
+        // kept, hidden, for an owner-approved purge. Either way the side
+        // stores forget the item's names and excerpt now.
+        forgetSecretInSideStores({ ledgerPath: ledger.dbPath, identity });
         if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets' };
         this.copyRemovals.set(identityKey(identity), identity);
         return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };

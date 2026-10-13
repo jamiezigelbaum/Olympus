@@ -640,6 +640,65 @@ describe('tier migration M2-M6', () => {
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'journal').content).toEqual([LIBRARY_CORPORA.secure_local]);
   });
 
+  test('a crash between the Secrets flip and the Secrets policy resumes to a tombstoned, screened copy', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const keysRow = () => {
+      const db = new Database(context.files.secure_local, { readonly: true });
+      try {
+        return db.query('SELECT * FROM items WHERE local_item_id = ?').get(`${ACCOUNT}:keys`) as Record<string, unknown>;
+      } finally {
+        closeSqliteStore(db, { checkpoint: false });
+      }
+    };
+    const keysChunks = () => snapshotStore(context.files.secure_local, [`${ACCOUNT}:keys`]).chunks;
+    expect(keysRow()).toMatchObject({ tombstoned: 0, title: 'deploy-notes.txt' });
+    expect(keysChunks().length).toBeGreaterThan(0);
+
+    const flip = TierLedger.prototype.flipToSecrets;
+    const crash = spyOn(TierLedger.prototype, 'flipToSecrets').mockImplementation(function (this: TierLedger, ...args) {
+      // The ledger write lands; the process dies before the Secrets policy runs.
+      flip.apply(this, args);
+      throw new Error('simulated crash after the Secrets flip');
+    });
+    try {
+      await expect(runTierMigration({
+        planId: plan.planId,
+        lanes: write.lanes,
+        inputs: context.inputs,
+        domainIdentity: context.domainIdentity,
+        paths: context.paths,
+        selector: 'source:rehearsal.files',
+      })).rejects.toThrow(/simulated crash/u);
+    } finally {
+      crash.mockRestore();
+    }
+    const keys = identityOf('rehearsal-files', 'keys');
+    const ledger = write.lanes[0]!.set.ledger;
+    // Hidden by the flip, but the store copy is still whole: not tombstoned, not screened.
+    expect(ledger.getCurrent(keys)).toMatchObject({ contentTier: 'secrets' });
+    expect(ledger.copies(keys).map((copy) => copy.state)).toEqual(['superseded']);
+    expect(keysRow()).toMatchObject({ tombstoned: 0, title: 'deploy-notes.txt' });
+
+    const resumed = await runTierMigration({
+      planId: plan.planId,
+      lanes: write.lanes,
+      inputs: context.inputs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      selector: 'source:rehearsal.files',
+    });
+    expect(resumed).toMatchObject({ state: 'done', secrets: 1 });
+    // Settled by the one Secrets policy: tombstoned, screened to the location
+    // only, chunks gone, the copy rows forgotten, the location recorded.
+    expect(keysRow()).toMatchObject({ tombstoned: 1, trust_tier: 'S5', title: null, search_text: null });
+    expect(keysChunks()).toEqual([]);
+    expect(ledger.copies(keys)).toEqual([]);
+    expect(write.lanes[0]!.set.secrets()!.get(keys)?.findingKinds).toContain('aws_access_key_id');
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
+  });
+
   test('the run stops before exceeding the approved chunks', async () => {
     const context = await rehearsal();
     const read = lanes(context, 'read');

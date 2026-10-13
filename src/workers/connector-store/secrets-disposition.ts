@@ -16,9 +16,19 @@
 // Either way the item is hidden in the same ledger write before anything else
 // happens, and its location is recorded. The owner's choice between the two
 // is pending; switching is this one constant.
+//
+// Either way, too, the side stores that hold the item's names or a short
+// excerpt outside its store copies keep none of it (`forgetSecretInSideStores`):
+// the sniffer's queued questions (beside the set ledger) are deleted, and the
+// extraction job ledger's captured names are cleared. A Secret keeps its
+// location only, wherever it was written down (docs/TRUST_MODEL.md).
 
+import { existsSync } from 'node:fs';
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
+import { TierSnifferStore } from '../classification/sniffer-store.ts';
 import type { TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
+import { clearExtractionJobNames, defaultFileExtractionJobsDbPath } from '../file-extraction/job-names.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 
 export type SecretsDisposition = 'tombstone_now' | 'hide_until_purge';
@@ -33,6 +43,16 @@ export interface SettledSecretsCopies {
   disposition: SecretsDisposition;
   /** Chunks deleted per corpus (tombstone_now), or kept hidden per corpus (hide_until_purge). */
   chunks: Record<string, number>;
+  sideStores: ForgottenSecretSideStores;
+}
+
+export interface ForgottenSecretSideStores {
+  /** Queued sniffer questions deleted (both passes). */
+  snifferQuestions: number;
+  /** Extraction job rows whose captured name was cleared. */
+  extractionJobNames: number;
+  /** Side stores that could not be reached; a later listing of the item tries again. */
+  failed: number;
 }
 
 /**
@@ -67,6 +87,55 @@ export function settleSecretsCopies(options: {
       store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
     }
   }
+  // Whichever way the copies go, the side stores forget the item now.
+  const sideStores = forgetSecretInSideStores({ ledgerPath: options.ledger.dbPath, identity });
   if (disposition === 'tombstone_now') options.ledger.removeCopies(options.identity);
-  return { disposition, chunks };
+  return { disposition, chunks, sideStores };
+}
+
+/**
+ * Forget a Secrets item in the side stores that hold its names or a short
+ * excerpt: delete its queued sniffer questions (the file beside the set
+ * ledger at `ledgerPath`) and clear the names its extraction jobs captured.
+ * Files that do not exist are not created. Never throws (the copies' fate
+ * must not wait on a side file): a store that cannot be reached is counted
+ * and logged, and the router forgets again whenever a listing finds the item
+ * Secrets.
+ */
+export function forgetSecretInSideStores(options: {
+  ledgerPath: string;
+  identity: TierLedgerIdentity & { localItemId?: string };
+}): ForgottenSecretSideStores {
+  const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, failed: 0 };
+  const { identity } = options;
+  const snifferPath = tierSnifferPathForLedger(options.ledgerPath);
+  if (snifferPath !== ':memory:' && existsSync(snifferPath)) {
+    try {
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      try {
+        result.snifferQuestions = sniffer.deleteItemQuestions({
+          provider: identity.provider,
+          accountScope: identity.accountScope,
+          providerItemId: identity.providerItemId,
+          ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
+        });
+      } finally {
+        sniffer.close();
+      }
+    } catch {
+      result.failed += 1;
+    }
+  }
+  try {
+    result.extractionJobNames = clearExtractionJobNames(defaultFileExtractionJobsDbPath(process.env), {
+      provider: identity.provider,
+      accountScope: identity.accountScope,
+      providerItemId: identity.providerItemId,
+      ...(identity.localItemId ? { localItemId: identity.localItemId } : {}),
+    });
+  } catch {
+    result.failed += 1;
+  }
+  if (result.failed > 0) console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at its next listing.`);
+  return result;
 }

@@ -33,7 +33,7 @@ import {
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
-import { secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, secretsDisposition } from './secrets-disposition.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -120,8 +120,12 @@ function applyOne(
       if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard })) report.secrets += 1;
       return;
     }
-    // No stored copy to read the location from: hidden all the same.
-    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === 'secrets') report.secrets += 1;
+    // No stored copy to read the location from: hidden all the same, and
+    // forgotten by the side stores.
+    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === 'secrets') {
+      forgetSecretInSideStores({ ledgerPath: ledger.dbPath, identity });
+      report.secrets += 1;
+    }
     return;
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard });

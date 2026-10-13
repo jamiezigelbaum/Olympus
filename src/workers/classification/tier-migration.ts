@@ -1631,7 +1631,14 @@ async function migrateOne(
 
   // Crash reconciliation: the flip already happened.
   if (record?.routed && record.state !== 'moving') {
-    const current = currentPlacement(ledger.copies(proposal.identity));
+    const copies = ledger.copies(proposal.identity);
+    const current = currentPlacement(copies);
+    if (secrets && record.contentTier === 'secrets' && current.length === 0
+      && unsettledSecretsCopies(copies, context.secretsDisposition ?? secretsDisposition())) {
+      // Flipped, then stopped before the Secrets policy ran: the copies are
+      // hidden but still stored. Settle them now; never count them as moved.
+      return resumeSecretsSettle(lane, proposal, record, copies, context.secretsDisposition);
+    }
     const done = secrets
       ? record.contentTier === 'secrets' && current.length === 0
       : record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier
@@ -1791,43 +1798,104 @@ function secretsMove(
   if (!record) return { kind: 'skipped', reason: 'changed_since_plan' };
   try {
     const flipped = ledger.flipToSecrets(proposal.identity, { expectedGeneration: record.generation, reasons: proposal.decision.reasons });
-    const row = sourceStore.activeLocalItemRow(identity.localItemId);
-    const kinds = detectSecretFindingKinds(text);
-    lane.set.secrets()?.record({
-      identity,
-      ...(row?.locatorUri ? { locator: row.locatorUri } : {}),
-      namesReleasable: proposal.decision.metadataTier === 'public' || proposal.decision.metadataTier === 'private',
-      folderKeys: row?.sourceScope?.folderKeys ?? [],
-      ...(row?.sourceScope
-        ? { scopeGeneration: row.sourceScope.accountGeneration, scopeRevision: row.sourceScope.scopeRevision }
-        : {}),
-      findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
-      text,
-    });
-    const settled = settleSecretsCopies({
-      ledger,
-      identity,
-      copies: flipped.copies,
-      storeFor: (corpusId) => {
-        const domain = lane.set.domainForCorpus(corpusId);
-        return domain ? lane.set.store(domain) : undefined;
-      },
-      connectorId: 'olympus_tier_migration',
-      ...(disposition ? { disposition } : {}),
-    });
-    return {
-      kind: 'secrets',
-      generation: flipped.record.generation,
-      chunksPlaced: 0,
-      vectorsCopied: 0,
-      chunksToEmbed: {},
-      secretsChunks: settled.chunks,
-      secretsDisposition: settled.disposition,
-    };
+    recordMigrationSecretLocation(lane, proposal, identity, text, sourceStore);
+    return settleMigrationSecrets(lane, identity, flipped.record.generation, flipped.copies, disposition);
   } catch (error) {
     if (error instanceof TierLedgerGenerationConflictError) return { kind: 'skipped', reason: 'changed_since_plan' };
     throw error;
   }
+}
+
+/** Where a Secret found by the migration lives: the location only, from its stored row. */
+function recordMigrationSecretLocation(
+  lane: TierMigrationLane,
+  proposal: TierMigrationProposal,
+  identity: SourceItemIdentity,
+  text: string,
+  store: LocalConnectorStore,
+): void {
+  const row = store.activeLocalItemRow(identity.localItemId);
+  const kinds = detectSecretFindingKinds(text);
+  lane.set.secrets()?.record({
+    identity,
+    ...(row?.locatorUri ? { locator: row.locatorUri } : {}),
+    namesReleasable: proposal.decision.metadataTier === 'public' || proposal.decision.metadataTier === 'private',
+    folderKeys: row?.sourceScope?.folderKeys ?? [],
+    ...(row?.sourceScope
+      ? { scopeGeneration: row.sourceScope.accountGeneration, scopeRevision: row.sourceScope.scopeRevision }
+      : {}),
+    findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
+    text,
+  });
+}
+
+/** Hand a flipped item's hidden copies to the one Secrets policy. */
+function settleMigrationSecrets(
+  lane: TierMigrationLane,
+  identity: SourceItemIdentity,
+  generation: number,
+  copies: readonly TierCopy[],
+  disposition: SecretsDisposition | undefined,
+): ItemOutcome {
+  const settled = settleSecretsCopies({
+    ledger: lane.set.ledger,
+    identity,
+    copies,
+    storeFor: (corpusId) => {
+      const domain = lane.set.domainForCorpus(corpusId);
+      return domain ? lane.set.store(domain) : undefined;
+    },
+    connectorId: 'olympus_tier_migration',
+    ...(disposition ? { disposition } : {}),
+  });
+  return {
+    kind: 'secrets',
+    generation,
+    chunksPlaced: 0,
+    vectorsCopied: 0,
+    chunksToEmbed: {},
+    secretsChunks: settled.chunks,
+    secretsDisposition: settled.disposition,
+  };
+}
+
+/**
+ * Copies a Secrets item still keeps that the policy has not settled: under
+ * `tombstone_now` any copy row at all (settling tombstones the copies, then
+ * forgets the rows); under `hide_until_purge` none, since hidden and kept is
+ * the settled state.
+ */
+function unsettledSecretsCopies(copies: readonly TierCopy[], disposition: SecretsDisposition): boolean {
+  return disposition === 'tombstone_now' && copies.length > 0;
+}
+
+/**
+ * A migration that stopped between `flipToSecrets` and the Secrets policy
+ * (process killed, power lost): the ledger already says Secrets and hides
+ * every copy, but the store rows are still there, untombstoned and
+ * unscreened. Finish it: record the location if a hidden copy still reads,
+ * then settle every copy the ledger lists.
+ */
+function resumeSecretsSettle(
+  lane: TierMigrationLane,
+  proposal: TierMigrationProposal,
+  record: TierLedgerRecord,
+  copies: readonly TierCopy[],
+  disposition: SecretsDisposition | undefined,
+): ItemOutcome {
+  let identity: SourceItemIdentity | undefined;
+  for (const copy of copies) {
+    const domain = lane.set.domainForCorpus(copy.corpusId);
+    const store = domain ? lane.set.store(domain) : undefined;
+    const exported = store?.exportItemCopy(proposal.identity);
+    if (!store || !exported) continue;
+    identity = fullIdentity(proposal, exported.identity.localItemId);
+    recordMigrationSecretLocation(lane, proposal, identity, exported.chunks.map((chunk) => chunk.boundedText).join(''), store);
+    break;
+  }
+  // Every copy already tombstoned (the stop came after them): the rows are
+  // matched by provider identity, so no local id is needed to settle.
+  return settleMigrationSecrets(lane, identity ?? fullIdentity(proposal, ''), record.generation, copies, disposition);
 }
 
 // ---- M5: rollback ------------------------------------------------------------------------

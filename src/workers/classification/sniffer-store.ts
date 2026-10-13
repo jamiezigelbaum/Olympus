@@ -205,6 +205,18 @@ export class TierSnifferStore {
   }
 
   /**
+   * Drop every queued question for one item, both passes, with the material
+   * they hold. An item that becomes Secrets is never asked about again, and
+   * its names or excerpt do not wait here for the resolver's next pass.
+   */
+  deleteItemQuestions(subject: TierSnifferSubject): number {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
+  }
+
+  /**
    * Re-ask a question under the item's current map revision: the queued
    * material (names or excerpt) is still the item's, only the map it is
    * judged under changed. Attempts start over.

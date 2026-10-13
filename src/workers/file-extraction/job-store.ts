@@ -32,8 +32,7 @@
 
 import { chmodSync, mkdirSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { Database } from 'bun:sqlite';
 import {
   assertSqliteSchemaCanOpen,
@@ -41,6 +40,7 @@ import {
   type SqliteMigration,
 } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, defaultFileExtractionJobsDbPath } from './job-names.ts';
 import type {
   ExtractionClaim,
   ExtractionDerivation,
@@ -52,7 +52,7 @@ import type {
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
 export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3;
-export const FILE_EXTRACTION_JOBS_DB_PATH_ENV = 'OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH';
+export { FILE_EXTRACTION_JOBS_DB_PATH_ENV, defaultFileExtractionJobsDbPath };
 
 /**
  * Lease, retry and janitor constants, ported verbatim from the queue running
@@ -582,15 +582,6 @@ interface ExtractionArtifactSqlRow {
   warnings_json: string | null;
   chars: number;
   derived_at: string;
-}
-
-export function defaultFileExtractionJobsDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
-  if (override) return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'file-extraction-jobs.sqlite');
 }
 
 /**

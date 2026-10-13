@@ -37,6 +37,7 @@ import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './
 import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
+import { forgetSecretInSideStores } from '../connector-store/secrets-disposition.ts';
 import { TIER_KEY_TRUST_DOMAIN } from '../connector-store/tiered-store-set.ts';
 import {
   OWNER_TIER_RULE_MATCH_KINDS,
@@ -93,6 +94,8 @@ interface LocatedItem {
   /** The tier ledger that holds (or will hold) this item's decision. */
   ledgerPath: string;
   identity: TierLedgerIdentity & { family: SourceFamily };
+  /** The stores' local id for the item, when a store row named it. */
+  localItemId?: string;
 }
 
 function knownStorePaths(context: TierCliContext): string[] {
@@ -103,6 +106,7 @@ function knownStorePaths(context: TierCliContext): string[] {
 
 interface StoreMatch {
   identity: TierLedgerIdentity & { family: SourceFamily };
+  localItemId: string;
   /** The set ledger this store is bound to, when a tiered store set routed into it. */
   boundLedgerPath?: string;
   ownLedgerPath: string;
@@ -113,7 +117,7 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
   try {
     db.exec('PRAGMA busy_timeout = 10000;');
     const rows = db.query(`
-      SELECT provider, family, account_scope, provider_item_id, provider_conversation_id FROM items
+      SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
       WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
       LIMIT 5
     `).all(needle, needle) as Array<{
@@ -122,6 +126,7 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
       account_scope: string;
       provider_item_id: string;
       provider_conversation_id: string | null;
+      local_item_id: string;
     }>;
     if (rows.length === 0) return [];
     let boundLedgerPath: string | undefined;
@@ -141,6 +146,7 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
         providerItemId: row.provider_item_id,
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
       },
+      localItemId: row.local_item_id,
       ...(boundLedgerPath ? { boundLedgerPath } : {}),
       ownLedgerPath: tierLedgerPathForStore(dbPath),
     }));
@@ -173,6 +179,7 @@ export function locateTierItem(locator: string, context: TierCliContext = {}): L
     throw new OperationError('invalid_params', `That locator matches ${identities.size} different items.`, 'Use the full locator URI an answer cited.');
   }
   const identity = [...identities.values()][0]!;
+  const localItemId = matches[0]!.localItemId;
   const ledgerPaths = new Set<string>();
   for (const dbPath of stores) {
     const path = tierLedgerPathForStore(dbPath);
@@ -180,9 +187,9 @@ export function locateTierItem(locator: string, context: TierCliContext = {}): L
   }
   for (const match of matches) if (match.boundLedgerPath && existsSync(match.boundLedgerPath)) ledgerPaths.add(match.boundLedgerPath);
   const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined));
-  if (deciding.length > 0) return deciding.map((ledgerPath) => ({ ledgerPath, identity }));
+  if (deciding.length > 0) return deciding.map((ledgerPath) => ({ ledgerPath, identity, localItemId }));
   const fallback = matches[0]!;
-  return [{ ledgerPath: fallback.boundLedgerPath ?? fallback.ownLedgerPath, identity }];
+  return [{ ledgerPath: fallback.boundLedgerPath ?? fallback.ownLedgerPath, identity, localItemId }];
 }
 
 function identityKey(identity: TierLedgerIdentity): string {
@@ -234,6 +241,16 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
       return { cleared, note: 'The next sync re-decides this item without the override.' };
     }
     ledger.setOverride(item.identity, override);
+    if (override.kind === 'tier' && override.tier === 'secrets') {
+      // Secrets at once, whether or not the engine runs: the side stores keep
+      // none of the item's names or excerpt (a queued sniffer question, a name
+      // an extraction job captured). Its copies follow below or at the set's
+      // next override pass.
+      forgetSecretInSideStores({
+        ledgerPath: item.ledgerPath,
+        identity: { ...item.identity, ...(item.localItemId ? { localItemId: item.localItemId } : {}) },
+      });
+    }
     if (override.kind === 'not_secret') {
       return { override: 'not_secret', note: 'The next sync sends this item back through normal classification.' };
     }
