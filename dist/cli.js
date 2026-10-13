@@ -53779,9 +53779,19 @@ function redactWhatsAppLiveSpoolSecrets(options) {
       return;
     owners ??= mediaPathOwners(options.spoolDir);
     const real = existingRealPath(message.mediaPath);
-    if (!real || (owners.get(real)?.size ?? 0) > 1)
+    if (!real)
+      return;
+    const self = chatScopedKey(message.chatJid, message.id);
+    if ([...owners.get(real) ?? []].some((owner) => owner !== self))
       return;
     deleteSavedMedia(real, mediaRoot);
+  };
+  const releaseMedia = (message) => {
+    if (!message.mediaPath || !owners)
+      return;
+    const real = existingRealPath(message.mediaPath);
+    if (real)
+      owners.get(real)?.delete(chatScopedKey(message.chatJid, message.id));
   };
   return redactCaptureSpoolLines({
     dir: options.spoolDir,
@@ -53832,6 +53842,7 @@ function redactWhatsAppLiveSpoolSecrets(options) {
         record["sender_name"] = "";
       }
       record["secret_redacted"] = true;
+      releaseMedia(message);
       return JSON.stringify(record);
     }
   });

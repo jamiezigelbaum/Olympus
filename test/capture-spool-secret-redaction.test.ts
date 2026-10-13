@@ -416,6 +416,23 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
     expect(record).not.toHaveProperty('media_path');
     expect(record).not.toHaveProperty('media_direct_path');
   });
+  test('audio two Secret messages share is deleted by the last one to let go of it', () => {
+    const root = workspace('olympus-whatsapp-spool-shared-secret-');
+    const spoolDir = join(root, 'spool');
+    const mediaDir = join(root, 'media', 'audio');
+    mkdirSync(spoolDir, { recursive: true });
+    mkdirSync(mediaDir, { recursive: true });
+    const shared = join(mediaDir, 'TWIN.ogg');
+    writeFileSync(shared, 'audio');
+    writeFileSync(join(spoolDir, WHATSAPP_FILE), `${[
+      whatsappLine({ id: 'TWIN', text: '', media_type: 'audio', media_path: shared }),
+      whatsappLine({ id: 'TWIN', chat_jid: '15550002222@s.whatsapp.net', text: '', media_type: 'audio', media_path: shared }),
+    ].join('\n')}\n`);
+    const result = redactWhatsAppLiveSpoolSecrets({ spoolDir, mediaDir, judge: () => 'content' });
+    expect(result).toEqual({ recordsRedacted: 2, recordsBlanked: 0 });
+    expect(existsSync(shared)).toBe(false);
+  });
+
   test('mentions go with the text, and audio another chat\'s message also names is kept', () => {
     const root = workspace('olympus-whatsapp-spool-mentions-');
     const spoolDir = join(root, 'spool');

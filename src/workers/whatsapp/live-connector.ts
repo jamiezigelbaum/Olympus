@@ -726,8 +726,17 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
     owners ??= mediaPathOwners(options.spoolDir);
     // Keyed by the file itself, so a symlink and its target are one file.
     const real = existingRealPath(message.mediaPath);
-    if (!real || (owners.get(real)?.size ?? 0) > 1) return;
+    if (!real) return;
+    const self = chatScopedKey(message.chatJid, message.id);
+    if ([...(owners.get(real) ?? [])].some((owner) => owner !== self)) return;
     deleteSavedMedia(real, mediaRoot);
+  };
+  // A line that gives up its path no longer holds the file, so the last
+  // Secret line to name a shared file is the one that deletes it.
+  const releaseMedia = (message: SpoolMessage): void => {
+    if (!message.mediaPath || !owners) return;
+    const real = existingRealPath(message.mediaPath);
+    if (real) owners.get(real)?.delete(chatScopedKey(message.chatJid, message.id));
   };
   return redactCaptureSpoolLines({
     dir: options.spoolDir,
@@ -775,6 +784,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         record['sender_name'] = '';
       }
       record['secret_redacted'] = true;
+      releaseMedia(message);
       return JSON.stringify(record);
     },
   });
