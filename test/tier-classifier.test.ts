@@ -21,7 +21,7 @@ import {
 
 const AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 const BENIGN = 'Notes from the weekly planning conversation about the garden.';
-const HEALTH = 'The lab results confirm the diagnosis; the patient starts treatment.';
+const HEALTH = 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.';
 
 function classify(
   signals: SourceClassificationSignals,
@@ -142,9 +142,8 @@ describe('Secrets', () => {
     const sniffer: TierSniffer = { id: 'spy', judge: () => { asked += 1; return { verdict: 'undecided' }; } };
     classify({ title: `medical ${AWS_KEY}` }, HEALTH, { sniffer });
     classify({ title: 'medical record' }, `token ${AWS_KEY}`, { sniffer });
-    // The second item's names are flagged, so pass 1 asks once; pass 2 finds
-    // the secret before any excerpt question.
-    expect(asked).toBe(1);
+    // Topic-only names no longer ask; the body secret is found before any question.
+    expect(asked).toBe(0);
   });
 
   test('a "do not distribute" or "highly confidential" stamp is not a secret', () => {
@@ -252,13 +251,12 @@ describe('content only raises', () => {
 });
 
 describe('sniffer seam', () => {
-  test('owner example: "biopsy results" names are Personal and pending; the content is judged on its own', () => {
-    const decision = classify({ title: 'biopsy results' }, 'the results show cancer');
+  test('record titles hold content, while topic-only names remain Personal', () => {
+    const decision = classify({ title: 'biopsy results 2026-10-12' }, 'the results show cancer');
     expect(decision.metadataTier).toBe('private');
-    expect(decision.state).toBe('pending');
-    expect(decision.reasons).toContain('metadata:possibly_private:names:health');
-    expect(decision.reasons).toContain('metadata:sniffer:undecided:undecided');
-
+    expect(decision.metadataPending).toBe(false);
+    expect(decision.contentPending).toBe(true);
+    expect(decision.reasons).toContain('content:own_record:dated_record');
     const withRecord = classify({ title: 'biopsy results' }, HEALTH);
     expect(withRecord.metadataTier).toBe('private');
     expect(withRecord.contentTier).toBe('secure');
@@ -267,7 +265,8 @@ describe('sniffer seam', () => {
   test('a decided sniffer verdict raises', () => {
     const sniffer: TierSniffer = { id: 'fake', judge: () => ({ verdict: 'decided', tier: 'secure', code: 'health:0.9' }) };
     const decided = classify({ title: 'therapy invoices' }, BENIGN, { sniffer });
-    expect(decided.metadataTier).toBe('secure');
+    expect(decided.metadataTier).toBe('private');
+    expect(decided.contentTier).toBe('secure');
     expect(decided.state).toBe('current');
   });
 
@@ -288,7 +287,7 @@ describe('reasons are content-free', () => {
       expect(joined).not.toContain(fragment);
     }
     expect(decision.reasons).toContain('content:detector:financial:iban');
-    expect(decision.reasons).toContain('content:detector:health:vocabulary');
+    expect(decision.reasons).not.toContain('content:detector:health:vocabulary');
   });
 });
 
@@ -337,17 +336,17 @@ describe('vocabulary-only detector hits are judged by the private model (owner r
     expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sniffer', state: 'current' });
   });
 
-  test('until the model answers, the item is pending (held Private)', () => {
+  test('until the model answers, the item is pending but Personal-first', () => {
     const decision = classify(BOOK_NAMES, BOOK, { sniffer: answering({ verdict: 'undecided' }, []) });
     expect(decision).toMatchObject({ state: 'pending', contentPending: true });
     expect(decision.reasons).toContain('content:borderline:health');
     expect(decision.reasons).toContain('content:sniffer:local:test:undecided');
   });
 
-  test('with no private model to ask, vocabulary still makes the item Private', () => {
+  test('with no private model to ask, vocabulary alone stays Personal', () => {
     const decision = classify(BOOK_NAMES, BOOK);
-    expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector' });
-    expect(decision.reasons).toContain('content:detector:health:vocabulary');
+    expect(decision).toMatchObject({ contentTier: 'private', decidedBy: 'default' });
+    expect(decision.reasons).not.toContain('content:detector:health:vocabulary');
   });
 
   test('financial vocabulary is judged the same way', () => {
@@ -358,7 +357,7 @@ describe('vocabulary-only detector hits are judged by the private model (owner r
     });
     expect(personal).toMatchObject({ contentTier: 'private', state: 'current' });
     expect(asked[0]!.flags).toContain('content:borderline:financial');
-    expect(classify({ title: 'essay.md' }, essay)).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector' });
+    expect(classify({ title: 'essay.md' }, essay)).toMatchObject({ contentTier: 'private', decidedBy: 'default' });
   });
 
   test('structured identifiers stay Private at once, and the model is never asked', () => {

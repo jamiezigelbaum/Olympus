@@ -30,7 +30,6 @@ import type {
 import {
   detectSecretFindingKinds,
   detectSensitiveContent,
-  namesLookPossiblyPrivate,
 } from './engine.ts';
 import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
 import { pathPrefixMatches } from '../../core/location-rules.ts';
@@ -47,7 +46,8 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // needs the steering half of an instruction (comparison signs, "all lines"
 // and "confidence" alone no longer count). Items decided under p3 are judged
 // again, so a document either rule misfired on gets a real verdict.
-export const TIER_CLASSIFIER_VERSION = '2026-10-02.p4';
+// p5: Personal-first content; own-record signals hold only the content.
+export const TIER_CLASSIFIER_VERSION = '2026-10-13.p5';
 
 /**
  * The `mapRevision` every decision records. The legacy sensitivity map was
@@ -129,6 +129,8 @@ export interface TierSnifferSubject {
 
 export interface TierSnifferRequest {
   pass: 'metadata' | 'content';
+  /** Held records go ahead of ordinary background judgments. */
+  priority?: 'normal' | 'high';
   /** Content-free reason the item was flagged, e.g. `names:health`. */
   flags: readonly string[];
   /**
@@ -174,6 +176,8 @@ export const SNIFFER_EXCERPT_MAX_CHARS = 1_200;
  * when a privacy-safe model can be asked.
  */
 export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
+/** An open model question that does not hold the content (owner-approved). */
+export const PERSONAL_FIRST_REASON = 'content:personal_first';
 
 /**
  * What the sniffer reads in pass 2: the item's names (title, folder path,
@@ -189,6 +193,8 @@ export function snifferContentMaterial(names: string, excerpt: string): string {
 
 export interface TierClassificationInput {
   signals: SourceClassificationSignals;
+  /** Stored links are checked for credentials before any metadata is released; never model input. */
+  locators?: readonly string[];
   /**
    * The item's provider, used ONLY to match owner rules that name a source.
    * Never compared against a literal in this module.
@@ -385,6 +391,7 @@ function classifyItemTiersWithPublic(
     signals,
     provider: input.provider,
     names,
+    locators: input.locators ?? [],
     options,
     secretsCleared,
     sniffer,
@@ -563,6 +570,7 @@ function metadataPass(args: {
   signals: SourceClassificationSignals;
   provider: string | undefined;
   names: string;
+  locators: readonly string[];
   options: TierClassificationOptions;
   secretsCleared: boolean;
   sniffer: TierSniffer;
@@ -573,7 +581,12 @@ function metadataPass(args: {
 
   // [2] Secret detector on title + path. Nothing but an override outranks it.
   if (!args.secretsCleared) {
-    const secretKinds = detectSecretFindingKinds([signals.title, signals.path].filter(Boolean).join('\n'));
+    const fields = [signals.title, signals.path, signals.sender, ...(signals.labels ?? []), ...(signals.folderKeys ?? []), ...args.locators]
+      .filter((value): value is string => typeof value === 'string');
+    const secretKinds = detectSecretFindingKinds(fields.join('\n'));
+    // Names are releasable data too. URL userinfo and encoded credential
+    // parameters must never reach the metadata model or a names-only copy.
+    if (fields.some(hasCredentialUrl) && !secretKinds.includes('credential_assignment')) secretKinds.push('credential_assignment');
     if (secretKinds.length > 0) {
       return {
         tier: 'secrets',
@@ -658,11 +671,14 @@ function metadataPass(args: {
 
   // [7] Sniffer, only when names look possibly private and nothing already
   // made them Private.
-  const flags = namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
+  // Topic words are not evidence that the names themselves are private.
+  // Structured values in names still require their own metadata judgment.
+  const flags = detectSensitiveContent({ text: names }).signals.map((signal) => `names:${signal}`);
   let pending = false;
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'metadata',
+      priority: 'high',
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
@@ -768,18 +784,8 @@ function contentPass(args: {
 
   let decided: ResolvedVerdict = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
 
-  // [10] Deterministic sensitive detectors on the text. Names travel with the
-  // text so the health origin hint and a title's vocabulary still count; the
-  // content tier is at least the metadata tier, so this can only raise.
-  //
-  // Structured hits (a Luhn-valid card, an IBAN, a routing or account number,
-  // an SSN, a passport or NIF number) raise to Private at once. Vocabulary
-  // alone ("treatment", "symptoms", "invoice") does not prove an item private
-  // (owner ruling 2026-10-01: a book chapter that mentions treatment is not a
-  // private answer): when a privacy-safe model can be asked, those families
-  // are borderline and step [12] asks it. With no model to ask, vocabulary
-  // still raises to Private, so nothing words flagged reaches Personal
-  // without a model's judgment.
+  // [10] Structured identifiers raise at once. Topic vocabulary only
+  // selects useful passages for the model; it never holds or raises.
   const detection = detectSensitiveContent({
     text,
     ...(args.matchInput.title ? { title: args.matchInput.title } : {}),
@@ -787,39 +793,23 @@ function contentPass(args: {
     ...(args.matchInput.path ? { path: args.matchInput.path } : {}),
   });
   const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
-  if (detection.signals.length > 0 || (detection.vocabulary.length > 0 && !canAskSniffer)) {
+  if (detection.signals.length > 0) {
     decided = maxVerdict(decided, {
       tier: 'secure',
       decidedBy: 'sensitive_detector',
-      reasons: detectorReasons([...detection.signals, ...detection.vocabulary]),
+      reasons: detectorReasons(detection.signals),
     });
   }
 
   // [11] Retired with the legacy sensitivity map (2026-10-03).
 
-  // [12] Sniffer on a short excerpt plus the item's names, while the content
-  // is below Private.
-  //
-  // With a privacy-safe model to ask, EVERY item whose text was read is asked
-  // (owner ruling 2026-10-01, p3): a person's own lab report, statement or
-  // filled form often carries none of the detector vocabulary (reference
-  // ranges, mg/dL, another language), so "no detector fired" never proves an
-  // item Personal. Until the model answers, the item is pending (held
-  // Private). Structured detections, owner rules and overrides still decide
-  // at once (above), and the model is never asked about Private content; an
-  // item whose names an owner rule settled is not asked only because its text was read.
-  //
-  // Without a privacy-safe model to ask (no private lane), only items whose
-  // NAMES were flagged wait (owner ruling 2026-10-01: unflagged items are
-  // Personal at once); a borderline word in the text alone is not a flag, and
-  // vocabulary raised to Private in step [10].
-  //
-  // A borderline family from vocabulary is asked about with the passages the
-  // detector matched, not just the document's opening, so a model can see the
-  // medical or financial text that tripped it.
+  // [12] Every eligible read item still gets its own background judgment.
+  // Only own-record signals hold its content while that answer is missing.
+  const recordFlags = ownRecordSignals(text, args.matchInput);
   let pending = false;
   const flags = [
     ...metadata.flags,
+    ...recordFlags.map(signal => `content:own_record:${signal}`),
     ...(canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []),
   ];
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true) flags.push(CONTENT_READ_SNIFFER_FLAG);
@@ -827,6 +817,7 @@ function contentPass(args: {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'content',
+      priority: recordFlags.length > 0 || metadata.pending ? 'high' : 'normal',
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
       mapRevision: args.mapRevision,
@@ -837,6 +828,8 @@ function contentPass(args: {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
+      if (recordFlags.length === 0 && !metadata.pending) reasons.push(PERSONAL_FIRST_REASON);
+      for (const flag of recordFlags) reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline) reasons.push(`content:borderline:${flag}`);
       reasons.push(`content:sniffer:${args.sniffer.id}:undecided`);
     }
@@ -844,6 +837,46 @@ function contentPass(args: {
   if (reasons.length === 0) reasons.push('content:no_raise');
   if (imageOrdinary) reasons.unshift(IMAGE_ORDINARY_REASON);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+
+/** Shared with placement so a credential URL is not retained as a Secret location. */
+export function hasCredentialUrl(material: string): boolean {
+  // Try a whole locator first: valid URL userinfo may contain spaces or
+  // apostrophes. In prose, retain quotes rather than truncating a password.
+  const candidates = [material.trim(), ...Array.from(material.matchAll(/https?:\/\/[^\s<>]+/gi), match => match[0])];
+  for (const candidate of candidates) {
+    try {
+      const url = new URL(candidate);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
+      if (url.username || url.password) return true;
+      for (const [key, value] of url.searchParams) {
+        if (value && /^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(key)) return true;
+      }
+    } catch { /* Not a URL; the regular credential detector still applies. */ }
+  }
+  return false;
+}
+
+/** Source-neutral evidence of a populated record, never a topic classifier. */
+function ownRecordSignals(text: string, names: NamesMatchInput): string[] {
+  const signals: string[] = [];
+  const value = String.raw`[+-]?\d+(?:[.,]\d+)?`;
+  const unit = String.raw`(?:mg\s*/\s*d[lL]|mmol\s*/\s*[lL]|g\s*/\s*d[lL]|mIU\s*/\s*[lL]|[uµμ]g\s*/\s*[lL]|ng\s*/\s*m[lL]|mmHg|bpm|kg|cm|°[CF])`;
+  if (new RegExp(String.raw`\b${value}\s*${unit}(?![\p{L}])`, 'iu').test(text)
+    || new RegExp(String.raw`\b${value}[^\n]{0,60}(?:reference\s+(?:range|interval)|normal\s+range)\s*[:(]?\s*${value}\s*[-–—]\s*${value}`, 'iu').test(text)) {
+    signals.push('measurement');
+  }
+  if (/\b(?:patient|account\s+holder|applicant)(?:\s+name)?\s*[:=]\s*[\p{L}][\p{L}'’.-]+(?:[ \t]+[\p{L}][\p{L}'’.-]+)*/iu.test(text)) signals.push('named_holder');
+  // At least two populated, distinct form fields; blank templates do not count.
+  const fields = [...text.matchAll(/(?:^|\n)\s*(name|full name|first name|last name|date of birth|dob|email|phone|address|signature|occupation|marital status)\s*[:=]\s*([^\n]+)/giu)]
+    .filter(match => /[\p{L}\p{N}]/u.test(match[2]!) && !/^(?:_{2,}|\[|<|enter\b|your\b|n\/a\b)/i.test(match[2]!.trim()));
+  if (new Set(fields.map(match => match[1]!.toLowerCase())).size >= 2) signals.push('filled_form');
+  // A folder segment, not a filename or a mention of a folder in prose.
+  if (/(?:^|[/\\])(?:labs?|medical|taxes|statements|legal)(?:[/\\])/i.test(names.path ?? '')) signals.push('records_folder');
+  const title = names.title ?? '';
+  if (/\b(?:test|lab|bloodwork|blood work|visit|statement|results?)\b/i.test(title)
+    && /\b(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:\d{4}|\d{1,2}(?:,?\s+\d{4})?))\b/i.test(title)) signals.push('dated_record');
+  return signals;
 }
 
 /** A category code safe in a reason string (the judge's own codes pass unchanged). */
@@ -980,10 +1013,9 @@ interface NamesMatchInput {
 function namesMatchInput(signals: SourceClassificationSignals): NamesMatchInput {
   const title = signals.title?.trim();
   const sender = signals.sender?.trim();
-  // A source without a folder path still has a name, and the detectors' path
-  // hint reads both. Joined, never chosen between, so a longer haystack can
-  // only add matches.
-  const path = [signals.path?.trim(), title].filter((part): part is string => Boolean(part)).join('\n');
+  // Keep the path separate: records-folder signals apply to directory
+  // segments, not to words in a title.
+  const path = signals.path?.trim();
   return {
     ...(title ? { title } : {}),
     ...(sender ? { sender } : {}),
@@ -1061,6 +1093,7 @@ function namesOf(signals: SourceClassificationSignals): string {
     signals.path,
     ...(signals.folderKeys ?? []),
     ...(signals.labels ?? []),
+    signals.sender,
   ].filter((part): part is string => typeof part === 'string' && part.trim().length > 0).join('\n');
 }
 

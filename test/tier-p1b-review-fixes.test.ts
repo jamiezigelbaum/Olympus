@@ -199,7 +199,7 @@ describe('Secrets and moves', () => {
     const specs: FixtureSpec[] = [{ id: 'garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden.' }];
     await tiered.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     // A raise: queued, the Personal copy hidden but kept.
-    specs[0] = { ...specs[0]!, version: 'v2', text: 'Garden notes. IBAN GB82WEST12345698765432 for the seeds.' };
+    specs[0] = { ...specs[0]!, version: 'v2', text: 'Garden notes. IBAN GB82WEST12345698765432.' };
     await tiered.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     expect(tiered.ledger.getCurrent(identityOf('garden'))?.state).toBe('moving');
     // Now a secret: the move is abandoned and every copy goes.

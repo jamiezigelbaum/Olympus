@@ -43,9 +43,9 @@ function model(answer: (material: string) => { tier: string; category: string; c
     requests,
     async complete(request) {
       requests.push(request);
-      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number; names?: string; excerpt?: string });
+      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number; names?: string; document?: string });
       return {
-        text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ownRecord: false, privateKind: 'none', ...answer(item.names ?? item.excerpt ?? '') })) }),
+        text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ownRecord: false, privateKind: 'none', ...answer(item.names ?? item.document ?? '') })) }),
         modelId: LANE.modelId,
       };
     },
@@ -67,12 +67,12 @@ describe('the sniffer settles routed items through the tiered store set', () => 
     const fixture = openTierFixture(workspace.dir, { embed: false });
     cleanups.push(() => fixture.close());
     const specs: FixtureSpec[] = [
-      { id: 'mortgage-letter', name: 'mortgage letter', text: 'Lunch with the neighbours on Friday.' },
-      { id: 'therapy-notes', name: 'therapy notes', text: 'Notes from the Tuesday meeting.' },
+      { id: 'mortgage-letter', name: 'mortgage letter', text: 'Patient: Morgan Example. Lunch with the neighbours on Friday.' },
+      { id: 'therapy-notes', name: 'therapy notes', text: 'Patient: Morgan Example. Notes from the Tuesday meeting.' },
     ];
     await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const copies = (id: string) => fixture.ledger.copies(identityOf(id)).map((copy) => [copy.corpusId, copy.layers, copy.state, copy.embedHold]);
-    expect(copies('mortgage-letter')).toEqual([[CORPORA.secure_local, 'both', 'current', true]]);
+    expect(copies('mortgage-letter')).toEqual([[CORPORA.internal, 'metadata', 'current', true], [CORPORA.secure_local, 'content', 'current', true]]);
     expect(fixture.ledger.getCurrent(identityOf('mortgage-letter'))?.state).toBe('pending');
 
     const sniffer = installed.snifferStoreForLedger(fixture.ledger.dbPath);
@@ -89,11 +89,11 @@ describe('the sniffer settles routed items through the tiered store set', () => 
     // current until the move primitive runs. Nothing was rewritten in place.
     const lowered = fixture.ledger.getCurrent(identityOf('mortgage-letter'))!;
     expect(lowered).toMatchObject({ state: 'moving', targetContentTier: 'private' });
-    expect(copies('mortgage-letter')).toEqual([[CORPORA.secure_local, 'both', 'current', true]]);
+    expect(copies('mortgage-letter')).toEqual([[CORPORA.internal, 'metadata', 'current', true], [CORPORA.secure_local, 'content', 'current', true]]);
 
     // Stays Private: same store, decided, the embedding hold released.
     expect(fixture.ledger.getCurrent(identityOf('therapy-notes'))).toMatchObject({ state: 'current', contentTier: 'secure' });
-    expect(copies('therapy-notes')).toEqual([[CORPORA.secure_local, 'both', 'current', false]]);
+    expect(copies('therapy-notes')).toEqual([[CORPORA.internal, 'metadata', 'current', false], [CORPORA.secure_local, 'content', 'current', false]]);
   });
 
   test('without the set planner a routed item stays pending and its question is kept', async () => {
@@ -125,7 +125,7 @@ describe('conversation-aware identity', () => {
     const sniffer = new CachedTierSniffer(store, LANE);
     const inConversation = (conversation: string, title: string) => {
       const subject = { provider: 'fixture', accountScope: 'personal', providerItemId: 'm1', providerConversationId: conversation };
-      ledger.recordDecision(subject, classifyItemTiers({ signals: { title }, subject }, { sniffer }));
+      ledger.recordDecision(subject, classifyItemTiers({ signals: { title: `${title} SSN 123-45-6789` }, subject }, { sniffer }));
       return subject;
     };
     const family = inConversation('chat:family', 'therapy');

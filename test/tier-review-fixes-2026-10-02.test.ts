@@ -126,7 +126,12 @@ afterEach(() => {
 
 let ownerWords: string | undefined;
 
-async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; extract?: boolean } = {}) {
+async function freshInstall(options: {
+  lane?: typeof BUILT_IN_SNIFFER_LANE;
+  extract?: boolean;
+  gardenOwnRecord?: boolean;
+  structuredBankName?: boolean;
+} = {}) {
   ownerWords = undefined;
   const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
   const installed = configureInstalledTierClassification({
@@ -144,7 +149,12 @@ async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; extr
     lane.internal.current()?.close();
     lane.public.current()?.close();
   });
-  const entries = FILES.map((file) => ({ tag: 'file' as const, id: file.id, name: file.name, pathDisplay: file.path, rev: 'r1' }));
+  const entries = FILES.map((file) => {
+    const name = options.structuredBankName && file.id === 'id:bank'
+      ? 'bank letter SSN 123-45-6789.pdf'
+      : file.name;
+    return { tag: 'file' as const, id: file.id, name, pathDisplay: file.path, rev: 'r1' };
+  });
   const metadataClient: DropboxMetadataClient = {
     supportsNativeRecursive: true,
     async listFolder(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c1', hasMore: false }; },
@@ -167,7 +177,9 @@ async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; extr
         localItemId: `personal:${file.id}`,
         sourceVersion: 'r1',
       },
-      text: file.text,
+      text: options.gardenOwnRecord && file.id === 'id:garden'
+        ? `${file.text}\nPatient name: Morgan Example`
+        : file.text,
       extractorKind: 'local_text',
       extractorVersion: 'test',
       fetchedAt: '2026-10-01T00:00:00.000Z',
@@ -249,7 +261,11 @@ function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { l
 /** Garden judged Personal by the model and moved there: its held copy stays kept (superseded) in the Private store. */
 async function gardenSettledPersonal(verdict: string | ((request: AnalystModelRequest) => string) = PERSONAL_VERDICT) {
   const model = registeredBuiltIn(verdict);
-  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, gardenOwnRecord: true });
+  const held = install.lane.ledger.getCurrent(garden)!;
+  expect(held).toMatchObject({ metadataTier: 'private', metadataPending: false, contentTier: 'private', contentPending: true });
+  expect(held.reasons).toContain('content:own_record:named_holder');
+  expect(await olympusSearch(install, 'pruning plan')).not.toContain('Orchard pruning plan');
   const service = snifferFor(install, model.builtIn);
   for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
   expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
@@ -462,12 +478,12 @@ describe('4. a re-judge that finds a secret in stored text', () => {
 });
 
 describe('6 and T-1. a private model that is not ready', () => {
-  test('read items wait for it (never Personal before it judges them), and the sniffer starts its download', async () => {
+  test('own-record items wait for it (never Personal before it judges them), and the sniffer starts its download', async () => {
     let ready = false;
     const model = registeredBuiltIn(PERSONAL_VERDICT, () => ready);
-    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
-    // The built-in lane exists but its model is not downloaded: the unflagged
-    // file is held for it, not released to ChatGPT.
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, gardenOwnRecord: true });
+    // The built-in lane exists but its model is not downloaded: the populated
+    // record is held for it even though its names remain Personal.
     expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentPending: true });
     expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
     const service = snifferFor(install, model.builtIn);
@@ -560,7 +576,7 @@ describe('9. built-in default approvals', () => {
 
 describe('11a. items a names-only folder covers stop waiting for text', () => {
   test('a row recorded before p4, pending on text that never comes, is settled on its names without a re-list', async () => {
-    const install = await freshInstall({ extract: false });
+    const install = await freshInstall({ extract: false, structuredBankName: true });
     expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentRead: false, contentPending: true });
     expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:unread');
     // Not names-only yet: nothing settles.
@@ -618,13 +634,14 @@ describe('12. a per-item owner override applies to an item already stored (no fi
     const service = snifferFor(install, model.builtIn);
     for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
     expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
-    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+    // Personal names remain in the Personal store while Private content rests securely.
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
 
     const set = await runTierCommand(['set', 'id:bank', 'personal'], { storePaths: storePaths() });
     expect(set).toMatchObject({ results: [{ override: 'Personal', outcome: 'set_applies_next_pass' }] });
     // A lowering exposes nothing before the move: still Private until it lands.
-    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
 
     await service.runOnce();
     expect(install.lane.ledger.getCurrent(bank)).toMatchObject({
@@ -699,13 +716,13 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
 
-  /** The bank letter judged Private by the model and resting in the Private store. */
+  /** The bank letter's content judged Private, with its Personal names retained separately. */
   async function bankPrivate() {
     const model = registeredBuiltIn(PRIVATE_VERDICT);
     const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
     const service = snifferFor(install, model.builtIn);
     for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
-    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
     return { install, service };
   }
 
@@ -724,12 +741,13 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
       beforeFlip: () => { raised = runTierSet(['id:bank', 'private'], { storePaths: storePaths() }); },
     });
     await expect(move).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
-    // Replacing the override cancelled the lower in the same write (it hid
-    // nothing): the item is already Private where it rests, nothing to raise.
-    expect(raised).toMatchObject({ results: [{ override: 'Private', outcome: 'set_applies_next_pass' }] });
-    // Never current in the Personal store; the staged copy is kept hidden.
-    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
+    // The owner raises the previously Personal names too, so every copy is
+    // hidden before the stale lower can publish; the new raise then lands.
+    expect(raised).toMatchObject({ results: [{ override: 'Private', outcome: 'hidden_now_move_queued' }] });
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([]);
     expect(install.lane.ledger.copies(bank).find((copy) => copy.corpusId === INTERNAL_CORPUS)).toMatchObject({ state: 'superseded' });
+    await service.runOnce();
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
     expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
 
@@ -751,7 +769,7 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
     ledger.setOverride(bank, { kind: 'tier', tier: 'private' });
     expect(applyOwnerOverrides({ set: install.lane.set, afterRead: () => ledger.clearOverride(bank) })).toMatchObject({ lowered: 0 });
     expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
-    expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(ledger, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
   });
 
   test('a queued lower whose override was cleared before it lands is cancelled: a move read before never lands', async () => {
@@ -770,7 +788,7 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
     })).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
     await service.runOnce();
     expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
-    expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(ledger, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
   });
 

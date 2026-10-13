@@ -1,6 +1,6 @@
 # Categorization precision: Private only when it is private
 
-Status: approved by the owner 2026-10-04 (Personal-first, the targets, and labeling); step 1 in progress (`eval/calibration/`).
+Status: approved by the owner 2026-10-04 (Personal-first, the targets, and labeling); step 1 in progress (`eval/calibration/`); step 2 built (2026-10-13), with real-corpus evaluation still required before rollout.
 Scope: the per-item tier classifier, the private model (sniffer), the move
 machinery and the dashboard. Source-agnostic throughout.
 
@@ -74,9 +74,9 @@ measure that this stays true.
 Done when the eval runs on the real labeled set and the dashboard shows the
 hold numbers.
 
-### 2. Hold only items that look like someone's own record
+### 2. Hold only items that look like someone's own record — built 2026-10-13
 
-Today every read item is held until the model answers. Instead:
+The shared classifier now separates waiting from placement:
 
 - **Own-record signals** decide whether an item waits. All of them are
   deterministic and source-neutral:
@@ -91,6 +91,26 @@ Today every read item is held until the model answers. Instead:
 - **Signal present:** held as today, but asked first in the queue.
 - **Topic vocabulary alone** (`health`, `personal_life`, `finance` words) no
   longer flags anything. It only steers which passage the model reads.
+
+Implementation: classifier `2026-10-13.p5` records an open background
+content question with `content:personal_first` for no-signal items. The same
+ledger verdict application and hide-before-move transaction handles a later
+Private verdict. Own-record requests expose `priority: "high"`; other requests
+use `"normal"` (queue scheduling consumes this separately). Structured identifiers,
+Secrets, owner rules, source floors and image restrictions retain precedence.
+Gmail and Drive use the shared placement planner: cleared names stay Personal
+when only the body is held. Names with unsafe metadata are still withheld;
+metadata copies contain no body chunks. Credential-bearing metadata URLs and
+secrets in sender/label fields are refused before model input.
+
+Synthetic tests cover immediate fruit-reminder, Gmail-tips and promotion
+availability, held records, searchable subject/sender without body or snippet,
+and immediate hiding after a background Private verdict. The 95-email export
+contains names and verdicts, not bodies: it cannot establish a new content tier
+for any individual message. Gmail tips (rows 1–2) and Uber promotions (17, 20)
+are immediate-availability candidates if their full content has no own-record
+or secret signal; row 47 is already Personal. The fruit-reminder body is absent
+from that evidence, so only its synthetic shape is verified here.
 
 Risk: a real private record with none of these signals would be Personal
 until the model answers, usually minutes. The eval in step 1 measures exactly

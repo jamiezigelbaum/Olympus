@@ -51,19 +51,20 @@ function answering(answer: TierSnifferVerdict, asked: TierSnifferRequest[] = [])
   return { id: 'local:test', judge: (request) => { asked.push(request); return answer; } };
 }
 
-describe('every read item is judged by the private model before it may be Personal', () => {
+describe('every read item is judged; only own-record signals hold content', () => {
   test('a lab report with no detector vocabulary is held pending, not Personal at once', () => {
     const asked: TierSnifferRequest[] = [];
     const decision = classifyItemTiers(
       { signals: LAB_NAMES, provider: 'fixture', text: LAB_REPORT },
       { sniffer: answering({ verdict: 'undecided' }, asked) },
     );
-    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-02.p4');
+    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-13.p5');
     expect(decision).toMatchObject({ contentRead: true, contentPending: true, state: 'pending', engineVersion: TIER_CLASSIFIER_VERSION });
     expect(decision.reasons).not.toContain('content:no_raise');
     expect(asked).toHaveLength(1);
     expect(asked[0]!.pass).toBe('content');
-    expect(asked[0]!.flags).toEqual([CONTENT_READ_SNIFFER_FLAG]);
+    expect(asked[0]!.flags).toContain('content:own_record:measurement');
+    expect(asked[0]!.priority).toBe('high');
     // The folder path and title travel with the excerpt.
     expect(asked[0]!.material).toStartWith('Names: 2026-06-29 blood work 1.pdf | /2 Areas/Health/Labs/');
     expect(asked[0]!.material).toContain('Excerpt: Laboratorio Central.');
@@ -120,7 +121,7 @@ describe('every read item is judged by the private model before it may be Person
   });
 
   test('with no private model, an unflagged read item is Personal at once (unchanged)', () => {
-    const decision = classifyItemTiers({ signals: LAB_NAMES, provider: 'fixture', text: LAB_REPORT });
+    const decision = classifyItemTiers({ signals: PROGRAM_NAMES, provider: 'fixture', text: PROGRAM_RULES });
     expect(decision).toMatchObject({ contentTier: 'private', state: 'current', contentPending: false });
     expect(decision.reasons).toContain('content:no_raise');
   });

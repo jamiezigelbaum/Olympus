@@ -35,7 +35,7 @@ import {
 } from '../src/core/mail-source-scope.ts';
 
 const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
-const HEALTH = 'The lab results confirm the diagnosis; the patient starts treatment.';
+const HEALTH = 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.';
 
 const dirs: string[] = [];
 function tempDir(): string {

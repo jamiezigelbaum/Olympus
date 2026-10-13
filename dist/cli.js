@@ -16552,20 +16552,6 @@ function detectSensitiveContent(input) {
   }
   return { signals, vocabulary, borderline };
 }
-function namesLookPossiblyPrivate(names) {
-  if (!names.trim())
-    return [];
-  const families = [];
-  if (matchTerms(names, [...FINANCIAL_STRONG_TERMS, ...FINANCIAL_WEAK_TERMS]).length > 0)
-    families.push("financial");
-  if (matchTerms(names, [...HEALTH_STRONG_TERMS, ...HEALTH_WEAK_TERMS]).length > 0)
-    families.push("health");
-  if (IDENTITY_NAME_PATTERN.test(names))
-    families.push("identity");
-  if (PERSONAL_LIFE_NAME_PATTERN.test(names))
-    families.push("personal_life");
-  return families;
-}
 function detectSensitiveSignals(input, haystack) {
   const signals = [];
   const scan = scanDropboxContentPolicyText({ text: haystack });
@@ -17082,6 +17068,7 @@ function classifyItemTiersWithPublic(input, options) {
     signals,
     provider: input.provider,
     names,
+    locators: input.locators ?? [],
     options,
     secretsCleared,
     sniffer,
@@ -17184,8 +17171,11 @@ function namesDecidedByOwner(reasons) {
 function metadataPass(args) {
   const { signals, names, options } = args;
   if (!args.secretsCleared) {
-    const secretKinds = detectSecretFindingKinds([signals.title, signals.path].filter(Boolean).join(`
+    const fields = [signals.title, signals.path, signals.sender, ...signals.labels ?? [], ...signals.folderKeys ?? [], ...args.locators].filter((value) => typeof value === "string");
+    const secretKinds = detectSecretFindingKinds(fields.join(`
 `));
+    if (fields.some(hasCredentialUrl) && !secretKinds.includes("credential_assignment"))
+      secretKinds.push("credential_assignment");
     if (secretKinds.length > 0) {
       return {
         tier: "secrets",
@@ -17240,11 +17230,12 @@ function metadataPass(args) {
     lowers.push({ tier: "public", decidedBy: "public_evidence", reason: `metadata:evidence:${signals.sharing}` });
   }
   let decided = resolveVerdicts(resting, raises, lowers, restingIsConfigured);
-  const flags = namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
+  const flags = detectSensitiveContent({ text: names }).signals.map((signal) => `names:${signal}`);
   let pending = false;
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({
       pass: "metadata",
+      priority: "high",
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
@@ -17319,16 +17310,18 @@ function contentPass(args) {
     ...args.matchInput.path ? { path: args.matchInput.path } : {}
   });
   const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
-  if (detection.signals.length > 0 || detection.vocabulary.length > 0 && !canAskSniffer) {
+  if (detection.signals.length > 0) {
     decided = maxVerdict(decided, {
       tier: "secure",
       decidedBy: "sensitive_detector",
-      reasons: detectorReasons([...detection.signals, ...detection.vocabulary])
+      reasons: detectorReasons(detection.signals)
     });
   }
+  const recordFlags = ownRecordSignals(text2, args.matchInput);
   let pending = false;
   const flags = [
     ...metadata.flags,
+    ...recordFlags.map((signal) => `content:own_record:${signal}`),
     ...canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []
   ];
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true)
@@ -17337,6 +17330,7 @@ function contentPass(args) {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({
       pass: "content",
+      priority: recordFlags.length > 0 || metadata.pending ? "high" : "normal",
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text2, vocabularyTerms(detection.vocabulary))),
       mapRevision: args.mapRevision,
@@ -17347,6 +17341,10 @@ function contentPass(args) {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
+      if (recordFlags.length === 0 && !metadata.pending)
+        reasons.push(PERSONAL_FIRST_REASON);
+      for (const flag of recordFlags)
+        reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline)
         reasons.push(`content:borderline:${flag}`);
       reasons.push(`content:sniffer:${args.sniffer.id}:undecided`);
@@ -17357,6 +17355,42 @@ function contentPass(args) {
   if (imageOrdinary)
     reasons.unshift(IMAGE_ORDINARY_REASON);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+function hasCredentialUrl(material) {
+  const candidates = [material.trim(), ...Array.from(material.matchAll(/https?:\/\/[^\s<>]+/gi), (match) => match[0])];
+  for (const candidate of candidates) {
+    try {
+      const url = new URL(candidate);
+      if (url.protocol !== "https:" && url.protocol !== "http:")
+        continue;
+      if (url.username || url.password)
+        return true;
+      for (const [key, value] of url.searchParams) {
+        if (value && /^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(key))
+          return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+function ownRecordSignals(text2, names) {
+  const signals = [];
+  const value = String.raw`[+-]?\d+(?:[.,]\d+)?`;
+  const unit = String.raw`(?:mg\s*/\s*d[lL]|mmol\s*/\s*[lL]|g\s*/\s*d[lL]|mIU\s*/\s*[lL]|[uµμ]g\s*/\s*[lL]|ng\s*/\s*m[lL]|mmHg|bpm|kg|cm|°[CF])`;
+  if (new RegExp(String.raw`\b${value}\s*${unit}(?![\p{L}])`, "iu").test(text2) || new RegExp(String.raw`\b${value}[^\n]{0,60}(?:reference\s+(?:range|interval)|normal\s+range)\s*[:(]?\s*${value}\s*[-–—]\s*${value}`, "iu").test(text2)) {
+    signals.push("measurement");
+  }
+  if (/\b(?:patient|account\s+holder|applicant)(?:\s+name)?\s*[:=]\s*[\p{L}][\p{L}'’.-]+(?:[ \t]+[\p{L}][\p{L}'’.-]+)*/iu.test(text2))
+    signals.push("named_holder");
+  const fields = [...text2.matchAll(/(?:^|\n)\s*(name|full name|first name|last name|date of birth|dob|email|phone|address|signature|occupation|marital status)\s*[:=]\s*([^\n]+)/giu)].filter((match) => /[\p{L}\p{N}]/u.test(match[2]) && !/^(?:_{2,}|\[|<|enter\b|your\b|n\/a\b)/i.test(match[2].trim()));
+  if (new Set(fields.map((match) => match[1].toLowerCase())).size >= 2)
+    signals.push("filled_form");
+  if (/(?:^|[/\\])(?:labs?|medical|taxes|statements|legal)(?:[/\\])/i.test(names.path ?? ""))
+    signals.push("records_folder");
+  const title = names.title ?? "";
+  if (/\b(?:test|lab|bloodwork|blood work|visit|statement|results?)\b/i.test(title) && /\b(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:\d{4}|\d{1,2}(?:,?\s+\d{4})?))\b/i.test(title))
+    signals.push("dated_record");
+  return signals;
 }
 function imageCategoryCode(category) {
   const allowed = "abcdefghijklmnopqrstuvwxyz0123456789_";
@@ -17421,8 +17455,7 @@ function detectorReasons(signals) {
 function namesMatchInput(signals) {
   const title = signals.title?.trim();
   const sender = signals.sender?.trim();
-  const path = [signals.path?.trim(), title].filter((part) => Boolean(part)).join(`
-`);
+  const path = signals.path?.trim();
   return {
     ...title ? { title } : {},
     ...sender ? { sender } : {},
@@ -17476,14 +17509,15 @@ function namesOf(signals) {
     signals.title,
     signals.path,
     ...signals.folderKeys ?? [],
-    ...signals.labels ?? []
+    ...signals.labels ?? [],
+    signals.sender
   ].filter((part) => typeof part === "string" && part.trim().length > 0).join(`
 `);
 }
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-02.p4", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-13.p5", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_engine();
   init_sender_rules();
@@ -22678,6 +22712,7 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const override = ledger?.getOverride(item.identity);
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
+    locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
     ...text2 !== undefined ? { text: text2 } : {},
     ...extra.namesOnly ? { namesOnly: true } : {},
@@ -33969,7 +34004,7 @@ class TieredStoreSet {
       return { copies: [], embedHold: false };
     }
     const deferred = this.contentArrivesLater || this.contentArrivesLaterFor !== undefined && (options.contentArrivesLater ?? decision.contentRead !== true);
-    const wholePending = deferred ? decision.metadataPending : decision.state === "pending" || decision.metadataPending || decision.contentPending;
+    const wholePending = decision.metadataPending;
     if (wholePending) {
       const domain = this.domainAtLeast("secure_local");
       return {
@@ -33987,7 +34022,7 @@ class TieredStoreSet {
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) }
       };
     }
-    const contentHeld = deferred && decision.contentPending;
+    const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
     const contentDomain = contentHeld ? this.domainAtLeast("secure_local") : this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier)], floor));
     const copies = !this.splitLayers || metadataDomain === contentDomain ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "both" }] : [
       { corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: "metadata" },
@@ -34557,7 +34592,11 @@ class TieredRoutingRun {
     const kinds = [...new Set([
       ...text2 ? detectSecretFindingKinds(text2) : [],
       ...title ? detectSecretFindingKinds(title) : [],
-      ...locator ? detectSecretFindingKinds(locator) : []
+      ...locator ? detectSecretFindingKinds(locator) : [],
+      ...decision.reasons.flatMap((reason) => {
+        const match = /^(?:metadata|content):secret:([a-z_]+)$/.exec(reason);
+        return match ? [match[1]] : [];
+      })
     ])];
     let folderKeys = input.sourceScope?.folderKeys ?? [];
     if (folderKeys.length === 0) {
@@ -34570,7 +34609,7 @@ class TieredRoutingRun {
     const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
     index.record({
       identity: item.identity,
-      ...locator ? { locator } : {},
+      ...locator && !hasCredentialUrl(locator) ? { locator } : {},
       ...title && namesReleasable ? { title } : {},
       namesReleasable,
       folderKeys,

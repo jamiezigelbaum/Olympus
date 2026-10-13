@@ -41,9 +41,9 @@ const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 
 const NEW: FixtureSpec[] = [
   { id: 'new-garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden and the compost bins.' },
-  { id: 'new-invoice', name: 'notes-0413.txt', text: 'Invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+  { id: 'new-invoice', name: 'notes-0413.txt', text: 'Invoice total and IBAN GB82WEST12345698765432.' },
   { id: 'new-launch', name: 'launch-post.txt', text: 'Our launch post, already on the blog.', sharing: 'public_link' },
-  { id: 'new-biopsy', name: 'biopsy results.txt', text: 'The lab results confirm the diagnosis; the patient starts treatment.' },
+  { id: 'new-biopsy', name: 'biopsy results.txt', text: 'Patient: Morgan Example. Glucose 93 mg/dL; the patient starts treatment.' },
   { id: 'new-secret', name: 'env.txt', text: `aws key ${FAKE_AWS_KEY} for the deploy` },
 ];
 
@@ -164,8 +164,8 @@ describe('P1b: new items are routed by their recorded tiers', () => {
         [CORPORA.secure_local, 'content', 'current', false],
       ]);
       expect(copies('new-launch')).toEqual([[CORPORA.public_safe, 'both', 'current', false]]);
-      // Pending is Private: the whole item in the secure store, held back from embedding.
-      expect(copies('new-biopsy')).toEqual([[CORPORA.secure_local, 'both', 'current', true]]);
+      // Only the pending content is sealed; checked names are Personal.
+      expect(copies('new-biopsy')).toEqual([[CORPORA.internal, 'metadata', 'current', true], [CORPORA.secure_local, 'content', 'current', true]]);
       expect(copies('new-secret')).toEqual([]);
 
       const internal = snapshotStore(fixture.paths.internal);
@@ -298,7 +298,7 @@ describe('P1b: new items are routed by their recorded tiers', () => {
       expect(fixture.stores.internal!.searchItems('compost', 5)).toHaveLength(1);
       const vectorsBefore = snapshotStore(fixture.paths.internal, [localId('new-garden')]).vectors;
 
-      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432 for the seeds.' };
+      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432.' };
       const run = await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       expect(run.routing.movesQueued).toBe(1);
       expect(fixture.ledger.getCurrent(identityOf('new-garden'))).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
@@ -345,7 +345,7 @@ describe('P1b: deletion', () => {
       const specs: FixtureSpec[] = [{ ...NEW[0]! }, { ...NEW[4]! }];
       await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       // Re-judge more private: the Personal copy becomes superseded (kept).
-      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432 for the seeds.' };
+      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432.' };
       await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       expect(fixture.ledger.copies(identityOf('new-garden'))[0]?.state).toBe('superseded');
 

@@ -14,8 +14,8 @@
 //   nothing stored before P1b moves, is re-embedded or is deleted.
 // - A new item is routed only from a decision made on text the set actually
 //   read. Unread content stays where the lane places it today.
-// - Pending (a sniffer question is open) is treated as Private: the whole
-//   item goes to the secure_local store and is held back from embedding.
+// - A names question holds the whole item. A content question holds only
+//   own-record content; Personal-first questions leave content usable.
 // - Otherwise the metadata row goes to the metadata tier's store and the
 //   content to the content tier's store (the two-tier invariant). A lane that
 //   keeps an item whole (a chat message) declares `splitLayers: false`, and
@@ -56,6 +56,8 @@ import { detectSecretFindingKinds } from '../classification/engine.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   maxTier,
+  hasCredentialUrl,
+  PERSONAL_FIRST_REASON,
   type OwnerTierRule,
   type TierDecidedBy,
   type TierDecision,
@@ -331,9 +333,9 @@ export class TieredStoreSet {
    * In a lane whose content arrives later (`contentArrivesLater`), an item
    * whose text has not been read yet gets only its metadata copy, in the
    * metadata tier's store; its content copy is placed when the text lands.
-   * There, only an open NAME question (the sniffer) makes the whole item
-   * pending (Private); an open CONTENT question holds just the content copy
-   * in the Private store, held back from embedding.
+   * In every lane, only an open NAME question holds the whole item. An
+   * own-record CONTENT question holds its content copy in Private while
+   * cleared names remain discoverable; Personal-first content stays usable.
    *
    * `contentArrivesLater` says whether this item's text arrives after listing
    * (`contentArrivesLaterFor`); a caller that knows the item says so. Omitted,
@@ -341,7 +343,7 @@ export class TieredStoreSet {
    */
   placementFor(
     decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'state' | 'metadataPending' | 'contentPending'>
-      & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule'>>,
+      & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule' | 'reasons'>>,
     options: { contentArrivesLater?: boolean } = {},
   ): TierPlacementPlan {
     if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
@@ -350,9 +352,7 @@ export class TieredStoreSet {
     const deferred = this.contentArrivesLater
       || (this.contentArrivesLaterFor !== undefined
         && (options.contentArrivesLater ?? decision.contentRead !== true));
-    const wholePending = deferred
-      ? decision.metadataPending
-      : decision.state === 'pending' || decision.metadataPending || decision.contentPending;
+    const wholePending = decision.metadataPending;
     if (wholePending) {
       const domain = this.domainAtLeast('secure_local');
       return {
@@ -370,7 +370,7 @@ export class TieredStoreSet {
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
       };
     }
-    const contentHeld = deferred && decision.contentPending;
+    const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
     const contentDomain = contentHeld
       ? this.domainAtLeast('secure_local')
       : this.domainAtLeast(atLeastDomain(
@@ -1291,6 +1291,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       ...(text ? detectSecretFindingKinds(text) : []),
       ...(title ? detectSecretFindingKinds(title) : []),
       ...(locator ? detectSecretFindingKinds(locator) : []),
+      ...decision.reasons.flatMap(reason => {
+        const match = /^(?:metadata|content):secret:([a-z_]+)$/.exec(reason);
+        return match ? [match[1]!] : [];
+      }),
     ])];
     let folderKeys: readonly string[] = input.sourceScope?.folderKeys ?? [];
     if (folderKeys.length === 0) {
@@ -1305,7 +1309,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const namesReleasable = decision.metadataTier === 'public' || decision.metadataTier === 'private';
     index.record({
       identity: item.identity,
-      ...(locator ? { locator } : {}),
+      ...(locator && !hasCredentialUrl(locator) ? { locator } : {}),
       ...(title && namesReleasable ? { title } : {}),
       namesReleasable,
       folderKeys,

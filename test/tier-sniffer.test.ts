@@ -41,6 +41,7 @@ import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool
 // Built at runtime so the repository's credential-pattern check never sees a
 // literal key in the diff.
 const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+const STRUCTURED_METADATA_LABEL = 'SSN 123-45-6789';
 
 function approvalKey(lane: SnifferLane) {
   return { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
@@ -87,7 +88,7 @@ function subject(n: number) {
 /** Record a flagged, metadata-only item through the real classifier + cached sniffer. */
 function recordFlagged(ledger: TierLedger, store: TierSnifferStore, n: number, title: string): void {
   const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-  const decision = classifyItemTiers({ signals: { title }, subject: subject(n) }, { sniffer });
+  const decision = classifyItemTiers({ signals: { title, labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(n) }, { sniffer });
   ledger.recordDecision(subject(n), decision);
 }
 
@@ -160,6 +161,7 @@ describe('secrets are never sent', () => {
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
       const decision = classifyItemTiers({ signals: { title: 'bank letters', labels: [FAKE_AWS_KEY] }, subject: subject(1) }, { sniffer });
       ledger.recordDecision(subject(1), decision);
+      expect(decision).toMatchObject({ metadataTier: 'secrets', contentTier: 'secrets', state: 'current', metadataPending: false, contentPending: false });
       expect(store.counts().questions).toBe(0);
 
       // A question that somehow carries a secret (written directly) never leaves.
@@ -213,7 +215,7 @@ describe('batching, cache and threshold', () => {
 
       // A re-sync of an unchanged item is decided synchronously from the cache.
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-      const again = classifyItemTiers({ signals: { title: 'therapy' }, subject: subject(0) }, { sniffer });
+      const again = classifyItemTiers({ signals: { title: 'therapy', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(0) }, { sniffer });
       expect(again.metadataPending).toBe(false);
       expect(again.reasons).toContain(`metadata:sniffer:${snifferId(LOCAL_LANE)}:ordinary:0.95`);
       expect(store.counts().questions).toBe(0);
@@ -334,7 +336,7 @@ describe('fail-safe behaviour', () => {
       expect(third.failSafePrivate).toBe(1);
       expect(ledger.getCurrent(subject(1))).toMatchObject({ metadataTier: 'secure', metadataPending: false });
       expect(ledger.getCurrent(subject(1))?.reasons).toContain(`metadata:sniffer:${snifferId(LOCAL_LANE)}:unresolved:0.00`);
-      const again = classifyItemTiers({ signals: { title: 'divorce papers' }, subject: subject(1) }, { sniffer: new CachedTierSniffer(store, LOCAL_LANE) });
+      const again = classifyItemTiers({ signals: { title: 'divorce papers', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(1) }, { sniffer: new CachedTierSniffer(store, LOCAL_LANE) });
       expect(again.metadataTier).toBe('secure');
     } finally {
       store.close();
@@ -346,7 +348,7 @@ describe('fail-safe behaviour', () => {
     const store = new TierSnifferStore({ dbPath: ':memory:' });
     store.close();
     const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-    const decision = classifyItemTiers({ signals: { title: 'bank' }, subject: subject(1) }, { sniffer });
+    const decision = classifyItemTiers({ signals: { title: 'bank', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(1) }, { sniffer });
     expect(decision.metadataPending).toBe(true);
     expect(decision.metadataTier).toBe('private');
   });
@@ -373,7 +375,7 @@ describe('fail-safe behaviour', () => {
     try {
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
       // Pass 1 flags the names; the text is read, so pass 2 asks about an excerpt too.
-      const decision = classifyItemTiers({ signals: { title: 'bank' }, text: 'Lunch plans for Saturday at noon.', subject: subject(1) }, { sniffer });
+      const decision = classifyItemTiers({ signals: { title: 'bank', labels: [STRUCTURED_METADATA_LABEL] }, text: 'Lunch plans for Saturday at noon.', subject: subject(1) }, { sniffer });
       ledger.recordDecision(subject(1), decision);
       expect(store.counts().byPass).toEqual({ metadata: 1, content: 1 });
       const model = spyModel((request, items) => request.prompt.includes('EXCERPT')
@@ -416,7 +418,7 @@ describe('work selection', () => {
     const store = new TierSnifferStore({ dbPath: ':memory:' });
     try {
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-      ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'divorce' }, text: 'Notes for Thursday.', subject: subject(1) }, { sniffer }));
+      ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'divorce', labels: [STRUCTURED_METADATA_LABEL] }, text: 'Notes for Thursday.', subject: subject(1) }, { sniffer }));
       expect(store.counts().byPass).toEqual({ metadata: 1, content: 1 });
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'legal', confidence: 0.95 }));
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
@@ -722,8 +724,10 @@ describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
         subject: subject(1),
       }, { sniffer });
       ledger.recordDecision(subject(1), decision);
-      // Held: pending, waiting on the content question, not decided by the words.
-      expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private' });
+      // Personal-first: usable while the content question waits; topic words do not hold it.
+      expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private', metadataFlagged: false });
+      expect(ledger.getCurrent(subject(1))?.reasons).toContain('content:personal_first');
+      expect(store.counts().byPass).toEqual({ metadata: 0, content: 1 });
       const model = spyModel((_, items) => verdictsFor(items, verdict));
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
       expect(report.verdictsApplied).toBe(1);

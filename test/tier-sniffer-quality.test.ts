@@ -257,7 +257,7 @@ describe('a names-only item is decided on its names', () => {
   });
 
   test('a names question still holds a names-only item until the model answers', () => {
-    const decision = classifyItemTiers({ signals: { title: 'bank statement.pdf', path: '/Books/bank statement.pdf' }, namesOnly: true });
+    const decision = classifyItemTiers({ signals: { title: 'bank statement SSN 123-45-6789.pdf', path: '/Books/bank statement.pdf' }, namesOnly: true });
     expect(decision).toMatchObject({ state: 'pending', metadataPending: true, contentPending: false });
   });
 
