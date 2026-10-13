@@ -11394,6 +11394,7 @@ var init_sniffer_store = __esm(() => {
 // src/workers/file-extraction/job-names.ts
 var openLedgerPaths;
 var init_job_names = __esm(() => {
+  init_linux_engine_layout();
   openLedgerPaths = new Map;
 });
 
