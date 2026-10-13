@@ -55,7 +55,10 @@ defines one, so every new install is such a policy: ChatGPT installs (seeded
 with the `no-sensitive` preset by `olympus engine install`) and OpenClaw
 installs on any preset. It shows **Personal → Private → Secrets** (Secret in
 ChatGPT copy), and the classifier lifts any Public verdict to Personal
-(reason `tier:public_retired`). A policy written before 1.0 defines Public and
+(reason `tier:public_retired`). Setup (`olympus setup`, `olympus sovereignty
+init`, `olympus engine install`) always writes a policy file; a worker that
+runs without one falls back to the environment-variable policy older hosts
+use, which defines Public and is left unchanged. A policy written before 1.0 defines Public and
 keeps it unchanged; Olympus never removes it. Re-running setup with `--force`
 on such an install keeps a Public tier, routed and embedded like the new
 posture's Personal tier, as presets were before 1.0. A policy that defines
