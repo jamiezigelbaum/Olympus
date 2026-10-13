@@ -707,11 +707,19 @@ account hashes and first-sign-in times are "kept until we retire the service,
 then deleted" (owner decision 2026-10-13), so deleting them is part of
 retiring, not optional cleanup.
 
-1. **Decide the cut-off.** `/exchange/stats` counts sign-ins, not refreshes,
-   so it cannot show whether release-candidate connections still refresh
-   here. Before retiring, either tally refreshes for a while or accept a grace
-   period after the Reconnect Google nudge; a connection that still refreshes
-   here stops working at retirement and needs Reconnect Google.
+1. **Record the cut-off receipt.** `/exchange/stats` counts sign-ins, not
+   refreshes, so it cannot show whether release-candidate connections still
+   refresh here, and nothing else can for installs we do not run. The receipt
+   is therefore two things, written into the retirement PR or ledger entry
+   before step 2:
+   - an inventory of the installs we run (each `~/.config/olympus/handles.json`),
+     listing every Google connection with `oauth2Refresh.exchangeVia:
+     'publisher_endpoint'`, and the reviewer demo engine's included even while
+     it is frozen; if the demo engine has one, stop here until its review ends;
+   - the owner's explicit acceptance that every such connection, and any
+     tester's, stops refreshing at retirement and needs Olympus 1.0.0 and then
+     **Reconnect Google** (a release candidate's own Reconnect also goes
+     through this Worker, so it cannot recover before updating).
 2. **Remove the route and the Worker.** Delete the `auth.olympusplugin.ai/exchange/*`
    Worker Route, then the Worker (`bunx wrangler delete` from `exchange/`).
    The relay page at `/oauth/callback/` on the same host stays: Dropbox still
