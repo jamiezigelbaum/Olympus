@@ -17,7 +17,8 @@ function restore(store: LocalConnectorStore, item: RawItem) {
     syncConnectorId: 'late-extraction', ownerConnectorId: 'fixture_lane', ownershipKind: 'observed',
     classify: () => buildSourceSensitivity({ trustTier: store.trustDomain === 'secure_local' ? 'S4' : 'S3', trustDomain: store.trustDomain }),
     items: [{ item, expectation: {
-      sourceItem: item.identity, sourceVersion: item.identity.sourceVersion,
+      sourceItem: item.identity,
+      ...(item.identity.sourceVersion === undefined ? {} : { sourceVersion: item.identity.sourceVersion }),
       contentHash: hash,
       chunkContentHashes: [hash],
     } }],
@@ -121,7 +122,7 @@ test('a body fetch finishing after the purge cannot pass the central chunk write
     const fetched = new Promise<void>((resolve) => { fetching = resolve; });
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
-    const connector = fixtureConnector(() => [{ ...late, text: undefined }]);
+    const connector = fixtureConnector(() => [{ id: late.id, name: late.name, version: late.version }]);
     connector.fetchItem = async () => {
       fetching();
       await waiting;
