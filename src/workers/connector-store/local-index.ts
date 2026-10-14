@@ -11342,13 +11342,11 @@ export function createConnectorStoreCorpusAdapter(
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.hasEmbeddings(embeddingProvider.modelId);
-    const keywordLane = connectorStoreKeywordLaneRows(
-      store,
-      request.query,
-      maxResults,
-      options.accountScope,
-      filters,
-      hybrid ? { prefix: false, locate: false } : { locate: false },
+    const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    const keywordLane = relaxEmptyLocalKeywordLane(
+      store, request.query, maxResults, options.accountScope, filters,
+      connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions),
+      options.localKeywordFallback, ftsOptions,
     );
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
     let semanticOnly = 0;
@@ -11711,7 +11709,7 @@ function connectorStoreKeywordLaneRows(
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  ftsOptions: { prefix?: boolean; locate?: boolean } = {},
+  ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean } = {},
 ): {
   rows: ConnectorStoreSearchRow[];
   matchCount: SourceIndexCorpusMatchCount;
@@ -11728,7 +11726,7 @@ function connectorStoreKeywordLaneRows(
   // Rows that match every concept of the question, in their name or text.
   const complete = new Set<string>();
   for (const concepts of [plain.concepts, content.concepts]) {
-    for (const [id, matched] of concepts.matched) if (matched >= concepts.total) complete.add(id);
+    for (const [id, matched] of concepts.matched) if (!ftsOptions.relaxed && matched >= concepts.total) complete.add(id);
   }
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
@@ -11747,7 +11745,7 @@ function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
-  const baseline = keywordExpansionDisabled() ? undefined : withKeywordExpansionDisabled(
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : withKeywordExpansionDisabled(
     () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions),
   );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
@@ -11779,23 +11777,12 @@ function relaxEmptyLocalKeywordLane(
   filters: ConnectorStoreSearchFilters | undefined,
   strict: ReturnType<typeof connectorStoreKeywordLaneRows>,
   enabled: boolean | undefined,
+  ftsOptions: { prefix?: boolean; locate?: boolean } = {},
 ): ReturnType<typeof connectorStoreKeywordLaneRows> {
   if (!enabled || strict.rows.length > 0) return strict;
-  const relaxed = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { relaxed: true });
-  const allRows = relaxed.rows;
-  return {
-    rows: allRows.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
-    allRows,
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
-      saturated: relaxed.saturated,
-    },
-    matchedItemIds: new Set(allRows.map(row => row.sourceItem.localItemId)),
-    // Partial matches stay partial: the retry does not claim every concept matched.
-    completeItemIds: new Set(),
-  };
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true });
+  // OR matches are ranked, but never claim every concept of the question matched.
+  return { ...relaxed, completeItemIds: new Set() };
 }
 
 // A keyword row is content-bearing when it matched a content chunk: the FTS
