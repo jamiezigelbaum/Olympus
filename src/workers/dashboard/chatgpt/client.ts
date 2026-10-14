@@ -1101,7 +1101,7 @@ export function chatgptDashboardClient(
     if (state.landed && state.landed.id === id) box.className += ' landed';
     if (stall.length) add(box, add(el('ul', 'plain stall-why'), ...stall.map((line) => el('li', '', line))));
     if (lines.length) {
-      add(box, add(el('ul', 'plain'), ...lines), unreadableFiles(unreadable, id), el('p', 'why-note', unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+      add(box, add(el('ul', 'plain'), ...lines), unreadableFiles(unreadable, id), el('p', 'why-note', unreadable.reasons.some((reason: Any) => reason.code === 'privacy_check_missing') ? '' : unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     }
     return box;
   }

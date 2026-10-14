@@ -47,4 +47,9 @@ describe('site Content-Security-Policy', () => {
     expect(directive('frame-ancestors')).toEqual(["'self'"]);
     expect(caddy).toContain('X-Frame-Options "SAMEORIGIN"');
   });
+
+  test('makes browsers revalidate everything but published releases', () => {
+    expect(caddy).toContain('@revalidate not path /releases/*');
+    expect(caddy).toContain('header @revalidate Cache-Control "no-cache"');
+  });
 });

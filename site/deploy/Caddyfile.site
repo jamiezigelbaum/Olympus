@@ -41,6 +41,14 @@ olympusplugin.ai {
 	redir /help/on-your-mac /help/on-your-computer/ permanent
 	redir /help/on-your-mac/ /help/on-your-computer/ permanent
 
+	# Browsers may keep pages, styles and scripts, but must ask whether they
+	# changed before reusing them (a cheap 304), so a deploy reaches returning
+	# visitors at once instead of after a heuristic cache lifetime (the 1.0.0
+	# launch showed new pages with an old cached style.css). Published releases
+	# never change, so they keep the browser default.
+	@revalidate not path /releases/*
+	header @revalidate Cache-Control "no-cache"
+
 	encode gzip
 	file_server
 
