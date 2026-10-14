@@ -17029,13 +17029,16 @@ function createDropboxSourceConnector(options) {
   let cachedMetadataClient = options.metadataClient;
   let cachedDownloadClient = options.downloadClient;
   const contentAllowedByLocalItemId = new Map;
+  const metadataAllowed = (path) => {
+    if (!options.scope)
+      return true;
+    options.scope.assertCurrent();
+    return Boolean(path && options.scope.allowsMetadata(path));
+  };
   const scopedItems = (entries, fetchedAt) => entries.flatMap((entry) => {
     const path = entry.pathLower ?? entry.pathDisplay;
-    if (options.scope) {
-      options.scope.assertCurrent();
-      if (!path || !options.scope.allowsMetadata(path))
-        return [];
-    }
+    if (!metadataAllowed(path))
+      return [];
     const item = rawItemFromDropboxEntry(entry, account, fetchedAt, options.deletedItemIdentityResolver);
     contentAllowedByLocalItemId.set(item.identity.localItemId, entry.tag === "file" && (!options.scope || options.scope.allowsContent(path)));
     return [item];
@@ -17044,19 +17047,31 @@ function createDropboxSourceConnector(options) {
     const resolver = options.deletedItemIdentityResolver;
     if (!resolver?.activeItemsUnderLocatorIfIndexed || room <= 0)
       return [];
-    const limit = room + live.size + deleted.size;
+    const baseLimit = room + live.size + deleted.size;
     const found = new Map;
     for (const folder of deletedFolderPaths(entry)) {
-      for (const descendant of resolver.activeItemsUnderLocatorIfIndexed({
-        provider: CONNECTOR_ID,
-        accountScope: account,
-        locatorUri: folder,
-        limit
-      })) {
-        const id = descendant.identity.providerItemId;
-        if (live.has(id) || deleted.has(id) || found.has(id))
-          continue;
-        found.set(id, descendant);
+      let limit = baseLimit;
+      for (;; ) {
+        const descendants = resolver.activeItemsUnderLocatorIfIndexed({
+          provider: CONNECTOR_ID,
+          accountScope: account,
+          locatorUri: folder,
+          limit
+        });
+        let excluded = 0;
+        for (const descendant of descendants) {
+          if (!metadataAllowed(descendant.locatorUri.toLowerCase())) {
+            excluded += 1;
+            continue;
+          }
+          const id = descendant.identity.providerItemId;
+          if (live.has(id) || deleted.has(id) || found.has(id))
+            continue;
+          found.set(id, descendant);
+        }
+        if (found.size >= room || descendants.length < limit || excluded === 0)
+          break;
+        limit += excluded;
       }
     }
     return [...found.values()].slice(0, room).map((descendant) => rawItemFromDeletedDescendant(descendant, account, fetchedAt));
@@ -17140,7 +17155,7 @@ function createDropboxSourceConnector(options) {
               if (seen + ahead.entries.length > lookaheadEntries)
                 return "capped";
               for (const entry of ahead.entries) {
-                if (entry.tag !== "deleted")
+                if (entry.tag !== "deleted" && metadataAllowed(entry.pathLower ?? entry.pathDisplay))
                   liveItemIds.add(entry.id);
               }
               if (!ahead.hasMore)
@@ -17187,7 +17202,7 @@ function createDropboxSourceConnector(options) {
           }
           const available = page2.entries.slice(offset);
           for (const entry of page2.entries) {
-            if (entry.tag !== "deleted")
+            if (entry.tag !== "deleted" && metadataAllowed(entry.pathLower ?? entry.pathDisplay))
               liveItemIds.add(entry.id);
           }
           const fetchedAt = nowIso();
@@ -17203,9 +17218,9 @@ function createDropboxSourceConnector(options) {
               continue;
             }
             const deletion = scopedItems([entry], fetchedAt);
-            if (deletion.length > 0 && options.deletedItemIdentityResolver?.lookupsReady?.() === false)
+            if (options.deletedItemIdentityResolver?.lookupsReady?.() === false)
               break;
-            let descendants = deletion.length === 0 || lookaheadCapped ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            let descendants = lookaheadCapped ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
             if (descendants.length > 0 && hasMore && !lookaheadComplete) {
               const proof = await lookAhead(nextCursor);
               if (proof === "failed") {
@@ -157152,6 +157167,7 @@ ${prompt}`)) {
 }
 
 // src/core/oauth-callback-paste.ts
+init_worker_transport();
 var PASTE_SOURCES = ["gmail", "google-drive", "google", "dropbox", "x"];
 
 class PastedCallbackError extends Error {
@@ -157214,7 +157230,7 @@ function loopbackEngineRoot(workerRoot) {
 async function finishPastedOAuthCallback(input, options) {
   const { source, query } = parsePastedOAuthCallback(input);
   const root = loopbackEngineRoot(options.workerRoot);
-  const fetchImpl = options.fetch ?? fetch;
+  const fetchImpl = options.fetch ?? workerFetch;
   let response;
   try {
     response = await fetchImpl(`${root}/oauth/callback/${source}?${query.toString()}`, {

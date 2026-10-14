@@ -8,14 +8,16 @@
  * server and the browser is on another computer without the SSH tunnel, that
  * page does not load, but its address still carries the result. The person
  * copies it and runs this command on the server, which hands the same
- * callback to the engine on the server's own loopback, the way rclone's
- * remote setup does.
+ * callback to the engine through its local transport (the owner socket on
+ * Linux, loopback TCP on Mac), the way rclone's remote setup does.
  *
  * Nothing here is trusted more than a browser visit would be: the engine's
  * callback route verifies the state against the sign-in it started, spends
  * the code once, and refuses everything else with one answer. Only `code`,
  * `state` and `error` are forwarded; the code is never printed.
  */
+
+import { workerFetch } from './worker-transport.ts';
 
 export const PASTE_SOURCES = ['gmail', 'google-drive', 'google', 'dropbox', 'x'] as const;
 export type PasteSource = typeof PASTE_SOURCES[number];
@@ -102,7 +104,7 @@ export async function finishPastedOAuthCallback(
 ): Promise<FinishPastedCallbackResult> {
   const { source, query } = parsePastedOAuthCallback(input);
   const root = loopbackEngineRoot(options.workerRoot);
-  const fetchImpl = options.fetch ?? fetch;
+  const fetchImpl = options.fetch ?? workerFetch;
   let response: Response;
   try {
     response = await fetchImpl(`${root}/oauth/callback/${source}?${query.toString()}`, {

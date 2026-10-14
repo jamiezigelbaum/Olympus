@@ -51,6 +51,110 @@ const TREE: DropboxMetadataEntry[] = [
 const UNDER_DOCS = ['id:docs', 'id:a', 'id:sub', 'id:b', 'id:deep', 'id:c'];
 const BESIDE_DOCS = ['id:docsold', 'id:sibling', 'id:docs2', 'id:dotted', 'id:keep'];
 
+describe('a folder moved outside approved scope', () => {
+  const gone = deleted('Docs', '/Approved/Docs');
+  const moved = [folder('id:docs', '/Excluded/Docs'), file('id:a', '/Excluded/Docs/a.txt')];
+  for (const [label, script] of [
+    ['delete first', { initial: TREE, deltas: { 'cursor-1': [gone, ...moved] } }],
+    ['delete last', { initial: TREE, deltas: { 'cursor-1': [...moved, gone] } }],
+    ['later page', { initial: TREE, deltaPages: {
+      'cursor-1': { entries: [gone], cursor: 'cursor-2', hasMore: true },
+      'cursor-2': { entries: moved, cursor: 'cursor-3', hasMore: false },
+    } }],
+  ] satisfies Array<[string, Script]>) {
+    test(`removes its old searchable contents and locator (${label})`, async () => {
+      const store = laneStore(join(workspace(), 'store.sqlite'));
+      const sync = createDropboxProviderStoreSyncHandler({
+        store, account: 'personal', broker: broker(), metadataClient: client(script),
+        scope: fakeScope((path) => path === '/approved' || path.startsWith('/approved/')),
+      });
+      await sync.pull({ approved_scope_key: SCOPE });
+      expect((await landText(store, 'id:a', 'The pelican nests here.')).accepted).toBe(true);
+      expect(store.searchItems('pelican', 10)).toHaveLength(1);
+
+      await sync.pull({ approved_scope_key: SCOPE });
+
+      expect(store.searchItems('pelican', 10)).toEqual([]);
+      expectInactive(store, UNDER_DOCS);
+      expectActive(store, BESIDE_DOCS);
+      for (const locatorUri of ['/Approved/Docs/a.txt', '/Excluded/Docs/a.txt']) {
+        expect(store.activeIdentityForLocatorIfIndexed({
+          provider: 'dropbox', accountScope: 'personal', locatorUri,
+        })).toBeUndefined();
+      }
+    });
+  }
+});
+
+describe('deleting an unselected parent', () => {
+  test('removes selected descendants and their text', async () => {
+    const dbPath = join(workspace(), 'store.sqlite');
+    const store = laneStore(dbPath);
+    const sync = createDropboxProviderStoreSyncHandler({
+      store, account: 'personal', broker: broker(),
+      scope: fakeScope((path) => path === '/approved/docs' || path.startsWith('/approved/docs/')),
+      metadataClient: client({ initial: TREE, deltas: { 'cursor-1': [deleted('Approved', '/Approved')] } }),
+    });
+    await sync.pull({ approved_scope_key: SCOPE });
+    expect((await landText(store, 'id:a', 'The pelican nests here.')).accepted).toBe(true);
+    expect(store.searchItems('pelican', 10)).toHaveLength(1);
+
+    const outcome = await sync.pull({ approved_scope_key: SCOPE });
+
+    expect(store.searchItems('pelican', 10)).toEqual([]);
+    expectInactive(store, UNDER_DOCS);
+    expect(store.activeIdentityForLocatorIfIndexed({
+      provider: 'dropbox', accountScope: 'personal', locatorUri: '/Approved/Docs/a.txt',
+    })).toBeUndefined();
+    expect(outcome.receipt.counts.traversal_complete).toBe(1);
+  });
+
+  test('holds an unselected parent while descendant lookups are unavailable', async () => {
+    const { store, sync } = singleStoreLane({ initial: TREE });
+    await sync.pull({ approved_scope_key: SCOPE });
+    let ready = false;
+    const connector = createDropboxSourceConnector({
+      account: 'personal', approvedScopeKey: SCOPE, broker: broker(),
+      scope: fakeScope((path) => path === '/approved/docs' || path.startsWith('/approved/docs/')),
+      metadataClient: client({ initial: [], deltas: { 'cursor-1': [deleted('Approved', '/Approved')] } }),
+      deletedItemIdentityResolver: {
+        lookupsReady: () => ready,
+        activeIdentityForLocatorIfIndexed: (input) => store.activeIdentityForLocatorIfIndexed(input),
+        activeItemsUnderLocatorIfIndexed: (input) => ready ? store.activeItemsUnderLocatorIfIndexed(input) : [],
+      },
+    });
+    const held = [];
+    for await (const page of connector.listItems({ cursor: 'cursor-1' })) held.push(page);
+    expect(held).toEqual([{ items: [], nextCursor: 'cursor-1', done: false, truncated: true }]);
+    ready = true;
+    const items = [];
+    for await (const page of connector.listItems({ cursor: held[0]!.nextCursor! })) items.push(...page.items);
+    expect(items.map((item) => item.identity.providerItemId).sort()).toEqual([...UNDER_DOCS].sort());
+    expect(items.every((item) => item.metadata['deleted'] === true)).toBe(true);
+  });
+
+  test('filters descendants by their own scope even across bounded passes', async () => {
+    const { store, sync: seed } = singleStoreLane({ initial: TREE });
+    await seed.pull({ approved_scope_key: SCOPE });
+    expect((await landText(store, 'id:b', 'The pelican nests here.')).accepted).toBe(true);
+    const sync = createDropboxProviderStoreSyncHandler({
+      store, account: 'personal', broker: broker(),
+      scope: fakeScope((path) => path === '/approved/docs/sub' || path.startsWith('/approved/docs/sub/')),
+      metadataClient: client({ initial: [deleted('Approved', '/Approved')] }),
+    });
+    let complete = false;
+    for (let pass = 0; pass < 8 && !complete; pass += 1) {
+      const outcome = await sync.pull({ approved_scope_key: SCOPE, max_items: 2 });
+      expect(outcome.receipt.counts.items_tombstoned).toBeLessThanOrEqual(2);
+      complete = outcome.receipt.counts.traversal_complete === 1;
+    }
+    expect(complete).toBe(true);
+    expect(store.searchItems('pelican', 10)).toEqual([]);
+    expectInactive(store, ['id:sub', 'id:b', 'id:deep', 'id:c']);
+    expectActive(store, ['id:docs', 'id:a', ...BESIDE_DOCS]);
+  });
+});
+
 describe('a deleted Dropbox folder takes its indexed descendants with it', () => {
   test('tombstones the folder and both nested levels below it, and nothing that only shares a name prefix', async () => {
     const { store, sync } = singleStoreLane({
@@ -359,7 +463,7 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
     expect(items.map((item) => item.identity.providerItemId)).toEqual(['id:docs']);
   });
 
-  test('a deleted folder outside the approved scope is not this lane\'s event and is never expanded', async () => {
+  test('a deleted folder outside the approved scope emits no out-of-scope descendants', async () => {
     const lookups: string[] = [];
     const connector = createDropboxSourceConnector({
       account: 'personal',
@@ -370,7 +474,7 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
         activeIdentityForLocatorIfIndexed: () => undefined,
         activeItemsUnderLocatorIfIndexed: (input) => {
           lookups.push(input.locatorUri);
-          return [];
+          return [{ identity: identityFor('id:outside'), locatorUri: '/Elsewhere/Docs/a.txt' }];
         },
       },
       metadataClient: client({ initial: [deleted('Docs', '/Elsewhere/Docs')], deltas: {} }),
@@ -378,7 +482,7 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
     const items = [];
     for await (const page of connector.listItems()) items.push(...page.items);
     expect(items).toEqual([]);
-    expect(lookups).toEqual([]);
+    expect(lookups.length).toBeGreaterThan(0);
   });
 
   test('an unrooted or empty deleted path expands to nothing', async () => {

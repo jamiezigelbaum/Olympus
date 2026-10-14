@@ -20,6 +20,8 @@
   New priority checks no longer wait behind a blocked sorting backlog.
 - **Google sign-in happens on your computer**, directly with Google. Google
   connections made with a release candidate need Reconnect Google.
+  On a headless Linux server, `olympus connect finish '<address>'` reaches
+  the running engine to finish sign-in when the browser cannot reach it.
 - **An item that becomes Secret keeps only a record of where it is** in
   Olympus's index (its location, a screened title and the kinds of secret
   found), so you can still find it. If you mark it not Secret, what

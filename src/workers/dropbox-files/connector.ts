@@ -162,15 +162,18 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
   let cachedDownloadClient = options.downloadClient;
   const contentAllowedByLocalItemId = new Map<string, boolean>();
 
+  const metadataAllowed = (path: string | undefined): boolean => {
+    if (!options.scope) return true;
+    options.scope.assertCurrent();
+    return Boolean(path && options.scope.allowsMetadata(path));
+  };
+
   const scopedItems = (
     entries: readonly DropboxMetadataEntry[],
     fetchedAt: string,
   ): RawItem[] => entries.flatMap((entry) => {
     const path = entry.pathLower ?? entry.pathDisplay;
-    if (options.scope) {
-      options.scope.assertCurrent();
-      if (!path || !options.scope.allowsMetadata(path)) return [];
-    }
+    if (!metadataAllowed(path)) return [];
     const item = rawItemFromDropboxEntry(entry, account, fetchedAt, options.deletedItemIdentityResolver);
     contentAllowedByLocalItemId.set(
       item.identity.localItemId,
@@ -181,10 +184,9 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
 
   /**
    * The deletions for the indexed descendants of a deleted folder: at most
-   * `room` of them, none for an item the listing also reports as present or
-   * one this traversal already deletes. Never throws; a resolver that cannot
-   * answer yet (an index still converging) expands to nothing and the folder's
-   * own deletion stands alone, as it always has.
+   * `room` scope-admitted items, none for an item the listing also admits as
+   * present or one this traversal already deletes. The parent need not be
+   * selected: a deletion above a selected folder still removes its contents.
    */
   const expandDeletedFolder = (
     entry: DropboxDeletedMetadataEntry,
@@ -197,18 +199,31 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
     if (!resolver?.activeItemsUnderLocatorIfIndexed || room <= 0) return [];
     // Rows the two guards discard still count against the resolver's limit,
     // so ask for that many more than the pass can use.
-    const limit = room + live.size + deleted.size;
+    const baseLimit = room + live.size + deleted.size;
     const found = new Map<string, DropboxDeletedDescendant>();
     for (const folder of deletedFolderPaths(entry)) {
-      for (const descendant of resolver.activeItemsUnderLocatorIfIndexed({
-        provider: CONNECTOR_ID,
-        accountScope: account,
-        locatorUri: folder,
-        limit,
-      })) {
-        const id = descendant.identity.providerItemId;
-        if (live.has(id) || deleted.has(id) || found.has(id)) continue;
-        found.set(id, descendant);
+      let limit = baseLimit;
+      for (;;) {
+        const descendants = resolver.activeItemsUnderLocatorIfIndexed({
+          provider: CONNECTOR_ID,
+          accountScope: account,
+          locatorUri: folder,
+          limit,
+        });
+        let excluded = 0;
+        for (const descendant of descendants) {
+          if (!metadataAllowed(descendant.locatorUri.toLowerCase())) {
+            excluded += 1;
+            continue;
+          }
+          const id = descendant.identity.providerItemId;
+          if (live.has(id) || deleted.has(id) || found.has(id)) continue;
+          found.set(id, descendant);
+        }
+        if (found.size >= room || descendants.length < limit || excluded === 0) break;
+        // Excluded rows remain active. Look past them so they cannot hide a
+        // selected descendant at the end of this or a later bounded pass.
+        limit += excluded;
       }
     }
     return [...found.values()]
@@ -304,7 +319,7 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
         // A deleted folder is one provider entry for its whole subtree. Its
         // descendants are expanded into deletions of their own, with two
         // guards that this one traversal can evaluate:
-        //  - an item the listing ALSO reports as present (a moved or renamed
+        //  - an item the listing ALSO admits at its new path (a moved or renamed
         //    folder arrives as a delete at the old path plus the files at the
         //    new one, in no promised order) is never deleted, and
         //  - an item this traversal already deletes is not deleted twice.
@@ -325,7 +340,7 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
               // Checked before the page is taken in, so the set stays bounded.
               if (seen + ahead.entries.length > lookaheadEntries) return 'capped';
               for (const entry of ahead.entries) {
-                if (entry.tag !== 'deleted') liveItemIds.add(entry.id);
+                if (entry.tag !== 'deleted' && metadataAllowed(entry.pathLower ?? entry.pathDisplay)) liveItemIds.add(entry.id);
               }
               if (!ahead.hasMore) return 'complete';
               seen += ahead.entries.length;
@@ -370,10 +385,10 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
             throw new Error('Dropbox metadata resume offset is past the provider page.');
           }
           const available = page.entries.slice(offset);
-          // Every id the whole page reports as present, ahead of consuming
+          // Every scope-admitted id the whole page reports as present, ahead of consuming
           // any of it: a delete may precede or follow the entries it races.
           for (const entry of page.entries) {
-            if (entry.tag !== 'deleted') liveItemIds.add(entry.id);
+            if (entry.tag !== 'deleted' && metadataAllowed(entry.pathLower ?? entry.pathDisplay)) liveItemIds.add(entry.id);
           }
           const fetchedAt = nowIso();
           const items: RawItem[] = [];
@@ -388,9 +403,9 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
             }
             const deletion = scopedItems([entry], fetchedAt);
             // Held rather than skipped: see DropboxDeletedItemIdentityResolver.lookupsReady.
-            if (deletion.length > 0 && options.deletedItemIdentityResolver?.lookupsReady?.() === false) break;
-            // Out of scope: the event is not this lane's, and neither is its subtree.
-            let descendants = deletion.length === 0 || lookaheadCapped
+            if (options.deletedItemIdentityResolver?.lookupsReady?.() === false) break;
+            // An unselected parent can contain selected descendants.
+            let descendants = lookaheadCapped
               ? []
               : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
             if (descendants.length > 0 && hasMore && !lookaheadComplete) {
