@@ -871,6 +871,7 @@ export class TierSnifferService {
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
+      set.repairLowerContent();
       try {
         const report = sweepOwnerRuleRaises({ set });
         if (report.raised > 0 || report.secrets > 0) {

@@ -1,3 +1,4 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 /**
  * A new install's first question: with no source connected, an empty search
  * says so instead of "no evidence in N searched sources" (zigelbot fresh
@@ -11,7 +12,7 @@ import { NO_SOURCES_CONNECTED_TEXT } from '../src/workers/chatgpt/response-build
 const EMPTY = { evidence: [], coverage: { searched_corpora: 4, unreadable_items: 0, partially_read_items: 0, unclassified_items: 0 } };
 
 function options(dashboardView: ChatGptSurfaceOptions['dashboardView'], raw: unknown = EMPTY): ChatGptSurfaceOptions {
-  return { dashboardView, evidenceSearch: async () => raw, privateMatchProbe: async () => ({ count: 0, evidence: [] }) } as ChatGptSurfaceOptions;
+  return { dashboardView, evidenceSearch: async () => recordScriptedSearch(raw as Record<string, unknown>), privateMatchProbe: async () => ({ count: 0, evidence: [] }) } as ChatGptSurfaceOptions;
 }
 
 const text = (result: { content: unknown }) => (result.content as Array<{ text: string }>)[0]!.text;
@@ -30,8 +31,8 @@ describe('olympus_search with nothing connected', () => {
 
   test('a result with evidence never reads the dashboard', async () => {
     let read = 0;
-    const raw = { ...EMPTY, evidence: [{ trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'Notes', excerpt: 'Integral theory notes.' }] };
-    const result = await callChatGptTool(SEARCH_TOOL.name, { question: 'integral theory' }, {} as OperationContext, options(async () => { read += 1; return {} as never; }, raw));
+    const raw = { ...EMPTY, evidence: [{ corpus_id: 'internal.dropbox.files', provider_item_id: 'notes', trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'Notes', excerpt: 'Integral theory notes.' }] };
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: 'integral theory' }, { releaseCheck: scriptedSearchReleaseCheck } as OperationContext, options(async () => { read += 1; return {} as never; }, raw));
     expect(text(result)).toContain('Notes');
     expect(read).toBe(0);
   });

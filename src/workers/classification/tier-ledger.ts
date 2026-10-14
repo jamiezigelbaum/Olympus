@@ -1540,6 +1540,18 @@ export class TierLedger {
     `).run(key, value);
   }
 
+  /** Hold the ledger write lock across a synchronous cross-store cleanup.
+   * The generation check and deletions cannot race a new routing decision.
+   */
+  withGenerationFence<T>(identity: TierLedgerIdentity, generation: number, work: () => T): T {
+    return this.db.transaction(() => {
+      // Acquire the SQLite writer lock before reading the authority.
+      this.db.query("UPDATE tier_ledger_meta SET value = value WHERE key = 'ledger_id'").run();
+      if (this.getCurrent(identity)?.generation !== generation) throw new TierLedgerGenerationConflictError();
+      return work();
+    })();
+  }
+
   /**
    * Routed rows in key order after `after`, at most `limit`: a bounded page
    * for background passes that read every routed item (owner-rule sweeps).
@@ -2455,6 +2467,9 @@ export class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (this.readMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`) === String(options.expectedGeneration)) {
+        throw new Error('Lower content was purged after verification; use a newly judged move to restore it.');
+      }
       if (existing && (existing.contentTier === 'secrets' || existing.metadataTier === 'secrets')) {
         throw new TierLedgerSecretsRollbackRefusedError();
       }

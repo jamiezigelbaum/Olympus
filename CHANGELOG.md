@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1 - unreleased
+
+- Fixed content and prepared answers remaining available after an item moves from Personal to Private.
+
 ## 1.0.0 - 2026-10-14
 
 - ChatGPT connection steps now start in Plugins and explain when to turn on Developer mode.

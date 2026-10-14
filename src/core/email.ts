@@ -1,3 +1,4 @@
+import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
 import { workerFetch } from './worker-transport.ts';
 import { isSourceIndexReadSurfaceEnabled, type OlympusConfig } from './config.ts';
 import { assertNoRawEmailFields } from './email-policy.ts';
@@ -398,6 +399,8 @@ export interface EmailRetrievalSearchSummary {
   capped: boolean;
 }
 
+const sourceAnswerTickets = new WeakMap<object, string>();
+
 export class EmailClient {
   private config: OlympusConfig;
   private transport: EmailTransport;
@@ -493,7 +496,30 @@ export class EmailClient {
     const data = asRecord(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexAnswerResult(data);
+    const ticket = data._release_ticket;
+    delete data._release_ticket;
+    const result = parseSourceIndexAnswerResult(data);
+    if (options.caller?.surface === 'mcp') {
+      if (typeof ticket === 'string' && /^[A-Za-z0-9_-]{43}$/.test(ticket)) sourceAnswerTickets.set(result, ticket);
+      return await this.revalidateSourceAnswer(result) as SourceIndexAnswerResult;
+    }
+    return result;
+  }
+
+  /** Current-tier check for an answer collected from a local in-memory job. */
+  async revalidateSourceAnswer(result: unknown): Promise<unknown> {
+    if (!result || typeof result !== 'object' || typeof (result as { answer?: unknown }).answer !== 'string') return result;
+    const ticket = sourceAnswerTickets.get(result);
+    if (!ticket) return withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
+    try {
+      const verdict = asRecord(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }),
+      }));
+      if (verdict.allowed === true) return result;
+      return withheldSourceAnswer(typeof verdict.withheld === 'string' ? verdict.withheld : ANSWER_RELEASE_UNVERIFIED);
+    } catch {
+      return withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
+    }
   }
 
   async sourceIndexStatus(options: SourceIndexStatusOptions = {}): Promise<SourceIndexStatusResult> {

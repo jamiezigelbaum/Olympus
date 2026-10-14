@@ -782,7 +782,7 @@ describe('Private-row re-home', () => {
     }, 60_000);
 
     for (const boundary of ['decision', 'staging', 'import'] as const) {
-      test(`restart at the ${boundary} boundary: fresh handles resume to one serving copy, source bytes kept, destination searchable`, async () => {
+      test(`restart at the ${boundary} boundary: fresh handles resume to one serving copy, lower content purged, destination searchable`, async () => {
         let fixture = fixtureIn();
         await seedLegacy(fixture, [ORCHID]);
         const before = snapshotStore(fixture.paths.internal, [localId('orchid')]).chunks
@@ -823,7 +823,7 @@ describe('Private-row re-home', () => {
         expect(fixture.ledger.getCurrent(identityOf('orchid'))).toMatchObject({ state: 'current' });
         const after = snapshotStore(fixture.paths.internal, [localId('orchid')]).chunks
           .map((chunk) => [chunk.chunk_index, chunk.bounded_text, chunk.embedding_input_hash]);
-        expect(after).toEqual(before);
+        expect(after).toEqual([]);
         expect(searchedIn(fixture, 'orchid', 'orchid')).toEqual([CORPORA.secure_local]);
         expect(await receipts(fixture)).toBe(1);
       });

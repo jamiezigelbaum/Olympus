@@ -100,6 +100,7 @@ import { registerTierSetPlanner } from '../classification/installed-tier-classif
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
+import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { applyOwnerOverrides } from './tier-override-settle.ts';
@@ -292,6 +293,7 @@ export class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
+    this.repairLowerContent();
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -309,6 +311,17 @@ export class TieredStoreSet {
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
+  }
+
+  /** Bounded upgrade repair; only corpus identifiers and counts reach logs. */
+  repairLowerContent(): void {
+    try {
+      purgeLowerTierContent(this, { log: (corpus, copies, chunks) => {
+        if (chunks > 0) console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
+      } });
+    } catch {
+      // Startup and sync must remain available; maintenance retries the page.
+    }
   }
 
   /** Every store that exists, for reads and status. Never creates one. */
@@ -562,6 +575,7 @@ export class TieredStoreSet {
    * directions (tier-override-settle.ts). Never fails the sync.
    */
   private async settleStoredItems(): Promise<void> {
+    this.repairLowerContent();
     try {
       applyOwnerOverrides({ set: this });
     } catch {

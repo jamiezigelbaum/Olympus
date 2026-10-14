@@ -3816,17 +3816,31 @@ export class LocalConnectorStore {
     return stripped;
   }
 
+  /** Keep a verified destination stable while another SQLite file is purged. */
+  withItemCopyWriteFence<T>(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    work: () => T,
+  ): T {
+    return this.db.transaction(() => {
+      this.db.query(`UPDATE items SET item_pk = item_pk
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`)
+        .run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      return work();
+    })();
+  }
+
   /**
    * Strip the kept text of a names-only copy (the owner-approved tier
-   * migration purge): its chunks, their FTS rows and every vector go; the item
+   * migration purge): its chunks, their FTS rows, text versions and every vector go; the item
    * row (its names) stays. Returns the chunks removed. The caller has checked
    * the tier ledger says this copy serves names only.
    */
   stripCopyContent(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    options: { keepMetadata?: boolean } = {},
   ): number {
     try {
-      return this.stripCopyContentHeld(identity);
+      return this.stripCopyContentHeld(identity, options);
     } finally {
       this.releaseUnreferencedChunkMedia();
     }
@@ -3834,12 +3848,12 @@ export class LocalConnectorStore {
 
   private stripCopyContentHeld(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    options: { keepMetadata?: boolean } = {},
   ): number {
     return this.db.transaction((): number => {
       const row = this.db.query(`
         SELECT item_pk FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-          AND tombstoned = 0
       `).get(
         identity.provider,
         identity.accountScope,
@@ -3848,9 +3862,14 @@ export class LocalConnectorStore {
       ) as { item_pk: number } | null;
       if (!row) return 0;
       const count = (this.db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?').get(row.item_pk) as { n: number }).n;
-      if (count === 0) return 0;
+      this.db.query('DELETE FROM item_text_versions WHERE item_pk = ?').run(row.item_pk);
       this.db.query('DELETE FROM chunk_embeddings WHERE item_pk = ?').run(row.item_pk);
       this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
+      if (options.keepMetadata === false) {
+        this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+      }
       this.refreshFtsForItem(row.item_pk);
       return count;
     })();
@@ -9742,7 +9761,12 @@ export class LocalConnectorStore {
         // The winning CHUNK is kept, not just its score. A cosine is a
         // chunk-level measurement, so the chunk that produced the item's best
         // score is the only defensible semantic citation target.
+        const visible = new Set(this.tierVisibleRows(
+          this.searchRowsByItemPks([...new Set(page.map(row => row.itemPk))], selectedAccount, filters),
+          row => row.sourceItem, () => 'content',
+        ).map(row => row.sourceItem.localItemId));
         for (const [index, row] of page.entries()) {
+          if (!visible.has(row.localItemId)) continue;
           if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
             return { rows: [], skippedReason: 'vector_scan_deadline_exceeded' };
           }

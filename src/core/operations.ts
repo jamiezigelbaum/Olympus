@@ -1,3 +1,4 @@
+import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
 import { DelphiClient } from './delphi.ts';
 import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
 import { checkOcrReadiness, type OcrReadiness } from './ocr-readiness.ts';
@@ -346,7 +347,8 @@ export const operations: Operation[] = [
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal);
+      const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
+      return revalidateStdioSourceAnswer(ctx, result);
     },
   },
   {
@@ -367,7 +369,10 @@ export const operations: Operation[] = [
       const jobId = asString(params.job_id, 'job_id');
       const jobs = ctx.sourceAnswerJobs;
       if (!jobs) throw sourceAnswerJobNotFound();
-      return jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
+      const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
+      // Stdio's answer crossed the worker transport, so revalidate its opaque
+      // manifest ticket there, before serializing the cached value.
+      return revalidateStdioSourceAnswer(ctx, result);
     },
   },
   {
@@ -1070,4 +1075,13 @@ function optionalAttachmentType(value: unknown): 'image' | 'video' | 'audio' | '
     || value === 'other'
   ) return value;
   throw new OperationError('invalid_params', 'attachment_type must be image, video, audio, file, link, or other.');
+}
+
+async function revalidateStdioSourceAnswer(ctx: OperationContext, result: unknown): Promise<unknown> {
+  // Anonymous jobs and pending markers carry no source answer.
+  if (ctx.caller?.surface !== 'mcp' || !result || typeof result !== 'object'
+      || typeof (result as { answer?: unknown }).answer !== 'string') return result;
+  return typeof ctx.email.revalidateSourceAnswer === 'function'
+    ? ctx.email.revalidateSourceAnswer(result)
+    : withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
 }

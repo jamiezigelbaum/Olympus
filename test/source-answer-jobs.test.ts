@@ -1,3 +1,4 @@
+import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 // Slow source_answer hand-off (v0.5 hosted agents): a call that is not done by
 // the threshold returns a connection-bound job id, the work keeps running, and
 // source_answer_result returns the same released answer.
@@ -605,11 +606,24 @@ describe('SourceAnswerJobRegistry', () => {
 
 describe('stdio MCP and surfaces without a registry', () => {
   function stdioContext(registry?: SourceAnswerJobRegistry, respond?: () => Promise<Response>): OperationContext {
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { async answer() {
+        const result = respond ? await (await respond()).json() as SourceIndexAnswerResult : answerFixture();
+        // This scripted answer reads no source items. Still supply the
+        // authoritative empty manifest so ticket collection is exercised.
+        recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
+        return result;
+      } },
+      sourceAnswerReleaseCheck: {
+        inputs: (inputs) => inputs.map(() => ({ tier: 'public_or_personal', gone: false })),
+        secureDerivativeDefault: () => 'allow',
+      },
+    });
     const ctx = createInProcessOperationContext({
       config: defaultConfig(),
       sourceIndexReadEnabled: true,
       caller: { surface: 'mcp', displayName: 'codex' },
-      workerFetch: async () => (respond ? respond() : Response.json(answerFixture())),
+      workerFetch: worker.fetch,
     });
     return registry ? { ...ctx, sourceAnswerJobs: { registry, owner: sourceAnswerJobOwner(ctx.caller)! } } : ctx;
   }
