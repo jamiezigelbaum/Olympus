@@ -112106,6 +112106,8 @@ function tieredExtractionView(set2, options = {}) {
           decision?.targetContentTier,
           override?.kind === "tier" ? override.tier : undefined
         ];
+        if (tiers.includes("secrets"))
+          return "S5";
         const decisionTier = tiers.includes("secure") ? "S4" : tiers.includes("private") ? "S3" : undefined;
         if (decisionTier && (tier === undefined || TRUST_TIER_RANK[decisionTier] > TRUST_TIER_RANK[tier]))
           tier = decisionTier;

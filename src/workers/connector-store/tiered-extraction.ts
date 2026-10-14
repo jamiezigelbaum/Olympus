@@ -216,6 +216,8 @@ export function tieredExtractionView(
         const tiers = [decision?.metadataTier, decision?.contentTier,
           decision?.targetMetadataTier, decision?.targetContentTier,
           override?.kind === 'tier' ? override.tier : undefined];
+        // A Secrets ruling can commit between these reads and the check above.
+        if (tiers.includes('secrets')) return 'S5';
         const decisionTier = tiers.includes('secure') ? 'S4'
           : tiers.includes('private') ? 'S3' : undefined;
         if (decisionTier && (tier === undefined || TRUST_TIER_RANK[decisionTier] > TRUST_TIER_RANK[tier])) tier = decisionTier;

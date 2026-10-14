@@ -61,3 +61,30 @@ for (const change of ['personal', 'owner secrets', 'ledger secrets', 'unreadable
     }
   });
 }
+
+// A Secrets ruling that commits between the reader's own reads still counts:
+// any `secrets` value it sees is S5, never a fall back to the stored tier.
+for (const read of ['override', 'decision'] as const) {
+  test(`a Secrets ${read} seen after the Secrets check reads as S5`, async () => {
+    const tmp = tempDir('extraction-live-tier-race-');
+    const fx = openTierFixture(tmp.dir, { embed: false });
+    const spies: ReturnType<typeof spyOn>[] = [];
+    try {
+      const spec = { id: 'garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden.' };
+      await fx.set.sync(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      const view = tieredExtractionView(fx.set, { home: 'secure_local' });
+      expect(['S3', 'S4'].includes(view.itemTrustTier('personal:garden') ?? '')).toBe(true);
+      spies.push(spyOn(fx.ledger, 'itemIsSecret').mockImplementation(() => false));
+      if (read === 'override') {
+        spies.push(spyOn(fx.ledger, 'getOverride').mockImplementation((() => ({ kind: 'tier', tier: 'secrets' })) as never));
+      } else {
+        const current = fx.ledger.getCurrent(identityOf('garden'))!;
+        spies.push(spyOn(fx.ledger, 'getCurrent').mockImplementation((() => ({ ...current, contentTier: 'secrets' })) as never));
+      }
+      expect(view.itemTrustTier('personal:garden')).toBe('S5');
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+      fx.close(); tmp.cleanup();
+    }
+  });
+}
