@@ -155,8 +155,16 @@ export function linuxEngineEnvironment(layout: LinuxEngineLayout): Record<string
 }
 export const LEGACY_LINUX_POLICY_FILES = ['privacy.json', 'tier-rules.json', 'consult.json',
   'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json'] as const;
+/** The language-pack installer uses manifest.json.<positive PID>.tmp. */
+export function legacyLinuxManifestTemporaryPid(name: string): number | undefined {
+  const match = name.match(/^consult\/vocabulary\/manifest[.]json[.]([1-9][0-9]*)[.]tmp$/);
+  if (!match) return undefined;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid <= 2147483647 ? pid : undefined;
+}
 /** Files the pre-XDG Linux writers could create. Never adopt an arbitrary tree. */
 export function isLegacyLinuxSetting(name: string): boolean {
+  if (legacyLinuxManifestTemporaryPid(name) !== undefined) return true;
   const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
   if (temporary) return isLegacyLinuxSetting(temporary[1]!);
   return ['privacy.json', 'tier-rules.json', 'consult.json', 'consult.json.lock', 'consult.json.lock.commit', 'sovereignty.json',

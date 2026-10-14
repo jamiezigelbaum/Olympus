@@ -367,3 +367,12 @@ for (const replacement of ['new-content', 'same-content', 'in-place'] as const) 
  expect(JSON.parse(readFileSync(join(l.stateDir,'install-transaction.json'),'utf8')).phase).toBe('rollback_required');
  expect(calls.filter(args=>args.includes('restart'))).toHaveLength(1);
 },15_000);
+
+for(const live of [false,true])test(`language-pack manifest PID temporary ${live?'refuses a live writer':'is reclaimed after its writer dies'}`,()=>{
+ const l=layout();publishLinuxEngineReceipt(l);const dir=join(l.home,'.olympus/consult/vocabulary');mkdirSync(dir,{recursive:true,mode:0o700});
+ const name=`manifest.json.${live?process.pid:2147483647}.tmp`;writeFileSync(join(dir,name),'incomplete synthetic manifest',{mode:0o600});writeFileSync(join(dir,'manifest.json'),'{"schema":1,"packs":{}}',{mode:0o600});
+ let linked=false;const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);if(command==='loginctl')return good('yes');if(args.includes('--version'))return good('systemd 256');if(args.includes('--property=Version'))return good('256');if(args.includes('olympus-worker.service'))return good('LoadState=not-found');if(args.includes('show'))return good(linked?`LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\nMainPID=0\nFragmentPath=${l.unitPath}`:'LoadState=not-found');if(args.includes('link'))linked=true;return good();};
+ const run=()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)});
+ if(live){expect(run).toThrow('language-pack installer is still running');expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);expect(existsSync(join(dir,name))).toBe(true);}
+ else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult/vocabulary/manifest.json'),'utf8')).toBe('{"schema":1,"packs":{}}');expect(existsSync(join(dir,name))).toBe(false);expect(existsSync(join(l.configDir,'consult/vocabulary',name))).toBe(false);}
+},15_000);

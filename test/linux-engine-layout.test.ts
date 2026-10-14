@@ -226,3 +226,14 @@ test('legacy migration accepts exactly the optional installer pack names',()=>{
  expect(()=>preflightLinuxEngineLayout(l)).not.toThrow();
  writeFileSync(join(dir,'xx-hunspell.txt.gz'),'unknown',{mode:0o600});expect(()=>preflightLinuxEngineLayout(l)).toThrow('Unrecognized legacy');
 });
+
+test('legacy inventory accepts only the language-pack installer manifest PID temporary',()=>{
+ const {home,env}=fixture();const l=resolveLinuxEngineLayout(env);publishLinuxEngineReceipt(l);
+ const dir=join(home,'.olympus/consult/vocabulary');mkdirSync(dir,{recursive:true,mode:0o700});
+ const valid=join(dir,'manifest.json.2147483647.tmp');writeFileSync(valid,'synthetic',{mode:0o600});
+ expect(()=>preflightLinuxEngineLayout(l)).not.toThrow();rmSync(valid);
+ for(const name of ['manifest.json.0.tmp','manifest.json.-1.tmp','manifest.json.abc.tmp','de-hunspell.txt.gz.123.tmp']){
+  const path=join(dir,name);writeFileSync(path,'synthetic',{mode:0o600});expect(()=>preflightLinuxEngineLayout(l)).toThrow('Unrecognized legacy');rmSync(path);
+ }
+ symlinkSync(join(home,'elsewhere'),valid);expect(()=>preflightLinuxEngineLayout(l)).toThrow();
+});

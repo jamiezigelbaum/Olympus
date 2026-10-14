@@ -7,7 +7,7 @@ import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, f
 import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { userInfo } from 'node:os';
-import { assertLinuxManagedPath, type LinuxEngineLayout, type LinuxMachineArtifact } from './linux-engine-layout.ts';
+import { legacyLinuxManifestTemporaryPid, assertLinuxManagedPath, type LinuxEngineLayout, type LinuxMachineArtifact } from './linux-engine-layout.ts';
 import type { EngineExec, EngineProgram } from './engine-service.ts';
 export const SYSTEMD_ENGINE_UNIT = 'olympus-engine.service';
 export function linuxEngineExec(command: string, args: string[]) {
@@ -572,6 +572,13 @@ function assertLegacySettingOverrides(layout: LinuxEngineLayout, env: Record<str
   throw new Error(`Set ${key} to ${destination} in ${layout.workerEnvPath} and in any launch environment that sets it, then retry the upgrade. Nothing was changed.`);
  }
 }
+function assertAbandonedLegacyManifestTemporary(name: string): void {
+ const pid=legacyLinuxManifestTemporaryPid(name);
+ if(pid===undefined)return;
+ try { process.kill(pid,0); }
+ catch(error){if((error as NodeJS.ErrnoException).code==='ESRCH')return;throw error;}
+ throw new Error('The Olympus language-pack installer is still running. Finish it before upgrading; nothing was migrated.');
+}
 function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
  const files=legacyLinuxSettings(layout).filter(name=>!isLegacyConsultSidecar(name));
  if(priorEngineUsesLegacySettings(layout)){
@@ -579,6 +586,7 @@ function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
    if(lstatSync(target,{throwIfNoEntry:false}))throw new Error(`Legacy-reader settings conflict at ${target}; nothing was migrated.`);}
  }
  for(const name of files){
+  assertAbandonedLegacyManifestTemporary(name);
   if(legacyOAuthWriterRunning(layout,name))throw new Error('Finish or cancel the running Olympus sign-in before upgrading. Nothing was changed.');
   const target=legacySettingTarget(layout,name);assertLinuxManagedPath(target);
   if(lstatSync(target,{throwIfNoEntry:false}))throw new Error(`Legacy Olympus settings conflict at ${target}; nothing was migrated.`);}
@@ -602,6 +610,14 @@ function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInst
   assertLinuxManagedPath(source);assertLinuxManagedPath(target);
   const sourceIdentity=lstatSync(source);
   if(hashFile(source)!==snapshots[name]!.sha256)throw new Error('Legacy Olympus settings changed during migration.');
+  if(legacyLinuxManifestTemporaryPid(name)!==undefined){
+   // Reclaim only the dead installer's recognized, private, singly-linked
+   // temporary. Its journal snapshot still permits failed-install recovery.
+   assertAbandonedLegacyManifestTemporary(name);
+   assertLegacySettingUnchanged(source,sourceIdentity,snapshots[name]!);
+   removeFileDurablySync(source);
+   continue;
+  }
   createLinuxPrivateDirectory(dirname(target));
   const temporary=legacyMigrationTemporary(layout,transaction,name);
   const fd=openSync(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
