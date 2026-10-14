@@ -185,9 +185,14 @@ describe('no existing embeddings are thrown away by a scope', () => {
     expect(await lane.confirmPrivateScope!({ ...(checkpoint ? { checkpoint } : {}) })).toMatchObject({ confirmed: 0, done: true });
     expect(client.formats.slice(formatsBefore)).toHaveLength(80);
     const renewed = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval: { generation: 'reconnected-account', revision: 'R3' }, confirmStoredPrivateScope: true });
+    const renewedId = gmailCursorConnectorId('personal', { generation: 'reconnected-account', revision: 'R3' });
     // Neither R2's completion marker nor its page cursor may skip R3's walk.
     const restarted = await renewed.confirmPrivateScope!({ ...(checkpoint ? { checkpoint } : {}) });
-    expect(restarted).toMatchObject({ confirmed: 1, done: false });
+    expect(restarted).toMatchObject({ confirmed: 32, done: false });
+    expect(restarted.checkpoint).toBeTruthy();
+    expect(client.formats.slice(formatsBefore)).toHaveLength(112);
+    expect(stores.secureStore.itemOwnerPresent(identity('retained-31'), renewedId, 'observed')).toBe(true);
+    expect(stores.secureStore.itemOwnerPresent(identity('retained-32'), renewedId, 'observed')).toBe(false);
     const list = client.listMessages;
     client.listMessages = async request => {
       if (request.pageToken) throw new Error('Gmail API request failed (400): page token expired');
@@ -195,11 +200,24 @@ describe('no existing embeddings are thrown away by a scope', () => {
     };
     const rejected = await renewed.confirmPrivateScope!({ checkpoint: restarted.checkpoint! });
     expect(rejected).toMatchObject({ confirmed: 0, done: false, checkpoint: null });
+    expect(client.formats.slice(formatsBefore)).toHaveLength(112);
     client.listMessages = list;
-    // Retry starts fresh, skips the durable already-confirmed first item,
-    // and continues to the next one instead of re-reading the first metadata.
-    expect(await renewed.confirmPrivateScope!()).toMatchObject({ confirmed: 1, done: false });
-    expect(client.formats.slice(formatsBefore)).toHaveLength(82);
+    // Replay skips the 32 durable confirmations. The 50-page cap leaves room
+    // for 18 new metadata reads, then a checkpoint resumes the remaining 30.
+    const replayed = await renewed.confirmPrivateScope!();
+    expect(replayed).toMatchObject({ confirmed: 18, done: false });
+    expect(replayed.checkpoint).toBeTruthy();
+    expect(client.formats.slice(formatsBefore)).toHaveLength(130);
+    expect(stores.secureStore.itemOwnerPresent(identity('retained-49'), renewedId, 'observed')).toBe(true);
+    expect(stores.secureStore.itemOwnerPresent(identity('retained-50'), renewedId, 'observed')).toBe(false);
+    const resumed = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval: { generation: 'reconnected-account', revision: 'R3' }, confirmStoredPrivateScope: true });
+    const completed = await resumed.confirmPrivateScope!({ checkpoint: replayed.checkpoint! });
+    expect(completed).toMatchObject({ confirmed: 30, done: true });
+    expect(stores.secureStore.itemOwnerPresent(identity('retained-79'), renewedId, 'observed')).toBe(true);
+    expect(client.formats.slice(formatsBefore)).toHaveLength(160);
+    expect(client.formats.slice(formatsBefore).every(format => format === 'metadata')).toBe(true);
+    expect(await resumed.confirmPrivateScope!({ checkpoint: completed.checkpoint! })).toMatchObject({ confirmed: 0, done: true });
+    expect(client.formats.slice(formatsBefore)).toHaveLength(160);
   }, 30_000);
 
   test('current-scope confirmation makes retained Private mail eligible without rewriting bodies or vectors; fresh skip rules still win', async () => {
