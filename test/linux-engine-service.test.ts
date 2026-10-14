@@ -124,7 +124,7 @@ test.skipIf(process.platform!=='linux')('kernel lifecycle lock reuses only an in
  expect(closed.status).not.toBe(0);expect(closed.stdout).not.toContain('held');
  expect(withLinuxEngineLifecycleLock(l,()=>statSync(l.lifecycleLockPath).mode&0o777)).toBe(0o600);
 });
-function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);mkdirSync(join(dir,'assets'));copyFileSync(join(import.meta.dir,'../assets/app-icon.png'),join(dir,'assets/app-icon.png'));return dir;}
+function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1,linuxSettingsLayout:'receipt-v1'}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);mkdirSync(join(dir,'assets'));copyFileSync(join(import.meta.dir,'../assets/app-icon.png'),join(dir,'assets/app-icon.png'));return dir;}
 function runtimeAt(root:string){const dir=join(root,`fixture-runtime-${Math.random().toString(16).slice(2)}`),runtime=join(dir,'bun');mkdirSync(dir,{mode:0o700});copyFileSync(realpathSync(process.execPath),runtime);chmodSync(runtime,0o700);return runtime;}
 test('install refuses an unintegrated approval package before enabling linger or writing config',()=>{
  const l=layout(),checkout=packageAt(l.home,'v1',false);const calls:string[][]=[];
@@ -281,10 +281,10 @@ for (const failure of ['none', 'link', 'start', 'health', 'parent', 'replacement
  },20_000);
 }
 
-for (const failure of [false, true]) test(`legacy privacy migration ${failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
+for (const failure of [false, true, 'edited'] as const) test(`legacy privacy migration ${failure === 'edited' ? 'preserves later owner edits on recovery' : failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
  const l=layout();publishLinuxEngineReceipt(l);
  const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
- const original=JSON.stringify({schemaVersion:1,description:'Synthetic health preference',rules:[],updatedAt:'2026-10-14T00:00:00Z'});
+ let original=JSON.stringify({schemaVersion:1,description:'Synthetic health preference',rules:[],updatedAt:'2026-10-14T00:00:00Z'});
  writeFileSync(join(legacy,'privacy.json'),original,{mode:0o600});
  let linked=false,active=false,enabled=false;
  const exec:EngineExec=(command,args)=>{
@@ -302,6 +302,7 @@ for (const failure of [false, true]) test(`legacy privacy migration ${failure ? 
  expect(existsSync(join(legacy,'privacy.json'))).toBe(false);
  const read=Bun.spawnSync([process.execPath,'-e',`const { readPrivacyProfile } = await import('./src/workers/classification/privacy-profile.ts');console.log(JSON.stringify(readPrivacyProfile()));`],{env:linuxEngineEnvironment(l),stdout:'pipe',stderr:'pipe'});
  expect(read.exitCode).toBe(0);expect(JSON.parse(read.stdout.toString()).description).toBe('Synthetic health preference');
+ if(failure==='edited'){original=JSON.stringify({schemaVersion:1,description:'Updated synthetic preference',rules:[]});writeFileSync(target,original,{mode:0o600});}
  await settleLinuxEngineInstall(options,{ok:!failure,expected_build:result.program.build??null,running_build:result.program.build??null,pid:42,worker:'ok',waited_ms:0});
  if(failure){expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe(original);expect(existsSync(target)).toBe(false);}
  else{expect(readFileSync(target,'utf8')).toBe(original);expect(existsSync(legacy)).toBe(false);}
@@ -315,3 +316,13 @@ test('legacy privacy migration refuses a destination conflict without changing e
  expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe('old');expect(readFileSync(join(l.configDir,'privacy.json'),'utf8')).toBe('new');
  expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
 },15_000);
+
+test('rollback refuses a previous generation that cannot read receipt-owned privacy settings before stopping the engine', async () => {
+ const {l,options,calls}=installed();
+ const old=packageAt(l.home,'old-layout');const manifest=JSON.parse(readFileSync(join(old,'package.json'),'utf8'));delete manifest.olympus.linuxSettingsLayout;writeFileSync(join(old,'package.json'),JSON.stringify(manifest));
+ writeFileSync(join(l.stateDir,'service-previous.json'),JSON.stringify({program:{workingDirectory:old}}),{mode:0o600});
+ const exec:EngineExec=(command,args)=>command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):args.includes('olympus-worker.service')?good('LoadState=not-found'):options.exec(command,args);
+ await expect(rollbackEngine({...options,exec,uid:process.getuid!()})).rejects.toThrow('cannot read receipt-owned settings');
+ expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);
+ expect(readFileSync(l.unitPath,'utf8')).toBe('unit');
+});

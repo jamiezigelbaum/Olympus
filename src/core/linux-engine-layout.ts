@@ -155,12 +155,14 @@ export function linuxEngineEnvironment(layout: LinuxEngineLayout): Record<string
 }
 /** Files the pre-XDG Linux writers could create. Never adopt an arbitrary tree. */
 export function isLegacyLinuxSetting(name: string): boolean {
+  const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
+  if (temporary) return isLegacyLinuxSetting(temporary[1]!);
   return ['privacy.json', 'tier-rules.json', 'consult.json', 'sovereignty.json',
     'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json',
     'consult/vocabulary/manifest.json'].includes(name)
     || /^consult\/vocabulary\/[a-z]{2}(?:[.]txt[.]gz|[.]LICENSE[.]txt)$/.test(name)
-    || /^pending-oauth\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_-]+[.]json(?:[.]request[.][0-9]+[.][0-9]+[.]json)?$/.test(name)
-    || /^logs\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_-]+[.][0-9TZ-]+[.]log$/.test(name);
+    || /^pending-oauth\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.-]+[.]json(?:[.]request[.][0-9]+[.][0-9]+[.]json)?$/.test(name)
+    || /^logs\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.:-]+[.][0-9TZ-]+[.]log$/.test(name);
 }
 export const LEGACY_LINUX_SETTINGS_DIRECTORIES = ['sources', 'consult', 'consult/vocabulary', 'pending-oauth', 'logs'] as const;
 /** Read-only inventory. Receipt custody is required even for an empty legacy directory. */
@@ -183,6 +185,11 @@ export function legacyLinuxSettings(layout: LinuxEngineLayout): string[] {
         if (!isLegacyLinuxSetting(name)) throw new Error(`Unrecognized legacy Olympus data: ${child}. Nothing was changed.`);
         assertLinuxManagedPath(child);
         if (info.nlink !== 1) throw new Error(`${child} must be singly linked.`);
+        if (name.startsWith('pending-oauth/')) {
+          if (name.includes('.request.') || JSON.parse(readFileSync(child, 'utf8')).status === 'pending') {
+            throw new Error('Finish or cancel the pending Olympus sign-in before upgrading; its detached writer still owns the legacy state. Nothing was changed.');
+          }
+        }
         files.push(name);
       }
     }

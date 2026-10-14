@@ -1,4 +1,3 @@
-import { resolveLinuxEngineLayout } from '../../core/linux-engine-layout.ts';
 // Owner tier rules (design docs/design/per-item-four-tier-classification.md,
 // section 2.4): `~/.olympus/tier-rules.json`, owner-only, validated on every
 // read.
@@ -32,11 +31,10 @@ import { resolveLinuxEngineLayout } from '../../core/linux-engine-layout.ts';
 // provider item identity (tier-ledger.ts, `setOverride`).
 
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
+import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
 import { TIER_KEYS, type OwnerTierRule, type TierKey } from './tier-classifier.ts';
 
 export const TIER_RULES_SCHEMA_VERSION = 1;
@@ -68,8 +66,7 @@ export interface TierRulesValidationResult {
 }
 
 export function defaultTierRulesPath(env: Record<string, string | undefined> = process.env): string {
-  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'tier-rules.json');
-  return join(homedir(), '.olympus', 'tier-rules.json');
+  return defaultOwnerConfigPath('tier-rules.json', env);
 }
 
 export function resolveTierRulesPath(options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {}): string {

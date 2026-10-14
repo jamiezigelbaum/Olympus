@@ -1,4 +1,4 @@
-import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { linuxOwnerConfigPath } from './owner-config-read.ts';
 import { isRetiredGoogleHandle } from './google-handle-compatibility.ts';
 import { modelEndpointFetch } from './model-transport.ts';
 import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
@@ -2318,12 +2318,14 @@ function oauthErrorCodeFromBody(text: string): string | undefined {
 }
 
 export function defaultDetachedOAuthStateDir(env: Record<string, string | undefined> = process.env): string {
-  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'pending-oauth');
+  const linuxPath = linuxOwnerConfigPath('pending-oauth', env);
+  if (linuxPath) return linuxPath;
   return join(homedir(), '.olympus', 'pending-oauth');
 }
 
 export function defaultDetachedOAuthLogDir(env: Record<string, string | undefined> = process.env): string {
-  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'logs');
+  const linuxPath = linuxOwnerConfigPath('logs', env);
+  if (linuxPath) return linuxPath;
   return join(homedir(), '.olympus', 'logs');
 }
 

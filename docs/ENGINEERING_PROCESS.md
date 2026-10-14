@@ -179,6 +179,13 @@ accepted by the deploy gate, the existing exact-SHA green-main check remains
 authoritative; any mismatch falls back to a full main run rather than skipping
 proof.
 
+Linux generations that read settings from the receipt-owned config directory
+advertise `olympus.linuxSettingsLayout = "receipt-v1"`. Rollback refuses older
+generations before stopping the engine, because those readers would silently
+ignore migrated privacy rules. Failed installation recovery restores settings
+(including later owner edits) to their prior paths before restarting the prior
+engine; successful upgrade removes only empty legacy directories.
+
 ## Version numbers and releases
 
 Olympus uses semantic versioning (owner decision 2026-10-13). `1.0.0` is the

@@ -1,4 +1,4 @@
-import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { linuxOwnerConfigPath } from './owner-config-read.ts';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -84,7 +84,8 @@ const DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS = [
 ] as const;
 
 export function defaultDropboxIngestionPolicyPath(env: Record<string, string | undefined> = process.env): string {
-  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'sources', 'dropbox.personal.ingestion.json');
+  const linuxPath = linuxOwnerConfigPath('sources/dropbox.personal.ingestion.json', env);
+  if (linuxPath) return linuxPath;
   return join(homedir(), '.olympus', 'sources', 'dropbox.personal.ingestion.json');
 }
 

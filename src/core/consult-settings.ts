@@ -1,4 +1,4 @@
-import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { linuxOwnerConfigPath } from './owner-config-read.ts';
 // Outside-help (consult) settings: the internal reader (design
 // docs/design/frontier-consult-lane.md, revision 7, §A.9, build stage C3).
 //
@@ -324,7 +324,7 @@ export interface ConsultSettingsLocation {
 export function consultSettingsPath(env: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
   const home = env.HOME?.trim();
   if (process.platform === 'linux' && home && !home.startsWith('/')) return undefined;
-  return home ? (process.platform === 'linux' ? join(resolveLinuxEngineLayout(env).configDir, 'consult.json') : join(home, '.olympus', 'consult.json')) : undefined;
+  return home ? (linuxOwnerConfigPath('consult.json', env) ?? join(home, '.olympus', 'consult.json')) : undefined;
 }
 
 /**

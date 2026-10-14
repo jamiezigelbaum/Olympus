@@ -1,7 +1,7 @@
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync } from 'node:fs';
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { userInfo } from 'node:os';
@@ -355,6 +355,7 @@ interface LinuxInstallTransaction {
  generationArtifact?:LinuxMachineArtifact;
  desktopIconSha256?:string;
  legacySettings?: Record<string, LinuxFileSnapshot>;
+ legacyRestoreSettings?: Record<string, LinuxFileSnapshot>;
  /** Write-ahead intent: only unit-search links absent before systemctl link. */
  newUnitLinks?:string[];
  priorUnitLinks?:Array<{path:string;target:string}>;
@@ -443,6 +444,10 @@ function readInstallTransaction(layout: LinuxEngineLayout): LinuxInstallTransact
  const legacy=value.legacySettings;
  if(legacy!==undefined && (!legacy || typeof legacy!=='object' || Array.isArray(legacy)
   || Object.entries(legacy).some(([name,snapshot],index)=>!isLegacyLinuxSetting(name)||!snapshotValid(snapshot)||!snapshot.present||snapshot.backupPath!==join(backupDir,`file-${10000+index}.backup`)))) throw new Error('Invalid legacy settings recovery journal.');
+ const restore=value.legacyRestoreSettings;
+ if(restore!==undefined && (!legacy || !restore || typeof restore!=='object' || Array.isArray(restore)
+  || Object.keys(restore).length!==Object.keys(legacy).length
+  || Object.entries(restore).some(([name,snapshot],index)=>!Object.hasOwn(legacy,name)||!snapshotValid(snapshot)||!snapshot.present||snapshot.backupPath!==join(backupDir,`file-${20000+index}.backup`)))) throw new Error('Invalid legacy settings restore journal.');
  const createdAllowed=new Set(transactionCreatedFiles(layout));const absent=value?.before?.absentCreatedFiles;
  if (value.schema !== 'olympus.engine.install-transaction.v1'||!['install','rollback'].includes(value.action)|| !['preparing','activating','rollback_required','qualified','recovered'].includes(value.phase)
   ||(value.priorUnitLinks!==undefined&&(!Array.isArray(value.priorUnitLinks)
@@ -534,21 +539,44 @@ function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInst
   const source=join(layout.home,'.olympus',name),target=legacySettingTarget(layout,name);
   assertLinuxManagedPath(source);assertLinuxManagedPath(target);
   if(hashFile(source)!==snapshots[name]!.sha256)throw new Error('Legacy Olympus settings changed during migration.');
-  createLinuxPrivateDirectory(dirname(target));copyFileSync(source,target,constants.COPYFILE_EXCL);chmodSync(target,0o600);
-  syncCopiedFile(target);syncDirectorySync(dirname(target));removeFileDurablySync(source);
+  createLinuxPrivateDirectory(dirname(target));
+  const temporary=legacyMigrationTemporary(layout,transaction,name);
+  const fd=openSync(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
+  try { writeFileSync(fd,snapshotBytes(snapshots[name]!)!);fsyncSync(fd); } finally { closeSync(fd); }
+  // link is an atomic no-replace publication on this filesystem, unlike copyFile.
+  linkSync(temporary,target);syncDirectorySync(dirname(target));removeFileDurablySync(temporary);removeFileDurablySync(source);
  }
 }
+function legacyMigrationTemporary(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction, name: string): string {
+ return `${legacySettingTarget(layout,name)}.${basename(transaction.backupDir)}.migration`;
+}
 function restoreLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
- // Validate every existing source/destination before touching any of them.
- for(const [name,snapshot] of Object.entries(transaction.legacySettings??{})){
+ // The engine has released custody. Preserve later owner edits in an immutable
+ // second snapshot set before restoring any file. Replays use that same set.
+ if(transaction.legacySettings && !transaction.legacyRestoreSettings){
+  const snapshots:Record<string,LinuxFileSnapshot>={};
+  for(const [index,[name,original]] of Object.entries(transaction.legacySettings).entries()){
+   const source=join(layout.home,'.olympus',name),target=legacySettingTarget(layout,name);
+   assertLinuxManagedPath(source);assertLinuxManagedPath(target);
+   if(existsSync(source)&&hashFile(source)!==original.sha256)throw new Error(`Legacy settings changed at ${source}; retained for recovery.`);
+   const bytes=existsSync(target)?readFileSync(target):snapshotBytes(original)!;
+   snapshots[name]=writeSnapshot(transaction.backupDir,20000+index,bytes,0o600);
+  }
+  transaction.legacyRestoreSettings=snapshots;writeInstallTransaction(layout,transaction);
+ }
+ for(const [name,snapshot] of Object.entries(transaction.legacyRestoreSettings??{})){
   snapshotBytes(snapshot);
-  for(const path of [join(layout.home,'.olympus',name),legacySettingTarget(layout,name)]){
-   assertLinuxManagedPath(path);if(existsSync(path)&&hashFile(path)!==snapshot.sha256)throw new Error(`Migrated settings changed at ${path}; retained for recovery.`);
+  const source=join(layout.home,'.olympus',name),target=legacySettingTarget(layout,name);
+  for(const path of [source,target]){
+   assertLinuxManagedPath(path);
+   if(existsSync(path)&&![snapshot.sha256,transaction.legacySettings![name]!.sha256].includes(hashFile(path)))throw new Error(`Migrated settings changed at ${path}; retained for recovery.`);
   }
  }
- for(const [name,snapshot] of Object.entries(transaction.legacySettings??{})){
+ for(const [name,snapshot] of Object.entries(transaction.legacyRestoreSettings??{})){
   restoreOptionalFile(join(layout.home,'.olympus',name),snapshot);
   removeFileDurablySync(legacySettingTarget(layout,name));
+  const temporary=legacyMigrationTemporary(layout,transaction,name);
+  assertLinuxManagedPath(temporary);removeFileDurablySync(temporary);
  }
 }
 function cleanupLegacySettingsDirectories(layout: LinuxEngineLayout): void {
@@ -933,6 +961,8 @@ export async function rollbackLinuxEngine(options: EngineServiceOptions & {healt
  return withLinuxEngineLifecycleLockAsync(l,async()=>{
   preflightLinuxEngineLayout(l);preflightSystemdEngine(l,exec,options.uid);preflightLinuxDesktopEntry(l);assertNoInterruptedInstall(l);assertKnown(inspectSystemdEngine(l,exec));ensureEngineLinger(exec,options.uid,options.userName,options.notice);
   const previous=JSON.parse(readFileSync(join(l.stateDir,'service-previous.json'),'utf8')) as {program:EngineProgram;unit:string;config:string};
+  const previousManifest=JSON.parse(readFileSync(join(previous.program.workingDirectory,'package.json'),'utf8'));
+  if(previousManifest.olympus?.linuxSettingsLayout!=='receipt-v1')throw new Error('The previous engine cannot read receipt-owned settings. Rollback was refused; the current engine and privacy settings were left unchanged.');
   const current=currentProgram(l); if(!current)throw new Error('The current service generation is unknown; rollback refused.');
   for(const p of [previous.program.runtimePath,previous.program.entryPath,current.runtimePath,current.entryPath])assertLinuxManagedPath(p);
   if(!previous.program.runtimeDigest || createHash('sha256').update(readFileSync(previous.program.runtimePath)).digest('hex')!==previous.program.runtimeDigest)throw new Error('The previous Bun runtime has changed; rollback refused.');

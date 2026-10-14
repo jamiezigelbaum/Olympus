@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { linuxEngineEnvironment, publishLinuxEngineReceipt, resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
@@ -48,4 +48,14 @@ test('dashboard privacy backend saves and reads Linux preferences in the receipt
   expect(existsSync(join(home, '.olympus'))).toBe(false);
   for (const file of ['privacy.json', 'tier-rules.json']) expect(statSync(join(layout.configDir, file)).mode & 0o777).toBe(0o600);
   expect(JSON.parse(readFileSync(join(layout.configDir, 'privacy.json'), 'utf8')).description).toBe(result.description);
+});
+
+test('Linux without a receipt refuses legacy privacy settings instead of silently ignoring them', () => {
+  const { home, env, layout } = fixture(); rmSync(layout.receiptPath);
+  mkdirSync(join(home, '.olympus'), { mode: 0o700 });
+  writeFileSync(join(home, '.olympus/privacy.json'), JSON.stringify({ schemaVersion: 1, description: 'synthetic', rules: [] }), { mode: 0o600 });
+  const result = probe(env, `const { readPrivacyProfile } = await import('./src/workers/classification/privacy-profile.ts');
+    try { readPrivacyProfile(); console.log(JSON.stringify({ refused: false })); }
+    catch { console.log(JSON.stringify({ refused: true })); }`);
+  expect(result.refused).toBe(true);
 });

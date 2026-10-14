@@ -13,7 +13,24 @@
 // The caller decides what a refusal means; the classifiers treat it as
 // "hold everything pending", never as "no policy".
 
-import { readFileSync, statSync, type Stats } from 'node:fs';
+import { readFileSync, statSync, lstatSync, type Stats } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+
+/** Never silently drop a hosted/pre-receipt Linux installation's existing policy. */
+export function linuxOwnerConfigPath(name: string, env: Record<string, string | undefined> = process.env): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const layout = resolveLinuxEngineLayout(env);
+  if (lstatSync(join(layout.home, '.olympus', name), { throwIfNoEntry: false }) && !readLinuxEngineReceipt(layout.receiptPath)) {
+    throw new Error('Legacy Olympus settings exist without an install receipt. Back up and migrate them before using the Linux configuration layout; existing privacy protections were not ignored.');
+  }
+  return join(layout.configDir, name);
+}
+/** Owner policy files share the installed Linux layout; Mac keeps its historical root. */
+export function defaultOwnerConfigPath(name: string, env: Record<string, string | undefined> = process.env): string {
+  return linuxOwnerConfigPath(name, env) ?? join(homedir(), '.olympus', name);
+}
 
 export type OwnerConfigRead =
   | { status: 'missing' }
