@@ -1,3 +1,4 @@
+import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
@@ -1268,6 +1269,9 @@ export interface ConnectorStoreStatus {
      * 20k of them extracted reported itself fully answer-ready.
      */
     itemsWithText: number;
+    /** Names copies with current content in another store. */
+    contentElsewhereItems?: number;
+    settledUnreadableItems?: number;
     /** Active non-directory rows in the current approved metadata scope. */
     files?: number;
     /** Active directory rows in the current approved metadata scope. */
@@ -10659,6 +10663,36 @@ export class LocalConnectorStore {
     return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
   }
 
+  /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
+  settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
+    if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
+    const ledger = this.visibilityLedger();
+    if (!ledger) return [];
+    const identities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_settled_unreadable');
+    const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
+    const account = normalizeOptionalAccountScope(scope?.accountScope);
+    const lookup = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
+      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
+        AND COALESCE(i.provider_conversation_id, '') = ?
+        ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`);
+    const out: ExtractionUnreadableItem[] = [];
+    for (const identity of identities) {
+      const override = ledger.getOverride(identity);
+      if (override?.kind === 'tier' && override.tier === 'secrets') continue;
+      const row = lookup.get(identity.provider, identity.accountScope, identity.providerItemId,
+        identity.providerConversationId ?? '', ...(account ? [account] : []), ...filters.params) as
+        { local_item_id: string; title: string | null; source_version: string | null } | null;
+      const record = ledger.getCurrent(identity);
+      if (!row || !record) continue;
+      out.push({ ref: { corpusId: this.corpusId, provider: identity.provider, accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId, localItemId: row.local_item_id,
+        approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
+        ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
+        failedAt: record.decidedAt });
+    }
+    return out;
+  }
+
   status(scope?: ConnectorStoreStatusScope): ConnectorStoreStatus {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
@@ -10722,6 +10756,8 @@ export class LocalConnectorStore {
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
+          AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -10753,6 +10789,7 @@ export class LocalConnectorStore {
         ) AS full_ingestion_files
     `).get(
       ...itemParams,
+      ...itemParams, JSON.stringify(keptNamesOnlyPks),
       ...itemParams,
       ...itemParams,
       ...itemParams,
@@ -10762,6 +10799,7 @@ export class LocalConnectorStore {
       ...fileScopeParams,
     ) as {
       items: number;
+      content_elsewhere_items: number;
       files: number;
       folders: number;
       tombstoned_items: number;
@@ -10847,6 +10885,7 @@ export class LocalConnectorStore {
           ...namesOnlyKept(this.db, tier.metadataLayer),
         }
       : undefined;
+    const settledUnreadableItems = this.settledUnreadableItems(scope).length;
     // "Last" means most-recently-inserted. started_at has only millisecond
     // resolution, so two runs in the same tick tie on it; sync_run_id is a
     // random UUID, so tie-breaking on it picks a run at random (an
@@ -10869,6 +10908,8 @@ export class LocalConnectorStore {
         embeddedChunks: counts.embedded_chunks,
         syncRuns: counts.sync_runs,
         itemsWithText: counts.items_with_text,
+        ...(counts.content_elsewhere_items > 0 ? { contentElsewhereItems: counts.content_elsewhere_items } : {}),
+        ...(settledUnreadableItems > 0 ? { settledUnreadableItems } : {}),
         ...(scope
           ? {
               files: counts.files,

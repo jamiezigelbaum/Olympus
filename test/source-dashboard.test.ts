@@ -66,6 +66,29 @@ import type {
 } from '../src/workers/x-bookmarks/index.ts';
 
 describe('multi-source source dashboard', () => {
+  test('fresh install finishes with two content copies elsewhere and two unread fail-safe items, with a problem route', () => {
+    const status = fixtureStatus();
+    const internal = status.corpora[0]!;
+    if (!internal.configured) throw new Error('fixture');
+    internal.counts = { indexed_items: 11, items_with_text: 7, content_elsewhere_items: 2,
+      extraction_items_unreadable: 2, settled_unreadable_items: 2, items_embedded: 7, chunks: 7, embedded_chunks: 7, sync_runs: 1, tombstoned_items: 0 };
+    internal.embedding_parity = { required: true, chunks: 7, embedded_chunks: 7, missing_chunks: 0, refresh_needed: false };
+    internal.last_refresh = { sync_run_id: 'fresh', status: 'completed', completed_at: '2026-07-02T11:00:00.000Z', items_seen: 11, items_indexed: 11 };
+    status.corpora = [internal, { ...internal, corpus_id: 'secure_local.email.private', trust_domain: 'secure_local',
+      activation_mode: 'lexical_only', embedding_policy: 'disabled',
+      counts: { indexed_items: 2, items_with_text: 2, chunks: 2, embedded_chunks: 0, sync_runs: 1, tombstoned_items: 0 },
+      embedding_parity: { required: false, chunks: 2, embedded_chunks: 0, missing_chunks: 0, refresh_needed: false } }];
+    const now = new Date('2026-07-02T12:00:00.000Z');
+    const view = buildSourceDashboardViewModel({ sourceIndexStatus: status, sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: { version: 1, handles: [gmailHandle('gmail.personal')] }, now,
+      unreadableFileNames: () => ['Welcome one', 'Welcome two'] });
+    const panel = buildChatGptDashboardViewModel(view, { now });
+    const source = panel.sources.find(source => source.id === 'gmail.email')!;
+    expect(source.progress).toMatchObject({ stage: 'done', percent: 100, stalled: false });
+    expect(source.unreadable).toMatchObject({ count: 2, names: ['Welcome one', 'Welcome two'] });
+    expect(source.unreadable?.reasons).toEqual([{ code: 'privacy_check_missing', count: 2 }]);
+  });
+
   test('mixed embedded and policy-held Gmail corpora finish without an embedding backlog', () => {
     const status = fixtureStatus();
     const internal = status.corpora[0]!;

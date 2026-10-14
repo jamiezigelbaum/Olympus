@@ -14642,7 +14642,18 @@ class TierLedger {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
   corpusCopyIdentities(corpusId, filter) {
-    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
+    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" ? `copy_state = 'current' AND layers = 'metadata'
+            AND EXISTS (SELECT 1 FROM tier_items t
+              WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+                AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+                AND t.state = 'current' AND t.content_read = 0
+                AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+                AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
+                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            AND NOT EXISTS (SELECT 1 FROM tier_copies other
+              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+                AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
+                AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
             AND NOT EXISTS (
               SELECT 1 FROM tier_copies other
               WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
@@ -25656,6 +25667,44 @@ var init_local_index = __esm(() => {
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
     }
+    settledUnreadableItems(scope) {
+      if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
+        return [];
+      const ledger = this.visibilityLedger();
+      if (!ledger)
+        return [];
+      const identities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_settled_unreadable");
+      const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
+      const account = normalizeOptionalAccountScope(scope?.accountScope);
+      const lookup3 = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
+      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
+        AND COALESCE(i.provider_conversation_id, '') = ?
+        ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`);
+      const out = [];
+      for (const identity of identities) {
+        const override = ledger.getOverride(identity);
+        if (override?.kind === "tier" && override.tier === "secrets")
+          continue;
+        const row = lookup3.get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? "", ...account ? [account] : [], ...filters.params);
+        const record = ledger.getCurrent(identity);
+        if (!row || !record)
+          continue;
+        out.push({
+          ref: {
+            corpusId: this.corpusId,
+            provider: identity.provider,
+            accountScope: identity.accountScope,
+            providerItemId: identity.providerItemId,
+            localItemId: row.local_item_id,
+            approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
+            ...row.title ? { name: row.title } : {},
+            ...row.source_version ? { sourceVersion: row.source_version } : {}
+          },
+          failedAt: record.decidedAt
+        });
+      }
+      return out;
+    }
     status(scope) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
@@ -25701,6 +25750,8 @@ var init_local_index = __esm(() => {
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
+          AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -25730,7 +25781,7 @@ var init_local_index = __esm(() => {
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
         ) AS full_ingestion_files
-    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+    `).get(...itemParams, ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
       let policyDeferredItems = 0;
       if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
         const rows = this.db.query(`
@@ -25792,6 +25843,7 @@ var init_local_index = __esm(() => {
         tierMoveInProgress: tier.moving,
         ...namesOnlyKept(this.db, tier.metadataLayer)
       } : undefined;
+      const settledUnreadableItems = this.settledUnreadableItems(scope).length;
       const last = this.db.query(`SELECT * FROM sync_runs
        WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
@@ -25807,6 +25859,8 @@ var init_local_index = __esm(() => {
           embeddedChunks: counts.embedded_chunks,
           syncRuns: counts.sync_runs,
           itemsWithText: counts.items_with_text,
+          ...counts.content_elsewhere_items > 0 ? { contentElsewhereItems: counts.content_elsewhere_items } : {},
+          ...settledUnreadableItems > 0 ? { settledUnreadableItems } : {},
           ...scope ? {
             files: counts.files,
             folders: counts.folders,
@@ -32389,6 +32443,10 @@ var init_vocabulary = __esm(() => {
   };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
+    privacy_check_missing: {
+      one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
+      other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
+    },
     damaged_or_unsupported: {
       one: "{count} file is damaged or in a format Olympus can't read",
       other: "{count} files are damaged or in a format Olympus can't read"
@@ -34086,7 +34144,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (stall.length)
       add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
     if (lines.length) {
-      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.reasons.some((reason) => reason.code === "privacy_check_missing") ? "" : unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     }
     return box;
   }
