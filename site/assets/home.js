@@ -35,7 +35,7 @@
   // target at real speed and seeks its timeline there, so no scene depends on its frame's own timers (one stalled
   // halfway, 2026-10-12), and a scene asked to play before it has loaded starts the moment it is ready.
   var state = new Map();   // scene -> { arrived, played, t, e }
-  var running = false, last = 0;
+  var running = false, last = 0, retries = 0;
   var ENTER = 0.6;         // seconds for the stand-in entry (film/scene.html)
 
   function want(scene, step) {
@@ -49,10 +49,10 @@
   function tick(now) {
     var dt = last ? Math.min((now - last) / 1000, 0.1) : 0;
     last = now;
-    var busy = false;
+    var busy = false, loading = false;
     state.forEach(function (st, scene) {
       var sc = frames.get(scene).contentWindow && frames.get(scene).contentWindow.olympusScene;
-      if (!sc) { busy = true; return; }
+      if (!sc) { loading = true; return; }
       if (sc.enter && st.arrived && st.e < ENTER) {
         st.e = Math.min(st.e + dt, ENTER);
         sc.enter.progress(st.e / ENTER);
@@ -68,7 +68,14 @@
       cursors(frames.get(scene));
     });
     if (busy) requestAnimationFrame(tick);
-    else running = false;
+    else {
+      running = false;
+      // A scene still loading is checked a few times a second, not every frame, and given up on after 30 seconds
+      // (a frame that failed to load would otherwise keep the page busy forever).
+      if (loading && retries++ < 120) setTimeout(function () {
+        if (!running) { running = true; last = 0; requestAnimationFrame(tick); }
+      }, 250);
+    }
   }
 
   // The film's mouse cursor (the hero's BLOCK click) is drawn over the whole window rather than inside its card:
