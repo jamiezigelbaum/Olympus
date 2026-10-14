@@ -931,8 +931,10 @@ bytes, verified both digests, then ran `bun --version` (1.3.14), JavaScript and
 an in-memory SQLite query successfully on glibc 2.36. This is actual execution,
 not physical-host or minimum-floor qualification.
 
-`config/linux-runtime-pins.json` is the pin authority. It deliberately records
-`pending-omarchy`; asset publication refuses until qualification is recorded.
+`config/linux-runtime-pins.json` is the pin authority. It records
+`qualified-omarchy` since 1.0.0 (2026-10-14, owner-approved): the owner's
+Omarchy x64 laptop (glibc 2.44, SSE4.2) ran the full 1.0.0 release test on this
+exact Bun executable. Asset publication refuses while it reads `pending-omarchy`.
 arm64 is absent and refused. No Linux Tor/zkAPI capability is enabled here.
 Existing model runtime authorities are unchanged: llama.cpp b11320 in
 `src/workers/source-index/built-in-reasoning/manifest.ts`, LiteRT-LM 0.18.0

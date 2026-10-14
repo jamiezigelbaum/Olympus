@@ -10,6 +10,6 @@
     "executableSha256": "a8f9ebd1770ddc8e55dab7a68d4ec1ec1eebf374bb97cc65cf2c3cb373fc6791",
     "glibcMin": "2.17",
     "cpuRequired": ["sse4_2"],
-    "qualification": "pending-omarchy"
+    "qualification": "qualified-omarchy"
   }
 }
