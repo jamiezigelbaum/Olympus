@@ -303,7 +303,15 @@ export function unreadableSovereigntyPolicy(): string | undefined {
  * status-change times (a rewrite always moves the status-change time).
  */
 export function refreshZkapiPortsFromPolicyFile(env: Record<string, string | undefined> = process.env): void {
-  const path = sovereigntyPolicyPath(env);
+  let path: string;
+  try { path = sovereigntyPolicyPath(env); }
+  catch {
+    // Receipt discovery or migration refusal cannot become an absent policy.
+    // Keep endpoint refusals typed, and retry layout discovery on every use.
+    policyFile.seen = undefined;
+    policyFile.unreadable = 'the sovereignty settings (layout discovery refused)';
+    return;
+  }
   let stamp: string;
   try {
     const stat = statSync(path);
