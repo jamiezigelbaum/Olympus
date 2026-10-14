@@ -157124,6 +157124,7 @@ ${prompt}`)) {
 }
 
 // src/core/oauth-callback-paste.ts
+init_worker_transport();
 var PASTE_SOURCES = ["gmail", "google-drive", "google", "dropbox", "x"];
 
 class PastedCallbackError extends Error {
@@ -157186,7 +157187,7 @@ function loopbackEngineRoot(workerRoot) {
 async function finishPastedOAuthCallback(input, options) {
   const { source, query } = parsePastedOAuthCallback(input);
   const root = loopbackEngineRoot(options.workerRoot);
-  const fetchImpl = options.fetch ?? fetch;
+  const fetchImpl = options.fetch ?? workerFetch;
   let response;
   try {
     response = await fetchImpl(`${root}/oauth/callback/${source}?${query.toString()}`, {
