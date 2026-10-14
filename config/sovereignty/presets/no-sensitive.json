@@ -17,7 +17,7 @@
     "secure_local": {
       "mode": "disabled",
       "pool": { "members": [] },
-      "disabledReason": "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
+      "disabledReason": "no-sensitive keeps Private search on this computer; no Private agent answer lane is configured."
     },
     "internal": { "analyst": ["cloud-openclaw-infer"] }
   },
@@ -26,9 +26,9 @@
       "secure_local": {
         "minimumExecutionTrust": "local",
         "allowedEmbeddingTrust": ["local"],
-        "embeddingProfile": null,
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": false,
-        "activationMode": "metadata_only",
+        "activationMode": "hybrid_shadow",
         "secureHandling": "metadata_only_gap"
       },
       "internal": {

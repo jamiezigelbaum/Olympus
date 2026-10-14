@@ -185,7 +185,8 @@ test(`routed secret cleanup retries after ${failure} and service restart`, async
   const f = await storedPrivate();
   const locator = failure === 'record-credential-locator'
     ? 'postgres://alice:q7@db.internal/app' : 'https://example.test/notes';
-  for (const domain of ['internal', 'secure_local'] as const) {
+  // The Personal copy was stripped by the raise. Only Private retains names.
+  for (const domain of ['secure_local'] as const) {
     const db = new Database(f.paths[domain]);
     db.query('UPDATE items SET locator_uri = ?, source_scope_folder_keys_json = ?, source_scope_generation = ?, source_scope_revision = ?')
       .run(locator, JSON.stringify(['notes-folder']), 'generation', 'revision');

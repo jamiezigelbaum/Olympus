@@ -24,6 +24,7 @@ import {
 } from './connector-store/index.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
+  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -1578,6 +1579,27 @@ export function wholeStoreEmbeddingSweepAllowed(sourceId: string, corpusId?: str
 }
 
 /**
+ * Local Private meaning search also indexes already-ingested items after an
+ * upgrade. Queue-only sync lanes can have no new provider pages to enqueue.
+ * Use their normal store embedder, bounded per pass, with current account and
+ * content scope supplied by the host. No connector traversal or cloud lane.
+ */
+export function withLocalPrivateEmbeddingBackfill(
+  sources: readonly SourceSchedulerSource[],
+  targetsFor: (source: SourceSchedulerSource) => readonly ConnectorStoreEmbeddingTarget[],
+): SourceSchedulerSource[] {
+  return sources.map(source => {
+    const targets = () => targetsFor(source)
+      .filter(target => target.store.trustDomain === 'secure_local'
+        && target.provider.provider === 'built-in' && target.provider.backend === 'local')
+      .map(target => ({ ...target, wholeStore: true, missingOnly: true }));
+    if (targets().length === 0) return source;
+    const task = embeddingSweepTask(source, targets);
+    return { ...source, tasks: [...source.tasks, { ...task, id: `${source.sourceId}_private_meaning` }] };
+  });
+}
+
+/**
  * Give every source that embeds one embedding sweep, built here once for all
  * of them rather than per source.
  *
@@ -1934,6 +1956,22 @@ export function createGmailConnectorStoreSchedulerSource(input: {
           }
         },
       },
+      ...(input.sync.confirmPrivateScope ? [{
+        id: 'gmail.email_private_scope_confirmation_v1', kind: 'sync' as const, writer: true as const,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
+          try {
+            const result = await input.sync!.confirmPrivateScope!({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}) });
+            return {
+              status: result.confirmed > 0 ? 'progress' : 'idle',
+              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              checkpoint: result.checkpoint,
+              ...(!result.done ? { continueSoon: true } : {}),
+            };
+          } catch (error) { throw gmailSchedulerFailure(error); }
+        },
+      }] : []),
     ],
     lastSyncCompletedAt: lastCompletedAt,
   };

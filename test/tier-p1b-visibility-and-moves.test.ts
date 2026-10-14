@@ -5,8 +5,8 @@
 //   from two tiers for the same layer, including while a sync and a move run
 //   beside the queries.
 // - Public <-> Personal moves copy Gemini vectors with zero provider calls.
-// - A raise hides first and KEEPS the cloud vectors (hidden).
-// - Rollback is a ledger flip: no store write, no embed.
+// - A raise hides first and purges lower content after destination verification.
+// - Unpurged moves can roll back; purged raises require a newly judged move.
 // - Secrets tombstone every copy and keep only the location.
 // - Every move writes an embedding-ledger entry with its chunk counts.
 
@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { TierLedgerPurgedRollbackRefusedError } from '../src/workers/classification/tier-ledger.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import {
@@ -137,7 +138,7 @@ describe('P1b move primitive', () => {
     }
   });
 
-  test('a raise hides first, keeps the cloud vectors hidden, and a rollback is a flip with no embed', async () => {
+  test('a verified raise purges cloud vectors and refuses a ledger-only rollback', async () => {
     const fixture = await routedFixture([LAUNCH]);
     const publicVectors = snapshotStore(fixture.paths.public_safe, [localId('launch')]).vectors;
     const calls = fixture.cloud.inputs.length + fixture.local.inputs.length;
@@ -152,22 +153,19 @@ describe('P1b move primitive', () => {
     // The Private store embeds later with its own model; nothing was copied across models.
     expect(raised.destinations[0]).toMatchObject({ corpusId: CORPORA.secure_local, vectorsCopied: 0 });
     expect(raised.destinations[0]!.chunksToEmbed).toBeGreaterThan(0);
-    // Cloud vectors kept, byte-identical, and hidden.
-    expect(snapshotStore(fixture.paths.public_safe, [localId('launch')]).vectors).toEqual(publicVectors);
+    expect(publicVectors.length).toBeGreaterThan(0);
+    expect(snapshotStore(fixture.paths.public_safe, [localId('launch')]).vectors).toEqual([]);
     expect(visibility(fixture, 'orchard', 'launch').content).toEqual([CORPORA.secure_local]);
     const hiddenSemantic = await fixture.stores.public_safe!.vectorSearchItems('launch post orchard', fixture.cloud, 5);
     expect(hiddenSemantic).toEqual([]);
     const publicStatus = fixture.stores.public_safe!.status();
-    expect(publicStatus.tier?.supersededChunks).toBeGreaterThan(0);
+    expect(publicStatus.tier?.supersededChunks ?? 0).toBe(0);
     expect(publicStatus.counts.chunks).toBe(0);
 
     const record = fixture.ledger.getCurrent(identityOf('launch'))!;
-    fixture.ledger.rollbackMove(identityOf('launch'), { expectedGeneration: record.generation });
-    expect(visibility(fixture, 'orchard', 'launch').content).toEqual([CORPORA.public_safe]);
-    expect((await fixture.stores.public_safe!.vectorSearchItems('launch post orchard', fixture.cloud, 5)).length).toBe(1);
-    // No embed happened for either direction (the query embeds above are queries, counted separately).
-    const queryEmbeds = 2;
-    expect(fixture.cloud.inputs.length + fixture.local.inputs.length).toBe(calls + queryEmbeds);
+    expect(() => fixture.ledger.rollbackMove(identityOf('launch'), { expectedGeneration: record.generation })).toThrow(TierLedgerPurgedRollbackRefusedError);
+    expect(visibility(fixture, 'orchard', 'launch').content).toEqual([CORPORA.secure_local]);
+    expect(fixture.cloud.inputs.length + fixture.local.inputs.length).toBe(calls + 1);
   });
 
   test('a move to Secrets tombstones every copy, deletes their vectors and keeps the location only', async () => {

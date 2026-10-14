@@ -369,7 +369,7 @@ fork:
 | **Local models and private cloud** (`local-first`) | frontier cloud | approved secure pool with explicit local → [Venice](https://venice.ai) Private order |
 | **Local models only** (`local-only`) | frontier cloud | your own local models only |
 | **Private cloud only** (`private-cloud-only`) | frontier cloud | [Venice](https://venice.ai) Private model (`kimi-k3`) |
-| **Private kept local, keyword search only** (`no-sensitive`) | frontier cloud | **stored on this computer, found by keyword only**: never embedded or sent to a cloud model |
+| **Private meaning search on this computer** (`no-sensitive`) | frontier cloud | **stored and searched by meaning on this computer**: Private text and search vectors stay here; no Private agent answer lane |
 
 “Private cloud only” describes **Private-data handling**: Venice answers
 Private questions. Search indexing for every tier uses EmbeddingGemma 2,

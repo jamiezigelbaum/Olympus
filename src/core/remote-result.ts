@@ -33,7 +33,7 @@
 import { boundedLogErrorMessage } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
-import type { ReleaseCheck, ReleaseInput, ReleaseInputVerdict, ReleaseManifest } from './release-manifest.ts';
+import { privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
@@ -371,11 +371,7 @@ function recheckRelease(
   if (verdicts.some((verdict) => verdict.tier === 'unknown')) return { withhold: REMOTE_ANSWER_UNVERIFIED };
   for (const [index, { input, manifest }] of inputs.entries()) {
     const verdict = verdicts[index]!;
-    const privateNow = verdict.tier === 'private' || (verdict.tier === 'legacy' && input.privateAtAnswer);
-    if (!privateNow) continue;
-    // As the analyst handler decides it: an explicit request, or the posture now.
-    const releasableNow = manifest.constraints.includeSecureLocalContent || postureNow === 'allow';
-    if (!releasableNow) return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
+    if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow)) return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
   }
   const dropped = new Set<number>();
   for (const [index, entry] of evidence.entries()) {

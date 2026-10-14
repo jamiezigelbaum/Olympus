@@ -182,6 +182,8 @@ export interface SourceIndexRouterAdapterMap {
 }
 
 export interface SourceIndexRoutedSearchHit extends SourceIndexSearchHit {
+  // Internal dispatch revalidation: the layer the hydrated candidate read.
+  servingLayer?: 'metadata' | 'content';
   corpusId: string;
   trustDomain: SourceTrustDomain;
 }

@@ -969,7 +969,7 @@ var init_source_corpus_registry = __esm(() => {
       provider: "google_drive",
       family: "file",
       trustDomain: "secure_local",
-      activationMode: "lexical_only",
+      activationMode: "hybrid_shadow",
       capabilities: ["answer", "status", "sync", "search"],
       description: "Secure-local Google Drive/Docs items raised by per-item sensitivity classification."
     },
@@ -21993,6 +21993,13 @@ class TierLedger {
       return "none";
     if (overrideAuthorizes(this.getOverride(identity), targetMetadata, targetContent))
       return "none";
+    const rawReceipt = this.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`);
+    const receipt = rawReceipt ? JSON.parse(rawReceipt) : undefined;
+    const verified = receipt?.generation === existing.generation && receipt.raise && receipt.target.metadataTier === targetMetadata && receipt.target.contentTier === targetContent;
+    const override = this.getOverride(identity);
+    if (verified && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
+      return "none";
+    }
     const decidedAt = this.now().toISOString();
     const prior = this.decisionBeforeOverride(identity, existing);
     const staleFlip = existing.generation + 1;
@@ -22029,6 +22036,21 @@ class TierLedger {
       UPDATE tier_items SET generation = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(staleFlip, ...idParams(identity));
+    if (verified) {
+      for (const copy of receipt.placement) {
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', layers = ?, superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(copy.layers, nextFlip, decidedAt, ...idParams(identity), copy.corpusId);
+      }
+      for (const copy of copies.filter((copy2) => !receipt.placement.some((dest) => dest.corpusId === copy2.corpusId))) {
+        this.db.query(`
+          UPDATE tier_copies SET superseded_by_generation = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(staleFlip, ...idParams(identity), copy.corpusId);
+      }
+    }
+    this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
     this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
       ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
@@ -22094,6 +22116,17 @@ class TierLedger {
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
   }
+  metaEntries(prefix, options = {}) {
+    return this.db.query("SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?").all(prefix, `${prefix}￿`, options.after ?? "", "", options.limit ?? -1);
+  }
+  withGenerationFence(identity, generation, work) {
+    return this.db.transaction(() => {
+      this.db.query("UPDATE tier_ledger_meta SET value = value WHERE key = 'ledger_id'").run();
+      if (this.getCurrent(identity)?.generation !== generation)
+        throw new TierLedgerGenerationConflictError;
+      return work();
+    })();
+  }
   listRouted(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 50000));
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
@@ -22105,6 +22138,52 @@ class TierLedger {
       LIMIT ?
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
     return rows.map(recordFromRow);
+  }
+  listLowerContentLeftovers(options) {
+    const attached = [];
+    try {
+      const queries = [];
+      const params = [];
+      for (const store of options.stores) {
+        const alias = `purge_lower_${attached.length}`;
+        this.db.query(`ATTACH DATABASE ? AS ${alias}`).run(store.dbPath);
+        attached.push(alias);
+        const higher = store.trustDomain === "public_safe" ? "('internal', 'secure_local')" : "('secure_local')";
+        const metadataAllowed = store.trustDomain === "public_safe" ? "('public_safe')" : "('public_safe', 'internal')";
+        queries.push(`SELECT l.provider, l.account_scope, l.conversation_key, l.provider_item_id
+          FROM tier_copies l INDEXED BY tier_copies_corpus
+          JOIN ${alias}.items s ON s.provider = l.provider AND s.account_scope = l.account_scope
+            AND s.normalized_conversation = l.conversation_key AND s.provider_item_id = l.provider_item_id
+          WHERE l.corpus_id = ? AND s.tombstoned = 0
+            AND EXISTS (SELECT 1 FROM tier_copies h
+              WHERE h.provider = l.provider AND h.account_scope = l.account_scope
+                AND h.conversation_key = l.conversation_key AND h.provider_item_id = l.provider_item_id
+                AND h.copy_state = 'current' AND h.layers IN ('content', 'both') AND h.trust_domain IN ${higher})
+            AND (EXISTS (SELECT 1 FROM ${alias}.chunks c WHERE c.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.chunk_embeddings e WHERE e.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.item_text_versions v WHERE v.item_pk = s.item_pk)
+              OR ((s.title IS NOT NULL OR s.locator_uri IS NOT NULL OR s.search_text IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM tier_copies m
+                  WHERE m.provider = l.provider AND m.account_scope = l.account_scope
+                    AND m.conversation_key = l.conversation_key AND m.provider_item_id = l.provider_item_id
+                    AND m.copy_state = 'current' AND m.layers IN ('metadata', 'both')
+                    AND m.trust_domain IN ${metadataAllowed})))`);
+        params.push(store.corpusId);
+      }
+      if (!queries.length)
+        return [];
+      const after = options.after ? idParams(options.after) : ["", "", "", ""];
+      const rows = this.db.query(`SELECT i.* FROM (${queries.join(" UNION ")}) candidates
+        JOIN tier_items i USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE i.routed = 1 AND i.state <> 'moving'
+          AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?)
+        ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...params, ...after, options.limit);
+      return rows.map(recordFromRow);
+    } finally {
+      for (const alias of attached.reverse())
+        this.db.exec(`DETACH DATABASE ${alias}`);
+    }
   }
   secretsIdentities() {
     const rows = this.db.query(`
@@ -22677,6 +22756,9 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (this.readMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`) === String(options.expectedGeneration)) {
+        throw new TierLedgerPurgedRollbackRefusedError;
+      }
       if (existing && (existing.contentTier === "secrets" || existing.metadataTier === "secrets")) {
         throw new TierLedgerSecretsRollbackRefusedError;
       }
@@ -22750,6 +22832,7 @@ class TierLedger {
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
         `).run(now, ...idParams(identity));
       }
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
       const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
@@ -23668,7 +23751,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -23682,6 +23765,12 @@ var init_tier_ledger = __esm(() => {
     constructor(message2 = "A raise is never abandoned: its hidden copies stay hidden until the move completes.") {
       super(message2);
       this.name = "TierLedgerRaiseAbandonRefusedError";
+    }
+  };
+  TierLedgerPurgedRollbackRefusedError = class TierLedgerPurgedRollbackRefusedError extends Error {
+    constructor() {
+      super("already Private; its lower copy was removed");
+      this.name = "TierLedgerPurgedRollbackRefusedError";
     }
   };
   TierLedgerSecretsRollbackRefusedError = class TierLedgerSecretsRollbackRefusedError extends Error {
@@ -24507,8 +24596,10 @@ var init_venice_models = __esm(() => {
 
 // src/core/sovereignty.ts
 import { chmodSync as chmodSync7, existsSync as existsSync22, mkdirSync as mkdirSync15, readFileSync as readFileSync26 } from "node:fs";
-import { dirname as dirname24, join as join31 } from "node:path";
+import { dirname as dirname24, join as join31, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import { randomUUID as randomUUID5 } from "node:crypto";
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -24519,7 +24610,27 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync22(configPath)) {
+    const isDefaultPath = (path) => {
+      try {
+        return resolve7(path) === resolve7(defaultSovereigntyConfigPath(env));
+      } catch {
+        return false;
+      }
+    };
+    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    if (options.migratePrivateMeaning && standaloneDefault) {
+      try {
+        const backup = migratePrivateMeaningSearch(configPath);
+        if (backup)
+          console.info(`Private meaning search enabled locally; policy backup: ${backup}`);
+      } catch {
+        console.warn("Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.");
+      }
+    }
     const parsed = JSON.parse(readFileSync26(configPath, "utf8"));
+    if (options.migratePrivateMeaning && !standaloneDefault && parsed?.retrieval?.trustDomains?.secure_local?.activationMode === "metadata_only") {
+      console.info("Pinned or hosted privacy policy still uses the 1.0.0 keyword-only Private setting; no migration was performed.");
+    }
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -24798,7 +24909,12 @@ function writeSovereigntyConfigFile(input) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
-  publishSovereigntyConfigFile(path, config);
+  withFileLeaseSync(path, (lease) => {
+    if (existsSync22(path) && input.force !== true) {
+      throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
+    }
+    lease.commit(() => publishSovereigntyConfigFile(path, config));
+  }, { acquireTimeoutMs: 5000 });
   return path;
 }
 function publishSovereigntyConfigFile(path, config, onPublished) {
@@ -24861,6 +24977,74 @@ function updateSovereigntyConfigFile(input) {
       return afterPublish();
     throw error;
   }
+}
+function migratePrivateMeaningSearch(path) {
+  const legacy = {
+    schemaVersion: 1,
+    modelProfiles: {
+      "built-in-embedding": { provider: "built-in", trust: "local", model: "embeddinggemma-2-litert-24d962e", purpose: "embedding" },
+      "cloud-openclaw-infer": { provider: "openclaw-infer", trust: "standard_cloud", purpose: "analyst" }
+    },
+    routes: {
+      secure_local: {
+        mode: "disabled",
+        pool: { members: [] },
+        disabledReason: "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
+      },
+      internal: { analyst: ["cloud-openclaw-infer"] }
+    },
+    retrieval: { trustDomains: {
+      secure_local: {
+        minimumExecutionTrust: "local",
+        allowedEmbeddingTrust: ["local"],
+        embeddingProfile: null,
+        allowCloudQuery: false,
+        activationMode: "metadata_only",
+        secureHandling: "metadata_only_gap"
+      },
+      internal: {
+        minimumExecutionTrust: "standard_cloud",
+        allowedEmbeddingTrust: ["local", "standard_cloud"],
+        embeddingProfile: "built-in-embedding",
+        allowCloudQuery: true,
+        activationMode: "hybrid_shadow"
+      }
+    } }
+  };
+  if (!existsSync22(path))
+    return;
+  const eligible = (current2) => {
+    const config = current2;
+    return config?.schemaVersion === 1 && isDeepStrictEqual(config.retrieval?.trustDomains?.secure_local, legacy.retrieval.trustDomains.secure_local) && isDeepStrictEqual(config.modelProfiles?.["built-in-embedding"], legacy.modelProfiles["built-in-embedding"]);
+  };
+  if (!eligible(JSON.parse(readFileSync26(path, "utf8"))))
+    return;
+  return withFileLeaseSync(path, (lease) => {
+    const original = readFileSync26(path, "utf8");
+    const current2 = JSON.parse(original);
+    if (!eligible(current2))
+      return;
+    const nextPolicy = loadSovereigntyPreset("no-sensitive");
+    const nextDisabledReason = nextPolicy.routes.secure_local?.disabledReason;
+    const next = {
+      ...current2,
+      ...nextDisabledReason && current2.routes?.secure_local?.disabledReason === legacy.routes.secure_local?.disabledReason ? {
+        routes: { ...current2.routes, secure_local: { ...current2.routes.secure_local, disabledReason: nextDisabledReason } }
+      } : {},
+      retrieval: {
+        ...current2.retrieval,
+        trustDomains: { ...current2.retrieval.trustDomains, secure_local: nextPolicy.retrieval.trustDomains.secure_local }
+      }
+    };
+    validateSovereigntyConfig(next);
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID5()}`;
+    lease.commit(() => {
+      writePrivateFileAtomicSync(backup, original);
+      writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
+`);
+    });
+    return backup;
+  }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
   const sourceLayoutPath = join31(dirname24(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
@@ -26579,7 +26763,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash18, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash18, randomUUID as randomUUID6 } from "node:crypto";
 import {
   chmodSync as chmodSync8,
   existsSync as existsSync23,
@@ -26594,7 +26778,7 @@ import {
   statSync as statSync13,
   writeFileSync as writeFileSync8
 } from "node:fs";
-import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute13, join as join32, resolve as resolve7 } from "node:path";
+import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute13, join as join32, resolve as resolve8 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute13(configured))
@@ -26611,11 +26795,11 @@ function isSha256(value) {
   return true;
 }
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute13(path) || !isSha256(sha256) || resolve7(path) !== path)
+  if (!isAbsolute13(path) || !isSha256(sha256) || resolve8(path) !== path)
     return false;
   if (basename4(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename4(dirname25(path))))
     return false;
-  if (dir !== undefined && dirname25(path) !== resolve7(dir))
+  if (dir !== undefined && dirname25(path) !== resolve8(dir))
     return false;
   try {
     const stat3 = lstatSync17(path);
@@ -26630,17 +26814,17 @@ function mediaHolderName(holder) {
   try {
     return realpathSync6(holder);
   } catch {
-    return resolve7(holder);
+    return resolve8(holder);
   }
 }
 function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash18("sha256").update(bytes).digest("hex");
   const path = join32(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
-  const stagingHolder = `staging:${randomUUID5()}`;
+  const stagingHolder = `staging:${randomUUID6()}`;
   addMarker(path, stagingHolder);
   if (!existsSync23(path)) {
-    const temporary = join32(dir, `.${sha256}.${randomUUID5()}.tmp`);
+    const temporary = join32(dir, `.${sha256}.${randomUUID6()}.tmp`);
     writeFileSync8(temporary, bytes, { mode: 384 });
     chmodSync8(temporary, 384);
     renameSync6(temporary, path);
@@ -28754,7 +28938,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash22, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash22, randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync18, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
 import { dirname as dirname28 } from "node:path";
 import { Database as Database7 } from "bun:sqlite";
@@ -29065,11 +29249,11 @@ async function embedPendingChunks(targets, options) {
       itemsOutOfScope: 0
     };
     runs.push(run);
-    const groups = store.queuedEmbeddingGroups(options.maxItems);
+    const groups = target.missingOnly ? [] : store.queuedEmbeddingGroups(options.maxItems);
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued).filter((localItemId) => !queuedIds.has(localItemId));
+      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued, target).filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0)
         groups.push({ provider: target.provider, localItemIds: missing });
     }
@@ -29077,12 +29261,13 @@ async function embedPendingChunks(targets, options) {
     for (const group of groups) {
       try {
         group.provider.assertBindingCurrent?.();
+        await target.assertAuthorized?.();
       } catch {
         store.completeQueuedEmbedding(group.localItemIds);
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds);
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, target);
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -29103,9 +29288,15 @@ async function embedPendingChunks(targets, options) {
   }
   return runs;
 }
-async function embedItemsIsolated(store, provider, localItemIds) {
+async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
   try {
-    const embed = await store.embedChunks({ provider, localItemIds: [...localItemIds] });
+    const embed = await store.embedChunks({
+      provider,
+      localItemIds: [...localItemIds],
+      ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+      ...scope.filters ? { filters: scope.filters } : {},
+      ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}
+    });
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
@@ -29122,7 +29313,7 @@ async function embedItemsIsolated(store, provider, localItemIds) {
     let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const localItemId of localItemIds) {
-      const single = await embedItemsIsolated(store, provider, [localItemId]);
+      const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
       if (single.busy || single.deferredReason)
@@ -29560,7 +29751,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function normalizeSemanticRelevanceBar(value) {
   if (value === undefined)
@@ -30561,6 +30752,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...provider ? { provider } : {},
+    ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty2(value.observedConnectorId, "Observed connector id") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -30588,6 +30780,10 @@ function connectorStoreFilterSql(filters) {
   if (normalized.provider) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
+  }
+  if (normalized.observedConnectorId) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -31489,7 +31685,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -31642,7 +31838,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -31734,6 +31930,11 @@ var init_local_index = __esm(() => {
       this.ruleId = ruleId;
     }
   };
+  ConnectorStoreTierWriteRefusedError = class ConnectorStoreTierWriteRefusedError extends Error {
+    constructor() {
+      super("The current tier ledger does not authorize this store write.");
+    }
+  };
   TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
     constructor(corpusId) {
       super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
@@ -31774,7 +31975,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty2(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID6()}` : this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID7()}` : this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -32103,6 +32304,16 @@ var init_local_index = __esm(() => {
       LIMIT 1
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
     }
+    observeStoredItemOwner(identity, connectorId) {
+      this.db.transaction(() => {
+        const row = this.db.query(`
+        SELECT item_pk, sync_run_id FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        if (row)
+          this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso2(), "provider_listing");
+      })();
+    }
     reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
       const row = this.db.query(`
       SELECT item_pk FROM items
@@ -32114,7 +32325,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso2(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID6()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID7()}`;
       const startedAt = nowIso2();
       try {
         return this.db.transaction(() => {
@@ -32173,7 +32384,7 @@ var init_local_index = __esm(() => {
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID7()}`;
           const startedAt = nowIso2();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -32276,7 +32487,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID6()}`;
+      const syncRunId = `connector-tier-move-${randomUUID7()}`;
       const now = nowIso2();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -32350,6 +32561,8 @@ var init_local_index = __esm(() => {
           if (strippedMedia)
             this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
         }
+        if (!namesOnly && options.sourceTextCurrent)
+          this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
         const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
         const provider = namesOnly ? undefined : options.vectorProvider;
@@ -32655,34 +32868,63 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID6()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID7()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
       }
       return stripped;
     }
-    stripCopyContent(identity) {
+    copyContentState(identity) {
+      const row = this.db.query(`SELECT i.source_version, i.content_hash, i.updated_at,
+      (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
+      (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
+      (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
+      NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version) AS current_text,
+      (i.title IS NOT NULL OR i.locator_uri IS NOT NULL OR i.search_text IS NOT NULL) AS names
+      FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      return row ? {
+        chunks: row.chunks,
+        vectors: row.vectors,
+        versions: row.versions,
+        currentText: row.current_text === 1,
+        names: row.names === 1,
+        sourceVersion: row.source_version,
+        contentHash: row.content_hash,
+        updatedAt: row.updated_at
+      } : undefined;
+    }
+    withItemCopyWriteFence(identity, work) {
+      return this.db.transaction(() => {
+        this.db.query(`UPDATE items SET item_pk = item_pk
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        return work();
+      })();
+    }
+    stripCopyContent(identity, options = {}) {
       try {
-        return this.stripCopyContentHeld(identity);
+        return this.stripCopyContentHeld(identity, options);
       } finally {
         this.releaseUnreferencedChunkMedia();
       }
     }
-    stripCopyContentHeld(identity) {
+    stripCopyContentHeld(identity, options = {}) {
       return this.db.transaction(() => {
         const row = this.db.query(`
         SELECT item_pk FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-          AND tombstoned = 0
       `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         if (!row)
           return 0;
         const count = this.db.query("SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?").get(row.item_pk).n;
-        if (count === 0)
-          return 0;
+        this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(row.item_pk);
         this.db.query("DELETE FROM chunk_embeddings WHERE item_pk = ?").run(row.item_pk);
         this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+        if (options.keepMetadata === false) {
+          this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+        }
         this.refreshFtsForItem(row.item_pk);
         return count;
       })();
@@ -33571,8 +33813,9 @@ var init_local_index = __esm(() => {
         }
         seenIdentities.add(key2);
       }
+      const tierLedgerForWrite = this.visibilityLedger();
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID6()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID7()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -33593,6 +33836,11 @@ var init_local_index = __esm(() => {
         const skippedProviderItemIds = [];
         for (const record of options.items) {
           const item = record.item;
+          if (!this.tierWriteAllowed(item.identity, "content", tierLedgerForWrite)) {
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
           const disposition = this.exclusions.evaluateMetadata(item.metadata);
           if (disposition.excluded) {
             itemsExcluded += 1;
@@ -33696,7 +33944,7 @@ var init_local_index = __esm(() => {
           restoredProviderItemIds: restoredProviderItemIds.sort(),
           skippedProviderItemIds: skippedProviderItemIds.sort()
         };
-      })();
+      }).immediate();
       for (const record of options.items) {
         if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
           retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
@@ -33909,7 +34157,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID6()}`;
+        const syncRunId = `connector-relinquish-${randomUUID7()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -34048,7 +34296,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID6()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID7()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -34667,7 +34915,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID6()}`;
+      const syncRunId = `connector-sync-${randomUUID7()}`;
       const startedAt = nowIso2();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -34825,7 +35073,15 @@ var init_local_index = __esm(() => {
               continue;
             }
             const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
-            const upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation);
+            let upsert;
+            try {
+              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
+            } catch (error) {
+              if (!(error instanceof ConnectorStoreTierWriteRefusedError))
+                throw error;
+              itemsRejected += 1;
+              continue;
+            }
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
@@ -35030,8 +35286,37 @@ var init_local_index = __esm(() => {
         contentChanged: ftsMetadataChanged || existing.content_hash !== (contentHash ?? null)
       };
     }
-    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation) {
+    tierWriteAllowed(identity, layer, ledger) {
+      try {
+        const binding = this.tierSetBinding();
+        if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId))
+          return false;
+        if (!ledger)
+          return true;
+        const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
+        if (!state || !state.record.routed)
+          return true;
+        const { record, copies } = state;
+        if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+          return false;
+        const here = copies.find((copy) => copy.corpusId === this.corpusId && (copy.state === "current" || copy.state === "staged" && record.state !== "moving" && !record.contentRead && copy.generation === record.generation));
+        if (!here)
+          return false;
+        if (layer === "metadata")
+          return true;
+        if (here.layers === "content" || here.layers === "both")
+          return true;
+        const contentDomain = record.contentTier === "public" ? "public_safe" : record.contentTier === "private" ? "internal" : "secure_local";
+        return record.state !== "moving" && !record.contentRead && contentDomain === this.trustDomain;
+      } catch {
+        return false;
+      }
+    }
+    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation, requiredLayer = textFromRawItem(item) === undefined ? "metadata" : "content") {
+      const tierLedgerForWrite = this.visibilityLedger();
       return this.db.transaction(() => {
+        if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite))
+          throw new ConnectorStoreTierWriteRefusedError;
         const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
         this.rememberItemOwner(upsert.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
         const missingScopeMetadataRow = sourceScopeObservation !== undefined && !this.db.query(`
@@ -35041,7 +35326,7 @@ var init_local_index = __esm(() => {
         if (upsert.ftsMetadataChanged || missingScopeMetadataRow)
           this.refreshFtsForItem(upsert.itemPk);
         return upsert;
-      })();
+      }).immediate();
     }
     tombstoneWindowRemovedItems(connectorId, ownershipKind, syncRunId, scopes, localItemIds, snapshotObservedAt) {
       return this.db.transaction(() => {
@@ -35272,6 +35557,14 @@ var init_local_index = __esm(() => {
       };
     }
     indexItemText(item, itemPk, maxChunkChars, text2, media) {
+      const tierLedgerForWrite = this.visibilityLedger();
+      return this.db.transaction(() => {
+        if (!this.tierWriteAllowed(item.identity, "content", tierLedgerForWrite))
+          return { chunksIndexed: 0, ftsContentChanged: false };
+        return this.indexItemTextHeld(item, itemPk, maxChunkChars, text2, media);
+      }).immediate();
+    }
+    indexItemTextHeld(item, itemPk, maxChunkChars, text2, media) {
       const disposition = this.exclusions.evaluateMetadata(item.metadata);
       if (disposition.disposition === "metadata_only") {
         throw new ConnectorStoreMetadataOnlyViolationError(disposition.ruleId);
@@ -35453,15 +35746,17 @@ var init_local_index = __esm(() => {
     embeddingFailedItemCount() {
       return this.embeddingFailureState?.size ?? 0;
     }
-    missingEmbeddingItemIds(embedder, limit) {
+    missingEmbeddingItemIds(embedder, limit, scope = {}) {
       if (limit <= 0)
         return [];
       const modelId = embedder.modelId;
+      const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = this.privateTierEmbeddingFilter(embedder);
-      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
-      const params = [...tierExclusion.params, ...privateTier.params];
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+      const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
       const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -36227,10 +36522,20 @@ var init_local_index = __esm(() => {
         if (ownsScanDb)
           closeSqliteStore(scanDb);
       }
-      const rankedItems = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]).slice(0, limit);
+      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+      const rankedItems = [];
+      let candidateOffset = 0;
+      while (rankedItems.length < limit && candidateOffset < candidates.length) {
+        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+        for (const candidate of batch)
+          if (visible.has(candidate[0]))
+            rankedItems.push(candidate);
+        candidateOffset += batch.length;
+      }
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
-      const laneRows = this.tierVisibleRows(searchRows, (row) => row.sourceItem, () => "content").flatMap((row) => {
+      const laneRows = searchRows.flatMap((row) => {
         const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
         if (winner === undefined)
           return [];
@@ -36302,6 +36607,24 @@ var init_local_index = __esm(() => {
         ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...excludedPks.length > 0 ? [JSON.stringify(excludedPks)] : [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
+    }
+    visibleVectorItemPks(itemPks, accountScope, filters) {
+      const visible = new Set;
+      const selectedFilters = connectorStoreFilterSql(filters);
+      for (let offset = 0;offset < itemPks.length; offset += 200) {
+        const batch = itemPks.slice(offset, offset + 200);
+        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
+        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
+        for (const row of this.tierVisibleRows(rows, (row2) => ({
+          provider: row2.provider,
+          accountScope: row2.account_scope,
+          providerItemId: row2.provider_item_id,
+          ...row2.provider_conversation_id ? { providerConversationId: row2.provider_conversation_id } : {}
+        }), () => "content"))
+          visible.add(row.item_pk);
+      }
+      return visible;
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)
@@ -37141,6 +37464,958 @@ var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
 });
 
+// src/workers/embedding-ledger.ts
+import { homedir as homedir22 } from "node:os";
+import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
+import { dirname as dirname29, join as join34 } from "node:path";
+function isOwnerApprovedEmbeddingLedgerEntry(entry) {
+  return entry.approved_by === EMBEDDING_LEDGER_OWNER_APPROVAL;
+}
+function resolveEmbeddingLedgerPath(env = process.env) {
+  const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
+  if (configured)
+    return configured;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join34(homedir22(), ".local", "share");
+  return join34(standaloneLinuxDataDir(env) ?? join34(dataHome, "openclaw", "olympus"), "embedding-ledger.jsonl");
+}
+async function appendEmbeddingLedgerEntry(path, entry) {
+  const line = `${JSON.stringify(entry)}
+`;
+  await mkdir3(dirname29(path), { recursive: true, mode: 448 });
+  const handle = await open3(path, "a", 384);
+  try {
+    await handle.chmod(384);
+    await handle.appendFile(line, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+async function appendEmbeddingLedgerEntryOnce(path, entry) {
+  const id = entry.entry_id?.trim();
+  if (!id) {
+    await appendEmbeddingLedgerEntry(path, entry);
+    return true;
+  }
+  const existing = await readEmbeddingLedger(path);
+  if (existing.entries.some((recorded) => recorded.entry_id === id))
+    return false;
+  await appendEmbeddingLedgerEntry(path, entry);
+  return true;
+}
+async function readEmbeddingLedger(path) {
+  let raw = "";
+  try {
+    raw = await readFile3(path, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      throw error;
+  }
+  const parsed = parseEmbeddingLedgerJsonl(raw);
+  return {
+    entries: mergeEmbeddingLedgerEntries(EMBEDDING_LEDGER_BACKFILL, parsed.entries),
+    skipped: parsed.skipped,
+    path
+  };
+}
+function parseEmbeddingLedgerJsonl(text2) {
+  const entries = [];
+  let skipped = 0;
+  for (const line of text2.split(`
+`)) {
+    if (line.trim() === "")
+      continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (isEmbeddingLedgerEntry(parsed))
+      entries.push(parsed);
+    else
+      skipped += 1;
+  }
+  return { entries, skipped };
+}
+function mergeEmbeddingLedgerEntries(backfill, recorded) {
+  const byId = new Map;
+  const unidentified = [];
+  for (const entry of [...backfill, ...recorded]) {
+    const id = entry.entry_id?.trim();
+    if (id)
+      byId.set(id, entry);
+    else
+      unidentified.push(entry);
+  }
+  const merged = [...byId.values(), ...unidentified];
+  return merged.map((entry, index) => ({ entry, index, at: stampOrder(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
+}
+function stampOrder(recordedAt) {
+  const at = Date.parse(recordedAt);
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
+function isEmbeddingLedgerEntry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const record = value;
+  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
+    return false;
+  if (typeof record.what !== "string" || record.what.trim() === "")
+    return false;
+  if (!isKind(record.kind))
+    return false;
+  if (!isApprovedBy(record.approved_by))
+    return false;
+  if (!isStatus(record.status))
+    return false;
+  for (const key2 of ["model_id", "epoch", "endpoint", "why", "entry_id"]) {
+    if (record[key2] !== undefined && typeof record[key2] !== "string")
+      return false;
+  }
+  return record.scope === undefined || isScope(record.scope);
+}
+function isKind(value) {
+  return typeof value === "string" && value in EMBEDDING_LEDGER_KIND_TEXT;
+}
+function isApprovedBy(value) {
+  return typeof value === "string" && value in EMBEDDING_LEDGER_APPROVAL_TEXT;
+}
+function isStatus(value) {
+  return typeof value === "string" && value in EMBEDDING_LEDGER_STATUS_TEXT;
+}
+function isScope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const scope = value;
+  if (scope.corpora !== undefined) {
+    if (!Array.isArray(scope.corpora))
+      return false;
+    if (scope.corpora.some((name) => typeof name !== "string"))
+      return false;
+  }
+  if (scope.chunks !== undefined) {
+    if (!scope.chunks || typeof scope.chunks !== "object" || Array.isArray(scope.chunks))
+      return false;
+    if (Object.values(scope.chunks).some((count) => typeof count !== "number" || !Number.isFinite(count)))
+      return false;
+  }
+  return true;
+}
+var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
+var init_embedding_ledger = __esm(() => {
+  init_linux_engine_layout();
+  EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
+  EMBEDDING_LEDGER_KIND_TEXT = {
+    model_decision: "Model decision",
+    epoch_change: "Epoch changed",
+    endpoint_change: "Endpoint changed",
+    invalidation: "Stored vectors invalidated",
+    re_embed_started: "Re-embed started",
+    re_embed_completed: "Re-embed finished",
+    note: "Note"
+  };
+  EMBEDDING_LEDGER_APPROVAL_TEXT = {
+    [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
+    "system-automatic": "Not approved — the system did this on its own",
+    "unattributed-historical": "Not approved — no decision is on record"
+  };
+  EMBEDDING_LEDGER_STATUS_TEXT = {
+    pending: "Pending",
+    in_progress: "In progress",
+    complete: "Complete",
+    "n/a": ""
+  };
+  WIPED_CORPORA = [
+    "dropbox",
+    "gmail-secure",
+    "drive-secure",
+    "whatsapp-live",
+    "telegram-protected"
+  ];
+  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
+  EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
+    {
+      entry_id: "backfill-2026-08-20-endpoint-retarget",
+      recorded_at: "2026-08-20T02:42:00.000Z",
+      kind: "endpoint_change",
+      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
+      approved_by: "unattributed-historical",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-invalidation",
+      recorded_at: "2026-08-20T12:03:00.000Z",
+      kind: "invalidation",
+      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
+      approved_by: "system-automatic",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-re-embed",
+      recorded_at: "2026-08-20T12:04:00.000Z",
+      kind: "re_embed_started",
+      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
+      approved_by: "system-automatic",
+      status: "in_progress"
+    },
+    {
+      entry_id: "backfill-2026-08-24-model-decision",
+      recorded_at: "2026-08-24T00:00:00.000Z",
+      kind: "model_decision",
+      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-24-drain-lane-enablement",
+      recorded_at: "2026-08-24T23:30:00.000Z",
+      kind: "note",
+      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
+      scope: {
+        corpora: LANE_ENABLEMENT_CORPORA,
+        chunks: { dropbox: 52840, "x-bookmarks": 15 }
+      },
+      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-24-readwise-hybrid",
+      recorded_at: "2026-09-24T13:30:00.000Z",
+      kind: "model_decision",
+      what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
+      scope: { corpora: ["readwise", "readwise-secure"] },
+      why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-25-chat-lane-catch-up",
+      recorded_at: "2026-09-25T07:00:00.000Z",
+      kind: "model_decision",
+      what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
+      scope: {
+        corpora: [
+          "internal.x.bookmarks",
+          "secure_local.x.bookmarks",
+          "internal.whatsapp.messages",
+          "secure_local.whatsapp.messages",
+          "internal.telegram.messages",
+          "secure_local.telegram.protected.messages"
+        ]
+      },
+      why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-30-gmail-catch-up",
+      recorded_at: "2026-09-30T21:05:00.000Z",
+      kind: "model_decision",
+      what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
+      scope: { corpora: ["internal.email"] },
+      why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    }
+  ];
+});
+
+// src/workers/connector-store/tier-move.ts
+import { createHash as createHash23 } from "node:crypto";
+function rowRehomeReceiptId(ledger, identity, generation) {
+  return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
+}
+async function moveTieredItem(options) {
+  const target = options.decision ?? options.target;
+  if (target?.contentTier === "secrets" || target?.metadataTier === "secrets") {
+    const record = options.set.ledger.getCurrent(options.identity);
+    if (!record || !record.routed)
+      throw new Error("Only a routed item can move; adopt a legacy placement first.");
+    if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration)
+      throw new TierLedgerGenerationConflictError;
+    return moveToSecrets(options, record.generation);
+  }
+  const result = moveTieredItemNow(options);
+  await flushTierMoveNotes(options.set.ledger);
+  return result;
+}
+function promoteLowerTierContent(options, source) {
+  const record = options.set.ledger.getCurrent(options.identity);
+  if (!record || record.state === "moving" || record.contentTier !== "secure" || record.metadataTier === "secrets" || source.trustDomain === "secure_local") {
+    throw new TierMoveRefusedError("Only a settled Private placement can repair lower content.");
+  }
+  return moveTieredItemNow({ ...options, target: { metadataTier: record.metadataTier, contentTier: record.contentTier } }, source);
+}
+function moveTieredItemNow(options, repairSource) {
+  const { set, identity, decision } = options;
+  const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
+  if (!target)
+    throw new Error("A tier move needs target tiers or a decision.");
+  const ledger = set.ledger;
+  const record = ledger.getCurrent(identity);
+  if (!record || !record.routed)
+    throw new Error("Only a routed item can move; adopt a legacy placement first.");
+  const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
+  if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
+    throw new TierLedgerGenerationConflictError;
+  }
+  if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
+    throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
+  }
+  const receiptKey = purgeReceiptKey(identity);
+  const receiptToResume = readVerifiedMove(ledger, identity);
+  if (receiptToResume) {
+    const receipt2 = receiptToResume;
+    if (receipt2.generation !== record.generation || receipt2.target.metadataTier !== target.metadataTier || receipt2.target.contentTier !== target.contentTier)
+      throw new TierLedgerGenerationConflictError;
+    const result2 = finishVerifiedMove(options, receipt2);
+    return result2;
+  }
+  const ownerOverride = !decision && record.decidedBy === "override";
+  const placement = set.placementFor(decision ?? {
+    metadataTier: target.metadataTier,
+    contentTier: target.contentTier,
+    state: record.metadataPending || record.contentPending ? "pending" : "current",
+    metadataPending: record.metadataPending,
+    contentPending: record.contentPending,
+    contentRead: record.contentRead,
+    ...ownerOverride ? { decidedBy: "override" } : {}
+  });
+  const moveGeneration = record.generation + 1;
+  const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
+  if (sources.length === 0)
+    throw new Error("The item has no copy to move from.");
+  if (repairSource && !sources.some((copy) => copy.corpusId === repairSource.corpusId))
+    sources.push(repairSource);
+  if (repairSource && placement.copies.some((copy) => copy.trustDomain !== "secure_local" && !sources.some((source) => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
+    throw new TierMoveRefusedError("Repair cannot write a lower destination.");
+  }
+  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
+  const exports = new Map;
+  const exportFrom = (copy) => {
+    if (!exports.has(copy.corpusId)) {
+      const domain = set.domainForCorpus(copy.corpusId);
+      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
+    }
+    return exports.get(copy.corpusId);
+  };
+  const contentSource = repairSource ?? copyServingLayer(sources, "content");
+  const contentDestination = copyServingLayer(placement.copies, "content");
+  if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+    const exported = exportFrom(contentSource);
+    const evidence = decision ?? record;
+    const digest3 = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
+    const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+    if (!digest3 || receipts.length !== 1 || receipts[0] !== digest3 || evidence.contentPending) {
+      if (!raise && record.state === "moving") {
+        ledger.abandonMove(identity, { expectedGeneration: record.generation });
+      }
+      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.");
+    }
+  }
+  const kept = ledger.copies(identity);
+  const replacedSuperseded = {};
+  for (const planned of placement.copies) {
+    if (sources.some((source2) => source2.corpusId === planned.corpusId))
+      continue;
+    const keptHere = kept.find((copy) => copy.corpusId === planned.corpusId && copy.state === "superseded");
+    if (!keptHere)
+      continue;
+    const source = copyServingLayer(sources, "content") ?? sources[0];
+    const keptCopy = exportFrom(keptHere);
+    if (!keptCopy || keptCopy.chunks.length === 0 || sameText(keptCopy, exportFrom(source)))
+      continue;
+    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
+      replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
+      continue;
+    }
+    throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
+  }
+  ledger.stageMove(identity, {
+    expectedGeneration: record.generation,
+    target,
+    destination: placement.copies,
+    hideSource: raise,
+    ...placement.embedHold ? { embedHold: true } : {}
+  });
+  let destinations = [];
+  options.beforeCopy?.();
+  const receipt = ledger.withGenerationFence(identity, record.generation, () => {
+    const alreadyVerified = readVerifiedMove(ledger, identity);
+    if (alreadyVerified) {
+      if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      return alreadyVerified;
+    }
+    const now = ledger.getCurrent(identity);
+    if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
+      throw new TierLedgerGenerationConflictError;
+    }
+    const copyWithLockedSources = (index) => {
+      const source = sources[index];
+      if (source) {
+        const domain = set.domainForCorpus(source.corpusId);
+        const store = domain ? set.store(domain) : undefined;
+        if (!store)
+          throw new Error("Source store unavailable.");
+        return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
+      }
+      exports.clear();
+      if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+        const exported = exportFrom(contentSource);
+        const evidence = decision ?? now;
+        const digest3 = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
+        const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+        if (!digest3 || receipts.length !== 1 || receipts[0] !== digest3 || evidence.contentPending) {
+          throw new TierMoveContentChangedError("Stored content changed before the fenced copy.");
+        }
+      }
+      for (const planned of placement.copies) {
+        const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
+        if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
+          const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
+          destinations.push({
+            corpusId: planned.corpusId,
+            trustDomain: planned.trustDomain,
+            layers: planned.layers,
+            relayeredOnly: true,
+            chunksWritten: 0,
+            chunksKept: keptChunks,
+            vectorsCopied: 0,
+            chunksToEmbed: 0
+          });
+          continue;
+        }
+        const wantsContent = planned.layers !== "metadata";
+        const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
+        const exported = exportFrom(from);
+        if (!exported)
+          throw new Error("The source store no longer holds an active copy of the item.");
+        const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
+        const store = set.store(planned.trustDomain, { create: true });
+        store.bindTierSet(ledger);
+        const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
+        const written = store.importItemCopy(payload2, {
+          trustTier: defaultStoreTrustTier(planned.trustDomain),
+          syncConnectorId: TIER_MOVE_CONNECTOR_ID,
+          layers: planned.layers,
+          ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
+          ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
+        });
+        destinations.push({
+          corpusId: planned.corpusId,
+          trustDomain: planned.trustDomain,
+          layers: planned.layers,
+          relayeredOnly: false,
+          chunksWritten: written.chunksWritten,
+          chunksKept: written.chunksKept,
+          vectorsCopied: written.vectorsCopied,
+          chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
+        });
+      }
+      const flipOptions = {
+        expectedGeneration: record.generation,
+        destination: placement.copies,
+        embedHold: placement.embedHold === true,
+        ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
+        ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
+      };
+      const verified = {
+        generation: record.generation,
+        target,
+        raise,
+        sources,
+        destinations,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+        rehomeTagged,
+        replacedSuperseded,
+        placement: placement.copies,
+        flipOptions,
+        fingerprints: Object.fromEntries(placement.copies.map((copy) => {
+          const exported = set.store(copy.trustDomain)?.exportItemCopy(identity);
+          if (!exported)
+            throw new Error("Destination verification failed.");
+          const wanted = copy.layers === "metadata" ? undefined : exportFrom(contentSource ?? sources[0]);
+          if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index2) => chunk.chunkIndex === wanted.chunks[index2].chunkIndex && chunk.boundedText === wanted.chunks[index2].boundedText)))
+            throw new Error("Destination content verification failed.");
+          return [copy.corpusId, copyFingerprint(exported, copy.layers)];
+        }))
+      };
+      ledger.writeMeta(receiptKey, JSON.stringify(verified));
+      return verified;
+    };
+    return copyWithLockedSources(0);
+  });
+  options.beforeFlip?.();
+  options.afterVerified?.();
+  const result = finishVerifiedMove(options, receipt);
+  return result;
+}
+function resumeVerifiedTierMove(set, identity, embeddingLedger) {
+  const receipt = readVerifiedMove(set.ledger, identity);
+  if (!receipt)
+    return false;
+  finishVerifiedMove({ set, identity, ...embeddingLedger ? { embeddingLedger } : {} }, receipt);
+  return true;
+}
+function queueMoveNote(options, receipt, result) {
+  const config = receipt.embeddingLedger ?? options.embeddingLedger;
+  if (!config)
+    return;
+  const { sources, destinations, raise } = receipt;
+  const replaced = receipt.replacedSuperseded ?? {};
+  const entryId = receipt.rehomeTagged ? rowRehomeReceiptId(options.set.ledger, options.identity, result.generation) : `tier-move:${options.set.ledger.ledgerId()}:${tierLedgerIdentityKey(options.identity)}:${result.generation}`;
+  const entry = {
+    entry_id: entryId,
+    recorded_at: new Date().toISOString(),
+    kind: "note",
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    scope: {
+      corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
+      chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
+    },
+    ...config.why ? { why: config.why } : {},
+    approved_by: config.approvedBy,
+    status: "complete"
+  };
+  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+}
+async function flushTierMoveNotes(ledger) {
+  let logged = false;
+  for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
+    try {
+      const note = JSON.parse(value);
+      await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+      if (ledger.readMeta(key2) === value)
+        ledger.writeMeta(key2, "");
+    } catch (error) {
+      if (!logged) {
+        const code = error?.code;
+        console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
+        logged = true;
+      }
+    }
+  }
+}
+function purgeReceiptKey(identity) {
+  return `tier-move-verified:${tierLedgerIdentityKey(identity)}`;
+}
+function readVerifiedMove(ledger, identity) {
+  const raw = ledger.readMeta(purgeReceiptKey(identity));
+  if (!raw)
+    return;
+  const receipt = JSON.parse(raw);
+  const current2 = ledger.getCurrent(identity);
+  if (!current2)
+    throw new TierLedgerGenerationConflictError;
+  if (receipt.generation < current2.generation || receipt.generation === current2.generation && current2.state !== "moving") {
+    ledger.withGenerationFence(identity, current2.generation, () => {
+      const now = ledger.getCurrent(identity);
+      if (ledger.readMeta(purgeReceiptKey(identity)) !== raw || !(receipt.generation < now.generation || receipt.generation === now.generation && now.state !== "moving")) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      ledger.writeMeta(purgeReceiptKey(identity), "");
+    });
+    return;
+  }
+  return receipt;
+}
+function copyFingerprint(copy, layers) {
+  return createHash23("sha256").update(JSON.stringify({
+    identity: copy.identity,
+    columns: copy.columns,
+    chunks: layers === "metadata" ? [] : copy.chunks
+  })).digest("hex");
+}
+function finishVerifiedMove(options, receipt) {
+  const { set, identity } = options;
+  const ledger = set.ledger;
+  const contentDestination = copyServingLayer(receipt.placement, "content");
+  const stableStore = set.store((contentDestination ?? receipt.placement[0]).trustDomain);
+  if (!stableStore)
+    throw new Error("Verified destination unavailable.");
+  return stableStore.withItemCopyWriteFence(identity, () => {
+    for (const copy of receipt.placement) {
+      const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
+      if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
+        throw new Error("Verified move destination changed; source remains held.");
+      }
+    }
+    return ledger.withGenerationFence(identity, receipt.generation, () => {
+      const record = ledger.getCurrent(identity);
+      if (ledger.readMeta(purgeReceiptKey(identity)) !== JSON.stringify(receipt))
+        throw new TierLedgerGenerationConflictError;
+      if (record.state !== "moving" || record.targetMetadataTier !== receipt.target.metadataTier || record.targetContentTier !== receipt.target.contentTier)
+        throw new TierLedgerGenerationConflictError;
+      const contentCopy = copyServingLayer(receipt.placement, "content");
+      const content = contentCopy ?? copyServingLayer(set.placementFor({
+        ...receipt.target,
+        state: "current",
+        metadataPending: false,
+        contentPending: false,
+        contentRead: true,
+        ...receipt.flipOptions.decidedBy === "override" ? { decidedBy: "override" } : {}
+      }).copies, "content");
+      if (receipt.raise && content && !contentCopy && ledger.copies(identity).some((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain) && (set.store(copy.trustDomain)?.copyContentState(identity)?.chunks ?? 0) > 0)) {
+        throw new Error("A lower body has no verified destination; move remains pending.");
+      }
+      const flipped = ledger.completeMove(identity, receipt.flipOptions);
+      const metadata = copyServingLayer(receipt.placement, "metadata");
+      if (receipt.raise && content) {
+        for (const copy of ledger.copies(identity)) {
+          if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain))
+            continue;
+          const store = set.store(copy.trustDomain);
+          if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
+            throw new Error("Lower store unavailable or ledger binding changed; move purge remains pending.");
+          }
+          store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+        }
+      }
+      if (receipt.raise && content)
+        ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
+      options.afterPurge?.();
+      ledger.writeMeta(purgeReceiptKey(identity), "");
+      const result = {
+        outcome: "moved",
+        raise: receipt.raise,
+        generation: flipped.generation,
+        destinations: receipt.destinations,
+        supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
+        chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
+      };
+      queueMoveNote(options, receipt, result);
+      return result;
+    });
+  });
+}
+async function moveToSecrets(options, expectedGeneration) {
+  const { set, identity } = options;
+  const ledger = set.ledger;
+  const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
+  let located = false;
+  const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+  const names = copyServingLayer(ordered.filter((copy) => copy.state === "current"), "metadata") ?? copyServingLayer(ordered, "metadata");
+  for (const copy of names ? [names, ...ordered.filter((copy2) => copy2 !== names)] : ordered) {
+    if (located)
+      break;
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (!exported)
+      continue;
+    const text2 = exported.chunks.map((chunk) => chunk.boundedText).join(`
+`);
+    const kinds = detectSecretFindingKinds(text2);
+    const locator = exported.columns.locator_uri;
+    const title = exported.columns.title;
+    set.secrets()?.record({
+      identity,
+      namesReleasable: record.previousMetadataTier === "public" || record.previousMetadataTier === "private",
+      ...typeof locator === "string" ? { locator } : {},
+      ...typeof title === "string" ? { title } : {},
+      findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
+      text: text2
+    });
+    located = true;
+  }
+  const settled = settleSecretsCopies({
+    ledger,
+    identity: fullIdentity(identity),
+    copies,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain ? set.store(domain) : undefined;
+    },
+    connectorId: TIER_MOVE_CONNECTOR_ID,
+    ...options.secretsDisposition ? { disposition: options.secretsDisposition } : {}
+  });
+  const corpora = Object.keys(settled.chunks);
+  const chunkCount = Object.values(settled.chunks).reduce((sum, count) => sum + count, 0);
+  if (options.embeddingLedger) {
+    const deleted = settled.disposition === "tombstone_now";
+    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
+      recorded_at: new Date().toISOString(),
+      kind: deleted ? "invalidation" : "note",
+      what: deleted ? `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} were tombstoned and ` + `${chunkCount} chunk(s) and their vectors deleted. Only its location is kept.` : `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} (${chunkCount} chunk(s)) ` + "are hidden and kept until an owner-approved purge. Only its location is served.",
+      scope: { corpora, chunks: settled.chunks },
+      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
+      approved_by: options.embeddingLedger.approvedBy,
+      status: "complete"
+    });
+  }
+  return {
+    outcome: "secrets",
+    raise: true,
+    generation: record.generation,
+    destinations: [],
+    supersededCorpora: corpora,
+    chunkCount,
+    secretsChunks: settled.chunks,
+    secretsDisposition: settled.disposition
+  };
+}
+function sameText(kept, source) {
+  if (!kept || !source || kept.chunks.length !== source.chunks.length)
+    return false;
+  return kept.chunks.every((chunk, index) => {
+    const other = source.chunks[index];
+    return chunk.chunkIndex === other.chunkIndex && chunk.boundedText === other.boundedText && chunk.contentHash === other.contentHash && chunk.embeddingInputHash === other.embeddingInputHash;
+  });
+}
+function layersCover(held, wanted) {
+  return held === "both" || held === wanted;
+}
+function fullIdentity(identity) {
+  return {
+    family: identity.family,
+    provider: identity.provider,
+    accountScope: identity.accountScope,
+    providerItemId: identity.providerItemId,
+    localItemId: identity.localItemId,
+    ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+  };
+}
+var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:";
+var init_tier_move = __esm(() => {
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_secrets_disposition();
+  init_tier_placement();
+  TierMoveRefusedError = class TierMoveRefusedError extends Error {
+    constructor(message2) {
+      super(message2);
+      this.name = "TierMoveRefusedError";
+    }
+  };
+  TierMoveContentChangedError = class TierMoveContentChangedError extends TierMoveRefusedError {
+  };
+});
+
+// src/workers/connector-store/tier-content-purge.ts
+function purgeLowerTierContent(set, options = {}) {
+  const report = { checked: 0, purged: 0, resumed: 0, failed: 0 };
+  const limit = Math.max(1, Math.min(options.limit ?? LOWER_CONTENT_PURGE_BATCH, LOWER_CONTENT_PURGE_BATCH));
+  const note = options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: "system-automatic" };
+  const resumed = new Set;
+  const receiptBudget = Math.max(1, Math.floor(limit / 2));
+  const receiptAfter = set.ledger.readMeta(RECEIPT_CURSOR) || undefined;
+  let receipts = set.ledger.metaEntries(VERIFIED, { ...receiptAfter ? { after: receiptAfter } : {}, limit: receiptBudget });
+  if (!receipts.length && receiptAfter)
+    receipts = set.ledger.metaEntries(VERIFIED, { limit: receiptBudget });
+  for (const { key: key2 } of receipts) {
+    const [provider, accountScope, conversation, providerItemId] = key2.slice(VERIFIED.length).split("\x00");
+    if (!provider || !accountScope || !providerItemId)
+      continue;
+    const identity = { provider, accountScope, providerItemId, ...conversation ? { providerConversationId: conversation } : {} };
+    report.checked++;
+    try {
+      if (resumeVerifiedTierMove(set, identity, note))
+        report.resumed++;
+      resumed.add(tierLedgerIdentityKey(identity));
+    } catch {
+      report.failed++;
+    }
+  }
+  set.ledger.writeMeta(RECEIPT_CURSOR, receipts.at(-1)?.key ?? "");
+  if (options.maintenance && set.ledger.readMeta(DONE) === "1")
+    return report;
+  const raw = set.ledger.readMeta(CURSOR);
+  const after = raw ? JSON.parse(raw) : undefined;
+  const stores = ["public_safe", "internal"].flatMap((domain) => {
+    const store = set.store(domain);
+    return store ? [{ corpusId: store.corpusId, dbPath: store.dbPath, trustDomain: domain }] : [];
+  });
+  const page2 = set.ledger.listLowerContentLeftovers({
+    stores,
+    ...after ? { after } : {},
+    limit: Math.max(1, limit - report.checked)
+  });
+  const counts = new Map;
+  const remaining = Math.max(0, limit - report.checked);
+  for (const record of page2.slice(0, remaining)) {
+    const identity = {
+      provider: record.provider,
+      accountScope: record.accountScope,
+      providerItemId: record.providerItemId,
+      ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+    };
+    report.checked++;
+    try {
+      if (record.state === "moving" || resumed.has(tierLedgerIdentityKey(identity)))
+        continue;
+      if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+        continue;
+      const copies = set.ledger.copies(identity);
+      const content = copyServingLayer(copies.filter((copy) => copy.state === "current"), "content");
+      const metadata = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+      if (!content)
+        continue;
+      const lower = copies.filter((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain));
+      if (!lower.length)
+        continue;
+      const destination = set.store(content.trustDomain);
+      if (!destination || destination.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
+        throw new Error("Destination unavailable.");
+      const purgedCopies = [];
+      const withLowerLocks = (index) => {
+        const copy = lower[index];
+        if (copy) {
+          const store = set.store(copy.trustDomain);
+          if (!store || store.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
+            throw new Error("Lower store unavailable.");
+          return store.withItemCopyWriteFence(identity, () => withLowerLocks(index + 1));
+        }
+        destination.withItemCopyWriteFence(identity, () => {
+          const proof = destination.copyContentState(identity);
+          const heldCopies = lower.flatMap((copy2) => {
+            const store = set.store(copy2.trustDomain);
+            const held = store.copyContentState(identity);
+            return held ? [{ copy: copy2, store, held }] : [];
+          });
+          if (!proof)
+            throw new Error("Destination disappeared.");
+          let newest = { copy: content, held: proof };
+          for (const candidate of heldCopies) {
+            if (candidate.held.chunks === 0)
+              continue;
+            if (!proof.chunks || !proof.currentText)
+              throw new Error("Destination content is missing or stale.");
+            const order = compareContentVersions(candidate.held, newest.held);
+            if (order === undefined)
+              throw new Error("Copy freshness cannot be proven.");
+            if (order > 0)
+              newest = candidate;
+          }
+          for (const candidate of heldCopies) {
+            if (candidate.held.chunks === 0)
+              continue;
+            const order = compareContentVersions(newest.held, candidate.held);
+            if (order === undefined || order < 0)
+              throw new Error("Copy freshness cannot be proven.");
+          }
+          if (newest.copy.corpusId !== content.corpusId) {
+            if (!newest.held.currentText)
+              throw new Error("Lower content is stale.");
+            const payload2 = set.store(newest.copy.trustDomain).exportItemCopy(identity);
+            if (!payload2)
+              throw new Error("Lower content disappeared.");
+            options.beforeDelete?.();
+            set.ledger.withGenerationFence(identity, record.generation, () => {
+              promoteLowerTierContent({
+                set,
+                identity: payload2.identity,
+                expectedGeneration: record.generation,
+                embeddingLedger: note
+              }, newest.copy);
+            });
+            for (const { copy: copy2, held } of heldCopies) {
+              purgedCopies.push({ corpusId: copy2.corpusId, chunks: held.chunks });
+            }
+            return;
+          }
+          for (const { copy: copy2, store, held } of heldCopies) {
+            const keepMetadata = !!metadata && trustDomainRank(copy2.trustDomain) >= trustDomainRank(metadata.trustDomain);
+            const hasBody = held.chunks + held.vectors + held.versions > 0;
+            if (!hasBody && (keepMetadata || !held.names))
+              continue;
+            if (hasBody && (!proof || proof.chunks === 0 || !proof.currentText))
+              throw new Error("Destination content is missing or stale.");
+            if (!proof)
+              throw new Error("Destination disappeared.");
+            options.beforeDelete?.();
+            set.ledger.withGenerationFence(identity, record.generation, () => {
+              const current2 = set.ledger.getCurrent(identity);
+              if (current2.state === "moving")
+                throw new Error("Placement changed.");
+              const chunks = store.stripCopyContent(identity, { keepMetadata });
+              set.ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(current2.generation));
+              const entryId = `tier-content-repair:${set.ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${current2.generation}:${copy2.corpusId}`;
+              set.ledger.writeMeta(`tier-move-note:${entryId}`, JSON.stringify({ path: note.path, entry: {
+                entry_id: entryId,
+                recorded_at: new Date().toISOString(),
+                kind: "note",
+                what: `Verified current content in ${content.corpusId}; removed ${chunks} lower-tier chunk(s), their vectors and text-version remnants from ${copy2.corpusId}.`,
+                scope: { corpora: [content.corpusId, copy2.corpusId], chunks: { [copy2.corpusId]: chunks } },
+                approved_by: note.approvedBy,
+                ...note.why ? { why: note.why } : {},
+                status: "complete"
+              } }));
+              purgedCopies.push({ corpusId: copy2.corpusId, chunks });
+            });
+          }
+        });
+      };
+      withLowerLocks(0);
+      for (const { corpusId, chunks } of purgedCopies) {
+        report.purged++;
+        const count = counts.get(corpusId) ?? { copies: 0, chunks: 0 };
+        count.copies++;
+        count.chunks += chunks;
+        counts.set(corpusId, count);
+      }
+    } catch {
+      report.failed++;
+    }
+  }
+  if (report.failed)
+    set.ledger.writeMeta(FAILED, "1");
+  if (remaining > 0) {
+    const last = page2.at(-1);
+    const finished = page2.length < remaining || !last;
+    set.ledger.writeMeta(CURSOR, finished ? "" : JSON.stringify({
+      provider: last.provider,
+      accountScope: last.accountScope,
+      providerItemId: last.providerItemId,
+      ...last.conversationKey ? { providerConversationId: last.conversationKey } : {}
+    }));
+    if (finished) {
+      set.ledger.writeMeta(DONE, set.ledger.readMeta(FAILED) === "1" ? "" : "1");
+      set.ledger.writeMeta(FAILED, "");
+    }
+  }
+  for (const [corpus, count] of counts)
+    options.log?.(corpus, count.copies, count.chunks);
+  return report;
+}
+function compareContentVersions(a, b) {
+  if (a.sourceVersion === b.sourceVersion && a.contentHash !== null && a.contentHash === b.contentHash)
+    return 0;
+  const aTime = a.updatedAt ? Date.parse(a.updatedAt) : NaN;
+  const bTime = b.updatedAt ? Date.parse(b.updatedAt) : NaN;
+  if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime)
+    return Math.sign(aTime - bTime);
+  return;
+}
+var CURSOR = "lower-content-purge-cursor-v2", DONE = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", LOWER_CONTENT_PURGE_BATCH = 200;
+var init_tier_content_purge = __esm(() => {
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+});
+
 // src/core/model-install-failure.ts
 function modelInstallFailedReason(failure) {
   if (!failure)
@@ -37176,8 +38451,8 @@ function formatSpaceToFree(bytes) {
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync29, statSync as statSync15 } from "node:fs";
-import { homedir as homedir22 } from "node:os";
-import { delimiter as delimiter3, dirname as dirname29, isAbsolute as isAbsolute14, join as join34 } from "node:path";
+import { homedir as homedir23 } from "node:os";
+import { delimiter as delimiter3, dirname as dirname30, isAbsolute as isAbsolute14, join as join35 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 function helperEnvironment() {
@@ -37189,7 +38464,7 @@ function helperEnvironment() {
       env[name] = value;
     }
   }
-  env.HOME ??= homedir22();
+  env.HOME ??= homedir23();
   return env;
 }
 
@@ -37235,7 +38510,7 @@ class HelperProcess {
       helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
       child.kill("SIGKILL");
     });
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       let started = false;
       const timer = setTimeout(() => {
         if (started)
@@ -37259,7 +38534,7 @@ class HelperProcess {
             clearTimeout(timer);
             helper.device = message2.device === "gpu" ? "gpu" : "cpu";
             helper.vision = message2.vision === true;
-            resolve8(helper);
+            resolve9(helper);
           } else if (message2.fatal) {
             started = true;
             clearTimeout(timer);
@@ -37296,13 +38571,13 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       const timer = setTimeout(() => {
         this.child.kill("SIGKILL");
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve8, reject, count: items.length, timer });
+      this.pending.set(id, { resolve: resolve9, reject, count: items.length, timer });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
       this.child.stdin.write(`${JSON.stringify(request)}
 `);
@@ -37343,7 +38618,7 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve8) => this.child.once("close", () => resolve8()));
+    const exited = new Promise((resolve9) => this.child.once("close", () => resolve9()));
     this.child.stdin.end();
     const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
@@ -37391,9 +38666,9 @@ async function startLiteRtEmbedder(options) {
   };
 }
 function helperPath() {
-  const here = dirname29(fileURLToPath5(import.meta.url));
+  const here = dirname30(fileURLToPath5(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join34(here, name);
+    const candidate = join35(here, name);
     if (existsSync29(candidate))
       return candidate;
   }
@@ -37403,9 +38678,9 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join34(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter3).filter(Boolean).map((directory) => join34(directory, bunName)),
-    join34(homedir22(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join35(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter3).filter(Boolean).map((directory) => join35(directory, bunName)),
+    join35(homedir23(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute14(candidate))
@@ -37438,11 +38713,11 @@ var init_litert_runtime = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
-import { join as join35 } from "node:path";
+import { join as join36 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire3(join35(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire3(join36(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -37624,10 +38899,10 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash23 } from "node:crypto";
+import { createHash as createHash24 } from "node:crypto";
 import { readFileSync as readFileSync28 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname30, join as join36 } from "node:path";
+import { dirname as dirname31, join as join37 } from "node:path";
 function loadedBuiltInEmbedding(provider) {
   return provider instanceof BuiltInSourceEmbeddingProvider ? provider.loadedOnly() : undefined;
 }
@@ -37676,7 +38951,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash23("sha256").update(JSON.stringify({
+    this.configHash = createHash24("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -37803,7 +39078,7 @@ class BuiltInSourceEmbeddingProvider {
         const embedder = await this.liteRtFactory({
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join36(dirname30(installed.modelPath), "cache"),
+          cacheDir: join37(dirname31(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -37829,7 +39104,7 @@ class BuiltInSourceEmbeddingProvider {
   }
   async withSlot(taskType, run) {
     if (this.slotBusy) {
-      await new Promise((resolve8) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve8));
+      await new Promise((resolve9) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve9));
     } else {
       this.slotBusy = true;
     }
@@ -38164,542 +39439,6 @@ var init_provider = __esm(() => {
       this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
       this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
     }
-  };
-});
-
-// src/workers/embedding-ledger.ts
-import { homedir as homedir23 } from "node:os";
-import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
-import { dirname as dirname31, join as join37 } from "node:path";
-function isOwnerApprovedEmbeddingLedgerEntry(entry) {
-  return entry.approved_by === EMBEDDING_LEDGER_OWNER_APPROVAL;
-}
-function resolveEmbeddingLedgerPath(env = process.env) {
-  const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
-  if (configured)
-    return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join37(homedir23(), ".local", "share");
-  return join37(standaloneLinuxDataDir(env) ?? join37(dataHome, "openclaw", "olympus"), "embedding-ledger.jsonl");
-}
-async function appendEmbeddingLedgerEntry(path, entry) {
-  const line = `${JSON.stringify(entry)}
-`;
-  await mkdir3(dirname31(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a", 384);
-  try {
-    await handle.chmod(384);
-    await handle.appendFile(line, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-async function appendEmbeddingLedgerEntryOnce(path, entry) {
-  const id = entry.entry_id?.trim();
-  if (!id) {
-    await appendEmbeddingLedgerEntry(path, entry);
-    return true;
-  }
-  const existing = await readEmbeddingLedger(path);
-  if (existing.entries.some((recorded) => recorded.entry_id === id))
-    return false;
-  await appendEmbeddingLedgerEntry(path, entry);
-  return true;
-}
-async function readEmbeddingLedger(path) {
-  let raw = "";
-  try {
-    raw = await readFile3(path, "utf8");
-  } catch (error) {
-    if (error?.code !== "ENOENT")
-      throw error;
-  }
-  const parsed = parseEmbeddingLedgerJsonl(raw);
-  return {
-    entries: mergeEmbeddingLedgerEntries(EMBEDDING_LEDGER_BACKFILL, parsed.entries),
-    skipped: parsed.skipped,
-    path
-  };
-}
-function parseEmbeddingLedgerJsonl(text2) {
-  const entries = [];
-  let skipped = 0;
-  for (const line of text2.split(`
-`)) {
-    if (line.trim() === "")
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      skipped += 1;
-      continue;
-    }
-    if (isEmbeddingLedgerEntry(parsed))
-      entries.push(parsed);
-    else
-      skipped += 1;
-  }
-  return { entries, skipped };
-}
-function mergeEmbeddingLedgerEntries(backfill, recorded) {
-  const byId = new Map;
-  const unidentified = [];
-  for (const entry of [...backfill, ...recorded]) {
-    const id = entry.entry_id?.trim();
-    if (id)
-      byId.set(id, entry);
-    else
-      unidentified.push(entry);
-  }
-  const merged = [...byId.values(), ...unidentified];
-  return merged.map((entry, index) => ({ entry, index, at: stampOrder(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
-}
-function stampOrder(recordedAt) {
-  const at = Date.parse(recordedAt);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-function isEmbeddingLedgerEntry(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const record = value;
-  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
-    return false;
-  if (typeof record.what !== "string" || record.what.trim() === "")
-    return false;
-  if (!isKind(record.kind))
-    return false;
-  if (!isApprovedBy(record.approved_by))
-    return false;
-  if (!isStatus(record.status))
-    return false;
-  for (const key2 of ["model_id", "epoch", "endpoint", "why", "entry_id"]) {
-    if (record[key2] !== undefined && typeof record[key2] !== "string")
-      return false;
-  }
-  return record.scope === undefined || isScope(record.scope);
-}
-function isKind(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_KIND_TEXT;
-}
-function isApprovedBy(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_APPROVAL_TEXT;
-}
-function isStatus(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_STATUS_TEXT;
-}
-function isScope(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const scope = value;
-  if (scope.corpora !== undefined) {
-    if (!Array.isArray(scope.corpora))
-      return false;
-    if (scope.corpora.some((name) => typeof name !== "string"))
-      return false;
-  }
-  if (scope.chunks !== undefined) {
-    if (!scope.chunks || typeof scope.chunks !== "object" || Array.isArray(scope.chunks))
-      return false;
-    if (Object.values(scope.chunks).some((count) => typeof count !== "number" || !Number.isFinite(count)))
-      return false;
-  }
-  return true;
-}
-var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
-var init_embedding_ledger = __esm(() => {
-  init_linux_engine_layout();
-  EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
-  EMBEDDING_LEDGER_KIND_TEXT = {
-    model_decision: "Model decision",
-    epoch_change: "Epoch changed",
-    endpoint_change: "Endpoint changed",
-    invalidation: "Stored vectors invalidated",
-    re_embed_started: "Re-embed started",
-    re_embed_completed: "Re-embed finished",
-    note: "Note"
-  };
-  EMBEDDING_LEDGER_APPROVAL_TEXT = {
-    [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
-    "system-automatic": "Not approved — the system did this on its own",
-    "unattributed-historical": "Not approved — no decision is on record"
-  };
-  EMBEDDING_LEDGER_STATUS_TEXT = {
-    pending: "Pending",
-    in_progress: "In progress",
-    complete: "Complete",
-    "n/a": ""
-  };
-  WIPED_CORPORA = [
-    "dropbox",
-    "gmail-secure",
-    "drive-secure",
-    "whatsapp-live",
-    "telegram-protected"
-  ];
-  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
-  EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
-    {
-      entry_id: "backfill-2026-08-20-endpoint-retarget",
-      recorded_at: "2026-08-20T02:42:00.000Z",
-      kind: "endpoint_change",
-      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
-      approved_by: "unattributed-historical",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-invalidation",
-      recorded_at: "2026-08-20T12:03:00.000Z",
-      kind: "invalidation",
-      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
-      approved_by: "system-automatic",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-re-embed",
-      recorded_at: "2026-08-20T12:04:00.000Z",
-      kind: "re_embed_started",
-      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
-      approved_by: "system-automatic",
-      status: "in_progress"
-    },
-    {
-      entry_id: "backfill-2026-08-24-model-decision",
-      recorded_at: "2026-08-24T00:00:00.000Z",
-      kind: "model_decision",
-      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-24-drain-lane-enablement",
-      recorded_at: "2026-08-24T23:30:00.000Z",
-      kind: "note",
-      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
-      scope: {
-        corpora: LANE_ENABLEMENT_CORPORA,
-        chunks: { dropbox: 52840, "x-bookmarks": 15 }
-      },
-      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-24-readwise-hybrid",
-      recorded_at: "2026-09-24T13:30:00.000Z",
-      kind: "model_decision",
-      what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
-      scope: { corpora: ["readwise", "readwise-secure"] },
-      why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-25-chat-lane-catch-up",
-      recorded_at: "2026-09-25T07:00:00.000Z",
-      kind: "model_decision",
-      what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
-      scope: {
-        corpora: [
-          "internal.x.bookmarks",
-          "secure_local.x.bookmarks",
-          "internal.whatsapp.messages",
-          "secure_local.whatsapp.messages",
-          "internal.telegram.messages",
-          "secure_local.telegram.protected.messages"
-        ]
-      },
-      why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-30-gmail-catch-up",
-      recorded_at: "2026-09-30T21:05:00.000Z",
-      kind: "model_decision",
-      what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
-      scope: { corpora: ["internal.email"] },
-      why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    }
-  ];
-});
-
-// src/workers/connector-store/tier-move.ts
-function rowRehomeReceiptId(ledger, identity, generation) {
-  return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
-}
-async function moveTieredItem(options) {
-  const { set, identity, decision } = options;
-  const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
-  if (!target)
-    throw new Error("A tier move needs target tiers or a decision.");
-  const ledger = set.ledger;
-  const record = ledger.getCurrent(identity);
-  if (!record || !record.routed)
-    throw new Error("Only a routed item can move; adopt a legacy placement first.");
-  const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
-  if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
-    throw new TierLedgerGenerationConflictError;
-  }
-  if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
-    return moveToSecrets(options, record.generation);
-  }
-  const ownerOverride = !decision && record.decidedBy === "override";
-  const placement = set.placementFor(decision ?? {
-    metadataTier: target.metadataTier,
-    contentTier: target.contentTier,
-    state: record.metadataPending || record.contentPending ? "pending" : "current",
-    metadataPending: record.metadataPending,
-    contentPending: record.contentPending,
-    contentRead: record.contentRead,
-    ...ownerOverride ? { decidedBy: "override" } : {}
-  });
-  const moveGeneration = record.generation + 1;
-  const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
-  if (sources.length === 0)
-    throw new Error("The item has no copy to move from.");
-  const raise = placementIsRaise(sources, placement.copies);
-  const exports = new Map;
-  const exportFrom = (copy) => {
-    if (!exports.has(copy.corpusId)) {
-      const domain = set.domainForCorpus(copy.corpusId);
-      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
-    }
-    return exports.get(copy.corpusId);
-  };
-  const contentSource = copyServingLayer(sources, "content");
-  const contentDestination = copyServingLayer(placement.copies, "content");
-  if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
-    const exported = exportFrom(contentSource);
-    const evidence = decision ?? record;
-    const digest3 = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
-    const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
-    if (!digest3 || receipts.length !== 1 || receipts[0] !== digest3 || evidence.contentPending) {
-      if (!raise && record.state === "moving") {
-        ledger.abandonMove(identity, { expectedGeneration: record.generation });
-      }
-      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.");
-    }
-  }
-  const kept = ledger.copies(identity);
-  const replacedSuperseded = {};
-  for (const planned of placement.copies) {
-    if (sources.some((source2) => source2.corpusId === planned.corpusId))
-      continue;
-    const keptHere = kept.find((copy) => copy.corpusId === planned.corpusId && copy.state === "superseded");
-    if (!keptHere)
-      continue;
-    const source = copyServingLayer(sources, "content") ?? sources[0];
-    const keptCopy = exportFrom(keptHere);
-    if (sameText(keptCopy, exportFrom(source)))
-      continue;
-    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
-      replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
-      continue;
-    }
-    throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
-  }
-  ledger.stageMove(identity, {
-    expectedGeneration: record.generation,
-    target,
-    destination: placement.copies,
-    hideSource: raise,
-    ...placement.embedHold ? { embedHold: true } : {}
-  });
-  const destinations = [];
-  for (const planned of placement.copies) {
-    const kept2 = sources.find((source) => source.corpusId === planned.corpusId);
-    if (kept2 && layersCover(kept2.layers, planned.layers)) {
-      const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
-      destinations.push({
-        corpusId: planned.corpusId,
-        trustDomain: planned.trustDomain,
-        layers: planned.layers,
-        relayeredOnly: true,
-        chunksWritten: 0,
-        chunksKept: keptChunks,
-        vectorsCopied: 0,
-        chunksToEmbed: 0
-      });
-      continue;
-    }
-    const wantsContent = planned.layers !== "metadata";
-    const from = copyServingLayer(sources, wantsContent ? "content" : "metadata") ?? sources[0];
-    const exported = exportFrom(from);
-    if (!exported)
-      throw new Error("The source store no longer holds an active copy of the item.");
-    const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
-    const store = set.store(planned.trustDomain, { create: true });
-    store.bindTierSet(ledger);
-    const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
-    const written = store.importItemCopy(payload2, {
-      trustTier: defaultStoreTrustTier(planned.trustDomain),
-      syncConnectorId: TIER_MOVE_CONNECTOR_ID,
-      layers: planned.layers,
-      ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
-    });
-    destinations.push({
-      corpusId: planned.corpusId,
-      trustDomain: planned.trustDomain,
-      layers: planned.layers,
-      relayeredOnly: false,
-      chunksWritten: written.chunksWritten,
-      chunksKept: written.chunksKept,
-      vectorsCopied: written.vectorsCopied,
-      chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
-    });
-  }
-  options.beforeFlip?.();
-  const flipped = ledger.completeMove(identity, {
-    expectedGeneration: record.generation,
-    destination: placement.copies,
-    embedHold: placement.embedHold === true,
-    ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
-    ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
-  });
-  const supersededCorpora = ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId);
-  const chunkCount = destinations.reduce((total, destination) => total + destination.chunksWritten + destination.chunksKept, 0);
-  if (options.embeddingLedger) {
-    const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
-    const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    const append = rehomeTagged ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
-    await append(options.embeddingLedger.path, {
-      recorded_at: new Date().toISOString(),
-      kind: "note",
-      what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(", ")}: ` + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, ` + `${toEmbed} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are kept and hidden: ${supersededCorpora.join(", ") || "none"}.` + (Object.keys(replacedSuperseded).length > 0 ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replacedSuperseded).map(([corpusId, chunks]) => `${corpusId} (${chunks} chunk(s) of older text)`).join(", ")}.` : ""),
-      scope: {
-        corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((destination) => destination.corpusId)])],
-        chunks: Object.fromEntries(destinations.map((destination) => [
-          destination.corpusId,
-          destination.chunksWritten + destination.chunksKept
-        ]))
-      },
-      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
-      approved_by: options.embeddingLedger.approvedBy,
-      status: "complete",
-      ...rehomeTagged ? { entry_id: rowRehomeReceiptId(ledger, identity, flipped.generation) } : {}
-    });
-  }
-  return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
-}
-async function moveToSecrets(options, expectedGeneration) {
-  const { set, identity } = options;
-  const ledger = set.ledger;
-  const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
-  let located = false;
-  for (const copy of copies) {
-    if (located)
-      break;
-    const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      continue;
-    const text2 = exported.chunks.map((chunk) => chunk.boundedText).join(`
-`);
-    const kinds = detectSecretFindingKinds(text2);
-    const locator = exported.columns.locator_uri;
-    const title = exported.columns.title;
-    set.secrets()?.record({
-      identity,
-      namesReleasable: record.previousMetadataTier === "public" || record.previousMetadataTier === "private",
-      ...typeof locator === "string" ? { locator } : {},
-      ...typeof title === "string" ? { title } : {},
-      findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
-      text: text2
-    });
-    located = true;
-  }
-  const settled = settleSecretsCopies({
-    ledger,
-    identity: fullIdentity(identity),
-    copies,
-    storeFor: (corpusId) => {
-      const domain = set.domainForCorpus(corpusId);
-      return domain ? set.store(domain) : undefined;
-    },
-    connectorId: TIER_MOVE_CONNECTOR_ID,
-    ...options.secretsDisposition ? { disposition: options.secretsDisposition } : {}
-  });
-  const corpora = Object.keys(settled.chunks);
-  const chunkCount = Object.values(settled.chunks).reduce((sum, count) => sum + count, 0);
-  if (options.embeddingLedger) {
-    const deleted = settled.disposition === "tombstone_now";
-    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
-      recorded_at: new Date().toISOString(),
-      kind: deleted ? "invalidation" : "note",
-      what: deleted ? `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} were tombstoned and ` + `${chunkCount} chunk(s) and their vectors deleted. Only its location is kept.` : `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} (${chunkCount} chunk(s)) ` + "are hidden and kept until an owner-approved purge. Only its location is served.",
-      scope: { corpora, chunks: settled.chunks },
-      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
-      approved_by: options.embeddingLedger.approvedBy,
-      status: "complete"
-    });
-  }
-  return {
-    outcome: "secrets",
-    raise: true,
-    generation: record.generation,
-    destinations: [],
-    supersededCorpora: corpora,
-    chunkCount,
-    secretsChunks: settled.chunks,
-    secretsDisposition: settled.disposition
-  };
-}
-function sameText(kept, source) {
-  if (!kept || !source || kept.chunks.length !== source.chunks.length)
-    return false;
-  return kept.chunks.every((chunk, index) => {
-    const other = source.chunks[index];
-    return chunk.chunkIndex === other.chunkIndex && chunk.boundedText === other.boundedText && chunk.contentHash === other.contentHash && chunk.embeddingInputHash === other.embeddingInputHash;
-  });
-}
-function layersCover(held, wanted) {
-  return held === "both" || held === wanted;
-}
-function fullIdentity(identity) {
-  return {
-    family: identity.family,
-    provider: identity.provider,
-    accountScope: identity.accountScope,
-    providerItemId: identity.providerItemId,
-    localItemId: identity.localItemId,
-    ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
-  };
-}
-var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError;
-var init_tier_move = __esm(() => {
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_embedding_ledger();
-  init_secrets_disposition();
-  init_tier_placement();
-  TierMoveRefusedError = class TierMoveRefusedError extends Error {
-    constructor(message2) {
-      super(message2);
-      this.name = "TierMoveRefusedError";
-    }
-  };
-  TierMoveContentChangedError = class TierMoveContentChangedError extends TierMoveRefusedError {
   };
 });
 
@@ -39474,7 +40213,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash24 } from "node:crypto";
+import { createHash as createHash25 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -39755,7 +40494,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash24("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash25("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function storedSignals(copy) {
   const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -40025,7 +40764,10 @@ class TieredStoreSet {
   privateEmbedder;
   privateEmbedWith;
   lastRowRehome;
+  lastLowerContentRepairAt;
+  lowerContentRepair;
   constructor(options) {
+    this.lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
     if (!options.setId.trim())
       throw new Error("A tiered store set needs a stable id.");
     this.setId = options.setId;
@@ -40055,6 +40797,7 @@ class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
+    this.repairLowerContent();
   }
   store(trustDomain, options = {}) {
     const leg = this.legs.get(trustDomain);
@@ -40073,6 +40816,31 @@ class TieredStoreSet {
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
+  }
+  repairLowerContent(options = {}) {
+    if (this.lowerContentRepair)
+      return this.lowerContentRepair;
+    const now = options.nowMs ?? Date.now();
+    if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS)
+      return Promise.resolve();
+    this.lastLowerContentRepairAt = now;
+    try {
+      purgeLowerTierContent(this, {
+        maintenance: true,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+        log: (corpus, copies, chunks) => {
+          if (chunks > 0)
+            console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
+        }
+      });
+      const pending = flushTierMoveNotes(this.ledger).catch(() => {}).finally(() => {
+        this.lowerContentRepair = undefined;
+      });
+      this.lowerContentRepair = pending;
+      return pending;
+    } catch {
+      return Promise.resolve();
+    }
   }
   openStores() {
     return TIER_DOMAIN_ORDER.flatMap((domain) => {
@@ -40212,6 +40980,7 @@ class TieredStoreSet {
     return tieredRun(legRuns, run.counts, undefined);
   }
   async settleStoredItems() {
+    this.repairLowerContent();
     try {
       applyOwnerOverrides({ set: this });
     } catch {}
@@ -40826,7 +41595,7 @@ function handoffConnector(source, item) {
     }
   };
 }
-var TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -40836,11 +41605,14 @@ var init_tiered_store_set = __esm(() => {
   init_tier_placement();
   init_secrets_disposition();
   init_tier_names_only_settle();
+  init_tier_content_purge();
+  init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
   TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
   TIER_KEY_TRUST_DOMAIN = {
     public: "public_safe",
@@ -41217,7 +41989,7 @@ var init_connector_store2 = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash25 } from "node:crypto";
+import { createHash as createHash26 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -41360,7 +42132,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash25("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash26("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
@@ -41372,7 +42144,7 @@ function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
   const approvedScopeIdentity = scope ? `\x00${required2(scope.generation, "Dropbox approved scope generation")}` + `\x00${required2(scope.revision, "Dropbox approved scope revision")}` : "";
-  const scopeHash = createHash25("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash26("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function dropboxScopedCheckpoint(cursor, connectorId, scoped) {
@@ -41586,14 +42358,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash26 } from "node:crypto";
+import { createHash as createHash27 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash26("sha256").update(block).digest());
+    blockDigests.push(createHash27("sha256").update(block).digest());
   }
-  return createHash26("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash27("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -41694,7 +42466,7 @@ function executableFile(path) {
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     const child = spawn4(command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -41737,7 +42509,7 @@ async function runExtractionCommand(request, internals = {}) {
         stderr: Buffer4.concat(stderr).toString("utf8")
       };
       if (code === 0) {
-        resolve8(result);
+        resolve9(result);
         return;
       }
       reject(new ExtractionCommandError({
@@ -42067,7 +42839,7 @@ function localModelResourceKey(profile) {
 }
 function createLocalModelActivity() {
   const queues = new Map;
-  const dispatch = (key2, work) => new Promise((resolve8, reject) => {
+  const dispatch = (key2, work) => new Promise((resolve9, reject) => {
     let queue = queues.get(key2);
     if (!queue) {
       queue = { running: false, tasks: [] };
@@ -42089,7 +42861,7 @@ function createLocalModelActivity() {
     };
     pending.tasks.push({ background: localInferencePriority?.getStore() === "background", run: async () => {
       try {
-        resolve8(await get(key2).run(work));
+        resolve9(await get(key2).run(work));
       } catch (error) {
         reject(error);
       }
@@ -43635,11 +44407,11 @@ var init_analyst_openclaw_infer = __esm(() => {
 
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
   return {
-    correlationId: randomUUID7(),
+    correlationId: randomUUID8(),
     receivedAt: received.toISOString(),
     receivedAtMs: received.getTime(),
     sqliteRetryCount: 0,
@@ -44195,8 +44967,8 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId) {
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve8) => {
-    timer = setTimeout(() => resolve8({ kind: "timeout" }), timeoutMs);
+  const deadline = new Promise((resolve9) => {
+    timer = setTimeout(() => resolve9({ kind: "timeout" }), timeoutMs);
   });
   try {
     const settled = await Promise.race([laneSettled, deadline]);
@@ -44811,9 +45583,49 @@ function recordReleaseManifest(manifest) {
 function adoptReleaseManifests(into, from) {
   into.manifests.push(...from.manifests);
 }
-var storage2;
+function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
+  return !privateNow || constraints.includeSecureLocalContent || postureNow === "allow";
+}
+function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
+  if (manifests.length === 0)
+    return ANSWER_RELEASE_UNVERIFIED;
+  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
+  const inputs = entries.map(({ input }) => input);
+  try {
+    const verdicts = check.inputs(inputs);
+    if (verdicts.length !== inputs.length)
+      return ANSWER_RELEASE_UNVERIFIED;
+    const postureNow = check.secureDerivativeDefault();
+    for (const [index, verdict] of verdicts.entries()) {
+      if (verdict.tier === "unknown" || verdict.gone)
+        return ANSWER_RELEASE_UNVERIFIED;
+      if (verdict.tier === "secret")
+        return ANSWER_RELEASE_UNVERIFIED;
+      const { input, constraints } = entries[index];
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
+        return ANSWER_BECAME_PRIVATE;
+      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
+        return "Olympus withheld this answer because current settings require approval for Private content.";
+      }
+    }
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+  return;
+}
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
+}
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var storage2, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
   storage2 = new AsyncLocalStorage5;
+  withheldAnswers = new WeakSet;
 });
 
 // src/core/secret-location-note.ts
@@ -45099,14 +45911,43 @@ function createAnalystSourceIndexAnswerHandler(options) {
       }
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
+      const assertDispatchAllowed = (analysisDetail) => {
+        if (options.releaseCheck) {
+          const reason = answerReleaseWithheldReason([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
+          if (reason)
+            throw new OperationError("source_index_policy_violation", reason);
+        }
+        if (lanes.visibilityGate) {
+          const hits = analysisDetail.pack.candidates.map((candidate, index) => ({
+            corpusId: analysisDetail.candidateCorpusIds[index] ?? "",
+            servingLayer: candidate.chunks.length > 0 || (candidate.tables?.length ?? 0) > 0 || (candidate.facts?.length ?? 0) > 0 ? "content" : "metadata",
+            sourceItem: candidate.provenance.sourceItem,
+            provenance: candidate.provenance,
+            trustDomain: candidate.trustDomain,
+            trustTier: candidate.trustTier,
+            rawExposed: false
+          }));
+          const kept = new Set(lanes.visibilityGate(hits));
+          if (hits.some((hit) => !kept.has(hit))) {
+            throw new OperationError("source_index_policy_violation", "Olympus withheld this answer because an item changed privacy tier before analysis.");
+          }
+        }
+      };
       const legFitting = (analysisDetail) => {
         const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
+        const guarded = (analyst) => ({
+          analyze: (dispatchPack, analyzeOptions) => {
+            assertDispatchAllowed(analysisDetail);
+            return analyst.analyze(dispatchPack, analyzeOptions);
+          }
+        });
         return {
-          localLeg: (analyst) => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus)
+          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          trustedLeg: guarded
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -45121,16 +45962,15 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
       const analyze = (analysisDetail, analysisLocalOnly) => {
-        const { localLeg, cloudLeg } = legFitting(analysisDetail);
+        const { localLeg, cloudLeg, trustedLeg } = legFitting(analysisDetail);
         const guard = async () => {
-          if (!options.inferenceGuard)
-            return;
           try {
-            await options.inferenceGuard(analysisDetail.pack, request, analysisDetail.candidateCorpusIds);
+            await options.inferenceGuard?.(analysisDetail.pack, request, analysisDetail.candidateCorpusIds);
           } catch {
             currentAnalystAbortSignal()?.throwIfAborted();
             throw new OperationError("source_index_policy_violation", "Source evidence is no longer allowed.", "Ask again under the current source policy.");
           }
+          assertDispatchAllowed(analysisDetail);
         };
         const live = (analyst) => options.inferenceGuard ? {
           async analyze(legPack, legOptions) {
@@ -45142,13 +45982,13 @@ function createAnalystSourceIndexAnswerHandler(options) {
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
-          local: localLeg(live(options.analyst)),
-          ...options.cloudAnalyst ? { cloud: cloudLeg(live(options.cloudAnalyst)) } : {},
-          ...veniceAnalyst ? { venice: live(veniceAnalyst) } : {},
+          local: live(localLeg(options.analyst)),
+          ...options.cloudAnalyst ? { cloud: live(cloudLeg(options.cloudAnalyst)) } : {},
+          ...veniceAnalyst ? { venice: live(trustedLeg(veniceAnalyst)) } : {},
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, (analyst) => localLeg(live(analyst)), (analyst) => cloudLeg(live(analyst)), live) } : {},
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, (analyst) => live(localLeg(analyst)), (analyst) => live(cloudLeg(analyst)), (analyst) => live(trustedLeg(analyst))) } : {},
           secureAnalystPoolState,
           ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
           ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
@@ -45969,7 +46809,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
           }, () => {
             return;
           }),
-          new Promise((resolve8) => setTimeout(resolve8, cancellationSettleMs))
+          new Promise((resolve9) => setTimeout(resolve9, cancellationSettleMs))
         ]);
       } else {
         await Promise.resolve();
@@ -46526,6 +47366,10 @@ async function searchReleasedEvidence(input) {
     }));
   });
   const released = input.releaseCheck ? recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  recordReleaseManifest({
+    inputs: identities.filter((_, index) => released.evidence.includes(evidence[index])),
+    constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: false }
+  });
   withheld += released.withheld;
   const coverage = detail.pack.coverage;
   return {
@@ -46682,8 +47526,8 @@ async function probePrivateMatch(input) {
   try {
     return await Promise.race([
       run(),
-      new Promise((resolve8) => {
-        timer = setTimeout(() => resolve8("unknown"), input.timeoutMs);
+      new Promise((resolve9) => {
+        timer = setTimeout(() => resolve9("unknown"), input.timeoutMs);
         timer.unref?.();
       })
     ]);
@@ -46888,7 +47732,7 @@ function sourceInvocationProvenance(value) {
 }
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash27, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash28, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync31, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname32, join as join42 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -46907,7 +47751,7 @@ function connectedSourceScopeAccountGeneration(sourceId, capability, registry, p
   if (handles.length !== 1)
     return;
   const handle = handles[0];
-  const generation = createHash27("sha256").update(JSON.stringify([
+  const generation = createHash28("sha256").update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? "",
@@ -46974,7 +47818,7 @@ function approveFileSourceScope(input) {
     }
     const existing = readState3(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID8();
+    const revision = randomUUID9();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -47082,7 +47926,7 @@ function readState3(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest3 = createHash27("sha256").update(raw).digest("hex");
+  const digest3 = createHash28("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -47153,7 +47997,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash28, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash29, randomUUID as randomUUID10 } from "node:crypto";
 import { existsSync as existsSync32, readFileSync as readFileSync30 } from "node:fs";
 import { dirname as dirname33, join as join43 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -47214,7 +48058,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState4(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID9();
+    const revision = randomUUID10();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -47247,7 +48091,7 @@ function assertMailSourceScopeApproved(input) {
 }
 function mailScopeOwnerTierRules(scope) {
   return scope.alwaysPrivateSenders.map((sender) => ({
-    id: `mail-scope-always-private-${createHash28("sha256").update(sender).digest("hex").slice(0, 12)}`,
+    id: `mail-scope-always-private-${createHash29("sha256").update(sender).digest("hex").slice(0, 12)}`,
     source: MAIL_SCOPE_RULE_SOURCE,
     match: { kind: "sender", value: sender },
     tier: "secure",
@@ -47465,7 +48309,7 @@ function readState4(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest3 = createHash28("sha256").update(raw).digest("hex");
+  const digest3 = createHash29("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -47981,7 +48825,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 import { homedir as homedir25 } from "node:os";
 import { join as join44 } from "node:path";
 
@@ -48049,14 +48893,15 @@ class GoogleGmailSourceConnector {
   }
   async* listItems(options = {}) {
     const client = await this.clientForRequest();
+    let scopeConfirmationsFetched = 0;
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    let metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
+    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
-    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
@@ -48082,7 +48927,22 @@ class GoogleGmailSourceConnector {
           break;
         messagesExamined += 1;
         const stored = this.scope?.storedItem?.(message2.id);
+        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
+          continue;
         if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
+            scopeConfirmationsFetched += 1;
+            messagesFetched += 1;
+            this.providerRequests += 1;
+            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
+            const received = internalDateNumber({ internalDate: metadata.internalDate });
+            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const subject2 = metadataString2(item2.metadata, "subject");
+            const from2 = metadataString2(item2.metadata, "from");
+            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
+            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
+              this.scope.storedItemObserved(item2);
+          }
           this.itemsSkippedStored += 1;
           continue;
         }
@@ -48458,7 +49318,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -48703,9 +49563,9 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash29("sha256").update(value).digest("hex");
+  return createHash30("sha256").update(value).digest("hex");
 }
-var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_linux_engine_layout();
   init_mail_source_scope();
@@ -48757,7 +49617,7 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash30 } from "node:crypto";
+import { createHash as createHash31 } from "node:crypto";
 function createGmailConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
@@ -48777,12 +49637,24 @@ function createGmailConnectorStoreSyncHandler(options) {
     const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)].filter((copy) => copy !== undefined);
     if (copies.length === 0)
       return;
-    return { hasContent: copies.some((copy) => copy.chunkCount > 0) };
+    return {
+      hasContent: copies.some((copy) => copy.chunkCount > 0),
+      ...options.confirmStoredPrivateScope && options.scopeApproval && options.secureStore.itemStoredContent(identity)?.chunkCount && !options.secureStore.itemOwnerPresent(identity, connectorId, "observed") ? { needsScopeObservation: true } : {}
+    };
   };
-  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
+  const scope = options.scope ? {
+    ...options.scope,
+    storedItem,
+    ...options.confirmStoredPrivateScope && options.scopeApproval ? {
+      storedItemObserved: (item) => {
+        options.assertScopeCurrent?.();
+        options.secureStore.observeStoredItemOwner(item.identity, connectorId);
+      }
+    } : {}
+  } : undefined;
   const buildConnector = (overrides = {}) => new GoogleGmailSourceConnector({
     ...options,
-    ...scope ? { scope } : {},
+    ...overrides.scope ? { scope: overrides.scope } : scope ? { scope } : {},
     ...overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {},
     ...overrides.query ? { query: overrides.query } : {},
     provenance: sourceInvocationProvenance(overrides.provenance)
@@ -48847,6 +49719,40 @@ function createGmailConnectorStoreSyncHandler(options) {
     };
   };
   return {
+    ...options.confirmStoredPrivateScope && options.scopeApproval && scope ? {
+      confirmPrivateScope: async (request = {}) => {
+        const confirmationScope = `private-confirmation-v1:${connectorId}`;
+        const complete = `${confirmationScope}:done`;
+        if (request.checkpoint === complete)
+          return { confirmed: 0, done: true, checkpoint: complete };
+        const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
+        options.assertScopeCurrent?.();
+        let confirmed = 0;
+        const maxItems = Math.min(request.max_items ?? config.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS);
+        const connector = buildConnector({
+          maxMessages: maxItems,
+          scope: { ...scope, confirmationOnly: true, storedItemObserved: (item) => {
+            scope.storedItemObserved?.(item);
+            if (options.secureStore.itemOwnerPresent(item.identity, connectorId, "observed"))
+              confirmed++;
+          } }
+        });
+        let done = false;
+        let checkpoint = resume ? encodeCheckpoint({ head: resume, scope: confirmationScope }) : null;
+        try {
+          for await (const page2 of connector.listItems({ limit: maxItems, ...resume ? { cursor: resume } : {} })) {
+            done = page2.done;
+            checkpoint = done ? complete : page2.nextCursor ? encodeCheckpoint({ head: page2.nextCursor, scope: confirmationScope }) : checkpoint;
+          }
+        } catch (error) {
+          if (!resume || !isRejectedCursorError(error))
+            throw error;
+          checkpoint = null;
+        }
+        options.assertScopeCurrent?.();
+        return { confirmed, done, checkpoint };
+      }
+    } : {},
     async sync(request = {}) {
       const maxMessages = request.max_messages ?? options.maxMessages;
       const connector = buildConnector({
@@ -48972,7 +49878,7 @@ function scopedTraversal(connector, connectorId, assertScopeCurrent) {
 function gmailCursorConnectorId(account, scope) {
   if (!scope)
     return GMAIL_PROVIDER;
-  const digest3 = createHash30("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest3 = createHash31("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest3}`;
 }
 function encodeCheckpoint(envelope) {
@@ -49068,7 +49974,7 @@ function taskOutcome(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash30("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash31("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError(error) {
   if (error instanceof TypeError)
@@ -49101,7 +50007,7 @@ var init_gmail_live_sync = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 import { homedir as homedir26 } from "node:os";
 import { join as join45 } from "node:path";
 
@@ -49582,7 +50488,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -49744,7 +50650,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash31("sha256").update(value).digest("hex");
+  return createHash32("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -49805,7 +50711,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 function createGoogleDriveLaneTierSet(options) {
   return createLaneTieredStoreSet({
     ...options,
@@ -49963,7 +50869,7 @@ function scopedTraversal2(connector, connectorId) {
 function googleDriveCursorConnectorId(account, scope) {
   if (!scope)
     return GOOGLE_DRIVE_PROVIDER;
-  const digest3 = createHash32("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest3 = createHash33("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest3}`;
 }
 function googleDriveScopedCheckpoint(cursor, connectorId) {
@@ -50052,7 +50958,7 @@ function taskOutcome2(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash32("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash33("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
@@ -50096,7 +51002,7 @@ var init_privacy_language = __esm(() => {
     "local-first": "Local models with Venice fallback",
     "local-only": "Local models",
     "private-cloud-only": "Venice",
-    "no-sensitive": "Private kept local, keyword search only"
+    "no-sensitive": "Private meaning search on this computer"
   };
 });
 
@@ -50202,7 +51108,7 @@ var init_corpus_adapter2 = __esm(() => {
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
 // src/workers/connector-store/capture-spool-secrets.ts
-import { createHash as createHash33 } from "node:crypto";
+import { createHash as createHash34 } from "node:crypto";
 import { closeSync as closeSync12, fsyncSync as fsyncSync3, lstatSync as lstatSync19, openSync as openSync12, readFileSync as readFileSync32, readSync as readSync2, writeSync as writeSync4 } from "node:fs";
 import { join as join47 } from "node:path";
 function redactCaptureSpoolLines(options) {
@@ -50335,7 +51241,7 @@ function addCaptureSpoolRedactions(...results) {
   }), { recordsRedacted: 0, recordsBlanked: 0 });
 }
 function secretsDigest(ledger) {
-  const hash = createHash33("sha256");
+  const hash = createHash34("sha256");
   for (const { identity, names } of ledger.secretsIdentities()) {
     hash.update([
       identity.provider,
@@ -50366,7 +51272,7 @@ var init_capture_spool_secrets = __esm(() => {
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash34 } from "node:crypto";
+import { createHash as createHash35 } from "node:crypto";
 import { existsSync as existsSync34, lstatSync as lstatSync20, readFileSync as readFileSync33, readdirSync as readdirSync4 } from "node:fs";
 import { homedir as homedir28 } from "node:os";
 import { join as join48 } from "node:path";
@@ -50822,7 +51728,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha256(value) {
-  return createHash34("sha256").update(value).digest("hex");
+  return createHash35("sha256").update(value).digest("hex");
 }
 function telegramConversationKind(chatType) {
   switch (chatType?.toLowerCase()) {
@@ -51331,7 +52237,7 @@ var init_corpus_adapter3 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash35 } from "node:crypto";
+import { createHash as createHash36 } from "node:crypto";
 import { mkdirSync as mkdirSync21, readFileSync as readFileSync34 } from "node:fs";
 import { homedir as homedir29 } from "node:os";
 import { dirname as dirname35, join as join49 } from "node:path";
@@ -51711,7 +52617,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash35("sha256").update(JSON.stringify({
+      contentHash: createHash36("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -51910,7 +52816,7 @@ var init_live_control = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash36 } from "node:crypto";
+import { createHash as createHash37 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -52084,7 +52990,7 @@ function taskOutcome3(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash36("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash37("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function emptyEmbedSummary(store, provider) {
   return {
@@ -52680,7 +53586,7 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { createHash as createHash37 } from "node:crypto";
+import { createHash as createHash38 } from "node:crypto";
 import { homedir as homedir31 } from "node:os";
 import { join as join51 } from "node:path";
 function createXBookmarksSourceConnector(options) {
@@ -52790,7 +53696,7 @@ function xBookmarkRawItemFromPost(post, account, folderMemberships, fetchedAt) {
       ...folders.length > 0 ? { folders, folderIds, folderNames } : {},
       ...post.lang ? { language: post.lang } : {},
       ...post.mediaUrls?.length ? { mediaUrls: [...post.mediaUrls] } : {},
-      contentHash: createHash37("sha256").update(JSON.stringify({ text: text2, title, url, folders })).digest("hex")
+      contentHash: createHash38("sha256").update(JSON.stringify({ text: text2, title, url, folders })).digest("hex")
     }),
     fetchedAt
   };
@@ -52879,7 +53785,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash38, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash39, randomUUID as randomUUID11 } from "node:crypto";
 import { chmodSync as chmodSync12, lstatSync as lstatSync21, mkdirSync as mkdirSync22 } from "node:fs";
 import { homedir as homedir32 } from "node:os";
 import { dirname as dirname36, join as join52 } from "node:path";
@@ -53158,7 +54064,7 @@ class LocalXBookmarksApiUsageStore {
       }
       const maxResources = routine ? Math.min(requestedMaxResources, input.preserveHeadReserve ? backgroundRemainingReads : remainingReads, input.preserveHeadReserve ? backgroundRemainingCostUnits : remainingCostUnits) : requestedMaxResources;
       const reservation = {
-        reservationId: randomUUID10(),
+        reservationId: randomUUID11(),
         account,
         utcDay,
         maxResources,
@@ -53699,7 +54605,7 @@ function rateLimitStatus(row) {
   };
 }
 function hashResourceId(resourceId) {
-  return createHash38("sha256").update(resourceId).digest("hex");
+  return createHash39("sha256").update(resourceId).digest("hex");
 }
 function utcDayFrom(date) {
   return date.toISOString().slice(0, 10);
@@ -53820,7 +54726,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash39, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash40, randomUUID as randomUUID12 } from "node:crypto";
 import { chmodSync as chmodSync13, mkdirSync as mkdirSync23 } from "node:fs";
 import { homedir as homedir33 } from "node:os";
 import { dirname as dirname37, join as join53 } from "node:path";
@@ -53890,7 +54796,7 @@ class LocalXBookmarksReconcileStateStore {
     const nowDate = validDate4(input.now ?? new Date);
     const now = nowDate.toISOString();
     const leaseExpiresAt = new Date(nowDate.getTime() + FOLDER_FACET_REFRESH_LEASE_MS).toISOString();
-    const runToken = randomUUID11();
+    const runToken = randomUUID12();
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT *
@@ -54115,7 +55021,7 @@ class LocalXBookmarksReconcileStateStore {
           membership_pages, coverage_scope, window_boundary_algorithm_version,
           started_at, updated_at
         ) VALUES (?, ?, ?, ?, 'global', 0, 0, 0, 0, 0, ?, ?, ?, ?)
-      `).run(account, randomUUID11(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
+      `).run(account, randomUUID12(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
     }
     return { progress: this.progress(account), warnings };
   }
@@ -55981,7 +56887,7 @@ function normalizeFolderFacetRefreshCounts(counts) {
   };
 }
 function reconcileCompatibilityHash(limits, providerUserId, coverageScope, windowBoundaryAlgorithmVersion) {
-  return createHash39("sha256").update(JSON.stringify({
+  return createHash40("sha256").update(JSON.stringify({
     algorithm: RECONCILE_ALGORITHM_VERSION,
     providerUserId,
     coverageScope,
@@ -56004,7 +56910,7 @@ function recoveryPolicy() {
   };
 }
 function sha256Json(value) {
-  return createHash39("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash40("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function normalizeOptionalSha2562(value, label) {
   if (value === undefined)
@@ -56218,7 +57124,7 @@ var init_reconcile_state = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-import { createHash as createHash40 } from "node:crypto";
+import { createHash as createHash41 } from "node:crypto";
 function createXBookmarksApiSourceConnector(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -56945,7 +57851,7 @@ function classifyXBookmarksProviderWindowBoundary(error, context2, policy = X_BO
   const matchedCode = error.providerErrorCode && approvedCodes.has(error.providerErrorCode) ? error.providerErrorCode : undefined;
   if (!matchedType && !matchedCode)
     return;
-  const fingerprintSha256 = createHash40("sha256").update(JSON.stringify({
+  const fingerprintSha256 = createHash41("sha256").update(JSON.stringify({
     kind: "x_provider_window_boundary",
     algorithm_version: algorithmVersion,
     http_status: error.status,
@@ -57145,7 +58051,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash41, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash42, randomUUID as randomUUID13 } from "node:crypto";
 import {
   chmodSync as chmodSync14,
   existsSync as existsSync35,
@@ -57197,7 +58103,7 @@ async function runXBookmarksWindowDiagnostic(options) {
     kind: "x_bookmarks_window_diagnostic",
     version: 1,
     generated_at: attemptedAt.toISOString(),
-    account_sha256: createHash41("sha256").update(account).digest("hex"),
+    account_sha256: createHash42("sha256").update(account).digest("hex"),
     page_size: config.reconcilePageSize,
     max_pages_per_traversal: MAX_DIAGNOSTIC_PAGES,
     probes: [freshRoot, identicalCursorRetry, idOnlyTraversal, richTraversal],
@@ -57220,7 +58126,7 @@ async function runXBookmarksWindowDiagnostic(options) {
   return {
     report,
     report_path: options.reportPath,
-    report_sha256: createHash41("sha256").update(reportJson).digest("hex")
+    report_sha256: createHash42("sha256").update(reportJson).digest("hex")
   };
 }
 async function diagnosticClient(options, env) {
@@ -57396,7 +58302,7 @@ function writePrivateReport(pathValue, contents) {
     throw new TypeError("X bookmark diagnostic report path is required.");
   const parent = dirname38(reportPath);
   mkdirSync24(parent, { recursive: true, mode: 448 });
-  const temporaryPath = `${reportPath}.tmp-${randomUUID12()}`;
+  const temporaryPath = `${reportPath}.tmp-${randomUUID13()}`;
   try {
     writeFileSync9(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync14(temporaryPath, 384);
@@ -57824,14 +58730,14 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash42, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID14 } from "node:crypto";
 import {
   chmodSync as chmodSync15,
   renameSync as renameSync9,
   rmSync as rmSync11,
   writeFileSync as writeFileSync10
 } from "node:fs";
-import { resolve as resolve8 } from "node:path";
+import { resolve as resolve9 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
   const account = requireNonEmpty3(options.account, "X bookmark content-recovery account");
   const userId = requireNonEmpty3(options.userId, "X bookmark content-recovery provider user id");
@@ -58038,11 +58944,11 @@ function sameFolderFacetAuthorityReading(atGate, atRestore) {
   return atGate.leaseGeneration === atRestore.leaseGeneration;
 }
 function contentRecoveryEmbeddingJournalId(restoreItems) {
-  const inputSha256 = createHash42("sha256").update(JSON.stringify(restoreItems)).digest("hex");
+  const inputSha256 = createHash43("sha256").update(JSON.stringify(restoreItems)).digest("hex");
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
-  return resolve8(`${storePath}.content-recovery-receipt.json`);
+  return resolve9(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
   const session = await issueGrantFencedXSession({
@@ -58132,8 +59038,8 @@ function buildReceipt(status, counts, retryAt) {
   return { ...unsigned, receipt_sha256: sha256Json2(unsigned) };
 }
 function writeReceipt(pathValue, receipt) {
-  const path = resolve8(pathValue);
-  const temporary = `${path}.tmp-${randomUUID13()}`;
+  const path = resolve9(pathValue);
+  const temporary = `${path}.tmp-${randomUUID14()}`;
   try {
     writeFileSync10(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
@@ -58151,7 +59057,7 @@ function writeReceipt(pathValue, receipt) {
   }
 }
 function sha256Json2(value) {
-  return createHash42("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash43("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function requireNonEmpty3(value, label) {
   const normalized = value.trim();
@@ -59250,7 +60156,7 @@ var init_store_sync2 = __esm(() => {
 });
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash43 } from "node:crypto";
+import { createHash as createHash44 } from "node:crypto";
 function isFileExtractionSourceError(value) {
   if (!value || typeof value !== "object")
     return false;
@@ -59293,7 +60199,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash43("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash44("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
     }
@@ -59302,7 +60208,7 @@ var init_file_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile5, realpath, stat as stat3 } from "node:fs/promises";
-import { basename as basename5, relative as relative6, resolve as resolve9, sep as sep6 } from "node:path";
+import { basename as basename5, relative as relative6, resolve as resolve10, sep as sep6 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -59321,7 +60227,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty5(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve9(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve10(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -59846,7 +60752,7 @@ var init_email_policy = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash45, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash46, randomUUID as randomUUID16 } from "node:crypto";
 import {
   chmodSync as chmodSync16,
   existsSync as existsSync38,
@@ -59896,7 +60802,7 @@ function createSourceWatchExecutorCapability(input) {
 }
 function sourceWatchDeliveryKey(watchId, ref) {
   const canonical = requireCanonicalRef(ref);
-  return createHash45("sha256").update(JSON.stringify([
+  return createHash46("sha256").update(JSON.stringify([
     requireId(watchId, "watchId"),
     canonical.corpusId,
     canonical.localItemId,
@@ -59932,7 +60838,7 @@ class LocalSourceWatchStore {
     requireOwnerContext(ownerContext);
     assertOnlyFields(input, CREATE_WATCH_FIELDS, "create watch");
     const now = this.now();
-    const watchId = input.watchId === undefined ? randomUUID15() : requireId(input.watchId, "watchId");
+    const watchId = input.watchId === undefined ? randomUUID16() : requireId(input.watchId, "watchId");
     const corpusId = requireId(input.corpusId, "corpusId");
     const queryText = requireQuery(input.queryText);
     const mode = requireMode(input.mode);
@@ -60227,7 +61133,7 @@ class LocalSourceWatchStore {
       `).all(now, limit);
       const leases = [];
       for (const candidate of candidates) {
-        const leaseToken = randomUUID15();
+        const leaseToken = randomUUID16();
         const result = this.db.query(`
           UPDATE source_watch_outbox
           SET status = 'leased', lease_owner = ?, lease_token = ?,
@@ -60962,7 +61868,7 @@ function addMilliseconds(timestamp2, deltaMs) {
   return new Date(Date.parse(timestamp2) + deltaMs).toISOString();
 }
 function sha2562(value) {
-  return createHash45("sha256").update(value, "utf8").digest("hex");
+  return createHash46("sha256").update(value, "utf8").digest("hex");
 }
 var SOURCE_WATCH_STORE_ID = "source-watch", SOURCE_WATCH_SCHEMA_VERSION = 1, SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_LOCAL_ITEM_ID_LENGTH = 4096, MAX_SOURCE_VERSION_LENGTH = 1024, MAX_DELIVERY_ATTEMPTS = 100, MAX_AVAILABLE_DELAY_MS, MAX_PAGE_SIZE = 100, MAX_MAINTENANCE_BATCH = 1000, MAX_CURSOR_LENGTH2 = 1024, DEFAULT_MAX_DELIVERY_ATTEMPTS = 5, DEFAULT_PAGE_SIZE = 50, SAFE_ID, SAFE_TOKEN, SAFE_HASH, SAFE_UUID, SAFE_CHANNEL_TARGET, SAFE_CANONICAL_REF, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, OWNED_SCHEMA_OBJECTS, REQUIRED_COLUMNS, SYSTEM_CLOCK;
 var init_source_watch = __esm(() => {
@@ -61142,7 +62048,35 @@ class EmailClient {
     const data2 = asRecord8(response);
     assertNoRawEmailFields(data2);
     assertNoSourceIndexOperationalLeakFields(data2);
-    return parseSourceIndexAnswerResult(data2);
+    const ticket = data2._release_ticket;
+    delete data2._release_ticket;
+    const result = parseSourceIndexAnswerResult(data2);
+    if (options.caller?.surface === "remote")
+      return result;
+    if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
+      sourceAnswerTickets.set(result, ticket);
+    return await this.revalidateSourceAnswer(result);
+  }
+  async revalidateSourceAnswer(result) {
+    if (!result || typeof result !== "object" || typeof result.answer !== "string")
+      return result;
+    if (isWithheldSourceAnswer(result))
+      return result;
+    const ticket = sourceAnswerTickets.get(result);
+    if (!ticket)
+      return withheldSourceAnswer("Olympus withheld this answer because the engine did not provide a privacy release ticket. Update Olympus, then ask again.");
+    try {
+      const verdict = asRecord8(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket })
+      }));
+      if (verdict.allowed === true)
+        return result;
+      return withheldSourceAnswer(typeof verdict.withheld === "string" ? verdict.withheld : ANSWER_RELEASE_UNVERIFIED);
+    } catch {
+      return withheldSourceAnswer("Olympus withheld this answer because the engine could not verify its privacy release ticket. Check that Olympus is running and up to date, then ask again.");
+    }
   }
   async sourceIndexStatus(options = {}) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
@@ -62004,8 +62938,9 @@ async function safeText2(response) {
     return "";
   }
 }
-var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512, MAX_EMAIL_WORKER_ERROR_BODY_LENGTH, PASSTHROUGH_EMAIL_WORKER_ERROR_CODES, CONSULT_ASK_CLIENT_TIMEOUT_MS, MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000, SOURCE_INDEX_LOCATOR_KEYS, DROPBOX_LOCATOR_REQUIRED_KEYS, DROPBOX_LOCATOR_OPTIONAL_KEYS, FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS;
+var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512, MAX_EMAIL_WORKER_ERROR_BODY_LENGTH, PASSTHROUGH_EMAIL_WORKER_ERROR_CODES, CONSULT_ASK_CLIENT_TIMEOUT_MS, sourceAnswerTickets, MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000, SOURCE_INDEX_LOCATOR_KEYS, DROPBOX_LOCATOR_REQUIRED_KEYS, DROPBOX_LOCATOR_OPTIONAL_KEYS, FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS;
 var init_email = __esm(() => {
+  init_release_manifest();
   init_worker_transport();
   init_config();
   init_email_policy();
@@ -62022,6 +62957,7 @@ var init_email = __esm(() => {
     ["source_index_policy_violation", "source_index_policy_violation"]
   ]);
   CONSULT_ASK_CLIENT_TIMEOUT_MS = 20 * 60000;
+  sourceAnswerTickets = new WeakMap;
   SOURCE_INDEX_LOCATOR_KEYS = new Set([
     "locator",
     "display_path",
@@ -62441,7 +63377,7 @@ __export(exports_managed_tools, {
   MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
 });
 import { execFile as execFile2 } from "node:child_process";
-import { createHash as createHash46, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash47, randomUUID as randomUUID17 } from "node:crypto";
 import {
   accessSync as accessSync7,
   constants as constants5,
@@ -62698,8 +63634,8 @@ ${inspect.stdout}`)) {
   return signed;
 }
 async function defaultClearQuarantine(dir) {
-  await new Promise((resolve11) => {
-    execFile2("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve11());
+  await new Promise((resolve12) => {
+    execFile2("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve12());
   });
 }
 function ensureOwnedDirectory(path, uid, label, options = {}) {
@@ -62790,7 +63726,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
   const toolDir = join60(root, tool);
   const versionDir = join60(toolDir, pin.version);
-  const id = randomUUID16();
+  const id = randomUUID17();
   const download = join60(toolDir, `.download-${id}`);
   const staging = join60(toolDir, `.staging-${id}`);
   try {
@@ -62887,7 +63823,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
   }
 }
 function fileSha256(path) {
-  return createHash46("sha256").update(readFileSync38(path)).digest("hex");
+  return createHash47("sha256").update(readFileSync38(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
@@ -62939,7 +63875,7 @@ async function downloadTo(path, asset, options, onBytes, tool, label) {
     });
     throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
   }
-  const hash = createHash46("sha256");
+  const hash = createHash47("sha256");
   const file = await open4(path, "wx", 384);
   let received = 0;
   let lastReport = 0;
@@ -63084,7 +64020,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
   const compressed = readFileSync38(archivePath);
   let tar;
   try {
-    tar = await new Promise((resolve11, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve11(out)));
+    tar = await new Promise((resolve12, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve12(out)));
   } catch {
     throw new ManagedToolsError("unsafe_archive", "The archive could not be unpacked.", tool);
   }
@@ -63211,27 +64147,27 @@ function createManagedToolsJob(options = {}) {
     settled: () => current2
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve11) => {
+var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve12) => {
   execFile2(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (!error) {
-      resolve11({ code: 0, stdout, stderr });
+      resolve12({ code: 0, stdout, stderr });
       return;
     }
     const failure = error;
     if (typeof failure.code === "string")
-      resolve11({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
+      resolve12({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
     else
-      resolve11({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
+      resolve12({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
   });
-}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve11) => {
+}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve12) => {
   execFile2(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
     if (error) {
       const failure = error;
       const detail = failure.signal ? `stopped by ${failure.signal}` : failure.code !== undefined ? `exit ${String(failure.code)}` : failure.message;
-      resolve11({ ok: false, detail });
+      resolve12({ ok: false, detail });
       return;
     }
-    resolve11({ ok: true, stdout });
+    resolve12({ ok: true, stdout });
   });
 });
 var init_managed_tools = __esm(() => {
@@ -63329,7 +64265,7 @@ function bridgeMac(token, role, name, ...parts) {
   return hmac.digest();
 }
 function authenticate(socketPath, token, name, signal) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     const socket = createConnection({ path: socketPath });
     const clientNonce = randomBytes11(16);
     let buffered = Buffer.alloc(0);
@@ -63380,7 +64316,7 @@ function authenticate(socketPath, token, name, signal) {
         }
         settled = true;
         cleanup();
-        resolve11(socket);
+        resolve12(socket);
       });
     };
     const timer = setTimeout(() => fail(authError("timeout")), HANDSHAKE_TIMEOUT_MS);
@@ -63451,8 +64387,8 @@ Connection: close\r
 function writeSocket(socket, bytes) {
   if (bytes.byteLength === 0)
     return Promise.resolve();
-  return new Promise((resolve11, reject) => {
-    socket.write(bytes, (error) => error ? reject(error) : resolve11());
+  return new Promise((resolve12, reject) => {
+    socket.write(bytes, (error) => error ? reject(error) : resolve12());
   });
 }
 async function writeRequestBody(socket, request, contentLength, signal) {
@@ -63496,7 +64432,7 @@ function validHeaderValue(value) {
   return true;
 }
 function exchange(socket, request, head, contentLength, signal) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     let state = "head";
     let buffered = Buffer.alloc(0);
     let remaining = 0;
@@ -63653,7 +64589,7 @@ function exchange(socket, request, head, contentLength, signal) {
               headers.append(name, value);
             const response = new Response(responseStream ?? null, { status, statusText: statusMatch[2] ?? "", headers });
             settled = true;
-            resolve11(response);
+            resolve12(response);
             if (bodyless) {
               finish();
               break;
@@ -63930,33 +64866,33 @@ async function runLinuxConfinementSelfTestWithRunner(launcher, workDir, env, por
   }
 }
 function listen(server, port, host, ipv6Only = false) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ port, host, exclusive: true, ipv6Only }, () => {
       server.removeListener("error", reject);
-      resolve11(server.address().port);
+      resolve12(server.address().port);
     });
   });
 }
 function listenPath(server, path) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ path }, () => {
       server.removeListener("error", reject);
-      resolve11();
+      resolve12();
     });
   });
 }
 function closeServer(server) {
-  return new Promise((resolve11) => server.close(() => resolve11()));
+  return new Promise((resolve12) => server.close(() => resolve12()));
 }
 function socketFd(socket) {
   return socket._handle?.fd ?? -1;
 }
 function connected(options) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     const socket = createConnection2(options);
-    socket.once("connect", () => resolve11(socket));
+    socket.once("connect", () => resolve12(socket));
     socket.once("error", reject);
   });
 }
@@ -63991,14 +64927,14 @@ async function stopGroup(pgid) {
   } catch {}
   const deadline = Date.now() + 2500;
   while (!processGone(pgid) && Date.now() < deadline)
-    await new Promise((resolve11) => setTimeout(resolve11, 50));
+    await new Promise((resolve12) => setTimeout(resolve12, 50));
   if (!processGone(pgid)) {
     try {
       process.kill(-pgid, "SIGKILL");
     } catch {}
     const killDeadline = Date.now() + 1500;
     while (!processGone(pgid) && Date.now() < killDeadline)
-      await new Promise((resolve11) => setTimeout(resolve11, 50));
+      await new Promise((resolve12) => setTimeout(resolve12, 50));
   }
   if (!processGone(pgid))
     throw new Error(`self-test process group ${pgid} survived cleanup`);
@@ -64008,8 +64944,8 @@ function startDgramDecoy(script2, pathname, env, watchdogPath, supervise) {
   let started = false;
   let resolveReady;
   let rejectReady;
-  const ready = new Promise((resolve11, reject) => {
-    resolveReady = resolve11;
+  const ready = new Promise((resolve12, reject) => {
+    resolveReady = resolve12;
     rejectReady = reject;
   });
   const timer = setTimeout(() => rejectReady(new Error("Unix datagram decoy did not start")), 3000);
@@ -64042,8 +64978,8 @@ async function releaseFixtureResources(servers, datagrams, sockets, acceptedSock
     try {
       await Promise.race([
         closeServer(server),
-        new Promise((resolve11) => {
-          timer = setTimeout(resolve11, 1000);
+        new Promise((resolve12) => {
+          timer = setTimeout(resolve12, 1000);
         })
       ]);
     } catch {} finally {
@@ -64141,9 +65077,9 @@ async function createFixture(script2, workDir, launcher, ports, env, watchdogPat
       const answer = Buffer.from([192, 12, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 127, 0, 0, 1]);
       dnsUdp.send(Buffer.concat([response, answer]), info.port, info.address);
     });
-    await new Promise((resolve11, reject) => {
+    await new Promise((resolve12, reject) => {
       dnsUdp.once("error", reject);
-      dnsUdp.bind(dnsPort, "127.0.0.53", resolve11);
+      dnsUdp.bind(dnsPort, "127.0.0.53", resolve12);
     });
     let controlStreams = 0;
     let confinedStreams = 0;
@@ -64555,11 +65491,11 @@ main().catch(() => process.exit(1));
           let status;
           let instanceBound = false;
           let listenerSetBound = false;
-          const controlDone = new Promise((resolve11, reject) => {
+          const controlDone = new Promise((resolve12, reject) => {
             control = transport.supervise("daemon", watchdogPath, [process.execPath, probePath, JSON.stringify(fixture.controlTarget)], env, (line) => {
               controlResult ??= parseProbeLine(line);
               if (controlResult)
-                resolve11();
+                resolve12();
             }, () => {
               if (!controlResult)
                 reject(new Error("control exited"));
@@ -64572,8 +65508,8 @@ main().catch(() => process.exit(1));
           });
           let resolveConfined;
           let rejectConfined;
-          const confinedDone = new Promise((resolve11, reject) => {
-            resolveConfined = resolve11;
+          const confinedDone = new Promise((resolve12, reject) => {
+            resolveConfined = resolve12;
             rejectConfined = reject;
           });
           const args = [
@@ -64634,7 +65570,7 @@ main().catch(() => process.exit(1));
             if (timeoutId)
               clearTimeout(timeoutId);
           }
-          await new Promise((resolve11) => setTimeout(resolve11, 50));
+          await new Promise((resolve12) => setTimeout(resolve12, 50));
           if (!controlResult || !confinedResult)
             throw new Error("probe missing");
           return {
@@ -64680,7 +65616,7 @@ __export(exports_zkapi_confinement_linux, {
 import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile6, stat as fileStat } from "node:fs/promises";
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash48 } from "node:crypto";
 import { lstatSync as lstatSync25, readFileSync as readFileSync40, readlinkSync as readlinkSync2, readdirSync as readdirSync9, realpathSync as realpathSync9 } from "node:fs";
 import { dirname as dirname43, join as join62 } from "node:path";
 function record(value) {
@@ -64857,7 +65793,7 @@ async function launcherPath(env) {
           break;
         current2 = dirname43(current2);
       }
-      if (!lstatSync25(path).isFile() || createHash47("sha256").update(await readFile6(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync25(path).isFile() || createHash48("sha256").update(await readFile6(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -64868,7 +65804,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash47("sha256").update(await readFile6(path)).digest("hex");
+  const hash = createHash48("sha256").update(await readFile6(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -64876,7 +65812,7 @@ function linuxZkapiConfinement(deps = {}) {
   const proc = deps.proc ?? realProc;
   const now = deps.now ?? Date.now;
   const identity = deps.launcherIdentity ?? launcherIdentity;
-  const resolve11 = deps.resolveLauncher ?? (() => launcherPath(env));
+  const resolve12 = deps.resolveLauncher ?? (() => launcherPath(env));
   let cache = hostChecks;
   if (deps.check) {
     cache = injectedChecks.get(deps.check) ?? new Map;
@@ -64888,7 +65824,7 @@ function linuxZkapiConfinement(deps = {}) {
     if ((deps.platform ?? process.platform) !== "linux" || (deps.arch ?? process.arch) !== "x64")
       return check = { ok: false, code: "unsupported_platform" };
     try {
-      const selected = await resolve11();
+      const selected = await resolve12();
       if (!selected)
         return check = { ok: false, code: "launcher_missing_or_untrusted" };
       const before = await identity(selected);
@@ -64925,7 +65861,7 @@ function linuxZkapiConfinement(deps = {}) {
           cache.delete(cache.keys().next().value);
       }
       const result = await entry.result;
-      if (await resolve11() !== selected || await identity(selected) !== before) {
+      if (await resolve12() !== selected || await identity(selected) !== before) {
         cache.delete(key2);
         return check = { ok: false, code: "launcher_missing_or_untrusted" };
       }
@@ -65074,7 +66010,7 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash48, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash49, randomUUID as randomUUID18 } from "node:crypto";
 import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants6, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync41, readlinkSync as readlinkSync3, realpathSync as realpathSync10, rmSync as rmSync16, statSync as statSync21, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
 import { homedir as homedir39, tmpdir as tmpdir4 } from "node:os";
@@ -65250,11 +66186,11 @@ function runSelfTestProbe(argv, env) {
 }
 async function listenProbe(port = 0, host = "127.0.0.1") {
   const server = createServer3((socket) => socket.end());
-  await new Promise((resolve11, reject) => {
+  await new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ port, host, exclusive: true }, () => {
       server.removeListener("error", reject);
-      resolve11();
+      resolve12();
     });
   });
   return server;
@@ -65363,7 +66299,7 @@ function zkapiWalletDirectory(env) {
   }
 }
 function zkapiFenceScope(input) {
-  return createHash48("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash49("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function abandonZkapiFence(path, scope, now) {
   let found = false;
@@ -65836,7 +66772,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   return;
 }
 function sleep2(ms) {
-  return new Promise((resolve11) => setTimeout(resolve11, ms));
+  return new Promise((resolve12) => setTimeout(resolve12, ms));
 }
 async function waitFor(condition, timeoutMs, options = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -65851,11 +66787,11 @@ async function waitFor(condition, timeoutMs, options = {}) {
   }
 }
 function portAnswers(port) {
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     const socket = createConnection3({ host: "127.0.0.1", port });
     const done = (value) => {
       socket.destroy();
-      resolve11(value);
+      resolve12(value);
     };
     socket.setTimeout(1000, () => done(false));
     socket.once("connect", () => done(true));
@@ -66145,16 +67081,16 @@ async function zkapiConsultReadiness(options) {
 }
 function deferred() {
   let settled = false;
-  let resolve11;
+  let resolve12;
   const promise = new Promise((done) => {
-    resolve11 = (value) => {
+    resolve12 = (value) => {
       if (settled)
         return;
       settled = true;
       done(value);
     };
   });
-  return { promise, resolve: resolve11, settled: () => settled };
+  return { promise, resolve: resolve12, settled: () => settled };
 }
 async function openZkapiConsultSession(options, control = {}) {
   return openSession(options, control, false);
@@ -66424,7 +67360,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     return refuse2("tor_port_busy");
   if (sessionSignal.aborted)
     return refuse2(abortCause);
-  const sessionId = randomUUID17();
+  const sessionId = randomUUID18();
   const workDir = mkdtempSync2(join63(tmpdir4(), "olympus-zkapi-"));
   chmodSync19(workDir, 448);
   const watchdog = join63(workDir, "watchdog.cjs");
@@ -66636,11 +67572,11 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
       timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
       bridge.state = "ready";
       bridge.ready.resolve();
-      const aborted = new Promise((resolve11) => {
+      const aborted = new Promise((resolve12) => {
         if (sessionSignal.aborted)
-          resolve11(undefined);
+          resolve12(undefined);
         else
-          sessionSignal.addEventListener("abort", () => resolve11(undefined), { once: true });
+          sessionSignal.addEventListener("abort", () => resolve12(undefined), { once: true });
       });
       const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
       const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
@@ -67324,7 +68260,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { createHash as createHash49, randomBytes as randomBytes13 } from "node:crypto";
+import { createHash as createHash50, randomBytes as randomBytes13 } from "node:crypto";
 import { existsSync as existsSync41, lstatSync as lstatSync26, readdirSync as readdirSync11, readFileSync as readFileSync42, renameSync as renameSync12, statSync as statSync22 } from "node:fs";
 import { homedir as homedir40, platform as osPlatform3 } from "node:os";
 import { basename as basename7, dirname as dirname45, isAbsolute as isAbsolute20, join as join64, resolve as resolvePath2 } from "node:path";
@@ -67387,7 +68323,7 @@ function engineBuildIdentity(packageRoot) {
     if (typeof manifest.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version))
       version = manifest.version;
   } catch {}
-  const hash = createHash49("sha256");
+  const hash = createHash50("sha256");
   for (const name of BUILD_DIGEST_FILES) {
     try {
       const bytes = readFileSync42(join64(packageRoot, "dist", name));
@@ -67673,7 +68609,7 @@ function installEngineUnderFence(options = {}) {
 }
 async function waitForEngineHealthy(input, deps = {}) {
   const now = deps.now ?? Date.now;
-  const sleep3 = deps.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
+  const sleep3 = deps.sleep ?? ((ms) => new Promise((resolve12) => setTimeout(resolve12, ms)));
   const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? workerFetch;
@@ -68457,9 +69393,9 @@ var init_engine_service = __esm(() => {
 import { spawnSync as spawnSync11 } from "node:child_process";
 import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants7, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync4, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync27, linkSync, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync43, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync11, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve11, sep as sep9 } from "node:path";
+import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve12, sep as sep9 } from "node:path";
 import { userInfo } from "node:os";
-import { randomBytes as randomBytes14, createHash as createHash50, randomUUID as randomUUID18 } from "node:crypto";
+import { randomBytes as randomBytes14, createHash as createHash51, randomUUID as randomUUID19 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync11(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -68668,7 +69604,7 @@ function inheritedUtilLinuxFlock(lockPath) {
       const executable = realpathSync11(`/proc/${pid}/exe`);
       const executableStat = statSync23(executable);
       const args = readFileSync43(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
-      if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve11(arg) === lockPath))
+      if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve12(arg) === lockPath))
         return true;
     } catch {}
     const parent = processParent(pid);
@@ -68771,7 +69707,7 @@ function hashFile(path) {
   const info = lstatSync27(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
     throw new Error(`${path} must be a singly-linked regular file.`);
-  return createHash50("sha256").update(readFileSync43(path)).digest("hex");
+  return createHash51("sha256").update(readFileSync43(path)).digest("hex");
 }
 function linuxMachineArtifactDigest(path, kind) {
   if (kind === "file")
@@ -68780,13 +69716,13 @@ function linuxMachineArtifactDigest(path, kind) {
     const info = lstatSync27(path);
     if (!info.isSymbolicLink())
       throw new Error(`${path} is not a symbolic link.`);
-    return createHash50("sha256").update(readlinkSync4(path)).digest("hex");
+    return createHash51("sha256").update(readlinkSync4(path)).digest("hex");
   }
-  const root = resolve11(path);
+  const root = resolve12(path);
   const rootInfo = lstatSync27(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
-  const hash = createHash50("sha256");
+  const hash = createHash51("sha256");
   const walk = (dir) => {
     for (const name of readdirSync12(dir).sort()) {
       const full = join65(dir, name);
@@ -68868,7 +69804,7 @@ function durableProgram(layout, source, transaction, options) {
   syncCopiedFile(runtime);
   syncDirectorySync(runtimeDir);
   syncDirectorySync(staging);
-  const custodyToken = createHash50("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
+  const custodyToken = createHash51("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
   writePrivateFileAtomicSync(join65(staging, ".olympus-generation.json"), `${JSON.stringify({ schema: "olympus.engine.generation.v1", token: custodyToken, build: source.build ?? null })}
 `);
   syncDirectorySync(staging);
@@ -68911,7 +69847,7 @@ function ownedUnitLink(layout, path) {
   if (!info)
     return false;
   assertLinuxManagedPath(dirname46(path), process.getuid(), "directory");
-  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve11(dirname46(path), readlinkSync4(path)) !== layout.unitPath) {
+  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve12(dirname46(path), readlinkSync4(path)) !== layout.unitPath) {
     throw new Error(`The systemd unit link changed at ${path}; it was retained.`);
   }
   return true;
@@ -68960,7 +69896,7 @@ function writeSnapshot(backupDir, index, text2, mode = 384) {
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join65(input.layout.stateDir, `.install-backup-${randomUUID18()}`);
+  const backupDir = join65(input.layout.stateDir, `.install-backup-${randomUUID19()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync27(backupDir);
   const files = {};
@@ -68977,7 +69913,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join65(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID18()}`),
+    stagingPath: join65(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID19()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -69005,8 +69941,8 @@ function readInstallTransaction(layout) {
   const value2 = JSON.parse(readFileSync43(path, "utf8"));
   const hasDesktop = Object.hasOwn(value2?.before?.files ?? {}, linuxDesktopEntryPaths(layout).desktop);
   const allowedFiles = transactionManagedFiles(layout, hasDesktop), actualFiles = value2?.before?.files && typeof value2.before.files === "object" ? Object.keys(value2.before.files) : [];
-  const backupDir = typeof value2?.backupDir === "string" ? resolve11(value2.backupDir) : "";
-  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname46(resolve11(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
+  const backupDir = typeof value2?.backupDir === "string" ? resolve12(value2.backupDir) : "";
+  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname46(resolve12(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const legacy = value2.legacySettings;
   if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join65(backupDir, `file-${1e4 + index}.backup`))))
     throw new Error("Invalid legacy settings recovery journal.");
@@ -69015,7 +69951,7 @@ function readInstallTransaction(layout) {
     throw new Error("Invalid legacy settings restore journal.");
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve11(dirname46(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve11(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve12(dirname46(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve12(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve12(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
@@ -69168,7 +70104,7 @@ function assertLegacySettingOverrides(layout, env) {
   for (const [key2, value2] of Object.entries(effective)) {
     if (!/^OLYMPUS_.*(?:_PATH|_DIR|_CONFIG)$/.test(key2) || !value2?.trim())
       continue;
-    const selected = resolve11(value2.trim());
+    const selected = resolve12(value2.trim());
     const moved = files.find((name) => {
       const source = join65(layout.home, ".olympus", name);
       return selected === source || source.startsWith(selected + sep9);
@@ -69906,7 +70842,7 @@ async function rollbackLinuxEngine(options) {
       throw new Error("The current service generation is unknown; rollback refused.");
     for (const p of [previous.program.runtimePath, previous.program.entryPath, current2.runtimePath, current2.entryPath])
       assertLinuxManagedPath(p);
-    if (!previous.program.runtimeDigest || createHash50("sha256").update(readFileSync43(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
+    if (!previous.program.runtimeDigest || createHash51("sha256").update(readFileSync43(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
       throw new Error("The previous Bun runtime has changed; rollback refused.");
     if (engineBuildIdentity(previous.program.workingDirectory) !== previous.program.build)
       throw new Error("The previous package has changed; rollback refused.");
@@ -70123,7 +71059,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash51 } from "node:crypto";
+import { createHash as createHash52 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -70135,7 +71071,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash51("sha256").update(material, "utf8").digest("hex");
+  return createHash52("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -76188,7 +77124,7 @@ var init_source_ingestion_ledger = __esm(() => {
 });
 
 // src/core/consult-gate.ts
-import { createHash as createHash52 } from "node:crypto";
+import { createHash as createHash53 } from "node:crypto";
 import { existsSync as existsSync46, readFileSync as readFileSync45, statSync as statSync24 } from "node:fs";
 import { homedir as homedir44 } from "node:os";
 import { basename as basename9, dirname as dirname50, join as join69 } from "node:path";
@@ -76702,7 +77638,7 @@ function verifiedPackFile(path, sha2563) {
     if (statSync24(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync45(path);
-    return createHash52("sha256").update(gz).digest("hex") === sha2563 ? gz : "hash_mismatch";
+    return createHash53("sha256").update(gz).digest("hex") === sha2563 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
@@ -82512,8 +83448,14 @@ function optionalAttachmentType(value2) {
     return value2;
   throw new OperationError("invalid_params", "attachment_type must be image, video, audio, file, link, or other.");
 }
+async function revalidateStdioSourceAnswer(ctx, result) {
+  if (ctx.caller?.surface !== "mcp" || !result || typeof result !== "object" || typeof result.answer !== "string")
+    return result;
+  return typeof ctx.email.revalidateSourceAnswer === "function" ? ctx.email.revalidateSourceAnswer(result) : withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
+}
 var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, operations;
 var init_operations = __esm(() => {
+  init_release_manifest();
   init_doctor();
   init_ocr_readiness();
   init_email();
@@ -82740,7 +83682,8 @@ var init_operations = __esm(() => {
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
-        return jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal);
+        const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
+        return revalidateStdioSourceAnswer(ctx, result);
       }
     },
     {
@@ -82760,7 +83703,8 @@ var init_operations = __esm(() => {
         const jobs = ctx.sourceAnswerJobs;
         if (!jobs)
           throw sourceAnswerJobNotFound();
-        return jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
+        const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
+        return revalidateStdioSourceAnswer(ctx, result);
       }
     },
     {
@@ -83387,7 +84331,7 @@ var init_tier_rules = __esm(() => {
 });
 
 // src/workers/classification/privacy-profile.ts
-import { createHash as createHash55 } from "node:crypto";
+import { createHash as createHash56 } from "node:crypto";
 import { mkdirSync as mkdirSync37 } from "node:fs";
 import { dirname as dirname57 } from "node:path";
 function defaultPrivacyProfilePath(env = process.env) {
@@ -83529,7 +84473,7 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest3 = createHash55("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  const digest3 = createHash56("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest3}`;
 }
 function writePrivacyProfile(update, options = {}) {
@@ -83580,7 +84524,7 @@ var init_privacy_profile = __esm(() => {
 });
 
 // src/workers/classification/tier-migration.ts
-import { createHash as createHash56 } from "node:crypto";
+import { createHash as createHash57 } from "node:crypto";
 import { chmodSync as chmodSync23, existsSync as existsSync53, mkdirSync as mkdirSync38, readFileSync as readFileSync52, renameSync as renameSync15, writeFileSync as writeFileSync17 } from "node:fs";
 import { homedir as homedir48 } from "node:os";
 import { dirname as dirname58, join as join79 } from "node:path";
@@ -83630,7 +84574,7 @@ function findPlan(statePath, planId) {
   return plan;
 }
 function sha2564(text2) {
-  return createHash56("sha256").update(text2, "utf8").digest("hex");
+  return createHash57("sha256").update(text2, "utf8").digest("hex");
 }
 function tierMigrationBatchKey(selector) {
   return sha2564(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
@@ -84050,11 +84994,6 @@ function addPlanned(planned, totals, patterns, lane, store, item, decision, from
     totals.lowers += 1;
   if (decision.state === "pending")
     totals.pendingHeld += 1;
-  for (const copy of placement) {
-    const kept = from.find((source) => source.corpusId === copy.corpusId);
-    if (kept && kept.layers !== "metadata" && copy.layers === "metadata")
-      totals.namesOnlyKeptChunks += item.chunks.length;
-  }
   const fromTier = TIER_DISPLAY[domainTier(copyServingLayer(from, "content")?.trustDomain ?? store.trustDomain)];
   const toNames = secrets ? "Secrets" : TIER_DISPLAY[domainTier(copyServingLayer(placement, "metadata").trustDomain)];
   const toContent = secrets ? "Secrets" : TIER_DISPLAY[domainTier(copyServingLayer(placement, "content").trustDomain)];
@@ -84223,7 +85162,7 @@ async function approveTierMigration(options) {
     entry_id: entryId,
     recorded_at: now().toISOString(),
     kind: "model_decision",
-    what: `The owner approved tier migration plan ${plan.planId} (counts sha256 ${plan.countsSha256}): move ${totals.proposed} ` + `stored item(s) to their classified tiers. Estimated ${totals.chunksToEmbed} chunk(s) to embed in each destination ` + `store's EXISTING model and ${totals.vectorsCopied} vector(s) copied, about $${totals.estimatedCostUsd.toFixed(2)} and ` + `${Math.ceil(totals.estimatedMinutes)} minute(s) (estimates). No model, epoch or dimension changes and no rebind; ` + "superseded copies and their vectors are kept, hidden, until a separately approved purge. " + `${totals.secrets} Secret(s) are settled by the Secrets policy (${secretsDisposition() === "tombstone_now" ? "copies tombstoned at once, as a sync does" : "copies hidden until an approved purge"}); ${totals.namesOnlyKeptChunks} chunk(s) stay held, unserved, in names-only copies until a purge strips them.`,
+    what: `The owner approved tier migration plan ${plan.planId} (counts sha256 ${plan.countsSha256}): move ${totals.proposed} ` + `stored item(s) to their classified tiers. Estimated ${totals.chunksToEmbed} chunk(s) to embed in each destination ` + `store's EXISTING model and ${totals.vectorsCopied} vector(s) copied, about $${totals.estimatedCostUsd.toFixed(2)} and ` + `${Math.ceil(totals.estimatedMinutes)} minute(s) (estimates). No model, epoch or dimension changes and no rebind; ` + "verified raises remove lower-tier content and vectors; other superseded copies stay hidden until a separately approved purge. " + `${totals.secrets} Secret(s) are settled by the Secrets policy (${secretsDisposition() === "tombstone_now" ? "copies tombstoned at once, as a sync does" : "copies hidden until an approved purge"}); names-only copies keep no lower-tier content after a verified raise.`,
     scope: { corpora: [...new Set([...totals.destinations.map((destination) => destination.corpusId), ...plan.lanes.flatMap((lane) => lane.corpora)])] },
     ...options.why?.trim() ? { why: options.why.trim() } : {},
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -84537,7 +85476,7 @@ async function yieldToAnswers(options) {
   }
 }
 function sleep3(ms) {
-  return new Promise((resolve12) => setTimeout(resolve12, ms));
+  return new Promise((resolve13) => setTimeout(resolve13, ms));
 }
 function adoptedByThisPlan(record2, proposal) {
   const expected = proposal.expectedGeneration ?? 0;
@@ -84763,10 +85702,16 @@ async function rollbackTierMigrationBatch(options) {
   if (plan.state === "running" && plan.lock && processAlive(plan.lock.pid) && plan.lock.pid !== process.pid) {
     throw new OperationError("invalid_request", `Plan ${plan.planId} is running; stop it before rolling back.`);
   }
+  const entryId = `tier-migration-rollback:${batch.batchId}`;
+  if (batch.state === "rolled_back" && batch.rollbackResult) {
+    return { planId: plan.planId, batchId: batch.batchId, ...batch.rollbackResult, entryId };
+  }
   let rolledBack = 0;
   let skipped = 0;
   let secretsKept = 0;
+  let purgedKept = 0;
   for (const lane of options.lanes) {
+    rolledBack += lane.set.ledger.migrationProposals(plan.planId, { status: "rolled_back", batchId: batch.batchId }).length;
     for (const proposal of lane.set.ledger.migrationProposals(plan.planId, { status: "moved", batchId: batch.batchId })) {
       if (proposal.outcome?.["kind"] === "secrets" || proposal.contentTier === "secrets" || proposal.metadataTier === "secrets") {
         secretsKept += 1;
@@ -84793,16 +85738,22 @@ async function rollbackTierMigrationBatch(options) {
           secretsKept += 1;
           continue;
         }
+        if (error instanceof TierLedgerPurgedRollbackRefusedError) {
+          purgedKept += 1;
+          skipped += 1;
+          continue;
+        }
         throw error;
       }
     }
   }
-  const entryId = `tier-migration-rollback:${batch.batchId}`;
+  const purgedKeptReason = purgedKept > 0 ? "already Private; its lower copy was removed" : undefined;
+  const rollbackResult = { rolledBack, skipped, secretsKept, purgedKept, ...purgedKeptReason ? { purgedKeptReason } : {} };
   await appendEmbeddingLedgerEntryOnce(options.paths.embeddingLedgerPath, {
     entry_id: entryId,
     recorded_at: now().toISOString(),
     kind: "note",
-    what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) ` + `serve from their previous copies again${skipped > 0 ? ` (${skipped} left alone because a later sync changed them)` : ""}` + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ""}. ` + "Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.",
+    what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) ` + `serve from their previous copies again${skipped > purgedKept ? ` (${skipped - purgedKept} left alone because a later sync changed them)` : ""}` + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ""}` + `${purgedKept > 0 ? `; ${purgedKept} item(s) skipped: ${purgedKeptReason}` : ""}. ` + "Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.",
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: "complete"
   });
@@ -84810,8 +85761,9 @@ async function rollbackTierMigrationBatch(options) {
     const entry = record2.batches.find((candidate) => candidate.batchId === batch.batchId);
     entry.state = "rolled_back";
     entry.rolledBack = rolledBack;
+    entry.rollbackResult = rollbackResult;
   });
-  return { planId: plan.planId, batchId: batch.batchId, rolledBack, skipped, secretsKept, entryId };
+  return { planId: plan.planId, batchId: batch.batchId, ...rollbackResult, entryId };
 }
 function purgeTargets(plan, lanes) {
   const targets = [];
@@ -85205,7 +86157,7 @@ __export(exports_tier_migration_cli, {
   runTierMigrateCommand: () => runTierMigrateCommand,
   TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
 });
-import { createHash as createHash57 } from "node:crypto";
+import { createHash as createHash58 } from "node:crypto";
 async function runTierMigrateCommand(args, context2 = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
@@ -85374,7 +86326,7 @@ async function withLanes(context2, env, mode, inputs, run) {
 }
 async function installedInputs(env, options) {
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash57("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash58("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...rules.length > 0 ? { rules } : {},
@@ -86700,20 +87652,20 @@ function isCleanExit(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve12) => {
+  await new Promise((resolve13) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve12();
+      resolve13();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve12) => {
-    const timeout = setTimeout(resolve12, ms);
+  return new Promise((resolve13) => {
+    const timeout = setTimeout(resolve13, ms);
     timeout.unref?.();
   });
 }
@@ -86990,7 +87942,7 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID21 } from "node:crypto";
+import { randomUUID as randomUUID22 } from "node:crypto";
 import { readFileSync as readFileSync55, statSync as statSync26 } from "node:fs";
 import { delimiter as delimiter6, dirname as dirname61, isAbsolute as isAbsolute23, join as join82 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
@@ -87041,7 +87993,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join82(dirname61(reportPath), READINESS_FILE);
-  const instanceId = randomUUID21();
+  const instanceId = randomUUID22();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
@@ -87210,7 +88162,7 @@ var init_native_embedding_drain_service = __esm(() => {
 });
 
 // src/core/native-worker-service.ts
-import { randomUUID as randomUUID22 } from "node:crypto";
+import { randomUUID as randomUUID23 } from "node:crypto";
 import { statSync as statSync27 } from "node:fs";
 import { basename as basename11, delimiter as delimiter7, isAbsolute as isAbsolute24, join as join83 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
@@ -87351,7 +88303,7 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   if (!authToken) {
     throw new Error("Olympus worker service requires a configured worker auth token.");
   }
-  const instanceId = randomUUID22();
+  const instanceId = randomUUID23();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
     runtimePath: resolveBunRuntimePath2(service.runtimePath, env),
@@ -87854,7 +88806,7 @@ async function startEngineHost(options) {
       status.state = "stopping";
       writeStatus();
       log("engine: stopping.");
-      const deadline = new Promise((resolve12) => setTimeout(resolve12, STOP_DEADLINE_MS).unref?.());
+      const deadline = new Promise((resolve13) => setTimeout(resolve13, STOP_DEADLINE_MS).unref?.());
       await Promise.race([
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline
@@ -88137,7 +89089,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve12) => setTimeout(resolve12, HEALTH_POLL_MS));
+      await new Promise((resolve13) => setTimeout(resolve13, HEALTH_POLL_MS));
     }
     if (current2 !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -88248,11 +89200,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve12) => {
+      return new Promise((resolve13) => {
         const settle = (value2) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve12(value2);
+          resolve13(value2);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -88295,12 +89247,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value2) => {
       signal.removeEventListener("abort", onAbort);
-      resolve12(value2);
+      resolve13(value2);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -88337,14 +89289,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const server = createServer4();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve12(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve13(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -96030,7 +96982,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve12) => setTimeout(resolve12, pollInterval));
+        await new Promise((resolve13) => setTimeout(resolve13, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -96042,7 +96994,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve12, reject) => {
+    return new Promise((resolve13, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -96120,7 +97072,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve12(parseResult.data);
+            resolve13(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -96311,12 +97263,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve12, reject) => {
+    return new Promise((resolve13, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve12, interval);
+      const timeoutId = setTimeout(resolve13, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -99301,7 +100253,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve12.call(this, root, ref);
+    let _sch = resolve13.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a4 = root.localRefs) === null || _a4 === undefined ? undefined : _a4[ref];
       const { schemaId } = this.opts;
@@ -99328,7 +100280,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve12(root, ref) {
+  function resolve13(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -99858,7 +100810,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve12(baseURI, relativeURI, options) {
+  function resolve13(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse7(baseURI, schemelessOptions), parse7(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -100086,7 +101038,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize5,
-    resolve: resolve12,
+    resolve: resolve13,
     resolveComponent,
     equal: equal2,
     serialize,
@@ -103469,12 +104421,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message2) {
-    return new Promise((resolve12) => {
+    return new Promise((resolve13) => {
       const json = serializeMessage(message2);
       if (this._stdout.write(json)) {
-        resolve12();
+        resolve13();
       } else {
-        this._stdout.once("drain", resolve12);
+        this._stdout.once("drain", resolve13);
       }
     });
   }
@@ -103614,11 +104566,7 @@ function recheckRelease(evidence, manifests, check) {
     return { withhold: REMOTE_ANSWER_UNVERIFIED };
   for (const [index, { input, manifest: manifest2 }] of inputs.entries()) {
     const verdict = verdicts[index];
-    const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
-    if (!privateNow)
-      continue;
-    const releasableNow = manifest2.constraints.includeSecureLocalContent || postureNow === "allow";
-    if (!releasableNow)
+    if (!privateInputReleaseAllowed(input, verdict, manifest2.constraints, postureNow))
       return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
   }
   const dropped = new Set;
@@ -103842,6 +104790,7 @@ var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, 
 var init_remote_result = __esm(() => {
   init_operation_error();
   init_opsec();
+  init_release_manifest();
   init_secret_location_note();
   MAX_ANSWER = 64 * 1024;
   MAX_SENT = 16 * 1024;
@@ -104226,7 +105175,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
 });
-import { createHash as createHash58, randomBytes as randomBytes17, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash59, randomBytes as randomBytes17, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
@@ -104292,8 +105241,8 @@ class SourceAnswerJobRegistry {
     }
     const outcome = pending.then((value2) => ({ ok: true, value: value2 }), (error2) => ({ ok: false, error: error2 }));
     let timer;
-    const handoff = new Promise((resolve12) => {
-      timer = setTimeout(() => resolve12("handoff"), this.limits.handoffMs);
+    const handoff = new Promise((resolve13) => {
+      timer = setTimeout(() => resolve13("handoff"), this.limits.handoffMs);
     });
     const first = await Promise.race([outcome, handoff]);
     clearTimeout(timer);
@@ -104312,8 +105261,8 @@ class SourceAnswerJobRegistry {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      done: new Promise((resolve12) => {
-        wake = resolve12;
+      done: new Promise((resolve13) => {
+        wake = resolve13;
       }),
       finish: (result) => {
         if (job.outcome)
@@ -104345,12 +105294,12 @@ class SourceAnswerJobRegistry {
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
       let onAbort;
-      const stop = new Promise((resolve12) => {
-        timer = setTimeout(resolve12, this.limits.resultWaitMs);
+      const stop = new Promise((resolve13) => {
+        timer = setTimeout(resolve13, this.limits.resultWaitMs);
         if (signal) {
-          onAbort = () => resolve12();
+          onAbort = () => resolve13();
           if (signal.aborted)
-            resolve12();
+            resolve13();
           else
             signal.addEventListener("abort", onAbort, { once: true });
         }
@@ -104456,10 +105405,10 @@ class SourceAnswerJobRegistry {
     }
     let state = "queued";
     let detached = false;
-    let resolve12;
+    let resolve13;
     let reject;
     const ready = new Promise((ok, fail) => {
-      resolve12 = ok;
+      resolve13 = ok;
       reject = fail;
     });
     ready.catch(() => {
@@ -104494,7 +105443,7 @@ class SourceAnswerJobRegistry {
         this.runningTotal += 1;
         priority.lastGrant = kind;
         this.unqueue(waiter);
-        resolve12();
+        resolve13();
       },
       cancel: (reason, wake = true) => {
         if (state !== "queued")
@@ -104730,8 +105679,8 @@ class SourceAnswerJobRegistry {
   }
 }
 function sameOwner(a, b) {
-  const left = createHash58("sha256").update(a).digest();
-  const right = createHash58("sha256").update(b).digest();
+  const left = createHash59("sha256").update(a).digest();
+  const right = createHash59("sha256").update(b).digest();
   return timingSafeEqual6(left, right);
 }
 function callerAbortError(message2) {
@@ -105002,7 +105951,7 @@ var init_server4 = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash59, createPublicKey, randomBytes as randomBytes18, sign, verify } from "node:crypto";
+import { createHash as createHash60, createPublicKey, randomBytes as randomBytes18, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message2) {
   if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
     return;
@@ -105054,7 +106003,7 @@ function base32(data2) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash59("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash60("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key2) {
   return key2.export({ format: "der", type: "spki" });
@@ -105068,7 +106017,7 @@ function signInstallMessage(privateKey, kind, nonce, installId, relayHost, schem
   return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
-  return createHash59("sha256").update(`${POW_DOMAIN}
+  return createHash60("sha256").update(`${POW_DOMAIN}
 ${nonce}
 ${installId}
 ${relayHost.toLowerCase()}
@@ -105091,7 +106040,7 @@ async function solveRegistrationPow(bits, nonce, installId, relayHost, signal) {
   for (let counter = 0;; counter += 1) {
     if (counter % 4096 === 0) {
       if (counter > 0)
-        await new Promise((resolve12) => setTimeout(resolve12, 0));
+        await new Promise((resolve13) => setTimeout(resolve13, 0));
       if (signal?.aborted)
         throw new PowCancelledError;
     }
@@ -105760,7 +106709,7 @@ class RelayClient {
   }
   async drained() {
     while (this.socket && this.socket.readyState === WebSocket.OPEN && this.socket.bufferedAmount > SEND_HIGH_WATER_BYTES) {
-      await new Promise((resolve12) => setTimeout(resolve12, 10));
+      await new Promise((resolve13) => setTimeout(resolve13, 10));
     }
   }
 }
@@ -105882,9 +106831,9 @@ async function startRelayRuntime(options) {
 }
 async function runRelayRuntimeProcess(instanceId, overrides = {}) {
   const runtime = await startRelayRuntime({ ...overrides, env: process.env, instanceId });
-  await new Promise((resolve12) => {
+  await new Promise((resolve13) => {
     const shutdown = () => {
-      runtime.stop().finally(resolve12);
+      runtime.stop().finally(resolve13);
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
@@ -106197,7 +107146,7 @@ var init_manifest2 = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawnSync as spawnSync16 } from "node:child_process";
-import { createHash as createHash60, randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash61, randomUUID as randomUUID24 } from "node:crypto";
 import {
   closeSync as closeSync18,
   createReadStream as createReadStream3,
@@ -106466,7 +107415,7 @@ function runtimeInstalled2(runtimeDir, archive) {
   return marker !== undefined && marker.sha256 === archive.sha256 && existsSync58(join89(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID23()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID24()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join89(staging, archive.name);
@@ -106558,7 +107507,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream3(path);
@@ -106571,7 +107520,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error2);
       } else {
-        resolve12();
+        resolve13();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -106583,20 +107532,20 @@ function hashInto(path, hash, timeoutMs, onProgress) {
   });
 }
 async function sha256File3(path, timeoutMs, onProgress) {
-  const hash = createHash60("sha256");
+  const hash = createHash61("sha256");
   await hashInto(path, hash, timeoutMs, onProgress);
   return hash.digest("hex");
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   const deadline = Date.now() + waitMs;
-  const token = randomUUID23();
+  const token = randomUUID24();
   for (;; ) {
     if (tryAcquireLock2(lockPath, token))
       break;
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve12) => setTimeout(resolve12, LOCK_POLL_MS2));
+    await new Promise((resolve13) => setTimeout(resolve13, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -107959,7 +108908,7 @@ var init_dashboard_session_secret = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile9, realpath as realpath2, stat as stat5 } from "node:fs/promises";
-import { relative as relative9, resolve as resolve12, sep as sep10 } from "node:path";
+import { relative as relative9, resolve as resolve13, sep as sep10 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -108101,7 +109050,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve12(rootRealPath, relativePath);
+    const candidatePath = resolve13(rootRealPath, relativePath);
     const relativeToRoot = relative9(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep10}`)) {
       return;
@@ -108447,7 +109396,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync27, mkdirSync as mkdirSync45 } from "node:fs";
-import { createHash as createHash61, randomUUID as randomUUID24 } from "node:crypto";
+import { createHash as createHash62, randomUUID as randomUUID25 } from "node:crypto";
 import { dirname as dirname65 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
@@ -108605,7 +109554,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID24();
+    const leaseToken = randomUUID25();
     const workerHash = hashString5(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -109544,7 +110493,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID24());
+      `).run(randomUUID25());
     }
   }, {
     version: 4,
@@ -109763,10 +110712,10 @@ function clampInteger(value2, min, max) {
   return Math.min(max, Math.max(min, value2));
 }
 function makeJobId() {
-  return `fx_${randomUUID24()}`;
+  return `fx_${randomUUID25()}`;
 }
 function hashString5(value2) {
-  return createHash61("sha256").update(value2).digest("hex");
+  return createHash62("sha256").update(value2).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -112607,7 +113556,7 @@ function createBuiltInTranscriber(options = {}) {
       if (state === "pending" && installing && filesOnDisk()) {
         const pending = installing;
         const waitMs = Math.max(0, Math.min(verifyWaitMs, deadline - now()));
-        await Promise.race([pending, new Promise((resolve13) => setTimeout(resolve13, waitMs).unref?.())]);
+        await Promise.race([pending, new Promise((resolve14) => setTimeout(resolve14, waitMs).unref?.())]);
         state = prepare();
       }
       if (state === "unavailable")
@@ -113050,9 +113999,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer6 } from "node:buffer";
-import { createHash as createHash62 } from "node:crypto";
+import { createHash as createHash63 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash62("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash63("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -113174,7 +114123,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve13) => setTimeout(resolve13, pageRetryDelayMs));
+            await new Promise((resolve14) => setTimeout(resolve14, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -113810,7 +114759,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash63 } from "node:crypto";
+import { createHash as createHash64 } from "node:crypto";
 import { dirname as dirname67 } from "node:path";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
@@ -114489,7 +115438,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash63("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash64("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message2 = error2 instanceof Error ? error2.message : "";
@@ -114625,7 +115574,7 @@ function logPlanRefusal(corpusId, extractorKind, reason, count, error2) {
   console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error2)}`);
 }
 function hashToken(value2) {
-  return createHash63("sha256").update(value2).digest("hex");
+  return createHash64("sha256").update(value2).digest("hex");
 }
 function isScopeApprovalRefusal(error2) {
   return error2 instanceof OperationError && error2.code === "source_index_policy_violation";
@@ -114637,7 +115586,7 @@ async function drainPdfExtraction(input) {
     const result = {
       corpusId: lane.corpusId,
       provider: lane.provider,
-      scopeKeyHash: createHash63("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
+      scopeKeyHash: createHash64("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
       candidatesRequeued: 0,
       jobsProcessed: 0,
       jobsIndexed: 0,
@@ -115682,7 +116631,7 @@ var init_readiness_ledger = __esm(() => {
 });
 
 // src/workers/file-extraction/unreadable-files.ts
-import { createHash as createHash64, randomBytes as randomBytes21 } from "node:crypto";
+import { createHash as createHash65, randomBytes as randomBytes21 } from "node:crypto";
 function createUnreadableVerdict(input) {
   return (item) => {
     const located = input.locate(item.ref);
@@ -115734,7 +116683,7 @@ function createUnreadableFiles(options) {
     }
   }
   function placeOf(item) {
-    return { at: item.failedAt, id: createHash64("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
+    return { at: item.failedAt, id: createHash65("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
   }
   function cursorOf(item) {
     const place = placeOf(item);
@@ -116066,7 +117015,7 @@ import {
   rmSync as rmSync22,
   writeFileSync as writeFileSync22
 } from "node:fs";
-import { randomUUID as randomUUID25 } from "node:crypto";
+import { randomUUID as randomUUID26 } from "node:crypto";
 import { homedir as homedir55 } from "node:os";
 import { dirname as dirname68, isAbsolute as isAbsolute27, join as join98 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir55(), type = "text") {
@@ -116276,7 +117225,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID25()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID26()}.tmp`;
   try {
     mkdirSync46(dirname68(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -117369,7 +118318,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash65 } from "node:crypto";
+import { createHash as createHash66 } from "node:crypto";
 import { readFileSync as readFileSync64 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir57 } from "node:os";
@@ -117862,7 +118811,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2565(value2) {
-  return createHash65("sha256").update(value2, "utf8").digest("hex");
+  return createHash66("sha256").update(value2, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -117936,7 +118885,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve14, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -117959,7 +118908,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve13(response);
+      resolve14(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -119294,7 +120243,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash66 } from "node:crypto";
+import { createHash as createHash67 } from "node:crypto";
 function escapeHtml2(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -119345,14 +120294,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash66("sha256").update(normalised).digest("hex");
+  return createHash67("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash66("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash67("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -120580,12 +121529,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve13, reject) => {
+    return new Promise((resolve14, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve13, reject, timer };
+      pending[id] = { resolve: resolve14, reject, timer };
     });
   }
   function notify(method, params) {
@@ -127177,9 +128126,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash67 } from "node:crypto";
+import { createHash as createHash68 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash67("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash68("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -128371,7 +129320,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash68 } from "node:crypto";
+import { createHash as createHash69 } from "node:crypto";
 function parseStructuredChatScope(value2) {
   const parts = value2.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -128399,7 +129348,7 @@ function unresolvedChatTitleResolution(value2) {
   };
 }
 function safeDigest(value2) {
-  return createHash68("sha256").update(value2).digest("hex");
+  return createHash69("sha256").update(value2).digest("hex");
 }
 function conversationTitleTerms(value2) {
   const seen = new Set;
@@ -128575,12 +129524,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve13) => {
+        new Promise((resolve14) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve13({
+              resolve14({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -128604,10 +129553,10 @@ function safeDetail(value2) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash69, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash70, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync66, statSync as statSync29 } from "node:fs";
 import { homedir as homedir58 } from "node:os";
-import { join as join100, resolve as resolve13 } from "node:path";
+import { join as join100, resolve as resolve14 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -128632,6 +129581,12 @@ function createEmailSourceWorker(options = {}) {
   const connector = options.connector ?? new GogcliEmailConnectorStub;
   const agentConnections = options.agentConnections;
   const sourceAnswer = options.sourceAnswer;
+  const releaseTickets = new Map;
+  const pruneReleaseTickets = () => {
+    for (const [ticket, entry] of releaseTickets)
+      if (entry.expires <= Date.now())
+        releaseTickets.delete(ticket);
+  };
   const consultAsk = options.consultAsk;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
@@ -128759,6 +129714,13 @@ function createEmailSourceWorker(options = {}) {
           }
           return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
         }
+        if (request.method === "POST" && url.pathname === `${basePath}/source/answer/release`) {
+          const body = await request.json();
+          const entry = typeof body.ticket === "string" ? releaseTickets.get(body.ticket) : undefined;
+          const reason = entry?.expires !== undefined && entry.expires <= Date.now() ? "Olympus withheld this answer because its privacy release ticket expired after 15 minutes. Ask again." : !entry ? "Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again." : options.sourceAnswerReleaseCheck ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck) : "Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.";
+          pruneReleaseTickets();
+          return json({ ...reason ? { withheld: reason } : { allowed: true } });
+        }
         if (request.method === "POST" && url.pathname === `${basePath}/source/answer`) {
           if (!sourceAnswer) {
             throw new EmailSourceWorkerError(501, "source_index_answer_not_supported", "Private source worker does not support routed source answers.");
@@ -128771,9 +129733,20 @@ function createEmailSourceWorker(options = {}) {
               const sourceAnswerRequest = await parseSourceIndexAnswerRequest(request);
               requestParsed = true;
               caller = sourceAnswerRequest.caller;
-              const result = await runWithAnalystAbortSignal(callerCancellationSignal(request.signal), () => retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest)));
+              const manifests = createReleaseManifestSink();
+              const result = await runWithReleaseManifestSink(manifests, () => runWithAnalystAbortSignal(callerCancellationSignal(request.signal), () => retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest))));
+              for (const manifest2 of manifests.manifests)
+                recordReleaseManifest(manifest2);
               assertNoRawEmailFields(result);
-              const response = json(result);
+              let releaseTicket;
+              if (caller?.surface !== "remote") {
+                pruneReleaseTickets();
+                releaseTicket = randomBytes24(32).toString("base64url");
+                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60000, manifests: manifests.manifests });
+                while (releaseTickets.size > 256)
+                  releaseTickets.delete(releaseTickets.keys().next().value);
+              }
+              const response = json({ ...result, ...releaseTicket ? { _release_ticket: releaseTicket } : {} });
               await emitSourceAnswerLatencyRecords({
                 log: sourceAnswerLatencyLog,
                 trace,
@@ -130330,8 +131303,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve14) => {
-      release = resolve14;
+    dashboardGrantMutationTail = new Promise((resolve15) => {
+      release = resolve15;
     });
     await previous;
     try {
@@ -130647,7 +131620,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve14) => setTimeout(resolve14, ms));
+  return new Promise((resolve15) => setTimeout(resolve15, ms));
 }
 async function parseConsultAskRequest(request) {
   const record4 = await parseObjectBody(request);
@@ -131663,10 +132636,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve13(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve14(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve13(path)))].sort();
+  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve14(path)))].sort();
   const a = normalize5(left);
   const b = normalize5(right);
   return a.length === b.length && a.every((value2, index) => value2 === b[index]);
@@ -131923,7 +132896,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual8(createHash69("sha256").update(expected).digest(), createHash69("sha256").update(state).digest());
+  return timingSafeEqual8(createHash70("sha256").update(expected).digest(), createHash70("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -132184,7 +133157,7 @@ function dashboardOAuthClientSecretRequired(source) {
 }
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash69("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash70("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -132557,6 +133530,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
+  init_release_manifest();
   init_google_handle_compatibility();
   init_google_publisher_capacity();
   init_source_account_binding();
@@ -132971,6 +133945,10 @@ function createTierVisibilityGate(scopes) {
         continue;
       }
       for (const hit of governed) {
+        if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
+          hidden.add(hit);
+          continue;
+        }
         const key2 = tierLedgerIdentityKey(hit.sourceItem);
         const itemCopies = copies.get(key2);
         if (!itemCopies || itemCopies.length === 0) {
@@ -132978,7 +133956,7 @@ function createTierVisibilityGate(scopes) {
             hidden.add(hit);
           continue;
         }
-        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current");
+        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current" && (!hit.servingLayer || copy.layers === "both" || copy.layers === hit.servingLayer));
         if (!currentHere)
           hidden.add(hit);
       }
@@ -133036,7 +134014,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash70 } from "node:crypto";
+import { createHash as createHash71 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -133114,7 +134092,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve14) => setTimeout(resolve14, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -133882,7 +134860,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash70("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash71("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -133938,6 +134916,15 @@ function createReadwiseSchedulerSource(input) {
 function wholeStoreEmbeddingSweepAllowed(sourceId, corpusId) {
   const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
   return allowed === true || Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId);
+}
+function withLocalPrivateEmbeddingBackfill(sources, targetsFor) {
+  return sources.map((source) => {
+    const targets = () => targetsFor(source).filter((target) => target.store.trustDomain === "secure_local" && target.provider.provider === "built-in" && target.provider.backend === "local").map((target) => ({ ...target, wholeStore: true, missingOnly: true }));
+    if (targets().length === 0)
+      return source;
+    const task = embeddingSweepTask(source, targets);
+    return { ...source, tasks: [...source.tasks, { ...task, id: `${source.sourceId}_private_meaning` }] };
+  });
 }
 function withEmbeddingSweep(sources, targetsFor) {
   return sources.map((source) => {
@@ -134215,7 +135202,27 @@ function createGmailConnectorStoreSchedulerSource(input) {
             throw gmailSchedulerFailure(error2);
           }
         }
-      }
+      },
+      ...input.sync.confirmPrivateScope ? [{
+        id: "gmail.email_private_scope_confirmation_v1",
+        kind: "sync",
+        writer: true,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context2) => {
+          try {
+            const result = await input.sync.confirmPrivateScope({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...context2?.checkpoint ? { checkpoint: context2.checkpoint } : {} });
+            return {
+              status: result.confirmed > 0 ? "progress" : "idle",
+              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              checkpoint: result.checkpoint,
+              ...!result.done ? { continueSoon: true } : {}
+            };
+          } catch (error2) {
+            throw gmailSchedulerFailure(error2);
+          }
+        }
+      }] : []
     ],
     lastSyncCompletedAt: lastCompletedAt
   };
@@ -134542,7 +135549,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value2) {
-  return createHash70("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash71("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -135131,7 +136138,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash71 } from "node:crypto";
+import { createHash as createHash72 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -135164,7 +136171,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash71("sha256").update(`${accessToken}
+    const key2 = createHash72("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -135195,7 +136202,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash71("sha256").update(session.token).digest("hex");
+    const key2 = createHash72("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -136412,7 +137419,9 @@ class TierSnifferService {
             }));
             if ([...stores.values()].some((store) => !store))
               return false;
-            const remaining = [...stores.values()].map((store) => store.exportItemCopy(question)).find(Boolean);
+            const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+            const serving2 = copyServingLayer(ordered, question.pass) ?? copyServingLayer(ordered, "content");
+            const remaining = serving2 ? stores.get(serving2.corpusId)?.exportItemCopy(question) : undefined;
             if (!locations?.get(question)?.findingKinds.includes("sniffer_secret_refusal")) {
               if (!locations || !remaining)
                 return false;
@@ -136557,6 +137566,9 @@ class TierSnifferService {
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
+      set2.repairLowerContent({ ...this.options.autoMoves ? {
+        embeddingLedger: { path: this.options.autoMoves.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
+      } : {} });
       try {
         const report = sweepOwnerRuleRaises({ set: set2 });
         if (report.raised > 0 || report.secrets > 0) {
@@ -136670,6 +137682,16 @@ class TierSnifferService {
         const identity = recordIdentity(record4);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record4.generation}`;
         try {
+          if (resumeVerifiedTierMove(set2, identity, {
+            path: options.embeddingLedgerPath,
+            approvedBy: "system-automatic",
+            why: AUTO_MOVE_WHY
+          })) {
+            await flushTierMoveNotes(set2.ledger);
+            report.moved += 1;
+            this.moveFailures.delete(failureKey);
+            continue;
+          }
           const sources = set2.ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record4.generation + 1);
           const source = sources[0];
           const exported = source ? set2.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
@@ -136792,6 +137814,7 @@ function positiveInteger7(value2, fallback, minimum) {
 }
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
+  init_tier_move();
   init_secret_locations();
   init_classification_ledger();
   init_secrets_disposition();
@@ -137200,9 +138223,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve14) => {
+        return new Promise((resolve15) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve14,
+            resolveJson: resolve15,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -138434,7 +139457,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -138445,7 +139468,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve14(db);
+        resolve15(db);
       };
       try {
         const factory = window.indexedDB;
@@ -138472,7 +139495,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -138481,7 +139504,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve14(value2);
+        resolve15(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -138616,10 +139639,10 @@ function chatgptPrivateAnswerProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve14) => setTimeout(resolve14, ms));
+    return new Promise((resolve15) => setTimeout(resolve15, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -138629,7 +139652,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve14(value2);
+        resolve15(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -139840,7 +140863,7 @@ function chatgptPrivateQuestionProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -139851,7 +140874,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return;
         }
         settled = true;
-        resolve14(db);
+        resolve15(db);
       };
       try {
         const factory = window.indexedDB;
@@ -139878,7 +140901,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -139887,7 +140910,7 @@ function chatgptPrivateQuestionProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve14(value2);
+        resolve15(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -139951,10 +140974,10 @@ function chatgptPrivateQuestionProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve14) => setTimeout(resolve14, ms));
+    return new Promise((resolve15) => setTimeout(resolve15, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -139964,7 +140987,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve14(value2);
+        resolve15(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -142449,7 +143472,18 @@ function askToolListed(ctx) {
   return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: "remote" });
 }
 async function callChatGptTool(name, args, ctx, options, signal, detachedContext) {
-  const result = await runChatGptTool(name, args, ctx, options, signal, detachedContext);
+  const manifests = createReleaseManifestSink();
+  const result = await runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, signal, detachedContext));
+  if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence) && result.structuredContent.evidence.length > 0) {
+    const reason = ctx.releaseCheck ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
+    if (reason)
+      return searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] });
+  }
+  if ((name === "source_answer" || name === "source_answer_result") && result.structuredContent?.status === "answered" && !(result.structuredContent && ("anonymous" in result.structuredContent))) {
+    const reason = ctx.releaseCheck ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
+    if (reason)
+      return withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason)));
+  }
   return PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result;
 }
 async function runChatGptTool(name, args, ctx, options, signal, detachedContext) {
@@ -142588,10 +143622,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve14) => {
+  const timeout = new Promise((resolve15) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve14(false);
+      resolve15(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -142662,8 +143696,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none2;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve14) => {
-    const timer = setTimeout(() => resolve14(none2), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve15) => {
+    const timer = setTimeout(() => resolve15(none2), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -142798,6 +143832,7 @@ var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600
   console.warn(line);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
+  init_release_manifest();
   init_server3();
   init_types2();
   init_operation_exposure();
@@ -150877,7 +151912,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash72, randomBytes as randomBytes25, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash73, randomBytes as randomBytes25, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -150918,7 +151953,7 @@ function createRemoteOAuthHandler(options) {
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
   const pending = new Map;
   const codes = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve14) => setTimeout(resolve14, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -151203,7 +152238,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash72("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash73("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -151467,7 +152502,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha2566(value2) {
-  return createHash72("sha256").update(value2).digest("hex");
+  return createHash73("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -152037,8 +153072,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve14) => {
-          timer = setTimeout(resolve14, holdMs);
+        await Promise.race([settled, new Promise((resolve15) => {
+          timer = setTimeout(resolve15, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -152191,8 +153226,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve14) => {
-      settle = resolve14;
+    const settled = new Promise((resolve15) => {
+      settle = resolve15;
     });
     const analysis = {
       key: key2,
@@ -152388,10 +153423,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve14) => {
+    const stopped = new Promise((resolve15) => {
       if (abort.signal.aborted)
-        resolve14();
-      abort.signal.addEventListener("abort", () => resolve14(), { once: true });
+        resolve15();
+      abort.signal.addEventListener("abort", () => resolve15(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -152418,8 +153453,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve14) => {
-      claimSettled = resolve14;
+    const done = new Promise((resolve15) => {
+      claimSettled = resolve15;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -152458,10 +153493,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve14) => {
+    const stopped = new Promise((resolve15) => {
       if (abort.signal.aborted)
-        resolve14();
-      abort.signal.addEventListener("abort", () => resolve14(), { once: true });
+        resolve15();
+      abort.signal.addEventListener("abort", () => resolve15(), { once: true });
     });
     const record4 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -152592,8 +153627,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve14) => {
-      timer = setTimeout(resolve14, this.resetTimeoutMs);
+    const timeout = new Promise((resolve15) => {
+      timer = setTimeout(resolve15, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -153908,7 +154943,23 @@ import { lstatSync as lstatSync36 } from "node:fs";
 import { randomBytes as randomBytes28 } from "node:crypto";
 function createLocalAnswerPath(options) {
   const lanes = (request) => options.lanes(request, "built_in_only");
-  const eligible = (items) => checkLocalEvidenceItems({ lanes, items });
+  const eligible = async (items) => {
+    const served = await checkLocalEvidenceItems({ lanes, items });
+    const inputs = items.map((item) => {
+      const provenance = item.provenance;
+      const identity = provenance?.sourceItem;
+      return {
+        corpusId: typeof item.corpusId === "string" ? item.corpusId : "",
+        provider: identity?.provider ?? "",
+        accountScope: identity?.accountScope ?? "",
+        providerItemId: identity?.providerItemId ?? "",
+        ...identity?.providerConversationId ? { providerConversationId: identity.providerConversationId } : {},
+        privateAtAnswer: item.trustDomain === "secure_local" || item.trustTier === "S4" || item.trustTier === "S5"
+      };
+    });
+    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: true } }], options.releaseCheck);
+    return reason ? items.map(() => false) : served;
+  };
   const model = createBuiltInPrivateAnswerModel({
     model: options.model,
     eligible,
@@ -154215,6 +155266,7 @@ function createLocalPrivateAnswers(options) {
 }
 var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS3 = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
+  init_release_manifest();
   init_waiting_private_questions();
   init_analyst_built_in();
   init_private_answer_model();
@@ -154297,8 +155349,8 @@ function createRemotePrivateParts(options) {
     try {
       return await Promise.race([
         options.probe(request, probeTimeoutMs),
-        new Promise((resolve14) => {
-          timer = setTimeout(() => resolve14("unknown"), probeTimeoutMs);
+        new Promise((resolve15) => {
+          timer = setTimeout(() => resolve15("unknown"), probeTimeoutMs);
           timer.unref?.();
         })
       ]);
@@ -154523,7 +155575,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash73 } from "node:crypto";
+import { createHash as createHash74 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -154540,7 +155592,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text5 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text5, etag: `"${createHash73("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text5, etag: `"${createHash74("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -154915,7 +155967,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash74 } from "node:crypto";
+import { createHash as createHash75 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -154939,7 +155991,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest3 = createHash74("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest3 = createHash75("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest3.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -156210,6 +157262,8 @@ __export(exports_server2, {
   parseConnectorStoreMountsFromEnv: () => parseConnectorStoreMountsFromEnv,
   openIngestionDispositionsRuntime: () => openIngestionDispositionsRuntime,
   main: () => main,
+  localPrivateEmbeddingTargets: () => localPrivateEmbeddingTargets,
+  loadSourceWorkerSovereignty: () => loadSourceWorkerSovereignty,
   createXBookmarksConnectorStoreRuntime: () => createXBookmarksConnectorStoreRuntime,
   createWorkerMessagingCaptureOwnership: () => createWorkerMessagingCaptureOwnership,
   createSourceIndexEmbeddingProviderFromSovereignty: () => createSourceIndexEmbeddingProviderFromSovereignty,
@@ -156412,6 +157466,64 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
     ...mediaFetchTimeoutMs !== undefined ? { mediaFetchTimeoutMs } : {},
     ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
   });
+}
+function localPrivateEmbeddingTargets(input) {
+  const {
+    source,
+    sovereigntyEngine,
+    secureLocalPolicyEmbeddingProvider,
+    sourceCorpusRegistry: sourceCorpusRegistry2,
+    scopeRefs,
+    connectorStores,
+    fullCorpusDefinitions,
+    fileSourceScopeAuthority,
+    readScope: connectorStoreReadScope,
+    connectorStoreAccountScopes,
+    gmailAccountScope
+  } = input;
+  const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
+  if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
+    return [];
+  const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
+  corpusIds.add(source.corpusId);
+  const ref = scopeRefs.get(source.sourceId);
+  return connectorStores.flatMap((store) => {
+    if (store.trustDomain !== "secure_local" || !corpusIds.has(store.corpusId))
+      return [];
+    const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+    const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+    if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
+      return [];
+    if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
+      return [];
+    const scope = connectorStoreReadScope(store);
+    if (!scope.allowed || !scope.contentAllowed)
+      return [];
+    const mail = ref?.sourceId === "gmail.email" && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
+    const accountScope = mail ? gmailAccountScope?.trim() || "personal" : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
+    if (mail && !accountScope)
+      return [];
+    const filters = mail ? {
+      provider: "gmail",
+      observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+    } : scope.contentFilters;
+    const provider = ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref) : secureLocalPolicyEmbeddingProvider;
+    return [{
+      store,
+      provider,
+      ...accountScope ? { accountScope } : {},
+      ...filters ? { filters } : {}
+    }];
+  });
+}
+function loadSourceWorkerSovereignty(config2, env) {
+  const options = {
+    env,
+    migratePrivateMeaning: true,
+    ...config2.sovereignty?.policy ? { inlineConfig: config2.sovereignty.policy } : {},
+    ...config2.sovereignty?.configPath ? { configPath: config2.sovereignty.configPath } : {}
+  };
+  return loadSovereigntyEngine(options);
 }
 function createSourceIndexEmbeddingProviderFromSovereignty(engine, trustDomain, env = process.env, bootSecretResolver) {
   const resolved = engine.resolveEmbeddingProfile(trustDomain);
@@ -157147,11 +158259,7 @@ async function main() {
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
     env: process.env
   });
-  const sovereigntyEngine = loadSovereigntyEngine({
-    env: process.env,
-    ...olympusConfig.sovereignty?.policy ? { inlineConfig: olympusConfig.sovereignty.policy } : {},
-    ...olympusConfig.sovereignty?.configPath ? { configPath: olympusConfig.sovereignty.configPath } : {}
-  });
+  const sovereigntyEngine = loadSourceWorkerSovereignty(olympusConfig, process.env);
   const bootSecretResolver = new WorkerBootSecretResolver({
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env })
   });
@@ -157831,6 +158939,31 @@ async function main() {
     };
   };
   const connectorStoreStatusScope = (store) => {
+    if (store === gmailSecureConnectorStore) {
+      const ref = fileSourceScopeAuthority?.mailPolicyRef();
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
+        provider: "gmail",
+        capability: "gmail.email.sync",
+        handles: readActiveConnectedHandles(process.env)
+      });
+      if (!ref || !handle || !fileSourceScopeAuthority)
+        return { itemsAllowed: false, contentAllowed: false };
+      const approval = fileSourceScopeAuthority.assertCurrentMail(ref);
+      const accountScope = handle.accountRole?.trim() || "personal";
+      const itemFilters = {
+        provider: "gmail",
+        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+      };
+      return {
+        accountScope,
+        scopeRevision: ref.revision,
+        itemFilters,
+        contentAllowed: true,
+        contentFilters: itemFilters
+      };
+    }
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed)
       return { itemsAllowed: false, contentAllowed: false };
@@ -157937,12 +159070,14 @@ async function main() {
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+    const privateDefinition = gmailSecureConnectorStore && sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === gmailSecureConnectorStore.corpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget ? createGmailConnectorStoreSyncHandler({
       internalStore: gmailInternalConnectorStore,
       secureStore: gmailSecureConnectorStore,
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      confirmStoredPrivateScope: !!privateDefinition && secureLocalPolicyEmbeddingProvider?.provider === "built-in" && secureLocalPolicyEmbeddingProvider.backend === "local" && privateDefinition?.activationMode !== "lexical_only" && privateDefinition?.embeddingPolicy !== "disabled" && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_shadow" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_primary"),
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -158031,6 +159166,7 @@ async function main() {
     return createAnalystSourceIndexAnswerHandler({
       inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,
+      releaseCheck: createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow"),
       queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
       ...cloudAnalyst ? { cloudAnalyst } : {},
       veniceAnalyst: (request) => {
@@ -158155,13 +159291,13 @@ async function main() {
       openFile: async (path, eligible) => {
         if (!await eligible())
           throw new Error("open refused");
-        return new Promise((resolve14, reject) => {
+        return new Promise((resolve15, reject) => {
           const args = unreadableOpenArguments(path, unreadableDropboxRoots());
           if (!args) {
             reject(new Error("open refused"));
             return;
           }
-          execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+          execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve15());
         });
       }
     } : {}
@@ -158455,7 +159591,25 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
       return targets().length > 0 ? targets : undefined;
     });
-    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
+    const scopeRefs = new Map;
+    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef]) {
+      if (ref)
+        scopeRefs.set(ref.sourceId, ref);
+    }
+    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, (source) => localPrivateEmbeddingTargets({
+      source,
+      sovereigntyEngine,
+      secureLocalPolicyEmbeddingProvider,
+      sourceCorpusRegistry: sourceCorpusRegistry2,
+      scopeRefs,
+      connectorStores,
+      fullCorpusDefinitions,
+      fileSourceScopeAuthority,
+      readScope: connectorStoreReadScope,
+      connectorStoreAccountScopes,
+      gmailAccountScope: currentGmailHandle?.accountRole
+    }));
+    const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass ? attachSourceWatchSchedulerTask({
@@ -158763,6 +159917,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
+    sourceAnswerReleaseCheck: createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow"),
     consultAsk: ({ caller, ...input }, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
@@ -159004,13 +160159,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const openCitedFile = process.platform === "darwin" ? async (path, eligible) => {
     if (!await eligible())
       throw new Error("open refused");
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const args = localOpenArguments2(path, localDropboxRoots2());
       if (!args) {
         reject(new Error("open refused"));
         return;
       }
-      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve15());
     });
   } : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel2({
@@ -159047,6 +160202,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...openCitedFile ? { openFile: openCitedFile } : {}
   });
+  const remoteReleaseCheck = createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow");
   if (sourceAnswerLanes) {
     const { createLocalAnswerPath: createLocalAnswerPath2, createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
     const { DASHBOARD_SUPPORTED_SOURCES: DASHBOARD_SUPPORTED_SOURCES2 } = await Promise.resolve().then(() => (init_source_dashboard(), exports_source_dashboard));
@@ -159057,6 +160213,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       return DASHBOARD_SUPPORTED_SOURCES2.find((source) => source.corpus_source_ids.includes(sourceId))?.label;
     };
     const local = createLocalAnswerPath2({
+      releaseCheck: remoteReleaseCheck,
       lanes: sourceAnswerLanes,
       model: answerBuiltInModel,
       available: () => workerBuiltInModel?.available() ?? false,
@@ -159085,7 +160242,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         openUrl: async (url, eligible) => {
           if (!await eligible())
             throw new Error("open refused");
-          await new Promise((resolve14, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14()));
+          await new Promise((resolve15, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve15()));
         }
       } : {}
     });
@@ -159207,7 +160364,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       };
     }
   }
-  const remoteReleaseCheck = createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow");
   const { createRemotePrivateParts: createRemotePrivateParts2 } = await Promise.resolve().then(() => (init_remote_private_part(), exports_remote_private_part));
   const remotePrivateParts = createRemotePrivateParts2({
     probe: (request, timeoutMs) => sourceAnswerLanes ? probePrivateMatch({ lanes: sourceAnswerLanes, request, timeoutMs }) : Promise.resolve("unknown"),
@@ -159352,7 +160508,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     return searchReleasedEvidence({
       lanes: sourceAnswerLanes,
       question: input.question,
-      ...input.limit ? { maxResults: input.limit } : {}
+      ...input.limit ? { maxResults: input.limit } : {},
+      releaseCheck: remoteReleaseCheck
     });
   } : undefined;
   const remoteEvidenceSearch = sourceAnswerLanes ? async (input) => searchReleasedEvidence({
@@ -160717,7 +161874,7 @@ import { randomBytes as randomBytes29 } from "node:crypto";
 import { readFileSync as readFileSync68, openSync as openSync18, closeSync as closeSync19, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve14 } from "node:path";
+import { resolve as resolve15 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -161050,7 +162207,7 @@ init_source_corpus_registry();
 init_public_source_capabilities();
 init_worker_service();
 init_media_cache();
-import { createHash as createHash44, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash45, randomUUID as randomUUID15 } from "node:crypto";
 import {
   closeSync as closeSync13,
   existsSync as existsSync37,
@@ -161066,7 +162223,7 @@ import {
   statSync as statSync19
 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
-import { basename as basename6, dirname as dirname39, join as join57, relative as relative7, resolve as resolve10, sep as sep7 } from "node:path";
+import { basename as basename6, dirname as dirname39, join as join57, relative as relative7, resolve as resolve11, sep as sep7 } from "node:path";
 import { Database as Database11 } from "bun:sqlite";
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
@@ -161306,7 +162463,7 @@ function exportOlympusData(options) {
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
 }
 function verifyOlympusDataExport(options) {
-  const destination = resolve10(requirePath(options.destination, "--input"));
+  const destination = resolve11(requirePath(options.destination, "--input"));
   const manifestPath = join57(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync36(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
@@ -161315,7 +162472,7 @@ function verifyOlympusDataExport(options) {
   const verified = [];
   for (const value of parsed.artifacts) {
     const artifact = parseExportArtifact(value);
-    const path = resolve10(destination, artifact.relativePath);
+    const path = resolve11(destination, artifact.relativePath);
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
@@ -161635,7 +162792,7 @@ function exportSqliteStore(options) {
     return;
   }
   const destination = join57(destinationRoot, basename6(sqlitePath));
-  const staging = `${destination}.${randomUUID14()}.partial`;
+  const staging = `${destination}.${randomUUID15()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
@@ -161708,13 +162865,13 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   return {
     sourceId,
     role,
-    relativePath: relative7(resolve10(exportRoot), resolve10(path)),
+    relativePath: relative7(resolve11(exportRoot), resolve11(path)),
     bytes: stats.size,
     sha256: sha256File2(path)
   };
 }
 function sha256File2(path) {
-  const hash = createHash44("sha256");
+  const hash = createHash45("sha256");
   const descriptor = openSync13(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -161761,7 +162918,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current2 = dirname39(resolve10(destination));
+  let current2 = dirname39(resolve11(destination));
   for (;; ) {
     if (existsSync37(current2))
       return current2;
@@ -161773,7 +162930,7 @@ function exportDurabilityBoundary(destination) {
 }
 function makeDurableDirectory(path, boundary) {
   mkdirSync25(path, { recursive: true, mode: 448 });
-  let current2 = resolve10(path);
+  let current2 = resolve11(path);
   for (;; ) {
     syncDirectorySync2(current2);
     if (current2 === boundary)
@@ -161901,8 +163058,8 @@ function isInsideKnownOlympusRoot(path, context2) {
   return knownOlympusDataRoots(context2).some((root) => isSameOrInsidePath(path, root));
 }
 function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve10(path);
-  const absoluteRoot = resolve10(root);
+  const absolutePath = resolve11(path);
+  const absoluteRoot = resolve11(root);
   return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep7}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
@@ -161965,7 +163122,7 @@ init_remote_open();
 // src/core/lifecycle.ts
 init_worker_transport();
 init_atomic_file();
-import { createHash as createHash54 } from "node:crypto";
+import { createHash as createHash55 } from "node:crypto";
 import { spawnSync as spawnSync14 } from "node:child_process";
 import { existsSync as existsSync52, lstatSync as lstatSync30, mkdirSync as mkdirSync35, readFileSync as readFileSync51 } from "node:fs";
 import { homedir as homedir46, platform as osPlatform4 } from "node:os";
@@ -161974,7 +163131,7 @@ import { dirname as dirname54, isAbsolute as isAbsolute22, join as join77 } from
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash53, randomUUID as randomUUID19 } from "node:crypto";
+import { createHash as createHash54, randomUUID as randomUUID20 } from "node:crypto";
 import { spawnSync as spawnSync13 } from "node:child_process";
 import {
   chmodSync as chmodSync21,
@@ -162002,7 +163159,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash53("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash54("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync3(join75(tmpdir6(), ".olympus-artifact-snapshot-"));
   const artifactPath = join75(snapshotDir, "artifact.tgz");
   const descriptor = openSync16(artifactPath, "wx", 384);
@@ -162252,7 +163409,7 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest3 = createHash53("sha256");
+  const digest3 = createHash54("sha256");
   hashVersionTree(root, "", digest3);
   return digest3.digest("hex");
 }
@@ -162279,7 +163436,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync50(workingDirectory)) {
-      replacedPath = join75(versionsDir, `.olympus-replaced-${basename10(workingDirectory)}-${randomUUID19()}`);
+      replacedPath = join75(versionsDir, `.olympus-replaced-${basename10(workingDirectory)}-${randomUUID20()}`);
       renameSync14(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
@@ -162321,7 +163478,7 @@ function removeStagingTree(root) {
 init_atomic_file();
 init_file_lease();
 init_operation_error();
-import { randomUUID as randomUUID20 } from "node:crypto";
+import { randomUUID as randomUUID21 } from "node:crypto";
 import { existsSync as existsSync51, linkSync as linkSync2, lstatSync as lstatSync29, readFileSync as readFileSync50 } from "node:fs";
 import { join as join76 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
@@ -162337,7 +163494,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
-      nonce: randomUUID20(),
+      nonce: randomUUID21(),
       action,
       started_at: now().toISOString()
     };
@@ -163058,7 +164215,7 @@ function assertRegularFile2(path, label) {
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2563(value2) {
-  return createHash54("sha256").update(value2).digest("hex");
+  return createHash55("sha256").update(value2).digest("hex");
 }
 
 // src/cli.ts
@@ -163696,7 +164853,7 @@ var VENICE_PITCH_TEXT = [
   `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS["local-first"]} tries your local lane first; ${PRIVACY_PRESET_LABELS["private-cloud-only"]} has no local-model requirement.`,
   "In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.",
   "Semantic search uses a small model built into Olympus: it downloads once, runs on this computer, and needs no account or key. Gemini, a local embedding server, or a Venice Private embedding model are opt-in; Private content never goes to ordinary cloud embedding providers.",
-  `Choosing ${PRIVACY_PRESET_LABELS["no-sensitive"]} is a deliberate choice after this screen.`
+  `Choosing ${PRIVACY_PRESET_LABELS["no-sensitive"]} keeps Private meaning search on this computer without configuring an agent answer lane.`
 ];
 function runSetupDependencyCheck(input = {}) {
   const platform2 = normalizeSetupPlatform(input.platform ?? process.platform);
@@ -164222,7 +165379,7 @@ async function followEngineLogs(deps, lines) {
   const child = spawn6("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child.stdout });
   reader.on("line", (line) => console.log(redactLogLine(line)));
-  await new Promise((resolve12) => child.once("exit", () => resolve12()));
+  await new Promise((resolve13) => child.once("exit", () => resolve13()));
 }
 function parseNowArg(command, args) {
   if (args.length === 0)
@@ -164313,7 +165470,7 @@ function expectNoArgs(command, args) {
 init_engine_service();
 init_remote_access();
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve14(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve15(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -165216,7 +166373,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve14(out),
+    out_dir: resolve15(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -165266,7 +166423,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync68(resolve14(input2), "utf8");
+    raw = readFileSync68(resolve15(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -165571,7 +166728,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve14(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve15(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };

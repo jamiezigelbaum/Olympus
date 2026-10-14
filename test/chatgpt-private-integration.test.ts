@@ -1,3 +1,4 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // The private answer panel wired to the built-in private model (integration):
 //
 // - olympus_search with a Private match creates a one-time panel job; the
@@ -160,7 +161,7 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     let refreshes = 0;
     const handler = createRemoteMcpHandler({
       connections: () => store,
-      makeOperationContext: (caller, signal) => createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }),
+      makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }), releaseCheck: scriptedSearchReleaseCheck }),
       chatgpt: {
         servesRequest: () => true,
         privateAnswers: jobs,
@@ -170,10 +171,10 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
         },
         async dashboardView() { throw new Error('unused'); },
         async evidenceSearch() {
-          return {
-            evidence: [{ trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs and a table.' }],
+          return recordScriptedSearch({
+            evidence: [{ corpus_id: 'internal.google_drive.docs', provider_item_id: 'flat-inventory', trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs and a table.' }],
             coverage: { searched_corpora: 2, unreadable_items: 0, partially_read_items: 0, unclassified_items: 0 },
-          };
+          });
         },
       },
     });
@@ -273,7 +274,7 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
     const handler = createRemoteMcpHandler({
       connections: () => store,
-      makeOperationContext: (caller, signal) => createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }),
+      makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }), releaseCheck: scriptedSearchReleaseCheck }),
       chatgpt: {
         servesRequest: () => true,
         privateAnswers: jobs,
@@ -599,7 +600,7 @@ describe('a Personal name over Private contents', () => {
 
     // olympus_search over such a match: the one Private note, no folder advice.
     const result = searchToolResult({
-      evidence: [{ trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs.' }],
+      evidence: [{ corpus_id: 'internal.google_drive.docs', provider_item_id: 'flat-inventory', trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs.' }],
       coverage: { searched_corpora: 1, unreadable_items: 0, names_only_items: 0, content_private_items: 1 },
     });
     const visible = JSON.stringify({ content: result.content, structuredContent: result.structuredContent });

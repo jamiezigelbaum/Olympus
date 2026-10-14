@@ -1,3 +1,4 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // The engine's directory endpoint (`/openai/mcp`) serves the listing submitted
 // to OpenAI (connect-relay/server/directory/approved.ts) while its calls run
 // the current code (src/workers/chatgpt/directory-surface.ts):
@@ -116,8 +117,8 @@ function surface(): ChatGptSurfaceOptions {
     privateAnswers: jobs,
     privateQuestions: questions,
     privateMatchProbe: async () => ({ count: 1, evidence: PRIVATE_HITS }),
-    evidenceSearch: async () => ({
-      evidence: [{ trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs and a table.' }],
+    evidenceSearch: async () => recordScriptedSearch({
+      evidence: [{ corpus_id: 'internal.google_drive.docs', provider_item_id: 'flat-inventory', trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs and a table.' }],
       coverage: { searched_corpora: 1, unreadable_items: 0, partially_read_items: 0, unclassified_items: 0 },
     }),
     setup,
@@ -170,12 +171,12 @@ type Endpoint = (method: string, params?: Record<string, unknown>) => Promise<{ 
 function connect(endpoint: 'directory' | 'mcp'): Endpoint {
   const worker = createEmailSourceWorker({});
   const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
-  const ctx = () => createInProcessOperationContext({
+  const ctx = () => ({ ...createInProcessOperationContext({
     config,
     sourceIndexReadEnabled: true,
     workerFetch: worker.fetch,
     caller: { surface: 'remote', connectionId: 'conn-1', displayName: 'ChatGPT' },
-  });
+  }), releaseCheck: scriptedSearchReleaseCheck });
   return async (method, params = {}) => {
     const server: Server = endpoint === 'directory' ? createChatGptDirectoryMcpServer(ctx, surface(), ctx) : createChatGptMcpServer(ctx, surface(), ctx);
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();

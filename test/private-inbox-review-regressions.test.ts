@@ -210,7 +210,7 @@ describe('model-slot privacy fences', () => {
 });
 
 describe('live authorization failures stop sovereignty fallback', () => {
-  for (const fault of ['Secret', 'provider error', 'lanes error', 'model failure after retier', 'model failure control'] as const) {
+  for (const fault of ['Secret', 'provider error', 'lanes error', 'model failure after retier', 'release target', 'model failure control'] as const) {
     test(`${fault} after local queueing cannot masquerade as a provider outage`, async () => {
       const corpusId = 'secure_local.synthetic.multi-leg';
       const sourceItem = { family: 'file' as const, provider: 'synthetic', accountScope: 'fixture', providerItemId: 'multi-leg', localItemId: 'multi-leg' };
@@ -251,6 +251,10 @@ describe('live authorization failures stop sovereignty fallback', () => {
       };
       const handler = createAnalystSourceIndexAnswerHandler({
         analyst: local, lanes,
+        releaseCheck: {
+          inputs: inputs => inputs.map(() => ({ tier: changed && fault === 'release target' ? 'secret' as const : 'private' as const, gone: false })),
+          secureDerivativeDefault: () => 'allow',
+        },
         inferenceGuard: async (pack, request, corpusIds) => {
           guarded++;
           await guardSourceAnswerEvidence({ lanes, request, pack, corpusIds });

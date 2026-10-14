@@ -963,6 +963,7 @@ function createDirectSourceEmbeddingDrainClient(
   const config = loadConfig(env);
   const sovereigntyEngine = loadSovereigntyEngine({
     env,
+    migratePrivateMeaning: true,
     ...(config.sovereignty?.policy ? { inlineConfig: config.sovereignty.policy } : {}),
     ...(config.sovereignty?.configPath ? { configPath: config.sovereignty.configPath } : {}),
   });

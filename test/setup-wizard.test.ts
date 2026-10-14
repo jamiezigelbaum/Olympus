@@ -49,8 +49,8 @@ describe('olympus setup wizard', () => {
       expect(pitch).toContain('Semantic search uses a small model built into Olympus');
       expect(pitch).toContain('needs no account or key');
       expect(pitch).toContain('Private content never goes to ordinary cloud embedding providers');
-      expect(pitch).toContain("Choosing Private kept local, keyword search only is a deliberate choice");
-      expect(result.presetLabel).toBe("Private kept local, keyword search only");
+      expect(pitch).toContain("Choosing Private meaning search on this computer keeps Private meaning search on this computer without configuring an agent answer lane");
+      expect(result.presetLabel).toBe("Private meaning search on this computer");
       expect(pitch).not.toContain('Venice E2EE can be connected');
       expect(pitch).not.toContain('E2EE and Anonymized models are refused');
       expect(result.secureTierDecision).toBe('secure_off_user_choice');
@@ -200,7 +200,7 @@ describe('olympus setup wizard', () => {
     expect(bun?.repairHint).toContain('Bun 1.2+');
   });
 
-  test('no-sensitive needs no embedding key: the built-in model indexes Public and Personal content', async () => {
+  test('no-sensitive needs no embedding key: the built-in model indexes Personal and Private content', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-cloud-test-'));
     try {
       const missing = await runIsolatedSetupWizard({

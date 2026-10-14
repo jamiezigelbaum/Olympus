@@ -705,11 +705,11 @@ describe('sovereignty config engine', () => {
     expect(local.calls).toHaveLength(0);
   });
 
-  test('preset routing: no-sensitive has no secure analyst or embedding lane', () => {
+  test('preset routing: no-sensitive embeds Private locally without a secure agent analyst lane', () => {
     const engine = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive'));
 
     expect(() => engine.resolveAnalystRoute({ trustDomain: 'secure_local' })).toThrow('route for secure_local is disabled');
-    expect(engine.resolveEmbeddingProfile('secure_local')).toBeUndefined();
+    expect(engine.resolveEmbeddingProfile('secure_local')).toMatchObject({ id: 'built-in-embedding', profile: { provider: 'built-in', trust: 'local', purpose: 'embedding' } });
     expect(engine.config.retrieval.trustDomains.secure_local?.secureHandling).toBe('metadata_only_gap');
   });
 

@@ -11,6 +11,7 @@
  * Retries persist only attempts and next-attempt, never exception text.
  */
 import { lstatSync } from 'node:fs';
+import { answerReleaseWithheldReason, type ReleaseCheck } from '../../core/release-manifest.ts';
 import { randomBytes } from 'node:crypto';
 import { CHATGPT_INBOX_GRACE_MS, type StoredPrivateAnswer, type WaitingQuestion, type WaitingQuestionRef, type WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
 import { answerPrivately, type BuiltInAnalystModel } from '../../core/analyst-built-in.ts';
@@ -106,6 +107,8 @@ interface OpenEntry {
 }
 
 export interface LocalAnswerPathOptions {
+  /** Current ledger targets too: a moving-to-Secret item may still have a serving copy. */
+  releaseCheck: ReleaseCheck;
   /** The worker's shared lane factory (source-answer-lanes.ts); called with `built_in_only`. */
   lanes: (request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => AnalystAnswerLanes;
   /** The worker's one built-in private model. */
@@ -131,7 +134,23 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
 } {
   const lanes = (request: SourceIndexAnswerRequest) => options.lanes(request, 'built_in_only');
-  const eligible = (items: readonly PrivateEvidenceItem[]) => checkLocalEvidenceItems({ lanes, items });
+  const eligible = async (items: readonly PrivateEvidenceItem[]) => {
+    const served = await checkLocalEvidenceItems({ lanes, items });
+    // This local control path explicitly asks for Private content. Remote
+    // manifests/tickets retain their own consent and release boundaries.
+    const inputs = items.map(item => {
+      const provenance = item.provenance as { sourceItem?: { provider?: string; accountScope?: string; providerItemId?: string; providerConversationId?: string } } | undefined;
+      const identity = provenance?.sourceItem;
+      return {
+        corpusId: typeof item.corpusId === 'string' ? item.corpusId : '',
+        provider: identity?.provider ?? '', accountScope: identity?.accountScope ?? '', providerItemId: identity?.providerItemId ?? '',
+        ...(identity?.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
+        privateAtAnswer: item.trustDomain === 'secure_local' || item.trustTier === 'S4' || item.trustTier === 'S5',
+      };
+    });
+    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: true } }], options.releaseCheck);
+    return reason ? items.map(() => false) : served;
+  };
   const model = createBuiltInPrivateAnswerModel({
     model: options.model,
     eligible,

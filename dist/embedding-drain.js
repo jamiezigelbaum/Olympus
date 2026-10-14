@@ -1494,7 +1494,7 @@ var init_source_corpus_registry = __esm(() => {
       provider: "google_drive",
       family: "file",
       trustDomain: "secure_local",
-      activationMode: "lexical_only",
+      activationMode: "hybrid_shadow",
       capabilities: ["answer", "status", "sync", "search"],
       description: "Secure-local Google Drive/Docs items raised by per-item sensitivity classification."
     },
@@ -6265,6 +6265,10 @@ var init_zkapi_consult_settings = __esm(() => {
 
 // src/core/sovereignty.ts
 import { chmodSync, existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync11 } from "node:fs";
+import { dirname as dirname8, join as join10, resolve as resolve5 } from "node:path";
+import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import { randomUUID as randomUUID4 } from "node:crypto";
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -6275,7 +6279,27 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync7(configPath)) {
+    const isDefaultPath = (path) => {
+      try {
+        return resolve5(path) === resolve5(defaultSovereigntyConfigPath(env));
+      } catch {
+        return false;
+      }
+    };
+    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    if (options.migratePrivateMeaning && standaloneDefault) {
+      try {
+        const backup = migratePrivateMeaningSearch(configPath);
+        if (backup)
+          console.info(`Private meaning search enabled locally; policy backup: ${backup}`);
+      } catch {
+        console.warn("Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.");
+      }
+    }
     const parsed = JSON.parse(readFileSync11(configPath, "utf8"));
+    if (options.migratePrivateMeaning && !standaloneDefault && parsed?.retrieval?.trustDomains?.secure_local?.activationMode === "metadata_only") {
+      console.info("Pinned or hosted privacy policy still uses the 1.0.0 keyword-only Private setting; no migration was performed.");
+    }
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -6509,6 +6533,81 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       }
     }
   };
+}
+function migratePrivateMeaningSearch(path) {
+  const legacy = {
+    schemaVersion: 1,
+    modelProfiles: {
+      "built-in-embedding": { provider: "built-in", trust: "local", model: "embeddinggemma-2-litert-24d962e", purpose: "embedding" },
+      "cloud-openclaw-infer": { provider: "openclaw-infer", trust: "standard_cloud", purpose: "analyst" }
+    },
+    routes: {
+      secure_local: {
+        mode: "disabled",
+        pool: { members: [] },
+        disabledReason: "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
+      },
+      internal: { analyst: ["cloud-openclaw-infer"] }
+    },
+    retrieval: { trustDomains: {
+      secure_local: {
+        minimumExecutionTrust: "local",
+        allowedEmbeddingTrust: ["local"],
+        embeddingProfile: null,
+        allowCloudQuery: false,
+        activationMode: "metadata_only",
+        secureHandling: "metadata_only_gap"
+      },
+      internal: {
+        minimumExecutionTrust: "standard_cloud",
+        allowedEmbeddingTrust: ["local", "standard_cloud"],
+        embeddingProfile: "built-in-embedding",
+        allowCloudQuery: true,
+        activationMode: "hybrid_shadow"
+      }
+    } }
+  };
+  if (!existsSync7(path))
+    return;
+  const eligible = (current2) => {
+    const config = current2;
+    return config?.schemaVersion === 1 && isDeepStrictEqual(config.retrieval?.trustDomains?.secure_local, legacy.retrieval.trustDomains.secure_local) && isDeepStrictEqual(config.modelProfiles?.["built-in-embedding"], legacy.modelProfiles["built-in-embedding"]);
+  };
+  if (!eligible(JSON.parse(readFileSync11(path, "utf8"))))
+    return;
+  return withFileLeaseSync(path, (lease) => {
+    const original = readFileSync11(path, "utf8");
+    const current2 = JSON.parse(original);
+    if (!eligible(current2))
+      return;
+    const nextPolicy = loadSovereigntyPreset("no-sensitive");
+    const nextDisabledReason = nextPolicy.routes.secure_local?.disabledReason;
+    const next = {
+      ...current2,
+      ...nextDisabledReason && current2.routes?.secure_local?.disabledReason === legacy.routes.secure_local?.disabledReason ? {
+        routes: { ...current2.routes, secure_local: { ...current2.routes.secure_local, disabledReason: nextDisabledReason } }
+      } : {},
+      retrieval: {
+        ...current2.retrieval,
+        trustDomains: { ...current2.retrieval.trustDomains, secure_local: nextPolicy.retrieval.trustDomains.secure_local }
+      }
+    };
+    validateSovereigntyConfig(next);
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID4()}`;
+    lease.commit(() => {
+      writePrivateFileAtomicSync(backup, original);
+      writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
+`);
+    });
+    return backup;
+  }, { acquireTimeoutMs: 5000 });
+}
+function loadSovereigntyPreset(name) {
+  const sourceLayoutPath = join10(dirname8(fileURLToPath(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join10(dirname8(fileURLToPath(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
+  const path = existsSync7(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
+  const parsed = JSON.parse(readFileSync11(path, "utf8"));
+  return validateSovereigntyConfig(parsed);
 }
 function parseSovereigntyConfig(value, label) {
   const root = unwrapSovereignty(value);
@@ -6938,7 +7037,7 @@ var init_sovereignty = __esm(() => {
 // src/core/worker-auth.ts
 import { readFileSync as readFileSync12, statSync as statSync7 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
   if (config.worker.authTokenSecretRefUnresolved)
     return;
@@ -6975,7 +7074,7 @@ function workerSetupEnvPath(options = {}) {
     return options.workerEnvPath;
   if (process.platform === "linux")
     return resolveLinuxEngineLayout({ ...env, HOME: options.homeDir ?? env.HOME }).workerEnvPath;
-  return join10(options.homeDir ?? optionalToken(env.HOME) ?? homedir6(), ".config", "olympus", "worker.env");
+  return join11(options.homeDir ?? optionalToken(env.HOME) ?? homedir6(), ".config", "olympus", "worker.env");
 }
 function isWorkerAuthTokenPlaceholder(value) {
   const normalized = value?.trim().toLowerCase();
@@ -7163,12 +7262,12 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync13 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname8, join as join11 } from "node:path";
+import { dirname as dirname9, join as join12 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join11(homedir7(), ".config", "olympus", "handles.json");
+  return join12(homedir7(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
   const path = connectedHandleGrantEpochPath(registryPath);
@@ -7194,7 +7293,7 @@ async function withConnectedHandleGrantCustody(registryPath, options, mutation) 
         throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
       }
       if (options.advanceEpoch === true) {
-        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID4() }, null, 2)}
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID5() }, null, 2)}
 `);
       }
       return await mutation();
@@ -7244,7 +7343,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync7(dirname8(path), { recursive: true, mode: 448 });
+  mkdirSync7(dirname9(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -7498,7 +7597,7 @@ var init_connected_handles = __esm(() => {
 // src/workers/credential-broker/index.ts
 import { createHash as createHash3 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname9 } from "node:path";
+import { dirname as dirname10 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -7573,7 +7672,7 @@ class JsonCredentialOAuth2StateStore {
         merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname9(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname10(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -7585,7 +7684,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname9(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname10(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -9533,14 +9632,14 @@ function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
   };
 }
 function abortableDelay(ms, signal) {
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     if (signal.aborted)
-      return resolve5();
+      return resolve6();
     const timer = setTimeout(done, ms);
     function done() {
       clearTimeout(timer);
       signal.removeEventListener("abort", done);
-      resolve5();
+      resolve6();
     }
     signal.addEventListener("abort", done, { once: true });
   });
@@ -12742,7 +12841,7 @@ var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
 import { chmodSync as chmodSync2, closeSync as closeSync5, existsSync as existsSync9, mkdirSync as mkdirSync8, openSync as openSync5 } from "node:fs";
-import { dirname as dirname10 } from "node:path";
+import { dirname as dirname11 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
 }
@@ -12759,7 +12858,7 @@ class TierLedger {
     this.now = options.now ?? (() => new Date);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
-      mkdirSync8(dirname10(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync8(dirname11(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync9(this.dbPath))
         closeSync5(openSync5(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
@@ -13496,6 +13595,13 @@ class TierLedger {
       return "none";
     if (overrideAuthorizes(this.getOverride(identity), targetMetadata, targetContent))
       return "none";
+    const rawReceipt = this.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`);
+    const receipt = rawReceipt ? JSON.parse(rawReceipt) : undefined;
+    const verified = receipt?.generation === existing.generation && receipt.raise && receipt.target.metadataTier === targetMetadata && receipt.target.contentTier === targetContent;
+    const override = this.getOverride(identity);
+    if (verified && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
+      return "none";
+    }
     const decidedAt = this.now().toISOString();
     const prior = this.decisionBeforeOverride(identity, existing);
     const staleFlip = existing.generation + 1;
@@ -13532,6 +13638,21 @@ class TierLedger {
       UPDATE tier_items SET generation = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(staleFlip, ...idParams(identity));
+    if (verified) {
+      for (const copy of receipt.placement) {
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', layers = ?, superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(copy.layers, nextFlip, decidedAt, ...idParams(identity), copy.corpusId);
+      }
+      for (const copy of copies.filter((copy2) => !receipt.placement.some((dest) => dest.corpusId === copy2.corpusId))) {
+        this.db.query(`
+          UPDATE tier_copies SET superseded_by_generation = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(staleFlip, ...idParams(identity), copy.corpusId);
+      }
+    }
+    this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
     this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
       ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
@@ -13597,6 +13718,17 @@ class TierLedger {
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
   }
+  metaEntries(prefix, options = {}) {
+    return this.db.query("SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?").all(prefix, `${prefix}￿`, options.after ?? "", "", options.limit ?? -1);
+  }
+  withGenerationFence(identity, generation, work) {
+    return this.db.transaction(() => {
+      this.db.query("UPDATE tier_ledger_meta SET value = value WHERE key = 'ledger_id'").run();
+      if (this.getCurrent(identity)?.generation !== generation)
+        throw new TierLedgerGenerationConflictError;
+      return work();
+    })();
+  }
   listRouted(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 50000));
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
@@ -13608,6 +13740,52 @@ class TierLedger {
       LIMIT ?
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
     return rows.map(recordFromRow);
+  }
+  listLowerContentLeftovers(options) {
+    const attached = [];
+    try {
+      const queries = [];
+      const params = [];
+      for (const store of options.stores) {
+        const alias = `purge_lower_${attached.length}`;
+        this.db.query(`ATTACH DATABASE ? AS ${alias}`).run(store.dbPath);
+        attached.push(alias);
+        const higher = store.trustDomain === "public_safe" ? "('internal', 'secure_local')" : "('secure_local')";
+        const metadataAllowed = store.trustDomain === "public_safe" ? "('public_safe')" : "('public_safe', 'internal')";
+        queries.push(`SELECT l.provider, l.account_scope, l.conversation_key, l.provider_item_id
+          FROM tier_copies l INDEXED BY tier_copies_corpus
+          JOIN ${alias}.items s ON s.provider = l.provider AND s.account_scope = l.account_scope
+            AND s.normalized_conversation = l.conversation_key AND s.provider_item_id = l.provider_item_id
+          WHERE l.corpus_id = ? AND s.tombstoned = 0
+            AND EXISTS (SELECT 1 FROM tier_copies h
+              WHERE h.provider = l.provider AND h.account_scope = l.account_scope
+                AND h.conversation_key = l.conversation_key AND h.provider_item_id = l.provider_item_id
+                AND h.copy_state = 'current' AND h.layers IN ('content', 'both') AND h.trust_domain IN ${higher})
+            AND (EXISTS (SELECT 1 FROM ${alias}.chunks c WHERE c.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.chunk_embeddings e WHERE e.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.item_text_versions v WHERE v.item_pk = s.item_pk)
+              OR ((s.title IS NOT NULL OR s.locator_uri IS NOT NULL OR s.search_text IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM tier_copies m
+                  WHERE m.provider = l.provider AND m.account_scope = l.account_scope
+                    AND m.conversation_key = l.conversation_key AND m.provider_item_id = l.provider_item_id
+                    AND m.copy_state = 'current' AND m.layers IN ('metadata', 'both')
+                    AND m.trust_domain IN ${metadataAllowed})))`);
+        params.push(store.corpusId);
+      }
+      if (!queries.length)
+        return [];
+      const after = options.after ? idParams(options.after) : ["", "", "", ""];
+      const rows = this.db.query(`SELECT i.* FROM (${queries.join(" UNION ")}) candidates
+        JOIN tier_items i USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE i.routed = 1 AND i.state <> 'moving'
+          AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?)
+        ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...params, ...after, options.limit);
+      return rows.map(recordFromRow);
+    } finally {
+      for (const alias of attached.reverse())
+        this.db.exec(`DETACH DATABASE ${alias}`);
+    }
   }
   secretsIdentities() {
     const rows = this.db.query(`
@@ -14180,6 +14358,9 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (this.readMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`) === String(options.expectedGeneration)) {
+        throw new TierLedgerPurgedRollbackRefusedError;
+      }
       if (existing && (existing.contentTier === "secrets" || existing.metadataTier === "secrets")) {
         throw new TierLedgerSecretsRollbackRefusedError;
       }
@@ -14253,6 +14434,7 @@ class TierLedger {
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
         `).run(now, ...idParams(identity));
       }
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
       const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
@@ -15171,7 +15353,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -15185,6 +15367,12 @@ var init_tier_ledger = __esm(() => {
     constructor(message2 = "A raise is never abandoned: its hidden copies stay hidden until the move completes.") {
       super(message2);
       this.name = "TierLedgerRaiseAbandonRefusedError";
+    }
+  };
+  TierLedgerPurgedRollbackRefusedError = class TierLedgerPurgedRollbackRefusedError extends Error {
+    constructor() {
+      super("already Private; its lower copy was removed");
+      this.name = "TierLedgerPurgedRollbackRefusedError";
     }
   };
   TierLedgerSecretsRollbackRefusedError = class TierLedgerSecretsRollbackRefusedError extends Error {
@@ -16323,7 +16511,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash7, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash7, randomUUID as randomUUID6 } from "node:crypto";
 import {
   chmodSync as chmodSync3,
   existsSync as existsSync10,
@@ -16338,12 +16526,12 @@ import {
   statSync as statSync8,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { basename as basename2, dirname as dirname11, isAbsolute as isAbsolute6, join as join12, resolve as resolve5 } from "node:path";
+import { basename as basename2, dirname as dirname12, isAbsolute as isAbsolute6, join as join13, resolve as resolve6 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute6(configured))
     throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
-  return configured ? join12(configured, "olympus-media") : join12(olympusDataDir(env), "media-cache");
+  return configured ? join13(configured, "olympus-media") : join13(olympusDataDir(env), "media-cache");
 }
 function isSha256(value) {
   if (value.length !== 64)
@@ -16355,11 +16543,11 @@ function isSha256(value) {
   return true;
 }
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute6(path) || !isSha256(sha256) || resolve5(path) !== path)
+  if (!isAbsolute6(path) || !isSha256(sha256) || resolve6(path) !== path)
     return false;
-  if (basename2(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename2(dirname11(path))))
+  if (basename2(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename2(dirname12(path))))
     return false;
-  if (dir !== undefined && dirname11(path) !== resolve5(dir))
+  if (dir !== undefined && dirname12(path) !== resolve6(dir))
     return false;
   try {
     const stat3 = lstatSync5(path);
@@ -16374,7 +16562,7 @@ function mediaHolderName(holder) {
   try {
     return realpathSync2(holder);
   } catch {
-    return resolve5(holder);
+    return resolve6(holder);
   }
 }
 function retainMediaCacheFile(path, sha256, holder, dir) {
@@ -16392,10 +16580,10 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
     return false;
   try {
     const refs = refsDir(path);
-    rmSync5(join12(refs, holderName(holder)), { force: true });
+    rmSync5(join13(refs, holderName(holder)), { force: true });
     const legacy = legacyHolderName(holder);
     if (legacy)
-      rmSync5(join12(refs, legacy), { force: true });
+      rmSync5(join13(refs, legacy), { force: true });
     const remaining = existsSync10(refs) ? readdirSync2(refs) : [];
     if (remaining.length > 0)
       return false;
@@ -16425,7 +16613,7 @@ function sweepMediaCache(dir, options = {}) {
     return 0;
   }
   for (const name of entries) {
-    const path = join12(dir, name);
+    const path = join13(dir, name);
     try {
       if (name.startsWith(".") && name.endsWith(".tmp")) {
         if (old(path))
@@ -16437,7 +16625,7 @@ function sweepMediaCache(dir, options = {}) {
       const refs = refsDir(path);
       if (existsSync10(refs)) {
         for (const marker of readdirSync2(refs)) {
-          const markerPath = join12(refs, marker);
+          const markerPath = join13(refs, marker);
           if (marker.startsWith("staging-") ? old(markerPath) : holderGone(markerPath, marker)) {
             rmSync5(markerPath, { force: true });
           }
@@ -16457,13 +16645,13 @@ function sweepMediaCache(dir, options = {}) {
 function addMarker(path, holder) {
   const refs = refsDir(path);
   ensureOwnerOnlyDir(refs);
-  const marker = join12(refs, holderName(holder));
+  const marker = join13(refs, holderName(holder));
   const name = mediaHolderName(holder);
   if (readMarker(marker) !== name)
     writeFileSync5(marker, name, { mode: 384 });
   const legacy = legacyHolderName(holder);
   if (legacy)
-    rmSync5(join12(refs, legacy), { force: true });
+    rmSync5(join13(refs, legacy), { force: true });
 }
 function readMarker(marker) {
   try {
@@ -16476,10 +16664,10 @@ function holderGone(marker, markerName) {
   const name = readMarker(marker);
   if (!name || !isAbsolute6(name) || holderDigest(name) !== markerName)
     return false;
-  return !existsSync10(name) && existsSync10(dirname11(name));
+  return !existsSync10(name) && existsSync10(dirname12(name));
 }
 function refsDir(path) {
-  return join12(dirname11(path), `${basename2(path)}.refs`);
+  return join13(dirname12(path), `${basename2(path)}.refs`);
 }
 function holderDigest(name) {
   return createHash7("sha256").update(name).digest("hex").slice(0, 32);
@@ -16511,7 +16699,7 @@ var init_media_cache = __esm(() => {
 import { Database as Database2 } from "bun:sqlite";
 import { createHash as createHash8 } from "node:crypto";
 import { chmodSync as chmodSync4, closeSync as closeSync6, existsSync as existsSync11, mkdirSync as mkdirSync10, openSync as openSync6 } from "node:fs";
-import { dirname as dirname12 } from "node:path";
+import { dirname as dirname13 } from "node:path";
 function screenedSecretLocator(locator) {
   return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
 }
@@ -16530,7 +16718,7 @@ class SecretLocationsIndex {
     }
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
-      mkdirSync10(dirname12(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync10(dirname13(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync11(this.dbPath))
         closeSync6(openSync6(this.dbPath, "a", 384));
       chmodSync4(this.dbPath, 384);
@@ -16905,7 +17093,7 @@ var init_delphi_scorer = __esm(() => {
 import { Database as Database3 } from "bun:sqlite";
 import { createHash as createHash9 } from "node:crypto";
 import { chmodSync as chmodSync5, existsSync as existsSync12, mkdirSync as mkdirSync11 } from "node:fs";
-import { dirname as dirname13 } from "node:path";
+import { dirname as dirname14 } from "node:path";
 function snifferMaterialHash(pass, material) {
   return createHash9("sha256").update(`${pass}
 ${material}`).digest("hex");
@@ -16928,7 +17116,7 @@ class TierSnifferStore {
     this.readOnly = false;
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      mkdirSync11(dirname13(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync11(dirname14(this.dbPath), { recursive: true, mode: 448 });
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
@@ -17514,14 +17702,14 @@ var init_sniffer = __esm(() => {
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync13 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 import { Database as Database4 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir8(), ".local", "share");
-  return join13(standaloneLinuxDataDir(env) ?? join13(dataHome, "openclaw", "olympus"), "file-extraction-jobs.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir8(), ".local", "share");
+  return join14(standaloneLinuxDataDir(env) ?? join14(dataHome, "openclaw", "olympus"), "file-extraction-jobs.sqlite");
 }
 function extractionJobsDbPaths(env = process.env) {
   return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
@@ -18253,9 +18441,9 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash11, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync15, lstatSync as lstatSync6, mkdirSync as mkdirSync12, statSync as statSync9 } from "node:fs";
-import { dirname as dirname14 } from "node:path";
+import { dirname as dirname15 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
@@ -18572,7 +18760,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve6) => setTimeout(resolve6, 0));
+  return new Promise((resolve7) => setTimeout(resolve7, 0));
 }
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
@@ -19278,6 +19466,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...provider ? { provider } : {},
+    ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, "Observed connector id") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -19305,6 +19494,10 @@ function connectorStoreFilterSql(filters) {
   if (normalized.provider) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
+  }
+  if (normalized.observedConnectorId) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -20206,7 +20399,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve6) => setTimeout(resolve6, 0));
+  return new Promise((resolve7) => setTimeout(resolve7, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -20359,7 +20552,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -20451,6 +20644,11 @@ var init_local_index = __esm(() => {
       this.ruleId = ruleId;
     }
   };
+  ConnectorStoreTierWriteRefusedError = class ConnectorStoreTierWriteRefusedError extends Error {
+    constructor() {
+      super("The current tier ledger does not authorize this store write.");
+    }
+  };
   TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
     constructor(corpusId) {
       super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
@@ -20491,7 +20689,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID6()}` : this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID7()}` : this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -20515,7 +20713,7 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync12(dirname14(this.dbPath), { recursive: true, mode: 448 });
+        mkdirSync12(dirname15(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database5(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
@@ -20820,6 +21018,16 @@ var init_local_index = __esm(() => {
       LIMIT 1
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
     }
+    observeStoredItemOwner(identity, connectorId) {
+      this.db.transaction(() => {
+        const row = this.db.query(`
+        SELECT item_pk, sync_run_id FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        if (row)
+          this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso(), "provider_listing");
+      })();
+    }
     reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
       const row = this.db.query(`
       SELECT item_pk FROM items
@@ -20831,7 +21039,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID6()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID7()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -20890,7 +21098,7 @@ var init_local_index = __esm(() => {
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID7()}`;
           const startedAt = nowIso();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -20993,7 +21201,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID6()}`;
+      const syncRunId = `connector-tier-move-${randomUUID7()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -21067,6 +21275,8 @@ var init_local_index = __esm(() => {
           if (strippedMedia)
             this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
         }
+        if (!namesOnly && options.sourceTextCurrent)
+          this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
         const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
         const provider = namesOnly ? undefined : options.vectorProvider;
@@ -21372,34 +21582,63 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID6()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID7()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
       }
       return stripped;
     }
-    stripCopyContent(identity) {
+    copyContentState(identity) {
+      const row = this.db.query(`SELECT i.source_version, i.content_hash, i.updated_at,
+      (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
+      (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
+      (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
+      NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version) AS current_text,
+      (i.title IS NOT NULL OR i.locator_uri IS NOT NULL OR i.search_text IS NOT NULL) AS names
+      FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      return row ? {
+        chunks: row.chunks,
+        vectors: row.vectors,
+        versions: row.versions,
+        currentText: row.current_text === 1,
+        names: row.names === 1,
+        sourceVersion: row.source_version,
+        contentHash: row.content_hash,
+        updatedAt: row.updated_at
+      } : undefined;
+    }
+    withItemCopyWriteFence(identity, work) {
+      return this.db.transaction(() => {
+        this.db.query(`UPDATE items SET item_pk = item_pk
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        return work();
+      })();
+    }
+    stripCopyContent(identity, options = {}) {
       try {
-        return this.stripCopyContentHeld(identity);
+        return this.stripCopyContentHeld(identity, options);
       } finally {
         this.releaseUnreferencedChunkMedia();
       }
     }
-    stripCopyContentHeld(identity) {
+    stripCopyContentHeld(identity, options = {}) {
       return this.db.transaction(() => {
         const row = this.db.query(`
         SELECT item_pk FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-          AND tombstoned = 0
       `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         if (!row)
           return 0;
         const count = this.db.query("SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?").get(row.item_pk).n;
-        if (count === 0)
-          return 0;
+        this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(row.item_pk);
         this.db.query("DELETE FROM chunk_embeddings WHERE item_pk = ?").run(row.item_pk);
         this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+        if (options.keepMetadata === false) {
+          this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+        }
         this.refreshFtsForItem(row.item_pk);
         return count;
       })();
@@ -22288,8 +22527,9 @@ var init_local_index = __esm(() => {
         }
         seenIdentities.add(key2);
       }
+      const tierLedgerForWrite = this.visibilityLedger();
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID6()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID7()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -22310,6 +22550,11 @@ var init_local_index = __esm(() => {
         const skippedProviderItemIds = [];
         for (const record of options.items) {
           const item = record.item;
+          if (!this.tierWriteAllowed(item.identity, "content", tierLedgerForWrite)) {
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
           const disposition = this.exclusions.evaluateMetadata(item.metadata);
           if (disposition.excluded) {
             itemsExcluded += 1;
@@ -22413,7 +22658,7 @@ var init_local_index = __esm(() => {
           restoredProviderItemIds: restoredProviderItemIds.sort(),
           skippedProviderItemIds: skippedProviderItemIds.sort()
         };
-      })();
+      }).immediate();
       for (const record of options.items) {
         if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
           retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
@@ -22626,7 +22871,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID6()}`;
+        const syncRunId = `connector-relinquish-${randomUUID7()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -22765,7 +23010,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID6()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID7()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -23384,7 +23629,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID6()}`;
+      const syncRunId = `connector-sync-${randomUUID7()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -23542,7 +23787,15 @@ var init_local_index = __esm(() => {
               continue;
             }
             const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
-            const upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation);
+            let upsert;
+            try {
+              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
+            } catch (error) {
+              if (!(error instanceof ConnectorStoreTierWriteRefusedError))
+                throw error;
+              itemsRejected += 1;
+              continue;
+            }
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
@@ -23747,8 +24000,37 @@ var init_local_index = __esm(() => {
         contentChanged: ftsMetadataChanged || existing.content_hash !== (contentHash ?? null)
       };
     }
-    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation) {
+    tierWriteAllowed(identity, layer, ledger) {
+      try {
+        const binding = this.tierSetBinding();
+        if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId))
+          return false;
+        if (!ledger)
+          return true;
+        const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
+        if (!state || !state.record.routed)
+          return true;
+        const { record, copies } = state;
+        if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+          return false;
+        const here = copies.find((copy) => copy.corpusId === this.corpusId && (copy.state === "current" || copy.state === "staged" && record.state !== "moving" && !record.contentRead && copy.generation === record.generation));
+        if (!here)
+          return false;
+        if (layer === "metadata")
+          return true;
+        if (here.layers === "content" || here.layers === "both")
+          return true;
+        const contentDomain = record.contentTier === "public" ? "public_safe" : record.contentTier === "private" ? "internal" : "secure_local";
+        return record.state !== "moving" && !record.contentRead && contentDomain === this.trustDomain;
+      } catch {
+        return false;
+      }
+    }
+    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation, requiredLayer = textFromRawItem(item) === undefined ? "metadata" : "content") {
+      const tierLedgerForWrite = this.visibilityLedger();
       return this.db.transaction(() => {
+        if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite))
+          throw new ConnectorStoreTierWriteRefusedError;
         const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
         this.rememberItemOwner(upsert.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
         const missingScopeMetadataRow = sourceScopeObservation !== undefined && !this.db.query(`
@@ -23758,7 +24040,7 @@ var init_local_index = __esm(() => {
         if (upsert.ftsMetadataChanged || missingScopeMetadataRow)
           this.refreshFtsForItem(upsert.itemPk);
         return upsert;
-      })();
+      }).immediate();
     }
     tombstoneWindowRemovedItems(connectorId, ownershipKind, syncRunId, scopes, localItemIds, snapshotObservedAt) {
       return this.db.transaction(() => {
@@ -23989,6 +24271,14 @@ var init_local_index = __esm(() => {
       };
     }
     indexItemText(item, itemPk, maxChunkChars, text2, media) {
+      const tierLedgerForWrite = this.visibilityLedger();
+      return this.db.transaction(() => {
+        if (!this.tierWriteAllowed(item.identity, "content", tierLedgerForWrite))
+          return { chunksIndexed: 0, ftsContentChanged: false };
+        return this.indexItemTextHeld(item, itemPk, maxChunkChars, text2, media);
+      }).immediate();
+    }
+    indexItemTextHeld(item, itemPk, maxChunkChars, text2, media) {
       const disposition = this.exclusions.evaluateMetadata(item.metadata);
       if (disposition.disposition === "metadata_only") {
         throw new ConnectorStoreMetadataOnlyViolationError(disposition.ruleId);
@@ -24170,15 +24460,17 @@ var init_local_index = __esm(() => {
     embeddingFailedItemCount() {
       return this.embeddingFailureState?.size ?? 0;
     }
-    missingEmbeddingItemIds(embedder, limit) {
+    missingEmbeddingItemIds(embedder, limit, scope = {}) {
       if (limit <= 0)
         return [];
       const modelId = embedder.modelId;
+      const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = this.privateTierEmbeddingFilter(embedder);
-      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
-      const params = [...tierExclusion.params, ...privateTier.params];
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+      const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
       const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -24944,10 +25236,20 @@ var init_local_index = __esm(() => {
         if (ownsScanDb)
           closeSqliteStore(scanDb);
       }
-      const rankedItems = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]).slice(0, limit);
+      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+      const rankedItems = [];
+      let candidateOffset = 0;
+      while (rankedItems.length < limit && candidateOffset < candidates.length) {
+        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+        for (const candidate of batch)
+          if (visible.has(candidate[0]))
+            rankedItems.push(candidate);
+        candidateOffset += batch.length;
+      }
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
-      const laneRows = this.tierVisibleRows(searchRows, (row) => row.sourceItem, () => "content").flatMap((row) => {
+      const laneRows = searchRows.flatMap((row) => {
         const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
         if (winner === undefined)
           return [];
@@ -25019,6 +25321,24 @@ var init_local_index = __esm(() => {
         ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...excludedPks.length > 0 ? [JSON.stringify(excludedPks)] : [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
+    }
+    visibleVectorItemPks(itemPks, accountScope, filters) {
+      const visible = new Set;
+      const selectedFilters = connectorStoreFilterSql(filters);
+      for (let offset = 0;offset < itemPks.length; offset += 200) {
+        const batch = itemPks.slice(offset, offset + 200);
+        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
+        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
+        for (const row of this.tierVisibleRows(rows, (row2) => ({
+          provider: row2.provider,
+          accountScope: row2.account_scope,
+          providerItemId: row2.provider_item_id,
+          ...row2.provider_conversation_id ? { providerConversationId: row2.provider_conversation_id } : {}
+        }), () => "content"))
+          visible.add(row.item_pk);
+      }
+      return visible;
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)
@@ -25854,13 +26174,760 @@ var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_a
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
 });
+
+// src/workers/embedding-ledger.ts
+import { homedir as homedir9 } from "node:os";
+import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
+import { dirname as dirname16, join as join15 } from "node:path";
+function resolveEmbeddingLedgerPath(env = process.env) {
+  const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
+  if (configured)
+    return configured;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir9(), ".local", "share");
+  return join15(standaloneLinuxDataDir(env) ?? join15(dataHome, "openclaw", "olympus"), "embedding-ledger.jsonl");
+}
+async function appendEmbeddingLedgerEntry(path, entry) {
+  const line = `${JSON.stringify(entry)}
+`;
+  await mkdir3(dirname16(path), { recursive: true, mode: 448 });
+  const handle = await open3(path, "a", 384);
+  try {
+    await handle.chmod(384);
+    await handle.appendFile(line, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+async function appendEmbeddingLedgerEntryOnce(path, entry) {
+  const id = entry.entry_id?.trim();
+  if (!id) {
+    await appendEmbeddingLedgerEntry(path, entry);
+    return true;
+  }
+  const existing = await readEmbeddingLedger(path);
+  if (existing.entries.some((recorded) => recorded.entry_id === id))
+    return false;
+  await appendEmbeddingLedgerEntry(path, entry);
+  return true;
+}
+async function readEmbeddingLedger(path) {
+  let raw = "";
+  try {
+    raw = await readFile3(path, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      throw error;
+  }
+  const parsed = parseEmbeddingLedgerJsonl(raw);
+  return {
+    entries: mergeEmbeddingLedgerEntries(EMBEDDING_LEDGER_BACKFILL, parsed.entries),
+    skipped: parsed.skipped,
+    path
+  };
+}
+function parseEmbeddingLedgerJsonl(text2) {
+  const entries = [];
+  let skipped = 0;
+  for (const line of text2.split(`
+`)) {
+    if (line.trim() === "")
+      continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (isEmbeddingLedgerEntry(parsed))
+      entries.push(parsed);
+    else
+      skipped += 1;
+  }
+  return { entries, skipped };
+}
+function mergeEmbeddingLedgerEntries(backfill, recorded) {
+  const byId = new Map;
+  const unidentified = [];
+  for (const entry of [...backfill, ...recorded]) {
+    const id = entry.entry_id?.trim();
+    if (id)
+      byId.set(id, entry);
+    else
+      unidentified.push(entry);
+  }
+  const merged = [...byId.values(), ...unidentified];
+  return merged.map((entry, index) => ({ entry, index, at: stampOrder(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
+}
+function stampOrder(recordedAt) {
+  const at = Date.parse(recordedAt);
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
+function isEmbeddingLedgerEntry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const record = value;
+  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
+    return false;
+  if (typeof record.what !== "string" || record.what.trim() === "")
+    return false;
+  if (!isKind(record.kind))
+    return false;
+  if (!isApprovedBy(record.approved_by))
+    return false;
+  if (!isStatus(record.status))
+    return false;
+  for (const key2 of ["model_id", "epoch", "endpoint", "why", "entry_id"]) {
+    if (record[key2] !== undefined && typeof record[key2] !== "string")
+      return false;
+  }
+  return record.scope === undefined || isScope(record.scope);
+}
+function isKind(value) {
+  return typeof value === "string" && value in EMBEDDING_LEDGER_KIND_TEXT;
+}
+function isApprovedBy(value) {
+  return typeof value === "string" && value in EMBEDDING_LEDGER_APPROVAL_TEXT;
+}
+function isStatus(value) {
+  return typeof value === "string" && value in EMBEDDING_LEDGER_STATUS_TEXT;
+}
+function isScope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const scope = value;
+  if (scope.corpora !== undefined) {
+    if (!Array.isArray(scope.corpora))
+      return false;
+    if (scope.corpora.some((name) => typeof name !== "string"))
+      return false;
+  }
+  if (scope.chunks !== undefined) {
+    if (!scope.chunks || typeof scope.chunks !== "object" || Array.isArray(scope.chunks))
+      return false;
+    if (Object.values(scope.chunks).some((count) => typeof count !== "number" || !Number.isFinite(count)))
+      return false;
+  }
+  return true;
+}
+var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
+var init_embedding_ledger = __esm(() => {
+  init_linux_engine_layout();
+  EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
+  EMBEDDING_LEDGER_KIND_TEXT = {
+    model_decision: "Model decision",
+    epoch_change: "Epoch changed",
+    endpoint_change: "Endpoint changed",
+    invalidation: "Stored vectors invalidated",
+    re_embed_started: "Re-embed started",
+    re_embed_completed: "Re-embed finished",
+    note: "Note"
+  };
+  EMBEDDING_LEDGER_APPROVAL_TEXT = {
+    [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
+    "system-automatic": "Not approved — the system did this on its own",
+    "unattributed-historical": "Not approved — no decision is on record"
+  };
+  EMBEDDING_LEDGER_STATUS_TEXT = {
+    pending: "Pending",
+    in_progress: "In progress",
+    complete: "Complete",
+    "n/a": ""
+  };
+  WIPED_CORPORA = [
+    "dropbox",
+    "gmail-secure",
+    "drive-secure",
+    "whatsapp-live",
+    "telegram-protected"
+  ];
+  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
+  EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
+    {
+      entry_id: "backfill-2026-08-20-endpoint-retarget",
+      recorded_at: "2026-08-20T02:42:00.000Z",
+      kind: "endpoint_change",
+      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
+      approved_by: "unattributed-historical",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-invalidation",
+      recorded_at: "2026-08-20T12:03:00.000Z",
+      kind: "invalidation",
+      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
+      approved_by: "system-automatic",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-re-embed",
+      recorded_at: "2026-08-20T12:04:00.000Z",
+      kind: "re_embed_started",
+      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
+      approved_by: "system-automatic",
+      status: "in_progress"
+    },
+    {
+      entry_id: "backfill-2026-08-24-model-decision",
+      recorded_at: "2026-08-24T00:00:00.000Z",
+      kind: "model_decision",
+      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-24-drain-lane-enablement",
+      recorded_at: "2026-08-24T23:30:00.000Z",
+      kind: "note",
+      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
+      scope: {
+        corpora: LANE_ENABLEMENT_CORPORA,
+        chunks: { dropbox: 52840, "x-bookmarks": 15 }
+      },
+      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-24-readwise-hybrid",
+      recorded_at: "2026-09-24T13:30:00.000Z",
+      kind: "model_decision",
+      what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
+      scope: { corpora: ["readwise", "readwise-secure"] },
+      why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-25-chat-lane-catch-up",
+      recorded_at: "2026-09-25T07:00:00.000Z",
+      kind: "model_decision",
+      what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
+      scope: {
+        corpora: [
+          "internal.x.bookmarks",
+          "secure_local.x.bookmarks",
+          "internal.whatsapp.messages",
+          "secure_local.whatsapp.messages",
+          "internal.telegram.messages",
+          "secure_local.telegram.protected.messages"
+        ]
+      },
+      why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-30-gmail-catch-up",
+      recorded_at: "2026-09-30T21:05:00.000Z",
+      kind: "model_decision",
+      what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
+      scope: { corpora: ["internal.email"] },
+      why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    }
+  ];
+});
+
+// src/workers/connector-store/tier-move.ts
+import { createHash as createHash12 } from "node:crypto";
+function rowRehomeReceiptId(ledger, identity, generation) {
+  return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
+}
+async function moveTieredItem(options) {
+  const target = options.decision ?? options.target;
+  if (target?.contentTier === "secrets" || target?.metadataTier === "secrets") {
+    const record = options.set.ledger.getCurrent(options.identity);
+    if (!record || !record.routed)
+      throw new Error("Only a routed item can move; adopt a legacy placement first.");
+    if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration)
+      throw new TierLedgerGenerationConflictError;
+    return moveToSecrets(options, record.generation);
+  }
+  const result = moveTieredItemNow(options);
+  await flushTierMoveNotes(options.set.ledger);
+  return result;
+}
+function moveTieredItemNow(options, repairSource) {
+  const { set, identity, decision } = options;
+  const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
+  if (!target)
+    throw new Error("A tier move needs target tiers or a decision.");
+  const ledger = set.ledger;
+  const record = ledger.getCurrent(identity);
+  if (!record || !record.routed)
+    throw new Error("Only a routed item can move; adopt a legacy placement first.");
+  const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
+  if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
+    throw new TierLedgerGenerationConflictError;
+  }
+  if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
+    throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
+  }
+  const receiptKey = purgeReceiptKey(identity);
+  const receiptToResume = readVerifiedMove(ledger, identity);
+  if (receiptToResume) {
+    const receipt2 = receiptToResume;
+    if (receipt2.generation !== record.generation || receipt2.target.metadataTier !== target.metadataTier || receipt2.target.contentTier !== target.contentTier)
+      throw new TierLedgerGenerationConflictError;
+    const result2 = finishVerifiedMove(options, receipt2);
+    return result2;
+  }
+  const ownerOverride = !decision && record.decidedBy === "override";
+  const placement = set.placementFor(decision ?? {
+    metadataTier: target.metadataTier,
+    contentTier: target.contentTier,
+    state: record.metadataPending || record.contentPending ? "pending" : "current",
+    metadataPending: record.metadataPending,
+    contentPending: record.contentPending,
+    contentRead: record.contentRead,
+    ...ownerOverride ? { decidedBy: "override" } : {}
+  });
+  const moveGeneration = record.generation + 1;
+  const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
+  if (sources.length === 0)
+    throw new Error("The item has no copy to move from.");
+  if (repairSource && !sources.some((copy) => copy.corpusId === repairSource.corpusId))
+    sources.push(repairSource);
+  if (repairSource && placement.copies.some((copy) => copy.trustDomain !== "secure_local" && !sources.some((source) => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
+    throw new TierMoveRefusedError("Repair cannot write a lower destination.");
+  }
+  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
+  const exports = new Map;
+  const exportFrom = (copy) => {
+    if (!exports.has(copy.corpusId)) {
+      const domain = set.domainForCorpus(copy.corpusId);
+      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
+    }
+    return exports.get(copy.corpusId);
+  };
+  const contentSource = repairSource ?? copyServingLayer(sources, "content");
+  const contentDestination = copyServingLayer(placement.copies, "content");
+  if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+    const exported = exportFrom(contentSource);
+    const evidence = decision ?? record;
+    const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
+    const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+    if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
+      if (!raise && record.state === "moving") {
+        ledger.abandonMove(identity, { expectedGeneration: record.generation });
+      }
+      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.");
+    }
+  }
+  const kept = ledger.copies(identity);
+  const replacedSuperseded = {};
+  for (const planned of placement.copies) {
+    if (sources.some((source2) => source2.corpusId === planned.corpusId))
+      continue;
+    const keptHere = kept.find((copy) => copy.corpusId === planned.corpusId && copy.state === "superseded");
+    if (!keptHere)
+      continue;
+    const source = copyServingLayer(sources, "content") ?? sources[0];
+    const keptCopy = exportFrom(keptHere);
+    if (!keptCopy || keptCopy.chunks.length === 0 || sameText(keptCopy, exportFrom(source)))
+      continue;
+    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
+      replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
+      continue;
+    }
+    throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
+  }
+  ledger.stageMove(identity, {
+    expectedGeneration: record.generation,
+    target,
+    destination: placement.copies,
+    hideSource: raise,
+    ...placement.embedHold ? { embedHold: true } : {}
+  });
+  let destinations = [];
+  options.beforeCopy?.();
+  const receipt = ledger.withGenerationFence(identity, record.generation, () => {
+    const alreadyVerified = readVerifiedMove(ledger, identity);
+    if (alreadyVerified) {
+      if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      return alreadyVerified;
+    }
+    const now = ledger.getCurrent(identity);
+    if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
+      throw new TierLedgerGenerationConflictError;
+    }
+    const copyWithLockedSources = (index) => {
+      const source = sources[index];
+      if (source) {
+        const domain = set.domainForCorpus(source.corpusId);
+        const store = domain ? set.store(domain) : undefined;
+        if (!store)
+          throw new Error("Source store unavailable.");
+        return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
+      }
+      exports.clear();
+      if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+        const exported = exportFrom(contentSource);
+        const evidence = decision ?? now;
+        const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
+        const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+        if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
+          throw new TierMoveContentChangedError("Stored content changed before the fenced copy.");
+        }
+      }
+      for (const planned of placement.copies) {
+        const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
+        if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
+          const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
+          destinations.push({
+            corpusId: planned.corpusId,
+            trustDomain: planned.trustDomain,
+            layers: planned.layers,
+            relayeredOnly: true,
+            chunksWritten: 0,
+            chunksKept: keptChunks,
+            vectorsCopied: 0,
+            chunksToEmbed: 0
+          });
+          continue;
+        }
+        const wantsContent = planned.layers !== "metadata";
+        const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
+        const exported = exportFrom(from);
+        if (!exported)
+          throw new Error("The source store no longer holds an active copy of the item.");
+        const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
+        const store = set.store(planned.trustDomain, { create: true });
+        store.bindTierSet(ledger);
+        const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
+        const written = store.importItemCopy(payload2, {
+          trustTier: defaultStoreTrustTier(planned.trustDomain),
+          syncConnectorId: TIER_MOVE_CONNECTOR_ID,
+          layers: planned.layers,
+          ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
+          ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
+        });
+        destinations.push({
+          corpusId: planned.corpusId,
+          trustDomain: planned.trustDomain,
+          layers: planned.layers,
+          relayeredOnly: false,
+          chunksWritten: written.chunksWritten,
+          chunksKept: written.chunksKept,
+          vectorsCopied: written.vectorsCopied,
+          chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
+        });
+      }
+      const flipOptions = {
+        expectedGeneration: record.generation,
+        destination: placement.copies,
+        embedHold: placement.embedHold === true,
+        ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
+        ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
+      };
+      const verified = {
+        generation: record.generation,
+        target,
+        raise,
+        sources,
+        destinations,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+        rehomeTagged,
+        replacedSuperseded,
+        placement: placement.copies,
+        flipOptions,
+        fingerprints: Object.fromEntries(placement.copies.map((copy) => {
+          const exported = set.store(copy.trustDomain)?.exportItemCopy(identity);
+          if (!exported)
+            throw new Error("Destination verification failed.");
+          const wanted = copy.layers === "metadata" ? undefined : exportFrom(contentSource ?? sources[0]);
+          if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index2) => chunk.chunkIndex === wanted.chunks[index2].chunkIndex && chunk.boundedText === wanted.chunks[index2].boundedText)))
+            throw new Error("Destination content verification failed.");
+          return [copy.corpusId, copyFingerprint(exported, copy.layers)];
+        }))
+      };
+      ledger.writeMeta(receiptKey, JSON.stringify(verified));
+      return verified;
+    };
+    return copyWithLockedSources(0);
+  });
+  options.beforeFlip?.();
+  options.afterVerified?.();
+  const result = finishVerifiedMove(options, receipt);
+  return result;
+}
+function resumeVerifiedTierMove(set, identity, embeddingLedger) {
+  const receipt = readVerifiedMove(set.ledger, identity);
+  if (!receipt)
+    return false;
+  finishVerifiedMove({ set, identity, ...embeddingLedger ? { embeddingLedger } : {} }, receipt);
+  return true;
+}
+function queueMoveNote(options, receipt, result) {
+  const config = receipt.embeddingLedger ?? options.embeddingLedger;
+  if (!config)
+    return;
+  const { sources, destinations, raise } = receipt;
+  const replaced = receipt.replacedSuperseded ?? {};
+  const entryId = receipt.rehomeTagged ? rowRehomeReceiptId(options.set.ledger, options.identity, result.generation) : `tier-move:${options.set.ledger.ledgerId()}:${tierLedgerIdentityKey(options.identity)}:${result.generation}`;
+  const entry = {
+    entry_id: entryId,
+    recorded_at: new Date().toISOString(),
+    kind: "note",
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    scope: {
+      corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
+      chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
+    },
+    ...config.why ? { why: config.why } : {},
+    approved_by: config.approvedBy,
+    status: "complete"
+  };
+  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+}
+async function flushTierMoveNotes(ledger) {
+  let logged = false;
+  for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
+    try {
+      const note = JSON.parse(value);
+      await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+      if (ledger.readMeta(key2) === value)
+        ledger.writeMeta(key2, "");
+    } catch (error) {
+      if (!logged) {
+        const code = error?.code;
+        console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
+        logged = true;
+      }
+    }
+  }
+}
+function purgeReceiptKey(identity) {
+  return `tier-move-verified:${tierLedgerIdentityKey(identity)}`;
+}
+function readVerifiedMove(ledger, identity) {
+  const raw = ledger.readMeta(purgeReceiptKey(identity));
+  if (!raw)
+    return;
+  const receipt = JSON.parse(raw);
+  const current2 = ledger.getCurrent(identity);
+  if (!current2)
+    throw new TierLedgerGenerationConflictError;
+  if (receipt.generation < current2.generation || receipt.generation === current2.generation && current2.state !== "moving") {
+    ledger.withGenerationFence(identity, current2.generation, () => {
+      const now = ledger.getCurrent(identity);
+      if (ledger.readMeta(purgeReceiptKey(identity)) !== raw || !(receipt.generation < now.generation || receipt.generation === now.generation && now.state !== "moving")) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      ledger.writeMeta(purgeReceiptKey(identity), "");
+    });
+    return;
+  }
+  return receipt;
+}
+function copyFingerprint(copy, layers) {
+  return createHash12("sha256").update(JSON.stringify({
+    identity: copy.identity,
+    columns: copy.columns,
+    chunks: layers === "metadata" ? [] : copy.chunks
+  })).digest("hex");
+}
+function finishVerifiedMove(options, receipt) {
+  const { set, identity } = options;
+  const ledger = set.ledger;
+  const contentDestination = copyServingLayer(receipt.placement, "content");
+  const stableStore = set.store((contentDestination ?? receipt.placement[0]).trustDomain);
+  if (!stableStore)
+    throw new Error("Verified destination unavailable.");
+  return stableStore.withItemCopyWriteFence(identity, () => {
+    for (const copy of receipt.placement) {
+      const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
+      if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
+        throw new Error("Verified move destination changed; source remains held.");
+      }
+    }
+    return ledger.withGenerationFence(identity, receipt.generation, () => {
+      const record = ledger.getCurrent(identity);
+      if (ledger.readMeta(purgeReceiptKey(identity)) !== JSON.stringify(receipt))
+        throw new TierLedgerGenerationConflictError;
+      if (record.state !== "moving" || record.targetMetadataTier !== receipt.target.metadataTier || record.targetContentTier !== receipt.target.contentTier)
+        throw new TierLedgerGenerationConflictError;
+      const contentCopy = copyServingLayer(receipt.placement, "content");
+      const content = contentCopy ?? copyServingLayer(set.placementFor({
+        ...receipt.target,
+        state: "current",
+        metadataPending: false,
+        contentPending: false,
+        contentRead: true,
+        ...receipt.flipOptions.decidedBy === "override" ? { decidedBy: "override" } : {}
+      }).copies, "content");
+      if (receipt.raise && content && !contentCopy && ledger.copies(identity).some((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain) && (set.store(copy.trustDomain)?.copyContentState(identity)?.chunks ?? 0) > 0)) {
+        throw new Error("A lower body has no verified destination; move remains pending.");
+      }
+      const flipped = ledger.completeMove(identity, receipt.flipOptions);
+      const metadata = copyServingLayer(receipt.placement, "metadata");
+      if (receipt.raise && content) {
+        for (const copy of ledger.copies(identity)) {
+          if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain))
+            continue;
+          const store = set.store(copy.trustDomain);
+          if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
+            throw new Error("Lower store unavailable or ledger binding changed; move purge remains pending.");
+          }
+          store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+        }
+      }
+      if (receipt.raise && content)
+        ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
+      options.afterPurge?.();
+      ledger.writeMeta(purgeReceiptKey(identity), "");
+      const result = {
+        outcome: "moved",
+        raise: receipt.raise,
+        generation: flipped.generation,
+        destinations: receipt.destinations,
+        supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
+        chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
+      };
+      queueMoveNote(options, receipt, result);
+      return result;
+    });
+  });
+}
+async function moveToSecrets(options, expectedGeneration) {
+  const { set, identity } = options;
+  const ledger = set.ledger;
+  const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
+  let located = false;
+  const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+  const names = copyServingLayer(ordered.filter((copy) => copy.state === "current"), "metadata") ?? copyServingLayer(ordered, "metadata");
+  for (const copy of names ? [names, ...ordered.filter((copy2) => copy2 !== names)] : ordered) {
+    if (located)
+      break;
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (!exported)
+      continue;
+    const text2 = exported.chunks.map((chunk) => chunk.boundedText).join(`
+`);
+    const kinds = detectSecretFindingKinds(text2);
+    const locator = exported.columns.locator_uri;
+    const title = exported.columns.title;
+    set.secrets()?.record({
+      identity,
+      namesReleasable: record.previousMetadataTier === "public" || record.previousMetadataTier === "private",
+      ...typeof locator === "string" ? { locator } : {},
+      ...typeof title === "string" ? { title } : {},
+      findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
+      text: text2
+    });
+    located = true;
+  }
+  const settled = settleSecretsCopies({
+    ledger,
+    identity: fullIdentity(identity),
+    copies,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain ? set.store(domain) : undefined;
+    },
+    connectorId: TIER_MOVE_CONNECTOR_ID,
+    ...options.secretsDisposition ? { disposition: options.secretsDisposition } : {}
+  });
+  const corpora = Object.keys(settled.chunks);
+  const chunkCount = Object.values(settled.chunks).reduce((sum, count) => sum + count, 0);
+  if (options.embeddingLedger) {
+    const deleted = settled.disposition === "tombstone_now";
+    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
+      recorded_at: new Date().toISOString(),
+      kind: deleted ? "invalidation" : "note",
+      what: deleted ? `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} were tombstoned and ` + `${chunkCount} chunk(s) and their vectors deleted. Only its location is kept.` : `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} (${chunkCount} chunk(s)) ` + "are hidden and kept until an owner-approved purge. Only its location is served.",
+      scope: { corpora, chunks: settled.chunks },
+      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
+      approved_by: options.embeddingLedger.approvedBy,
+      status: "complete"
+    });
+  }
+  return {
+    outcome: "secrets",
+    raise: true,
+    generation: record.generation,
+    destinations: [],
+    supersededCorpora: corpora,
+    chunkCount,
+    secretsChunks: settled.chunks,
+    secretsDisposition: settled.disposition
+  };
+}
+function sameText(kept, source) {
+  if (!kept || !source || kept.chunks.length !== source.chunks.length)
+    return false;
+  return kept.chunks.every((chunk, index) => {
+    const other = source.chunks[index];
+    return chunk.chunkIndex === other.chunkIndex && chunk.boundedText === other.boundedText && chunk.contentHash === other.contentHash && chunk.embeddingInputHash === other.embeddingInputHash;
+  });
+}
+function layersCover(held, wanted) {
+  return held === "both" || held === wanted;
+}
+function fullIdentity(identity) {
+  return {
+    family: identity.family,
+    provider: identity.provider,
+    accountScope: identity.accountScope,
+    providerItemId: identity.providerItemId,
+    localItemId: identity.localItemId,
+    ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+  };
+}
+var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:";
+var init_tier_move = __esm(() => {
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_secrets_disposition();
+  init_tier_placement();
+  TierMoveRefusedError = class TierMoveRefusedError extends Error {
+    constructor(message2) {
+      super(message2);
+      this.name = "TierMoveRefusedError";
+    }
+  };
+  TierMoveContentChangedError = class TierMoveContentChangedError extends TierMoveRefusedError {
+  };
+});
+
+// src/workers/connector-store/tier-content-purge.ts
+var init_tier_content_purge = __esm(() => {
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+});
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
 import { existsSync as existsSync16, statSync as statSync10 } from "node:fs";
-import { homedir as homedir9 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname15, isAbsolute as isAbsolute7, join as join14 } from "node:path";
+import { homedir as homedir10 } from "node:os";
+import { delimiter as delimiter2, dirname as dirname17, isAbsolute as isAbsolute7, join as join16 } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 function helperEnvironment() {
   const env = {};
   for (const [name, value] of Object.entries(process.env)) {
@@ -25870,7 +26937,7 @@ function helperEnvironment() {
       env[name] = value;
     }
   }
-  env.HOME ??= homedir9();
+  env.HOME ??= homedir10();
   return env;
 }
 
@@ -25916,7 +26983,7 @@ class HelperProcess {
       helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
       child.kill("SIGKILL");
     });
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       let started = false;
       const timer = setTimeout(() => {
         if (started)
@@ -25940,7 +27007,7 @@ class HelperProcess {
             clearTimeout(timer);
             helper.device = message2.device === "gpu" ? "gpu" : "cpu";
             helper.vision = message2.vision === true;
-            resolve6(helper);
+            resolve7(helper);
           } else if (message2.fatal) {
             started = true;
             clearTimeout(timer);
@@ -25977,13 +27044,13 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       const timer = setTimeout(() => {
         this.child.kill("SIGKILL");
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve6, reject, count: items.length, timer });
+      this.pending.set(id, { resolve: resolve7, reject, count: items.length, timer });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
       this.child.stdin.write(`${JSON.stringify(request)}
 `);
@@ -26024,7 +27091,7 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve6) => this.child.once("close", () => resolve6()));
+    const exited = new Promise((resolve7) => this.child.once("close", () => resolve7()));
     this.child.stdin.end();
     const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
@@ -26072,9 +27139,9 @@ async function startLiteRtEmbedder(options) {
   };
 }
 function helperPath() {
-  const here = dirname15(fileURLToPath(import.meta.url));
+  const here = dirname17(fileURLToPath2(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join14(here, name);
+    const candidate = join16(here, name);
     if (existsSync16(candidate))
       return candidate;
   }
@@ -26084,9 +27151,9 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join14(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join14(directory, bunName)),
-    join14(homedir9(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join16(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join16(directory, bunName)),
+    join16(homedir10(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute7(candidate))
@@ -26119,11 +27186,11 @@ var init_litert_runtime = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
-import { join as join15 } from "node:path";
+import { join as join17 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire3(join15(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire3(join17(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -26305,10 +27372,10 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 import { readFileSync as readFileSync15 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname16, join as join16 } from "node:path";
+import { dirname as dirname18, join as join18 } from "node:path";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -26354,7 +27421,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash12("sha256").update(JSON.stringify({
+    this.configHash = createHash13("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -26481,7 +27548,7 @@ class BuiltInSourceEmbeddingProvider {
         const embedder = await this.liteRtFactory({
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join16(dirname16(installed.modelPath), "cache"),
+          cacheDir: join18(dirname18(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -26507,7 +27574,7 @@ class BuiltInSourceEmbeddingProvider {
   }
   async withSlot(taskType, run) {
     if (this.slotBusy) {
-      await new Promise((resolve6) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve6));
+      await new Promise((resolve7) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve7));
     } else {
       this.slotBusy = true;
     }
@@ -26826,539 +27893,6 @@ var init_provider = __esm(() => {
       this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
       this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
     }
-  };
-});
-
-// src/workers/embedding-ledger.ts
-import { homedir as homedir10 } from "node:os";
-import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
-import { dirname as dirname17, join as join17 } from "node:path";
-function resolveEmbeddingLedgerPath(env = process.env) {
-  const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
-  if (configured)
-    return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir10(), ".local", "share");
-  return join17(standaloneLinuxDataDir(env) ?? join17(dataHome, "openclaw", "olympus"), "embedding-ledger.jsonl");
-}
-async function appendEmbeddingLedgerEntry(path, entry) {
-  const line = `${JSON.stringify(entry)}
-`;
-  await mkdir3(dirname17(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a", 384);
-  try {
-    await handle.chmod(384);
-    await handle.appendFile(line, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-async function appendEmbeddingLedgerEntryOnce(path, entry) {
-  const id = entry.entry_id?.trim();
-  if (!id) {
-    await appendEmbeddingLedgerEntry(path, entry);
-    return true;
-  }
-  const existing = await readEmbeddingLedger(path);
-  if (existing.entries.some((recorded) => recorded.entry_id === id))
-    return false;
-  await appendEmbeddingLedgerEntry(path, entry);
-  return true;
-}
-async function readEmbeddingLedger(path) {
-  let raw = "";
-  try {
-    raw = await readFile3(path, "utf8");
-  } catch (error) {
-    if (error?.code !== "ENOENT")
-      throw error;
-  }
-  const parsed = parseEmbeddingLedgerJsonl(raw);
-  return {
-    entries: mergeEmbeddingLedgerEntries(EMBEDDING_LEDGER_BACKFILL, parsed.entries),
-    skipped: parsed.skipped,
-    path
-  };
-}
-function parseEmbeddingLedgerJsonl(text2) {
-  const entries = [];
-  let skipped = 0;
-  for (const line of text2.split(`
-`)) {
-    if (line.trim() === "")
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      skipped += 1;
-      continue;
-    }
-    if (isEmbeddingLedgerEntry(parsed))
-      entries.push(parsed);
-    else
-      skipped += 1;
-  }
-  return { entries, skipped };
-}
-function mergeEmbeddingLedgerEntries(backfill, recorded) {
-  const byId = new Map;
-  const unidentified = [];
-  for (const entry of [...backfill, ...recorded]) {
-    const id = entry.entry_id?.trim();
-    if (id)
-      byId.set(id, entry);
-    else
-      unidentified.push(entry);
-  }
-  const merged = [...byId.values(), ...unidentified];
-  return merged.map((entry, index) => ({ entry, index, at: stampOrder(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
-}
-function stampOrder(recordedAt) {
-  const at = Date.parse(recordedAt);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-function isEmbeddingLedgerEntry(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const record = value;
-  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
-    return false;
-  if (typeof record.what !== "string" || record.what.trim() === "")
-    return false;
-  if (!isKind(record.kind))
-    return false;
-  if (!isApprovedBy(record.approved_by))
-    return false;
-  if (!isStatus(record.status))
-    return false;
-  for (const key2 of ["model_id", "epoch", "endpoint", "why", "entry_id"]) {
-    if (record[key2] !== undefined && typeof record[key2] !== "string")
-      return false;
-  }
-  return record.scope === undefined || isScope(record.scope);
-}
-function isKind(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_KIND_TEXT;
-}
-function isApprovedBy(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_APPROVAL_TEXT;
-}
-function isStatus(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_STATUS_TEXT;
-}
-function isScope(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const scope = value;
-  if (scope.corpora !== undefined) {
-    if (!Array.isArray(scope.corpora))
-      return false;
-    if (scope.corpora.some((name) => typeof name !== "string"))
-      return false;
-  }
-  if (scope.chunks !== undefined) {
-    if (!scope.chunks || typeof scope.chunks !== "object" || Array.isArray(scope.chunks))
-      return false;
-    if (Object.values(scope.chunks).some((count) => typeof count !== "number" || !Number.isFinite(count)))
-      return false;
-  }
-  return true;
-}
-var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
-var init_embedding_ledger = __esm(() => {
-  init_linux_engine_layout();
-  EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
-  EMBEDDING_LEDGER_KIND_TEXT = {
-    model_decision: "Model decision",
-    epoch_change: "Epoch changed",
-    endpoint_change: "Endpoint changed",
-    invalidation: "Stored vectors invalidated",
-    re_embed_started: "Re-embed started",
-    re_embed_completed: "Re-embed finished",
-    note: "Note"
-  };
-  EMBEDDING_LEDGER_APPROVAL_TEXT = {
-    [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
-    "system-automatic": "Not approved — the system did this on its own",
-    "unattributed-historical": "Not approved — no decision is on record"
-  };
-  EMBEDDING_LEDGER_STATUS_TEXT = {
-    pending: "Pending",
-    in_progress: "In progress",
-    complete: "Complete",
-    "n/a": ""
-  };
-  WIPED_CORPORA = [
-    "dropbox",
-    "gmail-secure",
-    "drive-secure",
-    "whatsapp-live",
-    "telegram-protected"
-  ];
-  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
-  EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
-    {
-      entry_id: "backfill-2026-08-20-endpoint-retarget",
-      recorded_at: "2026-08-20T02:42:00.000Z",
-      kind: "endpoint_change",
-      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
-      approved_by: "unattributed-historical",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-invalidation",
-      recorded_at: "2026-08-20T12:03:00.000Z",
-      kind: "invalidation",
-      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
-      approved_by: "system-automatic",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-re-embed",
-      recorded_at: "2026-08-20T12:04:00.000Z",
-      kind: "re_embed_started",
-      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
-      approved_by: "system-automatic",
-      status: "in_progress"
-    },
-    {
-      entry_id: "backfill-2026-08-24-model-decision",
-      recorded_at: "2026-08-24T00:00:00.000Z",
-      kind: "model_decision",
-      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-24-drain-lane-enablement",
-      recorded_at: "2026-08-24T23:30:00.000Z",
-      kind: "note",
-      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
-      scope: {
-        corpora: LANE_ENABLEMENT_CORPORA,
-        chunks: { dropbox: 52840, "x-bookmarks": 15 }
-      },
-      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-24-readwise-hybrid",
-      recorded_at: "2026-09-24T13:30:00.000Z",
-      kind: "model_decision",
-      what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
-      scope: { corpora: ["readwise", "readwise-secure"] },
-      why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-25-chat-lane-catch-up",
-      recorded_at: "2026-09-25T07:00:00.000Z",
-      kind: "model_decision",
-      what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
-      scope: {
-        corpora: [
-          "internal.x.bookmarks",
-          "secure_local.x.bookmarks",
-          "internal.whatsapp.messages",
-          "secure_local.whatsapp.messages",
-          "internal.telegram.messages",
-          "secure_local.telegram.protected.messages"
-        ]
-      },
-      why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-30-gmail-catch-up",
-      recorded_at: "2026-09-30T21:05:00.000Z",
-      kind: "model_decision",
-      what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
-      scope: { corpora: ["internal.email"] },
-      why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    }
-  ];
-});
-
-// src/workers/connector-store/tier-move.ts
-function rowRehomeReceiptId(ledger, identity, generation) {
-  return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
-}
-async function moveTieredItem(options) {
-  const { set, identity, decision } = options;
-  const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
-  if (!target)
-    throw new Error("A tier move needs target tiers or a decision.");
-  const ledger = set.ledger;
-  const record = ledger.getCurrent(identity);
-  if (!record || !record.routed)
-    throw new Error("Only a routed item can move; adopt a legacy placement first.");
-  const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
-  if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
-    throw new TierLedgerGenerationConflictError;
-  }
-  if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
-    return moveToSecrets(options, record.generation);
-  }
-  const ownerOverride = !decision && record.decidedBy === "override";
-  const placement = set.placementFor(decision ?? {
-    metadataTier: target.metadataTier,
-    contentTier: target.contentTier,
-    state: record.metadataPending || record.contentPending ? "pending" : "current",
-    metadataPending: record.metadataPending,
-    contentPending: record.contentPending,
-    contentRead: record.contentRead,
-    ...ownerOverride ? { decidedBy: "override" } : {}
-  });
-  const moveGeneration = record.generation + 1;
-  const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
-  if (sources.length === 0)
-    throw new Error("The item has no copy to move from.");
-  const raise = placementIsRaise(sources, placement.copies);
-  const exports = new Map;
-  const exportFrom = (copy) => {
-    if (!exports.has(copy.corpusId)) {
-      const domain = set.domainForCorpus(copy.corpusId);
-      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
-    }
-    return exports.get(copy.corpusId);
-  };
-  const contentSource = copyServingLayer(sources, "content");
-  const contentDestination = copyServingLayer(placement.copies, "content");
-  if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
-    const exported = exportFrom(contentSource);
-    const evidence = decision ?? record;
-    const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
-    const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
-    if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
-      if (!raise && record.state === "moving") {
-        ledger.abandonMove(identity, { expectedGeneration: record.generation });
-      }
-      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.");
-    }
-  }
-  const kept = ledger.copies(identity);
-  const replacedSuperseded = {};
-  for (const planned of placement.copies) {
-    if (sources.some((source2) => source2.corpusId === planned.corpusId))
-      continue;
-    const keptHere = kept.find((copy) => copy.corpusId === planned.corpusId && copy.state === "superseded");
-    if (!keptHere)
-      continue;
-    const source = copyServingLayer(sources, "content") ?? sources[0];
-    const keptCopy = exportFrom(keptHere);
-    if (sameText(keptCopy, exportFrom(source)))
-      continue;
-    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
-      replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
-      continue;
-    }
-    throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
-  }
-  ledger.stageMove(identity, {
-    expectedGeneration: record.generation,
-    target,
-    destination: placement.copies,
-    hideSource: raise,
-    ...placement.embedHold ? { embedHold: true } : {}
-  });
-  const destinations = [];
-  for (const planned of placement.copies) {
-    const kept2 = sources.find((source) => source.corpusId === planned.corpusId);
-    if (kept2 && layersCover(kept2.layers, planned.layers)) {
-      const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
-      destinations.push({
-        corpusId: planned.corpusId,
-        trustDomain: planned.trustDomain,
-        layers: planned.layers,
-        relayeredOnly: true,
-        chunksWritten: 0,
-        chunksKept: keptChunks,
-        vectorsCopied: 0,
-        chunksToEmbed: 0
-      });
-      continue;
-    }
-    const wantsContent = planned.layers !== "metadata";
-    const from = copyServingLayer(sources, wantsContent ? "content" : "metadata") ?? sources[0];
-    const exported = exportFrom(from);
-    if (!exported)
-      throw new Error("The source store no longer holds an active copy of the item.");
-    const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
-    const store = set.store(planned.trustDomain, { create: true });
-    store.bindTierSet(ledger);
-    const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
-    const written = store.importItemCopy(payload2, {
-      trustTier: defaultStoreTrustTier(planned.trustDomain),
-      syncConnectorId: TIER_MOVE_CONNECTOR_ID,
-      layers: planned.layers,
-      ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
-    });
-    destinations.push({
-      corpusId: planned.corpusId,
-      trustDomain: planned.trustDomain,
-      layers: planned.layers,
-      relayeredOnly: false,
-      chunksWritten: written.chunksWritten,
-      chunksKept: written.chunksKept,
-      vectorsCopied: written.vectorsCopied,
-      chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
-    });
-  }
-  options.beforeFlip?.();
-  const flipped = ledger.completeMove(identity, {
-    expectedGeneration: record.generation,
-    destination: placement.copies,
-    embedHold: placement.embedHold === true,
-    ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
-    ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
-  });
-  const supersededCorpora = ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId);
-  const chunkCount = destinations.reduce((total, destination) => total + destination.chunksWritten + destination.chunksKept, 0);
-  if (options.embeddingLedger) {
-    const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
-    const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    const append = rehomeTagged ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
-    await append(options.embeddingLedger.path, {
-      recorded_at: new Date().toISOString(),
-      kind: "note",
-      what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(", ")}: ` + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, ` + `${toEmbed} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are kept and hidden: ${supersededCorpora.join(", ") || "none"}.` + (Object.keys(replacedSuperseded).length > 0 ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replacedSuperseded).map(([corpusId, chunks]) => `${corpusId} (${chunks} chunk(s) of older text)`).join(", ")}.` : ""),
-      scope: {
-        corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((destination) => destination.corpusId)])],
-        chunks: Object.fromEntries(destinations.map((destination) => [
-          destination.corpusId,
-          destination.chunksWritten + destination.chunksKept
-        ]))
-      },
-      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
-      approved_by: options.embeddingLedger.approvedBy,
-      status: "complete",
-      ...rehomeTagged ? { entry_id: rowRehomeReceiptId(ledger, identity, flipped.generation) } : {}
-    });
-  }
-  return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
-}
-async function moveToSecrets(options, expectedGeneration) {
-  const { set, identity } = options;
-  const ledger = set.ledger;
-  const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
-  let located = false;
-  for (const copy of copies) {
-    if (located)
-      break;
-    const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      continue;
-    const text2 = exported.chunks.map((chunk) => chunk.boundedText).join(`
-`);
-    const kinds = detectSecretFindingKinds(text2);
-    const locator = exported.columns.locator_uri;
-    const title = exported.columns.title;
-    set.secrets()?.record({
-      identity,
-      namesReleasable: record.previousMetadataTier === "public" || record.previousMetadataTier === "private",
-      ...typeof locator === "string" ? { locator } : {},
-      ...typeof title === "string" ? { title } : {},
-      findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
-      text: text2
-    });
-    located = true;
-  }
-  const settled = settleSecretsCopies({
-    ledger,
-    identity: fullIdentity(identity),
-    copies,
-    storeFor: (corpusId) => {
-      const domain = set.domainForCorpus(corpusId);
-      return domain ? set.store(domain) : undefined;
-    },
-    connectorId: TIER_MOVE_CONNECTOR_ID,
-    ...options.secretsDisposition ? { disposition: options.secretsDisposition } : {}
-  });
-  const corpora = Object.keys(settled.chunks);
-  const chunkCount = Object.values(settled.chunks).reduce((sum, count) => sum + count, 0);
-  if (options.embeddingLedger) {
-    const deleted = settled.disposition === "tombstone_now";
-    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
-      recorded_at: new Date().toISOString(),
-      kind: deleted ? "invalidation" : "note",
-      what: deleted ? `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} were tombstoned and ` + `${chunkCount} chunk(s) and their vectors deleted. Only its location is kept.` : `One item became Secrets: its copies in ${corpora.join(", ") || "no store"} (${chunkCount} chunk(s)) ` + "are hidden and kept until an owner-approved purge. Only its location is served.",
-      scope: { corpora, chunks: settled.chunks },
-      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
-      approved_by: options.embeddingLedger.approvedBy,
-      status: "complete"
-    });
-  }
-  return {
-    outcome: "secrets",
-    raise: true,
-    generation: record.generation,
-    destinations: [],
-    supersededCorpora: corpora,
-    chunkCount,
-    secretsChunks: settled.chunks,
-    secretsDisposition: settled.disposition
-  };
-}
-function sameText(kept, source) {
-  if (!kept || !source || kept.chunks.length !== source.chunks.length)
-    return false;
-  return kept.chunks.every((chunk, index) => {
-    const other = source.chunks[index];
-    return chunk.chunkIndex === other.chunkIndex && chunk.boundedText === other.boundedText && chunk.contentHash === other.contentHash && chunk.embeddingInputHash === other.embeddingInputHash;
-  });
-}
-function layersCover(held, wanted) {
-  return held === "both" || held === wanted;
-}
-function fullIdentity(identity) {
-  return {
-    family: identity.family,
-    provider: identity.provider,
-    accountScope: identity.accountScope,
-    providerItemId: identity.providerItemId,
-    localItemId: identity.localItemId,
-    ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
-  };
-}
-var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError;
-var init_tier_move = __esm(() => {
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_embedding_ledger();
-  init_secrets_disposition();
-  init_tier_placement();
-  TierMoveRefusedError = class TierMoveRefusedError extends Error {
-    constructor(message2) {
-      super(message2);
-      this.name = "TierMoveRefusedError";
-    }
-  };
-  TierMoveContentChangedError = class TierMoveContentChangedError extends TierMoveRefusedError {
   };
 });
 
@@ -27769,7 +28303,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -27923,7 +28457,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash13("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash14("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function storedSignals(copy) {
   const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -28168,6 +28702,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
+var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -28177,11 +28712,14 @@ var init_tiered_store_set = __esm(() => {
   init_tier_placement();
   init_secrets_disposition();
   init_tier_names_only_settle();
+  init_tier_content_purge();
+  init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
 // src/workers/connector-store/principal.ts
@@ -28280,13 +28818,13 @@ var init_corpus_adapter = __esm(() => {
 
 // src/workers/dropbox-files/connector-store.ts
 import { homedir as homedir11 } from "node:os";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir11(), ".local", "share");
-  return join18(standaloneLinuxDataDir(env) ?? join18(dataHome, "openclaw", "olympus"), "dropbox-files-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir11(), ".local", "share");
+  return join19(standaloneLinuxDataDir(env) ?? join19(dataHome, "openclaw", "olympus"), "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
@@ -28409,7 +28947,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -28455,7 +28993,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join19(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join20(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -28516,14 +29054,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash14("sha256").update(block).digest());
+    blockDigests.push(createHash15("sha256").update(block).digest());
   }
-  return createHash14("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash15("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -28919,9 +29457,10 @@ var init_evidence_pack = __esm(() => {
 
 // src/core/release-manifest.ts
 import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-var storage2;
+var storage2, withheldAnswers;
 var init_release_manifest = __esm(() => {
   storage2 = new AsyncLocalStorage4;
+  withheldAnswers = new WeakSet;
 });
 
 // src/core/secret-location-note.ts
@@ -29249,7 +29788,7 @@ var init_remote_request_body = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash15, randomBytes as randomBytes2 } from "node:crypto";
+import { createHash as createHash16, randomBytes as randomBytes2 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -29312,7 +29851,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash15("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash16("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -29839,9 +30378,9 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 import { homedir as homedir12 } from "node:os";
-import { join as join20 } from "node:path";
+import { join as join21 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -30233,8 +30772,8 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join20(homedir12(), ".local", "share");
-  return join20(standaloneLinuxDataDir(env) ?? join20(dataHome, "openclaw", "olympus"), "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join21(homedir12(), ".local", "share");
+  return join21(standaloneLinuxDataDir(env) ?? join21(dataHome, "openclaw", "olympus"), "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -30252,7 +30791,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -30414,7 +30953,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash17("sha256").update(value).digest("hex");
+  return createHash18("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -30458,13 +30997,13 @@ var init_live_connector = __esm(() => {
 
 // src/workers/whatsapp/store-sync.ts
 import { homedir as homedir13 } from "node:os";
-import { join as join21 } from "node:path";
+import { join as join22 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join21(env.HOME?.trim() || homedir13(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join21(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join22(env.HOME?.trim() || homedir13(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join22(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join21(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join22(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync = __esm(() => {
@@ -30788,9 +31327,9 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 import { homedir as homedir15 } from "node:os";
-import { join as join23 } from "node:path";
+import { join as join24 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -30856,14 +31395,15 @@ class GoogleGmailSourceConnector {
   }
   async* listItems(options = {}) {
     const client = await this.clientForRequest();
+    let scopeConfirmationsFetched = 0;
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    let metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
+    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
-    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
@@ -30889,7 +31429,22 @@ class GoogleGmailSourceConnector {
           break;
         messagesExamined += 1;
         const stored = this.scope?.storedItem?.(message2.id);
+        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
+          continue;
         if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
+            scopeConfirmationsFetched += 1;
+            messagesFetched += 1;
+            this.providerRequests += 1;
+            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
+            const received = internalDateNumber({ internalDate: metadata.internalDate });
+            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const subject2 = metadataString2(item2.metadata, "subject");
+            const from2 = metadataString2(item2.metadata, "from");
+            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
+            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
+              this.scope.storedItemObserved(item2);
+          }
           this.itemsSkippedStored += 1;
           continue;
         }
@@ -31146,8 +31701,8 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir15(), ".local", "share");
-  return join23(standaloneLinuxDataDir(env) ?? join23(dataHome, "openclaw", "olympus"), "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join24(homedir15(), ".local", "share");
+  return join24(standaloneLinuxDataDir(env) ?? join24(dataHome, "openclaw", "olympus"), "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -31165,7 +31720,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -31410,9 +31965,9 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash18("sha256").update(value).digest("hex");
+  return createHash19("sha256").update(value).digest("hex");
 }
-var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_linux_engine_layout();
   init_mail_source_scope();
@@ -31442,13 +31997,13 @@ var init_corpus_adapter2 = __esm(() => {
 
 // src/workers/readwise/connector.ts
 import { homedir as homedir16 } from "node:os";
-import { dirname as dirname19, join as join24 } from "node:path";
+import { dirname as dirname20, join as join25 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join24(homedir16(), ".local", "share");
-  return join24(standaloneLinuxDataDir(env) ?? join24(dataHome, "openclaw", "olympus"), "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join25(homedir16(), ".local", "share");
+  return join25(standaloneLinuxDataDir(env) ?? join25(dataHome, "openclaw", "olympus"), "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
@@ -31553,13 +32108,13 @@ var init_folder_facets = __esm(() => {
 
 // src/workers/x-bookmarks/connector.ts
 import { homedir as homedir17 } from "node:os";
-import { join as join25 } from "node:path";
+import { join as join26 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join25(homedir17(), ".local", "share");
-  return join25(standaloneLinuxDataDir(env) ?? join25(dataHome, "openclaw", "olympus"), "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join26(homedir17(), ".local", "share");
+  return join26(standaloneLinuxDataDir(env) ?? join26(dataHome, "openclaw", "olympus"), "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
@@ -31668,12 +32223,12 @@ var init_x_bookmarks = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 import { homedir as homedir18 } from "node:os";
-import { join as join26 } from "node:path";
+import { join as join27 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join26(standaloneLinuxDataDir(env) ?? join26(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
+  return join27(standaloneLinuxDataDir(env) ?? join27(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join26(standaloneLinuxDataDir(env) ?? join26(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
+  return join27(standaloneLinuxDataDir(env) ?? join27(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_linux_engine_layout();
@@ -32709,12 +33264,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve7, reject, timer };
+      pending[id] = { resolve: resolve8, reject, timer };
     });
   }
   function notify(method, params) {
@@ -37137,9 +37692,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 `;
 });
 // src/workers/chatgpt/dashboard-resource.ts
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash19("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash20("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
 var init_dashboard_resource = __esm(() => {
@@ -37265,7 +37820,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash22 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -37277,7 +37832,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash21("sha256").update(material, "utf8").digest("hex");
+  return createHash22("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -37612,9 +38167,9 @@ init_sovereignty();
 init_secret_store();
 init_worker_auth();
 init_dropbox_files();
-import { createHash as createHash23 } from "node:crypto";
+import { createHash as createHash24 } from "node:crypto";
 import { existsSync as existsSync19, lstatSync as lstatSync7, mkdirSync as mkdirSync15, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname22, isAbsolute as isAbsolute9 } from "node:path";
+import { dirname as dirname23, isAbsolute as isAbsolute9 } from "node:path";
 
 // src/core/update-check.ts
 init_package_root();
@@ -37714,7 +38269,7 @@ init_credential_broker();
 init_types();
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
   source_item_not_found: "failed_terminal",
   source_permission_denied: "failed_terminal",
@@ -37742,7 +38297,7 @@ class FileExtractionSourceError extends Error {
     this.errorKind = errorKind;
     this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
     this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash16("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+    const errorHash = options.detailForHash === undefined ? undefined : createHash17("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
   }
@@ -37766,7 +38321,7 @@ init_dropbox_content_hash();
 init_provider_client();
 init_http_timeout();
 import { readFile as readFile4, realpath, stat as stat3 } from "node:fs/promises";
-import { relative as relative3, resolve as resolve6, sep as sep3 } from "node:path";
+import { relative as relative3, resolve as resolve7, sep as sep3 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
 var DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.";
 var DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:";
@@ -37913,7 +38468,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve6(rootRealPath, relativePath);
+    const candidatePath = resolve7(rootRealPath, relativePath);
     const relativeToRoot = relative3(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep3}`)) {
       return;
@@ -38349,9 +38904,9 @@ import {
   rmSync as rmSync6,
   writeFileSync as writeFileSync6
 } from "node:fs";
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
-import { dirname as dirname18, isAbsolute as isAbsolute8, join as join22 } from "node:path";
+import { dirname as dirname19, isAbsolute as isAbsolute8, join as join23 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -38361,8 +38916,8 @@ var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir14(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute8(configuredRoot) ? configuredRoot : join22(homeDir, ".cache");
-  return join22(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute8(configuredRoot) ? configuredRoot : join23(homeDir, ".cache");
+  return join23(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -38566,9 +39121,9 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID7()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID8()}.tmp`;
   try {
-    mkdirSync13(dirname18(path), { recursive: true, mode: 448 });
+    mkdirSync13(dirname19(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync6(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -38670,6 +39225,7 @@ init_model_transport();
 init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
+init_release_manifest();
 init_google_handle_compatibility();
 
 // src/core/google-publisher-capacity.ts
@@ -39279,7 +39835,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash20 } from "node:crypto";
+import { createHash as createHash21 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -39363,7 +39919,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash20("sha256").update(value).digest("hex");
+  return createHash21("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -39514,7 +40070,7 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
-import { createHash as createHash22 } from "node:crypto";
+import { createHash as createHash23 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
@@ -39598,7 +40154,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -40323,7 +40879,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash22("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash23("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -40590,19 +41146,20 @@ init_answer_activity();
 init_privacy_profile();
 
 // src/workers/classification/sniffer-service.ts
+init_tier_move();
 init_secret_locations();
 import { Database as Database6 } from "bun:sqlite";
 
 // src/workers/classification-ledger.ts
 init_linux_engine_layout();
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname20, join as join27 } from "node:path";
+import { dirname as dirname21, join as join28 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname20(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname21(path), { recursive: true, mode: 448 });
   const handle = await open4(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -40725,7 +41282,7 @@ init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
 import { mkdirSync as mkdirSync14, readFileSync as readFileSync17 } from "node:fs";
-import { dirname as dirname21 } from "node:path";
+import { dirname as dirname22 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -40763,7 +41320,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync14(dirname21(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync14(dirname22(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -41532,7 +42089,9 @@ class TierSnifferService {
             }));
             if ([...stores.values()].some((store) => !store))
               return false;
-            const remaining = [...stores.values()].map((store) => store.exportItemCopy(question)).find(Boolean);
+            const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+            const serving2 = copyServingLayer(ordered, question.pass) ?? copyServingLayer(ordered, "content");
+            const remaining = serving2 ? stores.get(serving2.corpusId)?.exportItemCopy(question) : undefined;
             if (!locations?.get(question)?.findingKinds.includes("sniffer_secret_refusal")) {
               if (!locations || !remaining)
                 return false;
@@ -41677,6 +42236,9 @@ class TierSnifferService {
       const set = tierSetForLedger(ledgerPath);
       if (!set)
         continue;
+      set.repairLowerContent({ ...this.options.autoMoves ? {
+        embeddingLedger: { path: this.options.autoMoves.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
+      } : {} });
       try {
         const report = sweepOwnerRuleRaises({ set });
         if (report.raised > 0 || report.secrets > 0) {
@@ -41790,6 +42352,16 @@ class TierSnifferService {
         const identity = recordIdentity(record);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record.generation}`;
         try {
+          if (resumeVerifiedTierMove(set, identity, {
+            path: options.embeddingLedgerPath,
+            approvedBy: "system-automatic",
+            why: AUTO_MOVE_WHY
+          })) {
+            await flushTierMoveNotes(set.ledger);
+            report.moved += 1;
+            this.moveFailures.delete(failureKey);
+            continue;
+          }
           const sources = set.ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
           const source = sources[0];
           const exported = source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
@@ -42493,7 +43065,7 @@ async function runSourceEmbeddingDrain(options) {
   const maxConsecutiveFailures = positiveIntOrUnboundedOption(options.maxConsecutiveFailures, DEFAULT_MAX_CONSECUTIVE_FAILURES, "maxConsecutiveFailures");
   const stopWhenIdle = options.stopWhenIdle ?? false;
   const ledgerObservationIntervalMs = nonNegativeIntOption(options.ledgerObservationIntervalMs, DEFAULT_LEDGER_OBSERVATION_INTERVAL_SECONDS * 1000, "ledgerObservationIntervalMs");
-  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
   const startedAt = Date.now();
   const deadlineMs = startedAt + maxRuntimeSeconds * 1000;
   let runs = 0;
@@ -42662,7 +43234,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash23("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash24("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -42846,6 +43418,7 @@ function createDirectSourceEmbeddingDrainClient(env) {
   const config = loadConfig(env);
   const sovereigntyEngine = loadSovereigntyEngine({
     env,
+    migratePrivateMeaning: true,
     ...config.sovereignty?.policy ? { inlineConfig: config.sovereignty.policy } : {},
     ...config.sovereignty?.configPath ? { configPath: config.sovereignty.configPath } : {}
   });
@@ -43116,7 +43689,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash23("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash24("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
@@ -43225,7 +43798,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute9(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname22(readinessPath);
+  const directory = dirname23(readinessPath);
   mkdirSync15(directory, { recursive: true, mode: 448 });
   const parent = lstatSync7(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
@@ -43248,7 +43821,7 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync15(dirname22(args.reportPath), { recursive: true });
+      mkdirSync15(dirname23(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -43258,7 +43831,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync15(dirname22(args.reportPath), { recursive: true });
+      mkdirSync15(dirname23(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

@@ -131,7 +131,7 @@ describe('P1b answers', () => {
 describe('P1b status', () => {
   test('status publishes pending, superseded and moving counts and keeps them out of parity', async () => {
     const tiered = await fixture();
-    // A raise: the Personal copy is superseded (kept, hidden).
+    // A verified raise supersedes the Personal copy and removes its content.
     await moveTieredItem({
       set: tiered.set,
       identity: identityOf('garden'),
@@ -150,7 +150,7 @@ describe('P1b status', () => {
     const internal = byCorpus.get(CORPORA.internal) as { counts: Record<string, number> };
     const secure = byCorpus.get(CORPORA.secure_local) as { counts: Record<string, number> };
     expect(internal.counts).toMatchObject({ chunks: 0, embedded_chunks: 0, tier_move_in_progress: 0 });
-    expect(internal.counts['superseded_chunks']).toBeGreaterThan(0);
+    expect(internal.counts['superseded_chunks']).toBe(0);
     expect(secure.counts['pending_classification_items']).toBe(1);
   });
 });

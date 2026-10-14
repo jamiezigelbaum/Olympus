@@ -43,13 +43,18 @@ export function createTierVisibilityGate(scopes: () => readonly TierVisibilitySc
         continue;
       }
       for (const hit of governed) {
+        if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
+          hidden.add(hit);
+          continue;
+        }
         const key = tierLedgerIdentityKey(hit.sourceItem);
         const itemCopies = copies.get(key);
         if (!itemCopies || itemCopies.length === 0) {
           if (routedWithoutCopies.has(key)) hidden.add(hit);
           continue;
         }
-        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === 'current');
+        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === 'current'
+          && (!hit.servingLayer || copy.layers === 'both' || copy.layers === hit.servingLayer));
         if (!currentHere) hidden.add(hit);
       }
     }

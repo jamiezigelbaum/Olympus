@@ -773,8 +773,10 @@ describe('native OpenClaw plugin adapter', () => {
     const calls: Array<{ url: string; body: string | undefined }> = [];
     globalThis.fetch = (async (url, init) => {
       calls.push({ url: String(url), body: typeof init?.body === 'string' ? init.body : undefined });
+      if (String(url).endsWith('/source/answer/release')) return Response.json({ allowed: true });
       return new Response(
         JSON.stringify({
+          _release_ticket: 'a'.repeat(43),
           answer: 'LDL is elevated, while the Telegram source discusses ApoB as a biomarker. [1][2]',
           evidence: [
             {
@@ -867,6 +869,8 @@ describe('native OpenClaw plugin adapter', () => {
       'secure_local.dropbox.files',
       'internal.telegram.messages',
     ]);
+    expect(calls[1]?.url).toBe(`${workerTestOrigin}/v1/source/answer/release`);
+    expect(JSON.stringify(result)).not.toContain('_release_ticket');
     expect(result?.content[0]?.text).toContain('Answer:\nLDL is elevated');
     expect(result?.content[0]?.text).toContain('1. Recent Labs [secure_local.dropbox.files]');
     expect(result?.content[0]?.text).toContain('Timing: 14500ms total, 2100ms retrieval, 12100ms analyst');

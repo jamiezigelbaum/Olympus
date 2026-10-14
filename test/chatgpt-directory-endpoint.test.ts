@@ -1,3 +1,4 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // The ChatGPT plugin directory's endpoint on the engine (`/openai/mcp`;
 // connect-relay/shared/directory-tools.ts):
 //
@@ -130,16 +131,16 @@ beforeEach(async () => {
     privateQuestions: questions,
     async privateMatchProbe() { return { count: 1, evidence: PRIVATE_HITS }; },
     async evidenceSearch() {
-      return {
-        evidence: [{ trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs and a table.' }],
+      return recordScriptedSearch({
+        evidence: [{ corpus_id: 'internal.google_drive.docs', provider_item_id: 'flat-inventory', trust_domain: 'internal', family: 'file', provider: 'google_drive', title: 'Flat inventory', excerpt: 'Two chairs and a table.' }],
         coverage: { searched_corpora: 1, unreadable_items: 0, partially_read_items: 0, unclassified_items: 0 },
-      };
+      });
     },
   };
   const mcp = createRemoteMcpHandler({
     connections: () => store,
     publicUrls: urls,
-    makeOperationContext: (caller, signal) => createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }),
+    makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }), releaseCheck: scriptedSearchReleaseCheck }),
     chatgpt: {
       servesRequest: (_request, connection) => isChatGptGrant(connection),
       readOnlyFor: isDemoGrant,
@@ -151,7 +152,7 @@ beforeEach(async () => {
   const narrowed = createRemoteMcpHandler({
     connections: () => store,
     publicUrls: urls,
-    makeOperationContext: (caller, signal) => createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }),
+    makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }), releaseCheck: scriptedSearchReleaseCheck }),
     chatgpt: { servesRequest: (_request, connection) => isChatGptGrant(connection), ...surface },
     directoryServer: (makeContext, options, detached) => createChatGptDirectoryMcpServer(makeContext, options, detached, (name) => directoryAllows!(name)),
   });

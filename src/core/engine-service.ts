@@ -916,9 +916,10 @@ function runningBuildDiffers(statusPath: string, build: string | undefined): boo
 /**
  * The policy a new standalone install starts with: the shipped preset that
  * needs nothing from the owner. Every tier embeds with the built-in model
- * (downloaded on first use, no key), Private items stay metadata-only and
- * unanswerable, and no answer model is required: ChatGPT answers from
- * olympus_search. An existing sovereignty.json is never touched.
+ * (downloaded on first use, no key), including Private meaning search on this
+ * computer. The Private agent answer route stays disabled; the built-in model
+ * serves Ask privately and the sealed panel separately. Seeding preserves an
+ * existing file; engine startup migrates only the unmodified 1.0.0 default.
  */
 export const STANDALONE_SOVEREIGNTY_PRESET: SovereigntyPresetName = 'no-sensitive';
 
