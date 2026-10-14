@@ -259,7 +259,8 @@ export interface ZkapiSessionReceipt {
 /**
  * Which owned process of a session stopped on its own, how, and in which
  * stage. Content-free: no line of its output is kept, only the exit code or
- * signal the operating system reported. A signal names an outside stop (the
+ * signal the operating system reported, and a recognized fixed diagnostic.
+ * A signal names an outside stop (the
  * recovery of 2026-10-10 18:36Z died to a SIGTERM that readiness, running in
  * the same process, sent to its own session's Tor client).
  */
@@ -268,6 +269,8 @@ export interface ZkapiProcessExit {
   code?: number;
   signal?: string;
   stage?: keyof ZkapiStageTimings;
+  /** Recognized fixed daemon diagnostic only; never raw companion output. */
+  reason?: 'wallet_companion_exited';
 }
 
 /**
@@ -1180,6 +1183,7 @@ interface Supervised {
   childExited: boolean;
   /** How the watchdog's child ended, from the marker line; absent when only the watchdog's exit was seen. */
   exit?: { code?: number; signal?: string };
+  failureReason?: ZkapiProcessExit['reason'];
   /** Set before Olympus stops the group on purpose, so the exit is not a failure. */
   deliberate: boolean;
   /** The group leader's process instance, taken at spawn. */
@@ -1285,6 +1289,11 @@ export function supervise(
           handle.childExited = true;
           report();
         } else {
+          // zkAPI discards its companion's output and emits this fixed lifecycle
+          // message when it exits. Keep only the label, never the error line.
+          if (role === 'daemon' && line.includes('zkAPI service stopped unexpectedly; run zkapi-clientd config to check the installation')) {
+            handle.failureReason = 'wallet_companion_exited';
+          }
           onLine(line);
         }
         pending = pending.slice(index + 1);
@@ -2545,6 +2554,7 @@ async function runSession(
     const exited = receipt.exited;
     if (!exited) return;
     const handle = groups.find((group) => group.role === exited.role);
+    if (handle?.failureReason && exited.role === 'daemon') exited.reason = handle.failureReason;
     if (handle?.exit?.code !== undefined && exited.code === undefined) exited.code = handle.exit.code;
     if (handle?.exit?.signal && !exited.signal) exited.signal = handle.exit.signal;
   };
@@ -3038,6 +3048,9 @@ export function zkapiProcessExitMessage(exit: ZkapiProcessExit): string {
   const who = exit.role === 'tor' ? 'The Tor client' : 'The zkAPI daemon';
   const how = exit.signal ? ` (signal ${exit.signal})` : exit.code !== undefined ? ` (exit code ${exit.code})` : '';
   const when = exit.stage && EXIT_STAGE_NAMES[exit.stage] ? ` ${EXIT_STAGE_NAMES[exit.stage]}` : '';
+  if (exit.role === 'daemon' && exit.reason === 'wallet_companion_exited' && !exit.signal) {
+    return `The zkAPI wallet companion stopped, causing this session's daemon to exit${how}${when}. Check the zkAPI installation and Tor connection before retrying.`;
+  }
   const outside = exit.signal ? ' Something else on this computer stopped it.' : '';
   return `${who} of this session stopped unexpectedly${how}${when}.${outside}`;
 }
