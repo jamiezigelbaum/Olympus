@@ -95,6 +95,46 @@ describe('release-check report verdict', () => {
   });
 });
 
+describe('release-check harness commit', () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const withCandidate = (sha: string | undefined, harnessCommit: string | undefined) => buildReport(input({
+    candidate: { label: 'candidate', ...(sha ? { sha } : {}) },
+    ...(harnessCommit ? { harnessCommit } : {}),
+  }));
+
+  test('the same commit is recorded in the JSON and shown on the page, and the run can pass', () => {
+    const report = withCandidate(A, A);
+    expect(report.harness).toEqual({ commit: A, candidateCommit: A, relation: 'same-commit' });
+    expect(report.verdict).toBe('pass');
+    expect(JSON.parse(JSON.stringify(report)).harness.relation).toBe('same-commit');
+    expect(renderHtml(report)).toContain(`Harness commit ${A} · the same commit as the candidate`);
+  });
+
+  test('a harness from another commit than the candidate fails the run and says so', () => {
+    const report = withCandidate(A, B);
+    expect(report.harness.relation).toBe('different-commit');
+    expect(report.verdict).toBe('fail');
+    expect(report.errors.join(' ')).toContain('does not qualify that candidate');
+    expect(renderHtml(report)).toContain("NOT the candidate&#39;s commit");
+    // Rebuilding from the finished report records the problem once.
+    expect(buildReport({ ...report }).errors).toEqual(report.errors);
+  });
+
+  test('a local artifact has no commit of its own: the harness commit is recorded and the page says the match is unconfirmed', () => {
+    const report = withCandidate(undefined, B);
+    expect(report.harness).toEqual({ commit: B, relation: 'candidate-commit-not-recorded' });
+    expect(report.verdict).toBe('pass');
+    expect(renderHtml(report)).toContain('not confirmed to match');
+  });
+
+  test('an unpinned run (no harness commit) is labeled as a development run', () => {
+    const report = withCandidate(A, undefined);
+    expect(report.harness.relation).toBe('unpinned');
+    expect(renderHtml(report)).toContain('not release evidence');
+  });
+});
+
 describe('release-check report page', () => {
   test('renders results, skip reasons, timings, screenshots and log links, with no script', () => {
     const html = renderHtml(buildReport(input({ machines: [machine([{ id: 'c1', title: 'Install works', status: 'pass', detail: 'build 1.0.0' }], [{ id: 'q', title: 'Fact stated', status: 'fail', detail: 'missing: 24 October' }])] })));
