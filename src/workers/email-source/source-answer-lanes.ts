@@ -133,7 +133,7 @@ export function createSourceAnswerLanes(
         store,
         retrievalMode: request.retrieval_mode ?? 'keyword',
         // Trusted local/private consumers only; never a tool/HTTP request field.
-        localKeywordFallback: mode === 'built_in_only' || (mode === 'private_search' && store.trustDomain === 'secure_local'),
+        localKeywordFallback: mode === 'built_in_only' ? true : (mode === 'private_search' && store.trustDomain === 'secure_local' ? 'private_search' : false),
         ...(semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {}),
         ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
         ...(filters ? { filters } : {}),
