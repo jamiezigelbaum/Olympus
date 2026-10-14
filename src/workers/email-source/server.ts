@@ -382,7 +382,7 @@ import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-source
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
-import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -1455,7 +1455,7 @@ export function createAnalystForSovereigntyProfile(input: {
       resolveSecretRef: () => apiKey,
     }), { profile: 'source_answer', preflightTimeoutMs: 0 });
     return createAnalyst(input.localModelActivity
-      ? input.localModelActivity.track(localModelResourceKey(profile), model) : model,
+      ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model,
     { auditSuspiciousDrafts: true });
   }
   if (profile.provider === 'openclaw-infer') {
@@ -1970,6 +1970,7 @@ export async function main(): Promise<void> {
     onExpired: (openMs) => console.warn(`Olympus answer activity: an answer still open after ${Math.round(openMs / 60_000)} min stopped holding background work.`),
   });
   // Set once the sniffer runs: its backlog, for the status surface.
+  let classificationBusy = () => false;
   let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(
@@ -3356,7 +3357,7 @@ export async function main(): Promise<void> {
         process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
-      ));
+      ), { serialize: false });
       const builtInAnalystModel = answerBuiltInModel;
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
         localModelActivity,
@@ -4896,6 +4897,7 @@ export async function main(): Promise<void> {
       answer: (input) => answerActivity.run(() => local.answer(input)),
       backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background')),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
+      backgroundBusy: () => classificationBusy(),
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
       isActive: connectionActive,
       store: waitingQuestionStore,
@@ -5500,7 +5502,10 @@ export async function main(): Promise<void> {
     ? new TierSnifferService({
         installed: installedTierClassification,
         lane: snifferLane,
-        model: snifferModel,
+        model: snifferResource ? {
+          ...snifferModel,
+          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request)),
+        } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
         ...(snifferRuntime.source === 'built_in'
@@ -5535,6 +5540,7 @@ export async function main(): Promise<void> {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
   }
+  classificationBusy = () => tierSniffer?.hasPriority ?? false;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
 

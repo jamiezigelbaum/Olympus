@@ -1204,4 +1204,110 @@ describe('the Private answers page', () => {
     const moved = renderAndRun(() => ({ status: 500, body: {} }), `http://127.0.0.1:8010/dashboard?private-answers#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`);
     expect((moved.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT) as unknown as { open: boolean }).open).toBe(true);
   });
+  test('the inbox renders temporary eligibility and queued states plainly without acknowledging an answer', async () => {
+    for (const [status, words] of [['check_unavailable', "Couldn't check this answer right now"], ['queued', 'Queued on this computer.']] as const) {
+      const page = renderAndRun(() => ({ status: 200, body: { ok: true, status } }));
+      (page.document.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+      await page.settle();
+      expect(page.document.body.textContent).toContain(words);
+      expect(page.posts.map(post => post.body.action)).toEqual(['read']);
+    }
+  });
+
+});
+
+// Independent review regressions, using the real tier-ledger fixture.
+
+const OFFER_A = JSON.stringify({ answer: 'The price is 620000 [1].', citations: [{ evidence: 1, claim: 'Price 620000' }], unanswered: [], sufficient: true });
+
+async function offerCase(conversation: string | undefined) {
+  const spec: FixtureSpec = { id: 'offer', name: 'offer.txt', text: 'The synthetic offer price is 620000.', ...(conversation ? { conversation } : {}) };
+  const local = await localFixture({ specs: [spec], privateIds: [], answer: OFFER_A, keywordOnly: true });
+  await moveTieredItem({ set: local.fixture.set, identity: identityOf('offer', conversation), target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const store = waitingStore();
+  const ref = store.record(store.ticket('conn-agent'), { question: 'What is the synthetic offer price?', surface: 'remote', state: 'waiting' })!;
+  let opened = 0; let paused = false;
+  const controller = createLocalPrivateAnswers({ interactiveBusy: () => paused, answer: async input => {
+    const result = await local.answer(input);
+    return result.status === 'answered' ? { ...result, citations: [{ url: 'https://example.invalid/source' }] } : result;
+  }, eligible: local.eligible, store: () => store, openUrl: async () => { opened++; } });
+  cleanups.push(() => controller.close());
+  await controller.tick();
+  return { local, store, ref, controller, opened: () => opened, pause: () => { paused = true; }, identity: identityOf('offer', conversation) };
+}
+
+test('REVIEW R1 pending-Secret stored answer: plain vs conversation-keyed item', async () => {
+  const out: Record<string, unknown> = {};
+  for (const conversation of [undefined, 'chat-1']) {
+    const c = await offerCase(conversation);
+    const key = conversation ?? 'plain';
+    out[`${key}:stored`] = c.store.get(c.ref.id)?.result?.status;
+    out[`${key}:readIdentity`] = JSON.stringify(c.store.get(c.ref.id)?.result?.read);
+    const before = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
+    const token = (before.body.citations as Array<{ open: string }>)[0]!.open;
+    const record = c.local.fixture.ledger.getCurrent(c.identity)!;
+    c.local.fixture.ledger.beginMove(c.identity, { metadataTier: 'secrets', contentTier: 'secrets' }, record.generation);
+    c.pause();
+    expect((await c.controller.handle({ action: 'open', token }, 'owner')).status).toBe(410);
+    expect(c.opened()).toBe(0);
+    const read = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
+    out[`${key}:readAfterPendingSecret`] = JSON.stringify(read.body);
+  }
+  expect(out['plain:readAfterPendingSecret']).toBe(JSON.stringify({ ok: true, status: 'answering' }));
+  expect(out['chat-1:readAfterPendingSecret']).toBe(JSON.stringify({ ok: true, status: 'answering' }));
+});
+
+test('REVIEW R2 re-ask by the agent erases an answered, read row', () => {
+  const store = waitingStore();
+  const t = store.ticket('conn-a');
+  const ref = store.record(t, { question: 'When is my dentist appointment?', surface: 'remote', state: 'waiting' })!;
+  store.saveAnswer(ref, { status: 'answered', answer: 'Tuesday', citations: [], unanswered: [], leftOut: [], read: [] });
+  store.markRead(ref);
+  const before = store.get(ref.id)!;
+  const again = store.record(store.ticket('conn-a'), { question: 'when is my dentist appointment?', surface: 'remote', state: 'waiting' })!;
+  const after = store.get(ref.id)!;
+  expect(after.result?.answer).toBe('Tuesday');
+});
+
+test('REVIEW R3 one connection evicts another connection\'s answered rows', () => {
+  const store = waitingStore();
+  const victim = store.record(store.ticket('conn-victim'), { question: 'victim question', surface: 'remote', state: 'waiting' })!;
+  store.saveAnswer(victim, { status: 'answered', answer: 'victim answer', citations: [], unanswered: [], leftOut: [], read: [] });
+  for (let i = 0; i < 500; i += 1) {
+    const r = store.record(store.ticket('conn-flood'), { question: `flood ${i}`, surface: 'remote', state: 'waiting' })!;
+    store.saveAnswer(r, { status: 'answered', answer: `a${i}`, citations: [], unanswered: [], leftOut: [], read: [] });
+  }
+  expect(store.list().questions.length).toBeLessThanOrEqual(51);
+  expect(store.get(victim.id)).toBeDefined();
+});
+
+test('REVIEW R4 transient ledger read failure destroys a stored answer on read', async () => {
+  const c = await offerCase(undefined);
+  const gen0 = c.store.get(c.ref.id)!.generation;
+  const original = c.local.fixture.ledger.itemStatesForMany.bind(c.local.fixture.ledger);
+  c.local.fixture.ledger.itemStatesForMany = () => { throw new Error('SQLITE_BUSY (simulated)'); };
+  const read = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
+  c.local.fixture.ledger.itemStatesForMany = original;
+  const row = c.store.get(c.ref.id)!;
+  expect(read.body).toEqual({ ok: true, status: 'check_unavailable' });
+  expect(row.result).toBeDefined();
+  expect(row.generation).toBe(gen0);
+  expect((await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner')).body.status).toBe('answered');
+});
+
+test('REVIEW R5 transient failure during auto-answer stores a permanent not_found', async () => {
+  const spec: FixtureSpec = { id: 'offer', name: 'offer.txt', text: 'The synthetic offer price is 620000.' };
+  const local = await localFixture({ specs: [spec], privateIds: ['offer'], answer: OFFER_A, keywordOnly: true });
+  const store = waitingStore();
+  const ref = store.record(store.ticket('conn-agent'), { question: 'What is the synthetic offer price?', surface: 'remote', state: 'waiting' })!;
+  const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store });
+  cleanups.push(() => controller.close());
+  const original = local.fixture.ledger.itemStatesForMany.bind(local.fixture.ledger);
+  local.fixture.ledger.itemStatesForMany = () => { throw new Error('SQLITE_BUSY (simulated)'); };
+  await controller.tick();
+  local.fixture.ledger.itemStatesForMany = original;
+  const first = store.get(ref.id)!;
+  await controller.tick();
+  expect(first.result).toBeUndefined();
+  expect(first.attempts).toBe(1);
 });

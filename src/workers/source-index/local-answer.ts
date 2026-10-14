@@ -190,7 +190,7 @@ export async function answerOnThisComputer(
       },
     }, { detail: input.detail === 'full' ? 'full' : 'summary' });
   } catch (error) {
-    if (error instanceof NoPrivateEvidenceError) return { status: 'not_found', leftOut };
+    if (error instanceof NoPrivateEvidenceError) return { status: 'failed' };
     return { status: 'failed' };
   }
   // Before anything is shown: every item that can reach the output (the items
@@ -252,12 +252,15 @@ function leftOutSources(
 export async function checkLocalEvidenceItems(input: {
   lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
   items: readonly Readonly<Record<string, unknown>>[];
+  /** Preserve an unavailable check for callers that must retain stored answers. */
+  throwOnUnavailable?: boolean;
 }): Promise<boolean[]> {
   if (input.items.length === 0) return [];
   let lanes: AnalystAnswerLanes;
   try {
     lanes = input.lanes(localAnswerRequest('eligibility', { retrieval_mode: 'keyword' }));
-  } catch {
+  } catch (error) {
+    if (input.throwOnUnavailable) throw error;
     return input.items.map(() => false);
   }
   return Promise.all(input.items.map(async (item) => {
@@ -277,9 +280,11 @@ export async function checkLocalEvidenceItems(input: {
       const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
       if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0) return false;
       if (content.sensitivity.trustDomain !== trustDomain) return false;
+      if (content.sensitivity.trustTier === 'S5') return false;
       assertModelTrustTierAllowed(content.sensitivity.trustTier);
       return true;
-    } catch {
+    } catch (error) {
+      if (input.throwOnUnavailable) throw error;
       return false;
     }
   }));

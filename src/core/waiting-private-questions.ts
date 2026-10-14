@@ -4,8 +4,8 @@
  * answer text, citation locators, content-free source identities, answered-at
  * and read/unread. Unanswered rows keep the original 20/connection, 50 total,
  * 256 KB and seven-day bounds. Answered rows stay until deletion, including
- * while re-answering after eligibility changes, subject only to 500 rows /
- * 16 MiB storage safety limits; each answer is at most 128 KiB.
+ * while re-answering after eligibility changes, subject to 50 rows / 1 MiB per
+ * connection and 500 rows / 16 MiB global storage safety limits; each answer is at most 128 KiB.
  *
  * Every completion/retry/invalidation compares id, generation and connection.
  * Revocation deletes that connection's rows and bumps its recording ticket;
@@ -30,7 +30,7 @@ import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } 
 import { closeSqliteStore } from './sqlite-store.ts';
 
 export const WAITING_PRIVATE_QUESTIONS_STORE_ID = 'waiting-private-questions';
-export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 2;
+export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 3;
 export const WAITING_PRIVATE_QUESTIONS_FILE_NAME = 'waiting-private-questions.sqlite';
 
 export const WAITING_QUESTION_LIMITS = Object.freeze({
@@ -42,6 +42,10 @@ export const WAITING_QUESTION_LIMITS = Object.freeze({
   total: 50,
   /** Every record's question and selectors together, plus a fixed allowance per record. */
   totalBytes: 256 * 1024,
+  answeredPerConnection: 50,
+  answeredBytesPerConnection: 1024 * 1024,
+  autoAnswersPerWindow: 5,
+  autoAnswerWindowMs: 60 * 60_000,
   answeredTotal: 500,
   answeredBytes: 16 * 1024 * 1024,
   answerBytes: 128 * 1024,
@@ -121,6 +125,8 @@ export interface WaitingQuestion {
   /** ISO time of the latest ask. */
   askedAt: string;
   result?: StoredPrivateAnswer;
+  /** Metadata listings omit bodies but retain their presence. */
+  hasResult?: boolean;
   answeredAt?: string;
   attempts: number;
   nextAttemptAt: number;
@@ -159,7 +165,7 @@ export interface WaitingQuestionStore {
    */
   record(ticket: WaitingQuestionTicket, input: WaitingQuestionInput): WaitingQuestionRef | undefined;
   /** Newest first, expired records dropped; `olderRemoved` while the marker stands. */
-  list(): { questions: WaitingQuestion[]; olderRemoved: boolean };
+  list(options?: { includeResults?: boolean }): { questions: WaitingQuestion[]; olderRemoved: boolean };
   get(id: string): WaitingQuestion | undefined;
   dismiss(id: string): boolean;
   /** Deletes every record and the "older questions were removed" marker. */
@@ -178,6 +184,7 @@ export interface WaitingQuestionStore {
   /** Generation fences every completion, retry and invalidation against delete/revoke/re-ask. */
   subscribe(listener: () => void): () => void;
   markRead(ref: WaitingQuestionRef): boolean;
+  reserveAutoAnswer(ref: WaitingQuestionRef): boolean;
   saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer): boolean;
   retry(ref: WaitingQuestionRef): boolean;
   invalidate(ref: WaitingQuestionRef): boolean;
@@ -199,6 +206,7 @@ interface QuestionRow {
   generation: number;
   asked_at: number;
   result: string | null;
+  has_result?: number;
   answered_at: number | null;
   attempts: number;
   next_attempt_at: number;
@@ -403,6 +411,12 @@ export function openWaitingPrivateQuestionStore(
         expire(at);
         const existing = db.query('SELECT * FROM waiting_questions WHERE dedupe_key = ?').get(dedupeKey) as QuestionRow | null;
         let ref: WaitingQuestionRef;
+        if (existing?.result) {
+          // Eligibility is checked at every read/open. Re-asking cannot erase
+          // a retained answer or restart its generation; only withdrawal can.
+          db.query('UPDATE waiting_questions SET asked_at = ? WHERE id = ?').run(at, existing.id);
+          return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
+        }
         if (existing) {
           const generation = existing.generation + 1;
           db.query(`
@@ -434,14 +448,19 @@ export function openWaitingPrivateQuestionStore(
       }).immediate();
     },
 
-    list() {
+    list(options) {
+      // A normal poll takes no write lock. Erase expired private text only
+      // when there is actually something to remove; omit bodies on tick/list.
       const at = now();
-      return db.transaction(() => {
-        expire(at);
-        const rows = db.query('SELECT * FROM waiting_questions ORDER BY asked_at DESC, rowid DESC').all() as QuestionRow[];
-        const marker = db.query('SELECT value FROM waiting_meta WHERE key = ?').get(OLDER_REMOVED_KEY);
-        return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
-      }).immediate();
+      if (db.query('SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1')
+        .get(at - WAITING_QUESTION_LIMITS.ttlMs)) expire(at);
+      const columns = options?.includeResults === false
+        ? 'id, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result'
+        : '*';
+      const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`)
+        .all(now() - WAITING_QUESTION_LIMITS.ttlMs) as QuestionRow[];
+      const marker = db.query('SELECT value FROM waiting_meta WHERE key = ?').get(OLDER_REMOVED_KEY);
+      return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
     },
 
     get(id: string): WaitingQuestion | undefined {
@@ -516,6 +535,25 @@ export function openWaitingPrivateQuestionStore(
         .run(ref.id, ref.generation, ref.connectionId).changes > 0;
     },
 
+    reserveAutoAnswer(ref) {
+      return db.transaction(() => {
+        if (!db.query('SELECT 1 FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL')
+          .get(ref.id, ref.generation, ref.connectionId)) return false;
+        const at = now();
+        const budget = db.query('SELECT started_at, attempts FROM auto_answer_budgets WHERE connection_id = ?')
+          .get(ref.connectionId) as { started_at: number; attempts: number } | null;
+        if (budget && at < budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs && budget.attempts >= WAITING_QUESTION_LIMITS.autoAnswersPerWindow) {
+          db.query('UPDATE waiting_questions SET next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ?')
+            .run(budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs, ref.id, ref.generation, ref.connectionId);
+          return false;
+        }
+        const fresh = !budget || at >= budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs;
+        db.query('INSERT INTO auto_answer_budgets (connection_id, started_at, attempts) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET started_at = excluded.started_at, attempts = excluded.attempts')
+          .run(ref.connectionId, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
+        return true;
+      }).immediate();
+    },
+
     saveAnswer(ref, result) {
       const serialized = JSON.stringify(result);
       if (utf8Length(serialized) > WAITING_QUESTION_LIMITS.answerBytes) return false;
@@ -523,16 +561,26 @@ export function openWaitingPrivateQuestionStore(
         const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
           .run(serialized, now(), ref.id, ref.generation, ref.connectionId).changes > 0;
         if (!changed) return false;
-        const rows = db.query('SELECT id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC').all() as Array<{ id: string; bytes: number }>;
-        let bytes = 0;
-        rows.forEach((row, index) => {
-          bytes += row.bytes + RECORD_OVERHEAD_BYTES;
-          if (index >= WAITING_QUESTION_LIMITS.answeredTotal || bytes > WAITING_QUESTION_LIMITS.answeredBytes) {
-            db.query('DELETE FROM waiting_questions WHERE id = ?').run(row.id);
-            markOlderRemoved(now());
-          }
-        });
-        return true;
+        const rows = db.query('SELECT id, connection_id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC').all() as Array<{ id: string; connection_id: string; bytes: number }>;
+        let ownBytes = 0;
+        let ownCount = 0;
+        const removed = new Set<string>();
+        const remove = (id: string) => { db.query('DELETE FROM waiting_questions WHERE id = ?').run(id); removed.add(id); };
+        for (const row of rows.filter(row => row.connection_id === ref.connectionId)) {
+          ownBytes += row.bytes + RECORD_OVERHEAD_BYTES;
+          if (++ownCount > WAITING_QUESTION_LIMITS.answeredPerConnection || ownBytes > WAITING_QUESTION_LIMITS.answeredBytesPerConnection) remove(row.id);
+        }
+        let count = rows.length - removed.size;
+        let bytes = rows.filter(row => !removed.has(row.id)).reduce((sum, row) => sum + row.bytes + RECORD_OVERHEAD_BYTES, 0);
+        // A full global store can consume only the saving connection's rows.
+        // A flood never pays for itself with another connection's answers.
+        for (const row of [...rows].reverse()) {
+          if (count <= WAITING_QUESTION_LIMITS.answeredTotal && bytes <= WAITING_QUESTION_LIMITS.answeredBytes) break;
+          if (row.connection_id !== ref.connectionId || removed.has(row.id)) continue;
+          remove(row.id); count--; bytes -= row.bytes + RECORD_OVERHEAD_BYTES;
+        }
+        if (removed.size) markOlderRemoved(now());
+        return !removed.has(ref.id);
       }).immediate();
     },
 
@@ -615,6 +663,7 @@ function toQuestion(row: QuestionRow): WaitingQuestion {
     seen: row.seen === 1,
     generation: row.generation,
     askedAt: new Date(row.asked_at).toISOString(),
+    ...(row.has_result !== undefined ? { hasResult: row.has_result === 1 } : {}),
     ...(row.result ? { result: JSON.parse(row.result) as StoredPrivateAnswer } : {}),
     ...(row.answered_at !== null ? { answeredAt: new Date(row.answered_at).toISOString() } : {}),
     attempts: row.attempts,
@@ -660,6 +709,12 @@ function migrations(): SqliteMigration[] {
         ALTER TABLE waiting_questions ADD COLUMN answered_at INTEGER;
         ALTER TABLE waiting_questions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE waiting_questions ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;`);
+    },
+  }, {
+    version: 3,
+    name: 'private_answer_auto_budgets',
+    up(db) {
+      db.exec('CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL)');
     },
   }];
 }

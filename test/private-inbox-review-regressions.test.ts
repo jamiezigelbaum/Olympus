@@ -9,7 +9,7 @@ import { createAnalyst, type AnalystModelRequest } from '../src/core/analyst.ts'
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { createAnalystSourceIndexAnswerHandler, guardSourceAnswerEvidence, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
-import { openWaitingPrivateQuestionStore, type StoredPrivateAnswer, type WaitingQuestionRef } from '../src/core/waiting-private-questions.ts';
+import { openWaitingPrivateQuestionStore, WAITING_QUESTION_LIMITS, type StoredPrivateAnswer, type WaitingQuestionRef } from '../src/core/waiting-private-questions.ts';
 import { createLocalModelActivity, runBackgroundInference } from '../src/workers/answer-activity.ts';
 import { createBuiltInPrivateAnswerModel } from '../src/workers/chatgpt/private-answer-model.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
@@ -297,23 +297,23 @@ describe('live authorization failures stop sovereignty fallback', () => {
 });
 
 describe('retained answer bounds', () => {
-  test('invalidated retained rows still count toward the 500-answer cap', () => {
+  test('invalidated retained rows still count toward the per-connection answer cap', () => {
     const f = fixture();
     const refs: WaitingQuestionRef[] = [];
-    for (let index = 0; index < 500; index++) {
+    for (let index = 0; index < WAITING_QUESTION_LIMITS.answeredPerConnection; index++) {
       f.advance(1);
       const ref = f.record(`Synthetic retained answer ${index}`);
       refs.push(ref);
       expect(f.store.saveAnswer(ref, saved())).toBe(true);
     }
     // Invalidate a recent row so the oldest complete row should be evicted.
-    const invalidated = refs[499]!;
+    const invalidated = refs[WAITING_QUESTION_LIMITS.answeredPerConnection - 1]!;
     expect(f.store.invalidate(invalidated)).toBe(true);
     expect(f.store.get(invalidated.id)?.result).toBeUndefined();
     expect(f.store.get(invalidated.id)?.answeredAt).toBeDefined();
     f.advance(1);
     expect(f.store.saveAnswer(f.record('Synthetic newest answer'), saved())).toBe(true);
-    expect(f.store.list().questions).toHaveLength(500);
+    expect(f.store.list().questions).toHaveLength(WAITING_QUESTION_LIMITS.answeredPerConnection);
     expect(f.store.get(refs[0]!.id)).toBeUndefined();
     expect(f.store.get(invalidated.id)).toBeDefined();
     expect(f.store.list().olderRemoved).toBe(true);
@@ -352,7 +352,7 @@ function lockStore(f: ReturnType<typeof fixture>) {
 }
 
 describe('panel acknowledgment durability under SQLite contention', () => {
-  test('a busy durable delete retains the decrypted capability for retry and prevents later fallback', async () => {
+  test('a busy durable delete acknowledges delivery and retries cleanup without later fallback', async () => {
     const f = fixture();
     const ref = f.record('Synthetic claimed panel question', 'chatgpt');
     const jobs = panelJobs(f);
@@ -364,10 +364,11 @@ describe('panel acknowledgment durability under SQLite contention', () => {
     const opened = JSON.parse(await openPrivateAnswer(jobId!, key.privateKey, ready.body as unknown as SealedPrivateAnswer)) as { ack: string };
     expect(opened.ack).toMatch(/^[A-Za-z0-9_-]{43}$/);
     const unlock = lockStore(f);
-    expect(await jobs.acknowledge(jobId!, key.publicKey, opened.ack)).toMatchObject({ status: 503, body: { status: 'busy' } });
+    expect(await jobs.acknowledge(jobId!, key.publicKey, opened.ack)).toMatchObject({ status: 200, body: { status: 'acknowledged' } });
+    expect(jobs.hasClaimedWaiting(ref)).toBe(true);
     expect(f.store.get(ref.id)).toBeDefined();
     unlock();
-    expect(await jobs.acknowledge(jobId!, key.publicKey, opened.ack)).toMatchObject({ status: 200, body: { status: 'acknowledged' } });
+    jobs.sweep();
     expect(f.store.get(ref.id)).toBeUndefined();
     expect((await jobs.acknowledge(jobId!, key.publicKey, opened.ack)).status).toBe(410);
     f.advance(31_000);
@@ -379,7 +380,7 @@ describe('panel acknowledgment durability under SQLite contention', () => {
     expect(fallbackCalls).toBe(0);
   });
 
-  test('pinned seenOnDelivery never hands out ready bytes until durable deletion succeeds', async () => {
+  test('pinned seenOnDelivery hands out sealed bytes while a busy inbox delete waits', async () => {
     const f = fixture();
     const ref = f.record('Synthetic pinned panel question', 'chatgpt');
     const jobs = panelJobs(f);
@@ -387,8 +388,8 @@ describe('panel acknowledgment durability under SQLite contention', () => {
     const key = await generatePanelKeyPair();
     const unlock = lockStore(f);
     const busy = await jobs.claim(jobId!, key.publicKey);
-    expect(busy).toMatchObject({ status: 503, body: { status: 'busy' } });
-    expect(JSON.stringify(busy.body)).not.toContain('ciphertext');
+    expect(busy).toMatchObject({ status: 200, body: { status: 'ready' } });
+    expect(JSON.parse(await openPrivateAnswer(jobId!, key.privateKey, busy.body as unknown as SealedPrivateAnswer)).answer).toBe('Synthetic sealed answer');
     expect(f.store.get(ref.id)).toBeDefined();
     unlock();
     const ready = await jobs.claim(jobId!, key.publicKey);

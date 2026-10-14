@@ -16370,6 +16370,10 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         expire(at);
         const existing = db.query("SELECT * FROM waiting_questions WHERE dedupe_key = ?").get(dedupeKey);
         let ref;
+        if (existing?.result) {
+          db.query("UPDATE waiting_questions SET asked_at = ? WHERE id = ?").run(at, existing.id);
+          return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
+        }
         if (existing) {
           const generation = existing.generation + 1;
           db.query(`
@@ -16392,14 +16396,14 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         return db.query("SELECT 1 FROM waiting_questions WHERE id = ?").get(ref.id) ? ref : undefined;
       }).immediate();
     },
-    list() {
+    list(options2) {
       const at = now();
-      return db.transaction(() => {
+      if (db.query("SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1").get(at - WAITING_QUESTION_LIMITS.ttlMs))
         expire(at);
-        const rows = db.query("SELECT * FROM waiting_questions ORDER BY asked_at DESC, rowid DESC").all();
-        const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
-        return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
-      }).immediate();
+      const columns = options2?.includeResults === false ? "id, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result" : "*";
+      const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`).all(now() - WAITING_QUESTION_LIMITS.ttlMs);
+      const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
+      return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
     },
     get(id) {
       if (typeof id !== "string")
@@ -16461,6 +16465,21 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     markRead(ref) {
       return db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NOT NULL").run(ref.id, ref.generation, ref.connectionId).changes > 0;
     },
+    reserveAutoAnswer(ref) {
+      return db.transaction(() => {
+        if (!db.query("SELECT 1 FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").get(ref.id, ref.generation, ref.connectionId))
+          return false;
+        const at = now();
+        const budget = db.query("SELECT started_at, attempts FROM auto_answer_budgets WHERE connection_id = ?").get(ref.connectionId);
+        if (budget && at < budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs && budget.attempts >= WAITING_QUESTION_LIMITS.autoAnswersPerWindow) {
+          db.query("UPDATE waiting_questions SET next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ?").run(budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs, ref.id, ref.generation, ref.connectionId);
+          return false;
+        }
+        const fresh = !budget || at >= budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs;
+        db.query("INSERT INTO auto_answer_budgets (connection_id, started_at, attempts) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET started_at = excluded.started_at, attempts = excluded.attempts").run(ref.connectionId, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
+        return true;
+      }).immediate();
+    },
     saveAnswer(ref, result) {
       const serialized = JSON.stringify(result);
       if (utf8Length(serialized) > WAITING_QUESTION_LIMITS.answerBytes)
@@ -16469,16 +16488,33 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), ref.id, ref.generation, ref.connectionId).changes > 0;
         if (!changed)
           return false;
-        const rows = db.query("SELECT id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC").all();
-        let bytes = 0;
-        rows.forEach((row, index) => {
-          bytes += row.bytes + RECORD_OVERHEAD_BYTES;
-          if (index >= WAITING_QUESTION_LIMITS.answeredTotal || bytes > WAITING_QUESTION_LIMITS.answeredBytes) {
-            db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id);
-            markOlderRemoved(now());
-          }
-        });
-        return true;
+        const rows = db.query("SELECT id, connection_id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC").all();
+        let ownBytes = 0;
+        let ownCount = 0;
+        const removed = new Set;
+        const remove = (id) => {
+          db.query("DELETE FROM waiting_questions WHERE id = ?").run(id);
+          removed.add(id);
+        };
+        for (const row of rows.filter((row2) => row2.connection_id === ref.connectionId)) {
+          ownBytes += row.bytes + RECORD_OVERHEAD_BYTES;
+          if (++ownCount > WAITING_QUESTION_LIMITS.answeredPerConnection || ownBytes > WAITING_QUESTION_LIMITS.answeredBytesPerConnection)
+            remove(row.id);
+        }
+        let count = rows.length - removed.size;
+        let bytes = rows.filter((row) => !removed.has(row.id)).reduce((sum, row) => sum + row.bytes + RECORD_OVERHEAD_BYTES, 0);
+        for (const row of [...rows].reverse()) {
+          if (count <= WAITING_QUESTION_LIMITS.answeredTotal && bytes <= WAITING_QUESTION_LIMITS.answeredBytes)
+            break;
+          if (row.connection_id !== ref.connectionId || removed.has(row.id))
+            continue;
+          remove(row.id);
+          count--;
+          bytes -= row.bytes + RECORD_OVERHEAD_BYTES;
+        }
+        if (removed.size)
+          markOlderRemoved(now());
+        return !removed.has(ref.id);
       }).immediate();
     },
     retry(ref) {
@@ -16541,6 +16577,7 @@ function toQuestion(row) {
     seen: row.seen === 1,
     generation: row.generation,
     askedAt: new Date(row.asked_at).toISOString(),
+    ...row.has_result !== undefined ? { hasResult: row.has_result === 1 } : {},
     ...row.result ? { result: JSON.parse(row.result) } : {},
     ...row.answered_at !== null ? { answeredAt: new Date(row.answered_at).toISOString() } : {},
     attempts: row.attempts,
@@ -16586,6 +16623,12 @@ function migrations() {
         ALTER TABLE waiting_questions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE waiting_questions ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;`);
     }
+  }, {
+    version: 3,
+    name: "private_answer_auto_budgets",
+    up(db) {
+      db.exec("CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL)");
+    }
   }];
 }
 function hardenPrivatePath(dbPath) {
@@ -16608,7 +16651,7 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 2, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 3, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
   WAITING_QUESTION_LIMITS = Object.freeze({
@@ -16617,6 +16660,10 @@ var init_waiting_private_questions = __esm(() => {
     perConnection: 20,
     total: 50,
     totalBytes: 256 * 1024,
+    answeredPerConnection: 50,
+    answeredBytesPerConnection: 1024 * 1024,
+    autoAnswersPerWindow: 5,
+    autoAnswerWindowMs: 60 * 60000,
     answeredTotal: 500,
     answeredBytes: 16 * 1024 * 1024,
     answerBytes: 128 * 1024,
@@ -23224,7 +23271,7 @@ function openRejudgeQuestionOf(row) {
   return { decision: stored.decision, keepVisible: stored.keepVisible === true };
 }
 function tierLedgerIdentityKey(identity) {
-  return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
+  return TIER_LEDGER_IDENTITY_FIELDS.map((field) => identity[field] ?? "").join("\x00");
 }
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
@@ -23751,7 +23798,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -23779,6 +23826,7 @@ var init_tier_ledger = __esm(() => {
       this.name = "TierLedgerSecretsRollbackRefusedError";
     }
   };
+  TIER_LEDGER_IDENTITY_FIELDS = ["provider", "accountScope", "providerConversationId", "providerItemId"];
   TRUST_DOMAIN_RANK = {
     public_safe: 0,
     internal: 1,
@@ -42740,6 +42788,10 @@ function runBackgroundInference(work) {
   localInferencePriority ??= new AsyncLocalStorage2;
   return localInferencePriority.run("background", work);
 }
+function runClassificationInference(work) {
+  localInferencePriority ??= new AsyncLocalStorage2;
+  return localInferencePriority.run("maintenance", work);
+}
 function createAnswerActivity(onBusy, options = {}) {
   const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
   const now = options.now ?? Date.now;
@@ -42849,8 +42901,8 @@ function createLocalModelActivity() {
     const pump = () => {
       if (pending.running)
         return;
-      const owner = pending.tasks.findIndex((task) => !task.background);
-      const next = pending.tasks.splice(owner < 0 ? 0 : owner, 1)[0];
+      const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best].priority ? index : best, 0);
+      const next = pending.tasks.splice(first, 1)[0];
       if (!next)
         return;
       pending.running = true;
@@ -42859,9 +42911,10 @@ function createLocalModelActivity() {
         pump();
       });
     };
-    pending.tasks.push({ background: localInferencePriority?.getStore() === "background", run: async () => {
+    const kind = localInferencePriority?.getStore() ?? "owner";
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 2 : localInferencePriority?.getStore() === "maintenance" ? 1 : 0, run: async () => {
       try {
-        resolve9(await get(key2).run(work));
+        resolve9(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key2).run(work)) : get(key2).run(work)));
       } catch (error) {
         reject(error);
       }
@@ -42874,8 +42927,10 @@ function createLocalModelActivity() {
     let activity = resources.get(key2);
     if (!activity) {
       activity = createAnswerActivity(() => {
-        for (const listener of busyListeners.get(key2) ?? [])
-          listener();
+        if (localInferencePriority?.getStore() !== "background" && localInferencePriority?.getStore() !== "maintenance") {
+          for (const listener of busyListeners.get(key2) ?? [])
+            listener();
+        }
       });
       resources.set(key2, activity);
     }
@@ -42893,10 +42948,11 @@ function createLocalModelActivity() {
       };
     },
     onIdle: (key2, listener) => get(key2).onInteractiveIdle(listener),
-    track(key2, model) {
+    track(key2, model, options = {}) {
       return { ...model, complete: (request) => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        return dispatch(key2, async () => {
+        const run = options.serialize === false ? (work) => get(key2).run(work) : (work) => dispatch(key2, work);
+        return run(async () => {
           request.signal?.throwIfAborted();
           for (const guard of guards) {
             try {
@@ -72689,6 +72745,8 @@ var init_vocabulary = __esm(() => {
     deleteAllConfirm: "Delete every question and answer in your private inbox?",
     deleted: "That answer was deleted",
     retrying: "Retrying on this computer…",
+    queued: "Queued on this computer. Automatic answers wait for their turn.",
+    checkUnavailable: "Couldn't check this answer right now",
     unchecked: "not checked yet",
     answering: "Answering…",
     sources: "Sources",
@@ -127672,7 +127730,7 @@ function renderWaiting(waiting, now) {
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
-    const status = state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
+    const status = state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
     const from = [question.from, when, status].filter(Boolean).join(" · ");
     return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
@@ -127725,6 +127783,8 @@ function privateAnswersClientScript(input) {
       deleteAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAllConfirm,
       deleted: DASHBOARD_PRIVATE_ANSWERS_COPY.deleted,
       retrying: DASHBOARD_PRIVATE_ANSWERS_COPY.retrying,
+      queued: DASHBOARD_PRIVATE_ANSWERS_COPY.queued,
+      checkUnavailable: DASHBOARD_PRIVATE_ANSWERS_COPY.checkUnavailable,
       unchecked: DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked
     }
   };
@@ -127847,8 +127907,8 @@ function privateAnswersClientScript(input) {
       if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
-    } else if (status === 'answering' || status === 'retrying' || status === 'unchecked') {
-      card.appendChild(el('p', 'pamsg', status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
+    } else if (status === 'answering' || status === 'retrying' || status === 'unchecked' || status === 'queued' || status === 'check_unavailable') {
+      card.appendChild(el('p', 'pamsg', status === 'check_unavailable' ? config.copy.checkUnavailable : status === 'queued' ? config.copy.queued : status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
@@ -127983,9 +128043,9 @@ function privateAnswersClientScript(input) {
       row.classList.toggle('unread', q.unread === true);
       row.querySelector('.paq').textContent = q.question;
       if (selected === q.id && q.state !== 'answered') {
-        message(row.querySelector('[data-pa-out]'), q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
+        message(row.querySelector('[data-pa-out]'), q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
       }
-      var state = q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var state = q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
       row.querySelector('.pafrom').textContent = ' · ' + [q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
       list.appendChild(row);
@@ -137110,6 +137170,9 @@ class TierSnifferService {
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
+  }
+  get hasPriority() {
+    return this.running || this.continuation !== undefined;
   }
   status() {
     return {
@@ -152940,6 +153003,7 @@ function questionKey(question) {
 
 class PrivateAnswerJobs {
   jobs;
+  waitingDeletes;
   shared;
   waiting;
   running;
@@ -152965,6 +153029,7 @@ class PrivateAnswerJobs {
   constructor(options) {
     this.options = options;
     this.jobs = new Map;
+    this.waitingDeletes = new Map;
     this.shared = new Map;
     this.waiting = [];
     this.running = undefined;
@@ -152992,7 +153057,7 @@ class PrivateAnswerJobs {
   }
   hasClaimedWaiting(ref) {
     this.sweep();
-    return [...this.jobs.values()].some((job) => !!job.claimKey && job.waiting?.id === ref.id && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
+    return [...this.waitingDeletes.values()].some((waiting) => waiting.id === ref.id && waiting.generation === ref.generation && waiting.connectionId === ref.connectionId) || [...this.jobs.values()].some((job) => !!job.claimKey && job.waiting?.id === ref.id && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
   }
   get pendingAnalyses() {
     return this.waiting.length + (this.running ? 1 : 0);
@@ -153093,8 +153158,8 @@ class PrivateAnswerJobs {
       return this.jobs.get(jobId) === job ? { status: 200, body: { status: "failed" } } : gone();
     if (this.jobs.get(jobId) !== job || job.outcome !== outcome)
       return job.outcome?.kind === "failed" ? { status: 200, body: { status: "failed" } } : gone();
-    if (job.seenOnDelivery && !this.acknowledgeWaiting(job))
-      return { status: 503, body: { status: "busy" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    if (job.seenOnDelivery)
+      this.acknowledgeWaiting(job);
     return { status: 200, body: { status: "ready", v: 1, ...outcome.sealed } };
   }
   async open(jobId, token) {
@@ -153145,23 +153210,28 @@ class PrivateAnswerJobs {
       return gone();
     if (!timingSafeEqual11(Buffer.from(expected), Buffer.from(ack)))
       return gone();
-    if (!this.acknowledgeWaiting(job))
-      return { status: 503, body: { status: "busy" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    this.acknowledgeWaiting(job);
     return { status: 200, body: { status: "acknowledged" } };
   }
   acknowledgeWaiting(job) {
     if (job.ack === undefined)
-      return true;
+      return;
     if (job.waiting) {
-      try {
-        if (!this.options.acknowledge || this.options.acknowledge(job.waiting) === false)
-          return false;
-      } catch {
-        return false;
-      }
+      const key2 = JSON.stringify([job.waiting.connectionId, job.waiting.id, job.waiting.generation]);
+      this.waitingDeletes.set(key2, job.waiting);
+      this.retryWaitingDelete(key2, job.waiting, true);
     }
     job.ack = undefined;
-    return true;
+  }
+  retryWaitingDelete(key2, ref, log = false) {
+    try {
+      if (!this.options.acknowledge || this.options.acknowledge(ref) === false)
+        throw new Error("Waiting delete unavailable");
+      this.waitingDeletes.delete(key2);
+    } catch {
+      if (log)
+        this.options.log?.("Private answer inbox cleanup deferred; it will be retried.");
+    }
   }
   async stillReleasable(job) {
     const kind = job.outcome?.kind;
@@ -153177,6 +153247,8 @@ class PrivateAnswerJobs {
     return false;
   }
   sweep(at = this.now()) {
+    for (const [key2, ref] of this.waitingDeletes)
+      this.retryWaitingDelete(key2, ref);
     for (const [id, job] of this.jobs) {
       if (job.expiresAt <= at)
         this.drop(id);
@@ -154821,7 +154893,7 @@ async function answerOnThisComputer(input, options) {
     }, { detail: input.detail === "full" ? "full" : "summary" });
   } catch (error2) {
     if (error2 instanceof NoPrivateEvidenceError)
-      return { status: "not_found", leftOut };
+      return { status: "failed" };
     return { status: "failed" };
   }
   const read = (used ?? candidates.map((_, index) => index)).map((index) => candidates[index]).filter((item) => item !== undefined);
@@ -154867,7 +154939,9 @@ async function checkLocalEvidenceItems(input) {
   let lanes;
   try {
     lanes = input.lanes(localAnswerRequest("eligibility", { retrieval_mode: "keyword" }));
-  } catch {
+  } catch (error2) {
+    if (input.throwOnUnavailable)
+      throw error2;
     return input.items.map(() => false);
   }
   return Promise.all(input.items.map(async (item) => {
@@ -154890,9 +154964,13 @@ async function checkLocalEvidenceItems(input) {
         return false;
       if (content.sensitivity.trustDomain !== trustDomain)
         return false;
+      if (content.sensitivity.trustTier === "S5")
+        return false;
       assertModelTrustTierAllowed(content.sensitivity.trustTier);
       return true;
-    } catch {
+    } catch (error2) {
+      if (input.throwOnUnavailable)
+        throw error2;
       return false;
     }
   }));
@@ -154944,7 +155022,7 @@ import { randomBytes as randomBytes28 } from "node:crypto";
 function createLocalAnswerPath(options) {
   const lanes = (request) => options.lanes(request, "built_in_only");
   const eligible = async (items) => {
-    const served = await checkLocalEvidenceItems({ lanes, items });
+    const served = await checkLocalEvidenceItems({ lanes, items, throwOnUnavailable: true });
     const inputs = items.map((item) => {
       const provenance = item.provenance;
       const identity = provenance?.sourceItem;
@@ -154957,7 +155035,11 @@ function createLocalAnswerPath(options) {
         privateAtAnswer: item.trustDomain === "secure_local" || item.trustTier === "S4" || item.trustTier === "S5"
       };
     });
-    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: true } }], options.releaseCheck);
+    const verdicts = options.releaseCheck.inputs(inputs);
+    if (verdicts.length !== inputs.length || verdicts.some((v) => v.tier === "unknown"))
+      throw new Error("Eligibility unavailable");
+    const posture = options.releaseCheck.secureDerivativeDefault();
+    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: true } }], { inputs: () => verdicts, secureDerivativeDefault: () => posture });
     return reason ? items.map(() => false) : served;
   };
   const model = createBuiltInPrivateAnswerModel({
@@ -154993,7 +155075,7 @@ function inboxEvidenceIdentity(item) {
   const source = provenance?.sourceItem;
   if (source) {
     const kept = {};
-    for (const key2 of ["family", "provider", "accountScope", "providerItemId", "localItemId"]) {
+    for (const key2 of ["family", "localItemId", ...TIER_LEDGER_IDENTITY_FIELDS]) {
       if (typeof source[key2] === "string")
         kept[key2] = source[key2];
     }
@@ -155033,9 +155115,11 @@ function createLocalPrivateAnswers(options) {
   const eligible = async (read) => {
     try {
       const ok = options.eligible ? await options.eligible(read) : read.map(() => false);
-      return ok.length === read.length && ok.every((value2) => value2 === true);
+      if (ok.length !== read.length)
+        return "unknown";
+      return ok.every((value2) => value2 === true) ? "eligible" : "ineligible";
     } catch {
-      return false;
+      return "unknown";
     }
   };
   const sweep = () => {
@@ -155098,7 +155182,7 @@ function createLocalPrivateAnswers(options) {
     tick() {
       if (pass)
         return pass;
-      if (closed || options.interactiveBusy?.())
+      if (closed || options.interactiveBusy?.() || options.backgroundBusy?.())
         return Promise.resolve();
       pass = (async () => {
         const currentStore = store();
@@ -155106,15 +155190,17 @@ function createLocalPrivateAnswers(options) {
           return;
         if (options.isActive)
           currentStore.reconcileConnections?.(options.isActive);
-        for (const q of [...currentStore.list().questions].reverse()) {
-          if (closed || options.interactiveBusy?.())
+        for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
+          if (closed || options.interactiveBusy?.() || options.backgroundBusy?.())
             break;
-          if (q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
+          if (q.hasResult || q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
+            continue;
+          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q)))
             continue;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
           if (!current2(q))
             continue;
-          if (result.status === "answered" && await eligible(result.read) || result.status === "not_found") {
+          if (result.status === "answered" && await eligible(result.read) === "eligible" || result.status === "not_found") {
             if (!current2(q))
               continue;
             const saved = result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
@@ -155140,7 +155226,7 @@ function createLocalPrivateAnswers(options) {
     },
     waiting() {
       try {
-        const listed = store()?.list();
+        const listed = store()?.list({ includeResults: false });
         if (!listed)
           return;
         return { questions: listed.questions.filter((q) => active(q) && !hidden(q)).map((q) => ({
@@ -155150,7 +155236,7 @@ function createLocalPrivateAnswers(options) {
           askedAt: q.askedAt,
           unchecked: q.state === "unchecked",
           unread: !q.seen,
-          state: q.result ? "answered" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : "answering",
+          state: q.hasResult || q.result ? "answered" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering",
           ...q.answeredAt ? { answeredAt: q.answeredAt } : {}
         })), olderRemoved: listed.olderRemoved };
       } catch {
@@ -155173,8 +155259,11 @@ function createLocalPrivateAnswers(options) {
         running = true;
         try {
           const result = await answerFor({ question, detail: body.detail === "full" ? "full" : "summary" });
-          if (result.status === "answered" && !await eligible(result.read))
-            return { status: 200, body: { ok: true, status: "changed" } };
+          if (result.status === "answered") {
+            const check = await eligible(result.read);
+            if (check !== "eligible")
+              return { status: 200, body: { ok: true, status: check === "unknown" ? "check_unavailable" : "changed" } };
+          }
           return { status: 200, body: { ok: true, ...answerBody(result, session) } };
         } finally {
           running = false;
@@ -155185,8 +155274,11 @@ function createLocalPrivateAnswers(options) {
         if (!q || !current2(q))
           return refused(410, "gone", "That answer was deleted");
         if (!q.result)
-          return { status: 200, body: { ok: true, status: q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : "answering" } };
-        if (!await eligible(q.result.read) || !current2(q)) {
+          return { status: 200, body: { ok: true, status: q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering" } };
+        const check = await eligible(q.result.read);
+        if (check === "unknown")
+          return { status: 200, body: { ok: true, status: "check_unavailable" } };
+        if (check === "ineligible" || !current2(q)) {
           invalidate(q);
           return { status: 200, body: { ok: true, status: "answering" } };
         }
@@ -155217,6 +155309,7 @@ function createLocalPrivateAnswers(options) {
         const entry = opens.get(id);
         if (!entry || entry.session !== session)
           return refused(410, "gone", "This source cannot be opened from this session.");
+        let checkUnavailable = false;
         const allowed = async () => {
           sweep();
           if (!entry || entry.session !== session || opens.get(id) !== entry)
@@ -155226,7 +155319,10 @@ function createLocalPrivateAnswers(options) {
             if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
               return false;
           }
-          if (!await eligible(entry.read))
+          const check = await eligible(entry.read);
+          if (check === "unknown")
+            checkUnavailable = true;
+          if (check !== "eligible")
             return false;
           sweep();
           if (opens.get(id) !== entry)
@@ -155239,6 +155335,8 @@ function createLocalPrivateAnswers(options) {
           return true;
         };
         if (!entry || !await allowed()) {
+          if (checkUnavailable)
+            return refused(503, "check_unavailable", "Couldn't check this answer right now");
           if (entry?.ref) {
             const q = store()?.get(entry.ref.id);
             if (q)
@@ -155266,6 +155364,7 @@ function createLocalPrivateAnswers(options) {
 }
 var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS3 = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
+  init_tier_ledger();
   init_release_manifest();
   init_waiting_private_questions();
   init_analyst_built_in();
@@ -157953,7 +158052,7 @@ function createAnalystForSovereigntyProfile(input) {
     const model = createDelphiAnalystModel(new DelphiClient(config2, undefined, {
       resolveSecretRef: () => apiKey
     }), { profile: "source_answer", preflightTimeoutMs: 0 });
-    return createAnalyst(input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model) : model, { auditSuspiciousDrafts: true });
+    return createAnalyst(input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model, { auditSuspiciousDrafts: true });
   }
   if (profile.provider === "openclaw-infer") {
     return createAnalyst(createOpenClawInferAnalystModel({
@@ -158289,6 +158388,7 @@ async function main() {
   }, {
     onExpired: (openMs) => console.warn(`Olympus answer activity: an answer still open after ${Math.round(openMs / 60000)} min stopped holding background work.`)
   });
+  let classificationBusy = () => false;
   let tierSnifferBacklog;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED");
@@ -159143,7 +159243,7 @@ async function main() {
       ...veniceReasoningHeadroomTokens !== undefined ? { reasoningHeadroomTokens: veniceReasoningHeadroomTokens } : {},
       ...veniceAnalystTimeoutMs !== undefined ? { timeoutMs: veniceAnalystTimeoutMs } : {}
     });
-    const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile]), createDelphiAnalystModel(new DelphiClient(olympusConfig), process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs } : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }));
+    const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile]), createDelphiAnalystModel(new DelphiClient(olympusConfig), process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs } : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }), { serialize: false });
     const builtInAnalystModel = answerBuiltInModel;
     const sovereigntyAnalysts = await createSovereigntyAnalystMap({
       localModelActivity,
@@ -160232,6 +160332,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       answer: (input) => answerActivity.run(() => local.answer(input)),
       backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), "background")),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
+      backgroundBusy: () => classificationBusy(),
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
       isActive: connectionActive,
       store: waitingQuestionStore,
@@ -160720,7 +160821,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const tierSniffer = snifferLane && snifferModel ? new TierSnifferService({
     installed: installedTierClassification,
     lane: snifferLane,
-    model: snifferModel,
+    model: snifferResource ? {
+      ...snifferModel,
+      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request))
+    } : snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
     ...snifferRuntime.source === "built_in" ? {
@@ -160749,6 +160853,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
   }
+  classificationBusy = () => tierSniffer?.hasPriority ?? false;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
   let shuttingDown = false;

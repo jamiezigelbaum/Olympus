@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CHATGPT_INBOX_GRACE_MS,
+  WAITING_QUESTION_LIMITS,
   openWaitingPrivateQuestionStore,
   type StoredPrivateAnswer,
   type WaitingQuestionInput,
@@ -145,18 +146,18 @@ describe('private inbox automatic answering', () => {
 });
 
 describe('private inbox persistence and fencing', () => {
-  test('answered rows survive seven days, remain owner-only and cap at 500', () => {
+  test('answered rows survive seven days, remain owner-only and respect the per-connection cap', () => {
     const f = fixture();
     const oldest = record(f.store, { question: 'Answered oldest' });
     expect(f.store.saveAnswer(oldest, stored())).toBe(true);
     record(f.store, { question: 'Unanswered oldest' });
     f.advance(8 * 24 * 60 * 60_000);
     expect(f.store.list().questions.map(q => q.id)).toEqual([oldest.id]);
-    for (let i = 0; i < 500; i++) {
+    for (let i = 0; i < WAITING_QUESTION_LIMITS.answeredPerConnection; i++) {
       f.advance(1);
       expect(f.store.saveAnswer(record(f.store, { question: `Answered ${i}` }), stored())).toBe(true);
     }
-    expect(f.store.list().questions).toHaveLength(500);
+    expect(f.store.list().questions).toHaveLength(WAITING_QUESTION_LIMITS.answeredPerConnection);
     expect(f.store.get(oldest.id)).toBeUndefined();
     expect(f.store.list().olderRemoved).toBe(true);
     expect(statSync(f.dbPath).mode & 0o777).toBe(0o600);
@@ -294,7 +295,7 @@ describe('private inbox source capabilities and egress', () => {
     expect(dispatched).toBe(0);
   });
 
-  for (const change of ['delete', 'revoke', 'eligibility', 'duplicate'] as const) {
+  for (const change of ['delete', 'revoke', 'eligibility'] as const) {
     test(`source tokens cannot open after ${change}`, async () => {
       const f = fixture();
       const ref = record(f.store);
@@ -306,7 +307,6 @@ describe('private inbox source capabilities and egress', () => {
       const token = (read.body.citations as Array<{ open: string }>)[0]!.open;
       if (change === 'delete') await api.handle({ action: 'delete', id: ref.id }, 'owner');
       else if (change === 'revoke') f.store.revokeConnection(ref.connectionId);
-      else if (change === 'duplicate') record(f.store);
       else { allowed = false; await api.handle({ action: 'read', id: ref.id }, 'owner'); }
       expect((await api.handle({ action: 'open', token }, 'owner')).status).toBe(410);
       expect(opened).toBe(0);
@@ -374,4 +374,101 @@ test('actual shared-model dispatch runs one completion at a time and queues owne
   expect(order).toEqual(['background-running', 'owner-queued', 'background-queued']);
   expect(maxRunning).toBe(1);
   expect(activity.busy('synthetic-shared-model')).toBe(false);
+});
+
+test('re-asking an answered row refreshes only its timestamp and preserves its open token', async () => {
+  const f = fixture();
+  const ref = record(f.store);
+  f.store.saveAnswer(ref, stored());
+  f.store.markRead(ref);
+  const api = service(f, { interactiveBusy: () => true, openUrl: async (_url, allowed) => { expect(await allowed()).toBe(true); } });
+  const read = await api.handle({ action: 'read', id: ref.id }, 'owner');
+  const token = (read.body.citations as Array<{ open: string }>)[0]!.open;
+  const before = f.store.get(ref.id)!;
+  f.advance(1000);
+  expect(record(f.store)).toEqual(ref);
+  expect(f.store.get(ref.id)).toEqual({ ...before, askedAt: new Date(f.now()).toISOString() });
+  expect((await api.handle({ action: 'open', token }, 'owner')).status).toBe(200);
+});
+
+test('per-connection automatic budget survives reopen and re-asks; queued rows resume next hour', async () => {
+  const f = fixture();
+  let calls = 0;
+  const api = service(f, { answer: async () => { calls++; return result(); } });
+  for (let i = 0; i < WAITING_QUESTION_LIMITS.autoAnswersPerWindow; i++) {
+    record(f.store, { question: `Budget ${i}` });
+    await api.tick();
+  }
+  const queued = record(f.store, { question: 'Queued question' });
+  await api.tick();
+  expect(calls).toBe(5);
+  expect(api.waiting()?.questions.find(q => q.id === queued.id)?.state).toBe('queued');
+  expect((await api.handle({ action: 'read', id: queued.id }, 'owner')).body.status).toBe('queued');
+  const second = openWaitingPrivateQuestionStore(f.dbPath, { now: f.now });
+  cleanups.push(() => second.close());
+  expect(second.reserveAutoAnswer(record(second, { question: 'Queued question' }))).toBe(false);
+  const other = record(f.store, { question: 'Other connection' }, 'another-agent');
+  await api.tick();
+  expect(f.store.get(other.id)?.result).toBeDefined();
+  f.advance(WAITING_QUESTION_LIMITS.autoAnswerWindowMs);
+  await api.tick();
+  expect(f.store.get(queued.id)?.result).toBeDefined();
+});
+
+test('metadata listing succeeds under a writer lock and never parses answer bodies', () => {
+  const f = fixture(); const ref = record(f.store); f.store.saveAnswer(ref, stored());
+  const lock = new Database(f.dbPath);
+  try {
+    // Invalid JSON independently proves the listing never parses this column.
+    lock.query('UPDATE waiting_questions SET result = ? WHERE id = ?').run('{invalid-json', ref.id);
+    lock.exec('BEGIN IMMEDIATE');
+    const listed = f.store.list({ includeResults: false });
+    expect(listed.questions).toHaveLength(1);
+    expect(listed.questions[0]).toMatchObject({ id: ref.id, hasResult: true });
+    expect(listed.questions[0]!.result).toBeUndefined();
+  } finally { lock.exec('ROLLBACK'); lock.close(); }
+});
+
+test('byte quota evicts only the saving connection even below the row quota', () => {
+  const f = fixture();
+  const victim = record(f.store, { question: 'Another connection answer' }, 'other');
+  f.store.saveAnswer(victim, stored());
+  for (let i = 0; i < 15; i++) {
+    f.advance(1);
+    f.store.saveAnswer(record(f.store, { question: `Large ${i}` }), { ...stored(), answer: 'x'.repeat(100 * 1024) });
+  }
+  expect(f.store.get(victim.id)?.result?.answer).toBe(ANSWER);
+  const own = f.store.list().questions.filter(q => q.connectionId === 'synthetic-agent');
+  expect(own.length).toBeLessThan(15);
+  expect(own.length).toBeGreaterThan(0);
+});
+
+test('an unavailable open check hides the source but preserves answer, generation and token for retry', async () => {
+  const f = fixture(); const ref = record(f.store); f.store.saveAnswer(ref, stored());
+  let unavailable = false; let opened = 0;
+  const api = service(f, { interactiveBusy: () => true,
+    eligible: async items => { if (unavailable) throw new Error('SQLITE_BUSY'); return items.map(() => true); },
+    openUrl: async () => { opened++; },
+  });
+  const read = await api.handle({ action: 'read', id: ref.id }, 'owner');
+  const token = (read.body.citations as Array<{ open: string }>)[0]!.open;
+  unavailable = true;
+  expect((await api.handle({ action: 'open', token }, 'owner')).status).toBe(503);
+  expect(f.store.get(ref.id)).toMatchObject({ generation: ref.generation, result: { answer: ANSWER } });
+  expect(opened).toBe(0);
+  unavailable = false;
+  expect((await api.handle({ action: 'open', token }, 'owner')).status).toBe(200);
+  expect(opened).toBe(1);
+});
+
+test('classification holds automatic answers visibly queued without spending their budget', async () => {
+  const f = fixture(); const ref = record(f.store);
+  let sorting = true; let calls = 0;
+  const api = service(f, { backgroundBusy: () => sorting, answer: async () => { calls++; return result(); } });
+  await api.tick();
+  expect(api.waiting()?.questions[0]?.state).toBe('queued');
+  expect(calls).toBe(0);
+  sorting = false;
+  await api.tick();
+  expect(f.store.get(ref.id)?.result).toBeDefined();
 });

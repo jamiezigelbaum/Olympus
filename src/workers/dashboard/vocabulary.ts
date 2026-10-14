@@ -2329,6 +2329,8 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   deleteAllConfirm: 'Delete every question and answer in your private inbox?',
   deleted: 'That answer was deleted',
   retrying: 'Retrying on this computer…',
+  queued: 'Queued on this computer. Automatic answers wait for their turn.',
+  checkUnavailable: "Couldn't check this answer right now",
   unchecked: 'not checked yet',
   answering: 'Answering…',
   sources: 'Sources',

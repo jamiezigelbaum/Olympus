@@ -144,7 +144,7 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
     const state = question.state ?? (question.unchecked ? 'unchecked' : 'answering');
-    const status = state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
+    const status = state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
     const from = [question.from, when, status].filter(Boolean).join(' · ');
     return `<li class="srow nodot${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
       + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom"> · ${escapeHtml(from)}</span></button></div>`
@@ -211,6 +211,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       deleteAllConfirm: W.deleteAllConfirm,
       deleted: W.deleted,
       retrying: W.retrying,
+      queued: W.queued,
+      checkUnavailable: W.checkUnavailable,
       unchecked: W.unchecked,
     },
   };
@@ -333,8 +335,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
-    } else if (status === 'answering' || status === 'retrying' || status === 'unchecked') {
-      card.appendChild(el('p', 'pamsg', status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
+    } else if (status === 'answering' || status === 'retrying' || status === 'unchecked' || status === 'queued' || status === 'check_unavailable') {
+      card.appendChild(el('p', 'pamsg', status === 'check_unavailable' ? config.copy.checkUnavailable : status === 'queued' ? config.copy.queued : status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
@@ -469,9 +471,9 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       row.classList.toggle('unread', q.unread === true);
       row.querySelector('.paq').textContent = q.question;
       if (selected === q.id && q.state !== 'answered') {
-        message(row.querySelector('[data-pa-out]'), q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
+        message(row.querySelector('[data-pa-out]'), q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
       }
-      var state = q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var state = q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
       row.querySelector('.pafrom').textContent = ' · ' + [q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
       list.appendChild(row);

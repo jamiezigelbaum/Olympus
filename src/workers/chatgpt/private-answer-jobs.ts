@@ -455,6 +455,7 @@ export class PrivateAnswerJobs {
   // Assigned in the constructor, not as field initializers: an initializer
   // would make the bundler keep this module in bundles that never use it.
   private readonly jobs: Map<string, Job>;
+  private readonly waitingDeletes: Map<string, PrivateAnswerWaitingRef>;
   /** Analyses an identical question may share, by question key, within the dedupe window. */
   private readonly shared: Map<string, Analysis>;
   /** Analyses waiting for the model slot. */
@@ -484,6 +485,7 @@ export class PrivateAnswerJobs {
   constructor(options: PrivateAnswerJobsOptions) {
     this.options = options;
     this.jobs = new Map();
+    this.waitingDeletes = new Map();
     this.shared = new Map();
     this.waiting = [];
     this.running = undefined;
@@ -514,7 +516,7 @@ export class PrivateAnswerJobs {
   /** Only a live panel claim suppresses the local inbox fallback. No claim capability is exposed. */
   hasClaimedWaiting(ref: PrivateAnswerWaitingRef): boolean {
     this.sweep();
-    return [...this.jobs.values()].some(job => !!job.claimKey && job.waiting?.id === ref.id
+    return [...this.waitingDeletes.values()].some(waiting => waiting.id === ref.id && waiting.generation === ref.generation && waiting.connectionId === ref.connectionId) || [...this.jobs.values()].some(job => !!job.claimKey && job.waiting?.id === ref.id
       && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
   }
 
@@ -648,7 +650,7 @@ export class PrivateAnswerJobs {
     // answer read that is no longer eligible withdraws it for good.
     if (!(await this.stillReleasable(job))) return this.jobs.get(jobId) === job ? { status: 200, body: { status: 'failed' } } : gone();
     if (this.jobs.get(jobId) !== job || job.outcome !== outcome) return job.outcome?.kind === 'failed' ? { status: 200, body: { status: 'failed' } } : gone();
-    if (job.seenOnDelivery && !this.acknowledgeWaiting(job)) return { status: 503, body: { status: 'busy' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    if (job.seenOnDelivery) this.acknowledgeWaiting(job);
     return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
   }
 
@@ -710,24 +712,30 @@ export class PrivateAnswerJobs {
     const expected = job.ack;
     if (expected === undefined || job.outcome?.kind !== 'sealed' || job.claimKey !== publicKey) return gone();
     if (!timingSafeEqual(Buffer.from(expected), Buffer.from(ack))) return gone();
-    if (!this.acknowledgeWaiting(job)) return { status: 503, body: { status: 'busy' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    this.acknowledgeWaiting(job);
     return { status: 200, body: { status: 'acknowledged' } };
   }
 
   /** Spends the job's acknowledgment (once) and deletes its waiting record if its generation still matches. */
-  private acknowledgeWaiting(job: Job): boolean {
-    if (job.ack === undefined) return true;
+  private acknowledgeWaiting(job: Job): void {
+    if (job.ack === undefined) return;
     if (job.waiting) {
-      try {
-        if (!this.options.acknowledge || this.options.acknowledge(job.waiting) === false) return false;
-      } catch {
-        // No successful acknowledgment until durable deletion. The same
-        // capability remains retryable; a busy store never reports success.
-        return false;
-      }
+      const key = JSON.stringify([job.waiting.connectionId, job.waiting.id, job.waiting.generation]);
+      this.waitingDeletes.set(key, job.waiting);
+      this.retryWaitingDelete(key, job.waiting, true);
     }
     job.ack = undefined;
-    return true;
+  }
+
+  private retryWaitingDelete(key: string, ref: PrivateAnswerWaitingRef, log = false): void {
+    try {
+      if (!this.options.acknowledge || this.options.acknowledge(ref) === false) throw new Error('Waiting delete unavailable');
+      this.waitingDeletes.delete(key);
+    } catch {
+      // Sealed delivery is independent of this local convenience store.
+      // No ids, exception text or answer content enter the log.
+      if (log) this.options.log?.('Private answer inbox cleanup deferred; it will be retried.');
+    }
   }
 
   /**
@@ -751,6 +759,7 @@ export class PrivateAnswerJobs {
 
   /** Drops expired jobs (cancelling analyses no live job needs) and forgets shared answers past the dedupe window. */
   sweep(at = this.now()): void {
+    for (const [key, ref] of this.waitingDeletes) this.retryWaitingDelete(key, ref);
     for (const [id, job] of this.jobs) {
       if (job.expiresAt <= at) this.drop(id);
     }

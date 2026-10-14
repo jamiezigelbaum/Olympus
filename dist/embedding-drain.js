@@ -14826,7 +14826,7 @@ function openRejudgeQuestionOf(row) {
   return { decision: stored.decision, keepVisible: stored.keepVisible === true };
 }
 function tierLedgerIdentityKey(identity) {
-  return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
+  return TIER_LEDGER_IDENTITY_FIELDS.map((field) => identity[field] ?? "").join("\x00");
 }
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
@@ -15353,7 +15353,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -15381,6 +15381,7 @@ var init_tier_ledger = __esm(() => {
       this.name = "TierLedgerSecretsRollbackRefusedError";
     }
   };
+  TIER_LEDGER_IDENTITY_FIELDS = ["provider", "accountScope", "providerConversationId", "providerItemId"];
   TRUST_DOMAIN_RANK = {
     public_safe: 0,
     internal: 1,
@@ -41780,6 +41781,9 @@ class TierSnifferService {
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
+  }
+  get hasPriority() {
+    return this.running || this.continuation !== undefined;
   }
   status() {
     return {

@@ -7,9 +7,10 @@
  * changed evidence invalidates the generation and schedules a fresh answer.
  * Source opens are opaque, session-bound, expire after 30 minutes and recheck
  * every source immediately before desktop dispatch. No external URL is sent
- * to the page. Delete/revoke/reask invalidates every outstanding completion.
+ * to the page. Delete/revoke/withdrawal invalidates every outstanding completion.
  * Retries persist only attempts and next-attempt, never exception text.
  */
+import { TIER_LEDGER_IDENTITY_FIELDS } from '../classification/tier-ledger.ts';
 import { lstatSync } from 'node:fs';
 import { answerReleaseWithheldReason, type ReleaseCheck } from '../../core/release-manifest.ts';
 import { randomBytes } from 'node:crypto';
@@ -48,7 +49,7 @@ export interface WaitingQuestionView {
   askedAt: string;
   /** The local probe could not tell yet whether Private items match. */
   unchecked: boolean;
-  state: 'answering' | 'retrying' | 'answered' | 'unchecked';
+  state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued';
   unread: boolean;
   answeredAt?: string;
 }
@@ -75,6 +76,8 @@ export interface LocalPrivateAnswersOptions {
   /** A live panel claim suppresses the fallback until that panel's job expires. */
   panelClaimed?: (ref: WaitingQuestionRef) => boolean;
   interactiveBusy?: () => boolean;
+  /** Privacy classification outranks automatic synthesis. */
+  backgroundBusy?: () => boolean;
   backgroundAnswer?: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
   isActive?: (connectionId: string) => boolean;
   openUrl?: (url: string, eligible: () => Promise<boolean>) => Promise<void>;
@@ -135,7 +138,7 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
 } {
   const lanes = (request: SourceIndexAnswerRequest) => options.lanes(request, 'built_in_only');
   const eligible = async (items: readonly PrivateEvidenceItem[]) => {
-    const served = await checkLocalEvidenceItems({ lanes, items });
+    const served = await checkLocalEvidenceItems({ lanes, items, throwOnUnavailable: true });
     // This local control path explicitly asks for Private content. Remote
     // manifests/tickets retain their own consent and release boundaries.
     const inputs = items.map(item => {
@@ -148,7 +151,12 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
         privateAtAnswer: item.trustDomain === 'secure_local' || item.trustTier === 'S4' || item.trustTier === 'S5',
       };
     });
-    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: true } }], options.releaseCheck);
+    // Read once outside the fail-closed release formatter: unavailable state
+    // must hide a retained answer without treating it as definitely withdrawn.
+    const verdicts = options.releaseCheck.inputs(inputs);
+    if (verdicts.length !== inputs.length || verdicts.some(v => v.tier === 'unknown')) throw new Error('Eligibility unavailable');
+    const posture = options.releaseCheck.secureDerivativeDefault();
+    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: true } }], { inputs: () => verdicts, secureDerivativeDefault: () => posture });
     return reason ? items.map(() => false) : served;
   };
   const model = createBuiltInPrivateAnswerModel({
@@ -186,7 +194,7 @@ export function inboxEvidenceIdentity(item: PrivateEvidenceItem): PrivateEvidenc
   const source = provenance?.sourceItem;
   if (source) {
     const kept: Record<string, string> = {};
-    for (const key of ['family', 'provider', 'accountScope', 'providerItemId', 'localItemId']) {
+    for (const key of ['family', 'localItemId', ...TIER_LEDGER_IDENTITY_FIELDS]) {
       if (typeof source[key] === 'string') kept[key] = source[key];
     }
     out.provenance = { sourceItem: kept };
@@ -218,8 +226,9 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   const eligible = async (read: readonly PrivateEvidenceItem[]) => {
     try {
       const ok = options.eligible ? await options.eligible(read) : read.map(() => false);
-      return ok.length === read.length && ok.every(value => value === true);
-    } catch { return false; }
+      if (ok.length !== read.length) return 'unknown';
+      return ok.every(value => value === true) ? 'eligible' : 'ineligible';
+    } catch { return 'unknown'; }
   };
   const sweep = () => {
     for (const [id, entry] of opens) if (entry.expiresAt <= now()) opens.delete(id);
@@ -265,18 +274,19 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     },
     tick() {
       if (pass) return pass;
-      if (closed || options.interactiveBusy?.()) return Promise.resolve();
+      if (closed || options.interactiveBusy?.() || options.backgroundBusy?.()) return Promise.resolve();
       pass = (async () => {
         const currentStore = store();
         if (!currentStore) return;
         if (options.isActive) currentStore.reconcileConnections?.(options.isActive);
         // Oldest first avoids starving a retry behind a busy connection.
-        for (const q of [...currentStore.list().questions].reverse()) {
-          if (closed || options.interactiveBusy?.()) break;
-          if (q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
+        for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
+          if (closed || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
+          if (q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
+          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) continue;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
           if (!current(q)) continue;
-          if ((result.status === 'answered' && await eligible(result.read)) || result.status === 'not_found') {
+          if ((result.status === 'answered' && await eligible(result.read) === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;
             const saved: StoredPrivateAnswer = result.status === 'answered'
               ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
@@ -296,12 +306,12 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     },
     waiting() {
       try {
-        const listed = store()?.list();
+        const listed = store()?.list({ includeResults: false });
         if (!listed) return undefined;
         return { questions: listed.questions.filter(q => active(q) && !hidden(q)).map(q => ({
           id: q.id, question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
           askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen,
-          state: q.result ? 'answered' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : 'answering',
+          state: q.hasResult || q.result ? 'answered' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
           ...(q.answeredAt ? { answeredAt: q.answeredAt } : {}),
         })), olderRemoved: listed.olderRemoved };
       } catch { return undefined; }
@@ -317,15 +327,20 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         running = true;
         try {
           const result = await answerFor({ question, detail: body.detail === 'full' ? 'full' : 'summary' });
-          if (result.status === 'answered' && !await eligible(result.read)) return { status: 200, body: { ok: true, status: 'changed' } };
+          if (result.status === 'answered') {
+            const check = await eligible(result.read);
+            if (check !== 'eligible') return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
+          }
           return { status: 200, body: { ok: true, ...answerBody(result, session) } };
         } finally { running = false; }
       }
       if (action === 'read') {
         const q = typeof body.id === 'string' ? store()?.get(body.id) : undefined;
         if (!q || !current(q)) return refused(410, 'gone', 'That answer was deleted');
-        if (!q.result) return { status: 200, body: { ok: true, status: q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : 'answering' } };
-        if (!await eligible(q.result.read) || !current(q)) {
+        if (!q.result) return { status: 200, body: { ok: true, status: q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering' } };
+        const check = await eligible(q.result.read);
+        if (check === 'unknown') return { status: 200, body: { ok: true, status: 'check_unavailable' } };
+        if (check === 'ineligible' || !current(q)) {
           invalidate(q);
           return { status: 200, body: { ok: true, status: 'answering' } };
         }
@@ -350,6 +365,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         const id = typeof body.token === 'string' && TOKEN_PATTERN.test(body.token) ? body.token : '';
         const entry = opens.get(id);
         if (!entry || entry.session !== session) return refused(410, 'gone', 'This source cannot be opened from this session.');
+        let checkUnavailable = false;
         const allowed = async () => {
           sweep();
           if (!entry || entry.session !== session || opens.get(id) !== entry) return false;
@@ -357,7 +373,9 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
             const q = store()?.get(entry.ref.id);
             if (!q || q.generation !== entry.ref.generation || !q.result || !current(q)) return false;
           }
-          if (!await eligible(entry.read)) return false;
+          const check = await eligible(entry.read);
+          if (check === 'unknown') checkUnavailable = true;
+          if (check !== 'eligible') return false;
           // Authorization may change while the source guard awaits a store.
           sweep();
           if (opens.get(id) !== entry) return false;
@@ -368,6 +386,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           return true;
         };
         if (!entry || !await allowed()) {
+          if (checkUnavailable) return refused(503, 'check_unavailable', "Couldn't check this answer right now");
           if (entry?.ref) { const q = store()?.get(entry.ref.id); if (q) invalidate(q); }
           opens.delete(id);
           return refused(410, 'gone', 'This source changed. The answer is being written again.');

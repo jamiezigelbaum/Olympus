@@ -87,7 +87,7 @@ export interface DashboardWaitingQuestion {
   from: string;
   askedAt: string;
   unchecked: boolean;
-  state?: 'answering' | 'retrying' | 'answered' | 'unchecked';
+  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued';
   unread?: boolean;
   answeredAt?: string;
 }

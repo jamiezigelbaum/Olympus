@@ -3394,9 +3394,12 @@ function openRejudgeQuestionOf(row: TierItemRow & { rejudge_json?: string | null
   return { decision: stored.decision, keepVisible: stored.keepVisible === true };
 }
 
+/** The ordered identity fields shared by ledger keys and persisted re-check identities. */
+export const TIER_LEDGER_IDENTITY_FIELDS = ['provider', 'accountScope', 'providerConversationId', 'providerItemId'] as const satisfies readonly (keyof TierLedgerIdentity)[];
+
 /** Stable map key for an item identity in ledger lookups. */
 export function tierLedgerIdentityKey(identity: TierLedgerIdentity): string {
-  return `${identity.provider}\u0000${identity.accountScope}\u0000${tierLedgerConversationKey(identity)}\u0000${identity.providerItemId}`;
+  return TIER_LEDGER_IDENTITY_FIELDS.map(field => identity[field] ?? '').join('\u0000');
 }
 
 const TRUST_DOMAIN_RANK: Readonly<Record<SourceTrustDomain, number>> = {
