@@ -21913,6 +21913,13 @@ class TierLedger {
       return "none";
     if (overrideAuthorizes(this.getOverride(identity), targetMetadata, targetContent))
       return "none";
+    const rawReceipt = this.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`);
+    const receipt = rawReceipt ? JSON.parse(rawReceipt) : undefined;
+    const verified = receipt?.generation === existing.generation && receipt.raise && receipt.target.metadataTier === targetMetadata && receipt.target.contentTier === targetContent;
+    const override = this.getOverride(identity);
+    if (verified && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
+      return "none";
+    }
     const decidedAt = this.now().toISOString();
     const prior = this.decisionBeforeOverride(identity, existing);
     const staleFlip = existing.generation + 1;
@@ -21949,6 +21956,21 @@ class TierLedger {
       UPDATE tier_items SET generation = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(staleFlip, ...idParams(identity));
+    if (verified) {
+      for (const copy of receipt.placement) {
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', layers = ?, superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(copy.layers, nextFlip, decidedAt, ...idParams(identity), copy.corpusId);
+      }
+      for (const copy of copies.filter((copy2) => !receipt.placement.some((dest) => dest.corpusId === copy2.corpusId))) {
+        this.db.query(`
+          UPDATE tier_copies SET superseded_by_generation = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(staleFlip, ...idParams(identity), copy.corpusId);
+      }
+    }
+    this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
     this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
       ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
@@ -22013,6 +22035,9 @@ class TierLedger {
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
+  }
+  metaEntries(prefix, options = {}) {
+    return this.db.query("SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?").all(prefix, `${prefix}￿`, options.after ?? "", "", options.limit ?? -1);
   }
   withGenerationFence(identity, generation, work) {
     return this.db.transaction(() => {
@@ -22606,7 +22631,7 @@ class TierLedger {
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (this.readMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`) === String(options.expectedGeneration)) {
-        throw new Error("Lower content was purged after verification; use a newly judged move to restore it.");
+        throw new TierLedgerPurgedRollbackRefusedError;
       }
       if (existing && (existing.contentTier === "secrets" || existing.metadataTier === "secrets")) {
         throw new TierLedgerSecretsRollbackRefusedError;
@@ -22681,6 +22706,7 @@ class TierLedger {
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
         `).run(now, ...idParams(identity));
       }
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
       const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
@@ -23599,7 +23625,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -23613,6 +23639,12 @@ var init_tier_ledger = __esm(() => {
     constructor(message2 = "A raise is never abandoned: its hidden copies stay hidden until the move completes.") {
       super(message2);
       this.name = "TierLedgerRaiseAbandonRefusedError";
+    }
+  };
+  TierLedgerPurgedRollbackRefusedError = class TierLedgerPurgedRollbackRefusedError extends Error {
+    constructor() {
+      super("already Private; its lower copy was removed");
+      this.name = "TierLedgerPurgedRollbackRefusedError";
     }
   };
   TierLedgerSecretsRollbackRefusedError = class TierLedgerSecretsRollbackRefusedError extends Error {
@@ -32598,6 +32630,22 @@ var init_local_index = __esm(() => {
       }
       return stripped;
     }
+    copyContentState(identity) {
+      const row = this.db.query(`SELECT
+      (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
+      (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
+      (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
+      NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version) AS current_text,
+      (i.title IS NOT NULL OR i.locator_uri IS NOT NULL OR i.search_text IS NOT NULL) AS names
+      FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      return row ? {
+        chunks: row.chunks,
+        vectors: row.vectors,
+        versions: row.versions,
+        currentText: row.current_text === 1,
+        names: row.names === 1
+      } : undefined;
+    }
     withItemCopyWriteFence(identity, work) {
       return this.db.transaction(() => {
         this.db.query(`UPDATE items SET item_pk = item_pk
@@ -36193,10 +36241,7 @@ var init_local_index = __esm(() => {
           }, afterChunkPk);
           if (page2.length === 0)
             break;
-          const visible = this.visibleVectorItemPks([...new Set(page2.map((row) => row.itemPk))], selectedAccount, filters);
           for (const [index, row] of page2.entries()) {
-            if (!visible.has(row.itemPk))
-              continue;
             if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
               return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
             }
@@ -36227,11 +36272,20 @@ var init_local_index = __esm(() => {
         if (ownsScanDb)
           closeSqliteStore(scanDb);
       }
-      const visibleAtRanking = this.visibleVectorItemPks([...bestByItem.keys()], selectedAccount, filters);
-      const rankedItems = Array.from(bestByItem.entries()).filter(([itemPk]) => visibleAtRanking.has(itemPk)).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]).slice(0, limit);
+      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+      const rankedItems = [];
+      let candidateOffset = 0;
+      while (rankedItems.length < limit && candidateOffset < candidates.length) {
+        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+        for (const candidate of batch)
+          if (visible.has(candidate[0]))
+            rankedItems.push(candidate);
+        candidateOffset += batch.length;
+      }
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
-      const laneRows = this.tierVisibleRows(searchRows, (row) => row.sourceItem, () => "content").flatMap((row) => {
+      const laneRows = searchRows.flatMap((row) => {
         const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
         if (winner === undefined)
           return [];
@@ -37463,7 +37517,9 @@ async function moveTieredItem(options) {
     const receipt2 = receiptToResume;
     if (receipt2.generation !== record.generation || receipt2.target.metadataTier !== target.metadataTier || receipt2.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
-    return finishVerifiedMove(options, receipt2);
+    const result2 = finishVerifiedMove(options, receipt2);
+    await flushTierMoveNotes(ledger);
+    return result2;
   }
   const ownerOverride = !decision && record.decidedBy === "override";
   const placement = set.placementFor(decision ?? {
@@ -37615,6 +37671,9 @@ async function moveTieredItem(options) {
         raise,
         sources,
         destinations,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+        rehomeTagged,
+        replacedSuperseded,
         placement: placement.copies,
         flipOptions,
         fingerprints: Object.fromEntries(placement.copies.map((copy) => {
@@ -37632,45 +37691,48 @@ async function moveTieredItem(options) {
     };
     return copyWithLockedSources(0);
   });
-  destinations = receipt.destinations;
   options.beforeFlip?.();
   options.afterVerified?.();
   const result = finishVerifiedMove(options, receipt);
-  const flipped = { generation: result.generation };
-  const supersededCorpora = ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId);
-  const chunkCount = destinations.reduce((total, destination) => total + destination.chunksWritten + destination.chunksKept, 0);
-  if (options.embeddingLedger) {
-    const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
-    const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    const append = rehomeTagged ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
-    await append(options.embeddingLedger.path, {
-      recorded_at: new Date().toISOString(),
-      kind: "note",
-      what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(", ")}: ` + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, ` + `${toEmbed} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${supersededCorpora.join(", ") || "none"}.` + (Object.keys(replacedSuperseded).length > 0 ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replacedSuperseded).map(([corpusId, chunks]) => `${corpusId} (${chunks} chunk(s) of older text)`).join(", ")}.` : ""),
-      scope: {
-        corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((destination) => destination.corpusId)])],
-        chunks: Object.fromEntries(destinations.map((destination) => [
-          destination.corpusId,
-          destination.chunksWritten + destination.chunksKept
-        ]))
-      },
-      ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
-      approved_by: options.embeddingLedger.approvedBy,
-      status: "complete",
-      ...rehomeTagged ? { entry_id: rowRehomeReceiptId(ledger, identity, flipped.generation) } : {}
-    });
-  }
-  return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
+  await flushTierMoveNotes(ledger);
+  return result;
 }
-function resumeVerifiedTierMove(set, identity) {
+function resumeVerifiedTierMove(set, identity, embeddingLedger) {
   const receipt = readVerifiedMove(set.ledger, identity);
   if (!receipt)
     return false;
-  const copy = receipt.placement.map((copy2) => set.store(copy2.trustDomain)?.exportItemCopy(identity)).find(Boolean);
-  if (!copy)
-    throw new Error("Verified destination unavailable.");
-  finishVerifiedMove({ set, identity: copy.identity }, receipt);
+  finishVerifiedMove({ set, identity, ...embeddingLedger ? { embeddingLedger } : {} }, receipt);
   return true;
+}
+function queueMoveNote(options, receipt, result) {
+  const config = receipt.embeddingLedger ?? options.embeddingLedger;
+  if (!config)
+    return;
+  const { sources, destinations, raise } = receipt;
+  const replaced = receipt.replacedSuperseded ?? {};
+  const entryId = receipt.rehomeTagged ? rowRehomeReceiptId(options.set.ledger, options.identity, result.generation) : `tier-move:${options.set.ledger.ledgerId()}:${tierLedgerIdentityKey(options.identity)}:${result.generation}`;
+  const entry = {
+    entry_id: entryId,
+    recorded_at: new Date().toISOString(),
+    kind: "note",
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    scope: {
+      corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
+      chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
+    },
+    ...config.why ? { why: config.why } : {},
+    approved_by: config.approvedBy,
+    status: "complete"
+  };
+  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+}
+async function flushTierMoveNotes(ledger) {
+  for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
+    const note = JSON.parse(value);
+    await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+    if (ledger.readMeta(key2) === value)
+      ledger.writeMeta(key2, "");
+  }
 }
 function purgeReceiptKey(identity) {
   return `tier-move-verified:${tierLedgerIdentityKey(identity)}`;
@@ -37709,61 +37771,69 @@ function finishVerifiedMove(options, receipt) {
   const stableStore = set.store((contentDestination ?? receipt.placement[0]).trustDomain);
   if (!stableStore)
     throw new Error("Verified destination unavailable.");
-  return ledger.withGenerationFence(identity, receipt.generation, () => stableStore.withItemCopyWriteFence(identity, () => {
-    const record = ledger.getCurrent(identity);
-    if (record.state !== "moving" || record.targetMetadataTier !== receipt.target.metadataTier || record.targetContentTier !== receipt.target.contentTier)
-      throw new TierLedgerGenerationConflictError;
+  return stableStore.withItemCopyWriteFence(identity, () => {
     for (const copy of receipt.placement) {
       const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
       if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
         throw new Error("Verified move destination changed; source remains held.");
       }
     }
-    const contentCopy = copyServingLayer(receipt.placement, "content");
-    const content = contentCopy ?? copyServingLayer(set.placementFor({
-      ...receipt.target,
-      state: "current",
-      metadataPending: false,
-      contentPending: false,
-      contentRead: true,
-      ...receipt.flipOptions.decidedBy === "override" ? { decidedBy: "override" } : {}
-    }).copies, "content");
-    if (receipt.raise && content && !contentCopy && ledger.copies(identity).some((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain) && (set.store(copy.trustDomain)?.exportItemCopy(identity)?.chunks.length ?? 0) > 0)) {
-      throw new Error("A lower body has no verified destination; move remains pending.");
-    }
-    const flipped = ledger.completeMove(identity, receipt.flipOptions);
-    const metadata = copyServingLayer(receipt.placement, "metadata");
-    if (receipt.raise && content) {
-      for (const copy of ledger.copies(identity)) {
-        if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain))
-          continue;
-        const store = set.store(copy.trustDomain);
-        if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
-          throw new Error("Lower store unavailable or ledger binding changed; move purge remains pending.");
-        }
-        store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+    return ledger.withGenerationFence(identity, receipt.generation, () => {
+      const record = ledger.getCurrent(identity);
+      if (ledger.readMeta(purgeReceiptKey(identity)) !== JSON.stringify(receipt))
+        throw new TierLedgerGenerationConflictError;
+      if (record.state !== "moving" || record.targetMetadataTier !== receipt.target.metadataTier || record.targetContentTier !== receipt.target.contentTier)
+        throw new TierLedgerGenerationConflictError;
+      const contentCopy = copyServingLayer(receipt.placement, "content");
+      const content = contentCopy ?? copyServingLayer(set.placementFor({
+        ...receipt.target,
+        state: "current",
+        metadataPending: false,
+        contentPending: false,
+        contentRead: true,
+        ...receipt.flipOptions.decidedBy === "override" ? { decidedBy: "override" } : {}
+      }).copies, "content");
+      if (receipt.raise && content && !contentCopy && ledger.copies(identity).some((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain) && (set.store(copy.trustDomain)?.copyContentState(identity)?.chunks ?? 0) > 0)) {
+        throw new Error("A lower body has no verified destination; move remains pending.");
       }
-    }
-    if (receipt.raise && content)
-      ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-    options.afterPurge?.();
-    ledger.writeMeta(purgeReceiptKey(identity), "");
-    return {
-      outcome: "moved",
-      raise: receipt.raise,
-      generation: flipped.generation,
-      destinations: receipt.destinations,
-      supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
-      chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
-    };
-  }));
+      const flipped = ledger.completeMove(identity, receipt.flipOptions);
+      const metadata = copyServingLayer(receipt.placement, "metadata");
+      if (receipt.raise && content) {
+        for (const copy of ledger.copies(identity)) {
+          if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain))
+            continue;
+          const store = set.store(copy.trustDomain);
+          if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
+            throw new Error("Lower store unavailable or ledger binding changed; move purge remains pending.");
+          }
+          store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+        }
+      }
+      if (receipt.raise && content)
+        ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
+      options.afterPurge?.();
+      ledger.writeMeta(purgeReceiptKey(identity), "");
+      const result = {
+        outcome: "moved",
+        raise: receipt.raise,
+        generation: flipped.generation,
+        destinations: receipt.destinations,
+        supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
+        chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
+      };
+      queueMoveNote(options, receipt, result);
+      return result;
+    });
+  });
 }
 async function moveToSecrets(options, expectedGeneration) {
   const { set, identity } = options;
   const ledger = set.ledger;
   const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
   let located = false;
-  for (const copy of copies) {
+  const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+  const names = copyServingLayer(ordered.filter((copy) => copy.state === "current"), "metadata") ?? copyServingLayer(ordered, "metadata");
+  for (const copy of names ? [names, ...ordered.filter((copy2) => copy2 !== names)] : ordered) {
     if (located)
       break;
     const domain = set.domainForCorpus(copy.corpusId);
@@ -37842,7 +37912,7 @@ function fullIdentity(identity) {
     ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
   };
 }
-var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError;
+var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:";
 var init_tier_move = __esm(() => {
   init_engine();
   init_tier_classifier();
@@ -37863,12 +37933,37 @@ var init_tier_move = __esm(() => {
 // src/workers/connector-store/tier-content-purge.ts
 function purgeLowerTierContent(set, options = {}) {
   const report = { checked: 0, purged: 0, resumed: 0, failed: 0 };
+  const limit = Math.max(1, Math.min(options.limit ?? LOWER_CONTENT_PURGE_BATCH, LOWER_CONTENT_PURGE_BATCH));
+  const note = options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: "system-automatic" };
+  const resumed = new Set;
+  const receiptBudget = Math.max(1, Math.floor(limit / 2));
+  const receiptAfter = set.ledger.readMeta(RECEIPT_CURSOR) || undefined;
+  let receipts = set.ledger.metaEntries(VERIFIED, { ...receiptAfter ? { after: receiptAfter } : {}, limit: receiptBudget });
+  if (!receipts.length && receiptAfter)
+    receipts = set.ledger.metaEntries(VERIFIED, { limit: receiptBudget });
+  for (const { key: key2 } of receipts) {
+    const [provider, accountScope, conversation, providerItemId] = key2.slice(VERIFIED.length).split("\x00");
+    if (!provider || !accountScope || !providerItemId)
+      continue;
+    const identity = { provider, accountScope, providerItemId, ...conversation ? { providerConversationId: conversation } : {} };
+    report.checked++;
+    try {
+      if (resumeVerifiedTierMove(set, identity, note))
+        report.resumed++;
+      resumed.add(tierLedgerIdentityKey(identity));
+    } catch {
+      report.failed++;
+    }
+  }
+  set.ledger.writeMeta(RECEIPT_CURSOR, receipts.at(-1)?.key ?? "");
+  if (options.maintenance && set.ledger.readMeta(DONE) === "1")
+    return report;
   const raw = set.ledger.readMeta(CURSOR);
   const after = raw ? JSON.parse(raw) : undefined;
-  const limit = Math.max(1, Math.min(options.limit ?? LOWER_CONTENT_PURGE_BATCH, LOWER_CONTENT_PURGE_BATCH));
-  const page2 = set.ledger.listRouted({ ...after ? { after } : {}, limit });
+  const page2 = set.ledger.listRouted({ ...after ? { after } : {}, limit: Math.max(1, limit - report.checked) });
   const counts = new Map;
-  for (const record of page2) {
+  const remaining = Math.max(0, limit - report.checked);
+  for (const record of page2.slice(0, remaining)) {
     const identity = {
       provider: record.provider,
       accountScope: record.accountScope,
@@ -37877,72 +37972,92 @@ function purgeLowerTierContent(set, options = {}) {
     };
     report.checked++;
     try {
-      if (record.state === "moving") {
-        if (resumeVerifiedTierMove(set, identity))
-          report.resumed++;
+      if (record.state === "moving" || resumed.has(tierLedgerIdentityKey(identity)))
         continue;
-      }
       if (record.contentTier === "secrets" || record.metadataTier === "secrets")
         continue;
-      options.beforeDelete?.();
-      set.ledger.withGenerationFence(identity, record.generation, () => {
-        const current2 = set.ledger.getCurrent(identity);
-        if (current2.state === "moving")
-          return;
-        const copies = set.ledger.copies(identity);
-        const content = copyServingLayer(copies.filter((copy) => copy.state === "current"), "content") ?? copyServingLayer(set.placementFor({
-          metadataTier: current2.metadataTier,
-          contentTier: current2.contentTier,
-          state: "current",
-          metadataPending: false,
-          contentPending: false,
-          contentRead: true,
-          ...current2.decidedBy === "override" ? { decidedBy: "override" } : {}
-        }).copies, "content");
-        const metadata = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
-        if (!content)
-          return;
-        const destination = set.store(content.trustDomain);
-        if (!destination || destination.tierSetBinding()?.ledgerId !== set.ledger.ledgerId() || !destination.exportItemCopy(identity))
-          return;
-        for (const copy of copies) {
-          if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain))
-            continue;
+      const copies = set.ledger.copies(identity);
+      const content = copyServingLayer(copies.filter((copy) => copy.state === "current"), "content");
+      const metadata = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+      if (!content)
+        continue;
+      const lower = copies.filter((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain));
+      if (!lower.length)
+        continue;
+      const destination = set.store(content.trustDomain);
+      if (!destination || destination.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
+        throw new Error("Destination unavailable.");
+      destination.withItemCopyWriteFence(identity, () => {
+        const proof = destination.copyContentState(identity);
+        for (const copy of lower) {
           const store = set.store(copy.trustDomain);
           if (!store || store.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
-            continue;
-          const chunks = destination.withItemCopyWriteFence(identity, () => {
-            if (!destination.exportItemCopy(identity))
-              throw new Error("Current destination disappeared.");
-            return store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+            throw new Error("Lower store unavailable.");
+          store.withItemCopyWriteFence(identity, () => {
+            const held = store.copyContentState(identity);
+            const keepMetadata = !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain);
+            const hasBody = !!held && held.chunks + held.vectors + held.versions > 0;
+            if (!held || !hasBody && (keepMetadata || !held.names))
+              return;
+            if (hasBody && (!proof || proof.chunks === 0 || !proof.currentText))
+              throw new Error("Destination content is missing or stale.");
+            if (!proof)
+              throw new Error("Destination disappeared.");
+            options.beforeDelete?.();
+            set.ledger.withGenerationFence(identity, record.generation, () => {
+              const current2 = set.ledger.getCurrent(identity);
+              if (current2.state === "moving")
+                throw new Error("Placement changed.");
+              const chunks = store.stripCopyContent(identity, { keepMetadata });
+              set.ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(current2.generation));
+              const entryId = `tier-content-repair:${set.ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${current2.generation}:${copy.corpusId}`;
+              set.ledger.writeMeta(`tier-move-note:${entryId}`, JSON.stringify({ path: note.path, entry: {
+                entry_id: entryId,
+                recorded_at: new Date().toISOString(),
+                kind: "note",
+                what: `Verified current content in ${content.corpusId}; removed ${chunks} lower-tier chunk(s), their vectors and text-version remnants from ${copy.corpusId}.`,
+                scope: { corpora: [content.corpusId, copy.corpusId], chunks: { [copy.corpusId]: chunks } },
+                approved_by: note.approvedBy,
+                ...note.why ? { why: note.why } : {},
+                status: "complete"
+              } }));
+              report.purged++;
+              const count = counts.get(copy.corpusId) ?? { copies: 0, chunks: 0 };
+              count.copies++;
+              count.chunks += chunks;
+              counts.set(copy.corpusId, count);
+            });
           });
-          set.ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(current2.generation));
-          report.purged++;
-          const count = counts.get(copy.corpusId) ?? { copies: 0, chunks: 0 };
-          count.copies++;
-          count.chunks += chunks;
-          counts.set(copy.corpusId, count);
         }
       });
     } catch {
       report.failed++;
     }
   }
-  const last = page2.at(-1);
-  set.ledger.writeMeta(CURSOR, page2.length < limit || !last ? "" : JSON.stringify({
-    provider: last.provider,
-    accountScope: last.accountScope,
-    providerItemId: last.providerItemId,
-    ...last.conversationKey ? { providerConversationId: last.conversationKey } : {}
-  }));
-  for (const [corpus, count] of counts) {
-    options.log?.(corpus, count.copies, count.chunks);
+  if (report.failed)
+    set.ledger.writeMeta(FAILED, "1");
+  if (remaining > 0) {
+    const last = page2.at(-1);
+    const finished = page2.length < remaining || !last;
+    set.ledger.writeMeta(CURSOR, finished ? "" : JSON.stringify({
+      provider: last.provider,
+      accountScope: last.accountScope,
+      providerItemId: last.providerItemId,
+      ...last.conversationKey ? { providerConversationId: last.conversationKey } : {}
+    }));
+    if (finished) {
+      set.ledger.writeMeta(DONE, set.ledger.readMeta(FAILED) === "1" ? "" : "1");
+      set.ledger.writeMeta(FAILED, "");
+    }
   }
+  for (const [corpus, count] of counts)
+    options.log?.(corpus, count.copies, count.chunks);
   return report;
 }
-var CURSOR = "lower-content-purge-cursor-v1", LOWER_CONTENT_PURGE_BATCH = 200;
+var CURSOR = "lower-content-purge-cursor-v2", DONE = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", LOWER_CONTENT_PURGE_BATCH = 200;
 var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
+  init_embedding_ledger();
   init_tier_move();
 });
 
@@ -40294,6 +40409,8 @@ class TieredStoreSet {
   privateEmbedder;
   privateEmbedWith;
   lastRowRehome;
+  lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
+  lowerContentRepair;
   constructor(options) {
     if (!options.setId.trim())
       throw new Error("A tiered store set needs a stable id.");
@@ -40344,13 +40461,30 @@ class TieredStoreSet {
     this.onLegOpened?.(store, leg.spec);
     return store;
   }
-  repairLowerContent() {
+  repairLowerContent(options = {}) {
+    if (this.lowerContentRepair)
+      return this.lowerContentRepair;
+    const now = options.nowMs ?? Date.now();
+    if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS)
+      return Promise.resolve();
+    this.lastLowerContentRepairAt = now;
     try {
-      purgeLowerTierContent(this, { log: (corpus, copies, chunks) => {
-        if (chunks > 0)
-          console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
-      } });
-    } catch {}
+      purgeLowerTierContent(this, {
+        maintenance: true,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+        log: (corpus, copies, chunks) => {
+          if (chunks > 0)
+            console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
+        }
+      });
+      const pending = flushTierMoveNotes(this.ledger).catch(() => {}).finally(() => {
+        this.lowerContentRepair = undefined;
+      });
+      this.lowerContentRepair = pending;
+      return pending;
+    } catch {
+      return Promise.resolve();
+    }
   }
   openStores() {
     return TIER_DOMAIN_ORDER.flatMap((domain) => {
@@ -41105,7 +41239,7 @@ function handoffConnector(source, item) {
     }
   };
 }
-var TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -41116,11 +41250,13 @@ var init_tiered_store_set = __esm(() => {
   init_secrets_disposition();
   init_tier_names_only_settle();
   init_tier_content_purge();
+  init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
   TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
   TIER_KEY_TRUST_DOMAIN = {
     public: "public_safe",
@@ -61248,7 +61384,7 @@ class EmailClient {
       return result;
     const ticket = sourceAnswerTickets.get(result);
     if (!ticket)
-      return withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
+      return withheldSourceAnswer("Olympus withheld this answer because the engine did not provide a privacy release ticket. Update Olympus, then ask again.");
     try {
       const verdict = asRecord8(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
         method: "POST",
@@ -61259,7 +61395,7 @@ class EmailClient {
         return result;
       return withheldSourceAnswer(typeof verdict.withheld === "string" ? verdict.withheld : ANSWER_RELEASE_UNVERIFIED);
     } catch {
-      return withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
+      return withheldSourceAnswer("Olympus withheld this answer because the engine could not verify its privacy release ticket. Check that Olympus is running and up to date, then ask again.");
     }
   }
   async sourceIndexStatus(options = {}) {
@@ -84174,11 +84310,6 @@ function addPlanned(planned, totals, patterns, lane, store, item, decision, from
     totals.lowers += 1;
   if (decision.state === "pending")
     totals.pendingHeld += 1;
-  for (const copy of placement) {
-    const kept = from.find((source) => source.corpusId === copy.corpusId);
-    if (kept && kept.layers !== "metadata" && copy.layers === "metadata")
-      totals.namesOnlyKeptChunks += item.chunks.length;
-  }
   const fromTier = TIER_DISPLAY[domainTier(copyServingLayer(from, "content")?.trustDomain ?? store.trustDomain)];
   const toNames = secrets ? "Secrets" : TIER_DISPLAY[domainTier(copyServingLayer(placement, "metadata").trustDomain)];
   const toContent = secrets ? "Secrets" : TIER_DISPLAY[domainTier(copyServingLayer(placement, "content").trustDomain)];
@@ -84347,7 +84478,7 @@ async function approveTierMigration(options) {
     entry_id: entryId,
     recorded_at: now().toISOString(),
     kind: "model_decision",
-    what: `The owner approved tier migration plan ${plan.planId} (counts sha256 ${plan.countsSha256}): move ${totals.proposed} ` + `stored item(s) to their classified tiers. Estimated ${totals.chunksToEmbed} chunk(s) to embed in each destination ` + `store's EXISTING model and ${totals.vectorsCopied} vector(s) copied, about $${totals.estimatedCostUsd.toFixed(2)} and ` + `${Math.ceil(totals.estimatedMinutes)} minute(s) (estimates). No model, epoch or dimension changes and no rebind; ` + "superseded copies and their vectors are kept, hidden, until a separately approved purge. " + `${totals.secrets} Secret(s) are settled by the Secrets policy (${secretsDisposition() === "tombstone_now" ? "copies tombstoned at once, as a sync does" : "copies hidden until an approved purge"}); ${totals.namesOnlyKeptChunks} chunk(s) stay held, unserved, in names-only copies until a purge strips them.`,
+    what: `The owner approved tier migration plan ${plan.planId} (counts sha256 ${plan.countsSha256}): move ${totals.proposed} ` + `stored item(s) to their classified tiers. Estimated ${totals.chunksToEmbed} chunk(s) to embed in each destination ` + `store's EXISTING model and ${totals.vectorsCopied} vector(s) copied, about $${totals.estimatedCostUsd.toFixed(2)} and ` + `${Math.ceil(totals.estimatedMinutes)} minute(s) (estimates). No model, epoch or dimension changes and no rebind; ` + "verified raises remove lower-tier content and vectors; other superseded copies stay hidden until a separately approved purge. " + `${totals.secrets} Secret(s) are settled by the Secrets policy (${secretsDisposition() === "tombstone_now" ? "copies tombstoned at once, as a sync does" : "copies hidden until an approved purge"}); names-only copies keep no lower-tier content after a verified raise.`,
     scope: { corpora: [...new Set([...totals.destinations.map((destination) => destination.corpusId), ...plan.lanes.flatMap((lane) => lane.corpora)])] },
     ...options.why?.trim() ? { why: options.why.trim() } : {},
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -84887,10 +85018,16 @@ async function rollbackTierMigrationBatch(options) {
   if (plan.state === "running" && plan.lock && processAlive(plan.lock.pid) && plan.lock.pid !== process.pid) {
     throw new OperationError("invalid_request", `Plan ${plan.planId} is running; stop it before rolling back.`);
   }
+  const entryId = `tier-migration-rollback:${batch.batchId}`;
+  if (batch.state === "rolled_back" && batch.rollbackResult) {
+    return { planId: plan.planId, batchId: batch.batchId, ...batch.rollbackResult, entryId };
+  }
   let rolledBack = 0;
   let skipped = 0;
   let secretsKept = 0;
+  let purgedKept = 0;
   for (const lane of options.lanes) {
+    rolledBack += lane.set.ledger.migrationProposals(plan.planId, { status: "rolled_back", batchId: batch.batchId }).length;
     for (const proposal of lane.set.ledger.migrationProposals(plan.planId, { status: "moved", batchId: batch.batchId })) {
       if (proposal.outcome?.["kind"] === "secrets" || proposal.contentTier === "secrets" || proposal.metadataTier === "secrets") {
         secretsKept += 1;
@@ -84917,16 +85054,22 @@ async function rollbackTierMigrationBatch(options) {
           secretsKept += 1;
           continue;
         }
+        if (error instanceof TierLedgerPurgedRollbackRefusedError) {
+          purgedKept += 1;
+          skipped += 1;
+          continue;
+        }
         throw error;
       }
     }
   }
-  const entryId = `tier-migration-rollback:${batch.batchId}`;
+  const purgedKeptReason = purgedKept > 0 ? "already Private; its lower copy was removed" : undefined;
+  const rollbackResult = { rolledBack, skipped, secretsKept, purgedKept, ...purgedKeptReason ? { purgedKeptReason } : {} };
   await appendEmbeddingLedgerEntryOnce(options.paths.embeddingLedgerPath, {
     entry_id: entryId,
     recorded_at: now().toISOString(),
     kind: "note",
-    what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) ` + `serve from their previous copies again${skipped > 0 ? ` (${skipped} left alone because a later sync changed them)` : ""}` + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ""}. ` + "Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.",
+    what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) ` + `serve from their previous copies again${skipped > purgedKept ? ` (${skipped - purgedKept} left alone because a later sync changed them)` : ""}` + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ""}` + `${purgedKept > 0 ? `; ${purgedKept} item(s) skipped: ${purgedKeptReason}` : ""}. ` + "Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.",
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: "complete"
   });
@@ -84934,8 +85077,9 @@ async function rollbackTierMigrationBatch(options) {
     const entry = record2.batches.find((candidate) => candidate.batchId === batch.batchId);
     entry.state = "rolled_back";
     entry.rolledBack = rolledBack;
+    entry.rollbackResult = rollbackResult;
   });
-  return { planId: plan.planId, batchId: batch.batchId, rolledBack, skipped, secretsKept, entryId };
+  return { planId: plan.planId, batchId: batch.batchId, ...rollbackResult, entryId };
 }
 function purgeTargets(plan, lanes) {
   const targets = [];
@@ -128526,9 +128670,9 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json();
-          pruneReleaseTickets();
           const entry = typeof body.ticket === "string" ? releaseTickets.get(body.ticket) : undefined;
-          const reason = entry && options.sourceAnswerReleaseCheck ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck) : ANSWER_RELEASE_UNVERIFIED;
+          const reason = entry?.expires !== undefined && entry.expires <= Date.now() ? "Olympus withheld this answer because its privacy release ticket expired after 15 minutes. Ask again." : !entry ? "Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again." : options.sourceAnswerReleaseCheck ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck) : "Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.";
+          pruneReleaseTickets();
           return json({ ...reason ? { withheld: reason } : { allowed: true } });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/answer`) {
@@ -136331,7 +136475,9 @@ class TierSnifferService {
             }));
             if ([...stores.values()].some((store) => !store))
               return false;
-            const remaining = [...stores.values()].map((store) => store.exportItemCopy(question)).find(Boolean);
+            const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+            const serving2 = copyServingLayer(ordered, question.pass) ?? copyServingLayer(ordered, "content");
+            const remaining = serving2 ? stores.get(serving2.corpusId)?.exportItemCopy(question) : undefined;
             if (!locations?.get(question)?.findingKinds.includes("sniffer_secret_refusal")) {
               if (!locations || !remaining)
                 return false;
@@ -136476,7 +136622,9 @@ class TierSnifferService {
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
-      set2.repairLowerContent();
+      set2.repairLowerContent({ ...this.options.autoMoves ? {
+        embeddingLedger: { path: this.options.autoMoves.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
+      } : {} });
       try {
         const report = sweepOwnerRuleRaises({ set: set2 });
         if (report.raised > 0 || report.secrets > 0) {
@@ -136590,6 +136738,16 @@ class TierSnifferService {
         const identity = recordIdentity(record4);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record4.generation}`;
         try {
+          if (resumeVerifiedTierMove(set2, identity, {
+            path: options.embeddingLedgerPath,
+            approvedBy: "system-automatic",
+            why: AUTO_MOVE_WHY
+          })) {
+            await flushTierMoveNotes(set2.ledger);
+            report.moved += 1;
+            this.moveFailures.delete(failureKey);
+            continue;
+          }
           const sources = set2.ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record4.generation + 1);
           const source = sources[0];
           const exported = source ? set2.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
@@ -136712,6 +136870,7 @@ function positiveInteger7(value2, fallback, minimum) {
 }
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
+  init_tier_move();
   init_secret_locations();
   init_classification_ledger();
   init_secrets_disposition();

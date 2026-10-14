@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { TierLedgerPurgedRollbackRefusedError } from '../src/workers/classification/tier-ledger.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import {
@@ -162,7 +163,7 @@ describe('P1b move primitive', () => {
     expect(publicStatus.counts.chunks).toBe(0);
 
     const record = fixture.ledger.getCurrent(identityOf('launch'))!;
-    expect(() => fixture.ledger.rollbackMove(identityOf('launch'), { expectedGeneration: record.generation })).toThrow(/purged/);
+    expect(() => fixture.ledger.rollbackMove(identityOf('launch'), { expectedGeneration: record.generation })).toThrow(TierLedgerPurgedRollbackRefusedError);
     expect(visibility(fixture, 'orchard', 'launch').content).toEqual([CORPORA.secure_local]);
     expect(fixture.cloud.inputs.length + fixture.local.inputs.length).toBe(calls + 1);
   });

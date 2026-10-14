@@ -3820,6 +3820,24 @@ export class LocalConnectorStore {
     return stripped;
   }
 
+  /** Lightweight purge proof; no text, vectors or owners are exported. */
+  copyContentState(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): {
+    chunks: number; vectors: number; versions: number; currentText: boolean; names: boolean;
+  } | undefined {
+    const row = this.db.query(`SELECT
+      (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
+      (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
+      (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
+      NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version) AS current_text,
+      (i.title IS NOT NULL OR i.locator_uri IS NOT NULL OR i.search_text IS NOT NULL) AS names
+      FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`)
+      .get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as {
+        chunks: number; vectors: number; versions: number; current_text: number; names: number;
+      } | null;
+    return row ? { chunks: row.chunks, vectors: row.vectors, versions: row.versions,
+      currentText: row.current_text === 1, names: row.names === 1 } : undefined;
+  }
+
   /** Keep a verified destination stable while another SQLite file is purged. */
   withItemCopyWriteFence<T>(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
@@ -9825,9 +9843,7 @@ export class LocalConnectorStore {
         // The winning CHUNK is kept, not just its score. A cosine is a
         // chunk-level measurement, so the chunk that produced the item's best
         // score is the only defensible semantic citation target.
-        const visible = this.visibleVectorItemPks([...new Set(page.map(row => row.itemPk))], selectedAccount, filters);
         for (const [index, row] of page.entries()) {
-          if (!visible.has(row.itemPk)) continue;
           if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
             return { rows: [], skippedReason: 'vector_scan_deadline_exceeded' };
           }
@@ -9869,14 +9885,20 @@ export class LocalConnectorStore {
     // real corpus, where duplicated and forwarded content is normal. Naming the
     // tiebreak here keeps the ranking identical to the ordered scan's and, more
     // importantly, makes it independent of whatever plan SQLite chooses.
-    // A move can land while a paged scan yields. Recheck all winners before
-    // applying the rank limit so a now-hidden score cannot crowd out a match.
-    const visibleAtRanking = this.visibleVectorItemPks([...bestByItem.keys()], selectedAccount, filters);
-    const rankedItems = Array.from(bestByItem.entries())
-      .filter(([itemPk]) => visibleAtRanking.has(itemPk))
+    // Validate in rank order after the scan's last yield. Only candidates
+    // needed to fill the result limit touch the live tier ledger; hidden
+    // winners are skipped so they cannot crowd out an eligible match.
+    const candidates = Array.from(bestByItem.entries())
       .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
-      .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0])
-      .slice(0, limit);
+      .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+    const rankedItems: typeof candidates = [];
+    let candidateOffset = 0;
+    while (rankedItems.length < limit && candidateOffset < candidates.length) {
+      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+      for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
+      candidateOffset += batch.length;
+    }
     const searchRows = this.searchRowsByItemPks(
       rankedItems.map(([itemPk]) => itemPk),
       selectedAccount,
@@ -9885,11 +9907,9 @@ export class LocalConnectorStore {
     const winnersByLocalItemId = new Map(
       rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]),
     );
-    const laneRows = this.tierVisibleRows(
-      searchRows,
-      (row) => row.sourceItem,
-      () => 'content',
-    ).flatMap((row) => {
+    // No await occurs between the live visibility check and hydration.
+    // Rechecking here would validate the same winners twice.
+    const laneRows = searchRows.flatMap((row) => {
       const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
       if (winner === undefined) return [];
       if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
@@ -10027,7 +10047,7 @@ export class LocalConnectorStore {
 
   // Hydrates membrane-safe search rows for ranked item pks, preserving order.
   // Exact item PKs avoid local-id aliases across providers/accounts. Batches
-  // keep full-corpus winner validation below SQLite's bind-variable ceiling.
+  // keep candidate validation below SQLite's bind-variable ceiling.
   private visibleVectorItemPks(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Set<number> {
     const visible = new Set<number>();
     const selectedFilters = connectorStoreFilterSql(filters);

@@ -41,6 +41,7 @@ import {
   appendEmbeddingLedgerEntry,
   appendEmbeddingLedgerEntryOnce,
   type EmbeddingLedgerApprovedBy,
+  type EmbeddingLedgerEntry,
 } from '../embedding-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
@@ -187,7 +188,9 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     const receipt = receiptToResume;
     if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier
       || receipt.target.contentTier !== target.contentTier) throw new TierLedgerGenerationConflictError();
-    return finishVerifiedMove(options, receipt);
+    const result = finishVerifiedMove(options, receipt);
+    await flushTierMoveNotes(ledger);
+    return result;
   }
 
   // Without a decision the move keeps what the ledger knows about the text:
@@ -362,6 +365,8 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
       };
       const verified: VerifiedMove = {
         generation: record.generation, target, raise, sources, destinations,
+        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
+        rehomeTagged, replacedSuperseded,
         placement: placement.copies, flipOptions,
         // Store hashes, not text: verification survives a source purge and restart.
         fingerprints: Object.fromEntries(placement.copies.map(copy => {
@@ -378,56 +383,19 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     };
     return copyWithLockedSources(0);
   });
-  destinations = receipt.destinations;
   options.beforeFlip?.();
   options.afterVerified?.();
   const result = finishVerifiedMove(options, receipt);
-  const flipped = { generation: result.generation };
-  const supersededCorpora = ledger.copies(identity)
-    .filter((copy) => copy.state === 'superseded' && copy.supersededByGeneration === flipped.generation)
-    .map((copy) => copy.corpusId);
-  const chunkCount = destinations.reduce((total, destination) => total + destination.chunksWritten + destination.chunksKept, 0);
-
-  if (options.embeddingLedger) {
-    const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
-    const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    const append = rehomeTagged ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
-    await append(options.embeddingLedger.path, {
-      recorded_at: new Date().toISOString(),
-      kind: 'note',
-      what: `Tier move of one item (${raise ? 'raise' : 'lateral or lower'}) from ${sources.map((copy) => copy.corpusId).join(', ')} `
-        + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(', ')}: `
-        + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, `
-        + `${toEmbed} chunk(s) left for the destination's own embedding model. `
-        + `Superseded copies are hidden; lower content on raises is purged: ${supersededCorpora.join(', ') || 'none'}.`
-        + (Object.keys(replacedSuperseded).length > 0
-          ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replacedSuperseded)
-            .map(([corpusId, chunks]) => `${corpusId} (${chunks} chunk(s) of older text)`).join(', ')}.`
-          : ''),
-      scope: {
-        corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((destination) => destination.corpusId)])],
-        chunks: Object.fromEntries(destinations.map((destination) => [
-          destination.corpusId,
-          destination.chunksWritten + destination.chunksKept,
-        ])),
-      },
-      ...(options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {}),
-      approved_by: options.embeddingLedger.approvedBy,
-      status: 'complete',
-      ...(rehomeTagged ? { entry_id: rowRehomeReceiptId(ledger, identity, flipped.generation) } : {}),
-    });
-  }
-
-  return { outcome: 'moved', raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
+  await flushTierMoveNotes(ledger);
+  return result;
 }
 
 /** Resume only a durably verified move, without exporting its lower source. */
-export function resumeVerifiedTierMove(set: TieredStoreSet, identity: TierLedgerIdentity): boolean {
+export function resumeVerifiedTierMove(set: TieredStoreSet, identity: TierLedgerIdentity,
+  embeddingLedger?: TierMoveOptions['embeddingLedger']): boolean {
   const receipt = readVerifiedMove(set.ledger, identity);
   if (!receipt) return false;
-  const copy = receipt.placement.map(copy => set.store(copy.trustDomain)?.exportItemCopy(identity)).find(Boolean);
-  if (!copy) throw new Error('Verified destination unavailable.');
-  finishVerifiedMove({ set, identity: copy.identity }, receipt);
+  finishVerifiedMove({ set, identity, ...(embeddingLedger ? { embeddingLedger } : {}) }, receipt);
   return true;
 }
 
@@ -440,6 +408,47 @@ interface VerifiedMove {
   placement: Parameters<TierLedger['completeMove']>[1]['destination'];
   flipOptions: Parameters<TierLedger['completeMove']>[1];
   fingerprints: Record<string, string>;
+  embeddingLedger?: TierMoveOptions['embeddingLedger'];
+  rehomeTagged?: boolean;
+  replacedSuperseded?: Record<string, number>;
+}
+
+type VerifiedMoveOptions = Pick<TierMoveOptions, 'set' | 'embeddingLedger' | 'afterPurge'> & { identity: TierLedgerIdentity };
+
+const MOVE_NOTE_PREFIX = 'tier-move-note:';
+
+/** The flip and note obligation commit together; filesystem I/O happens afterward. */
+function queueMoveNote(options: VerifiedMoveOptions, receipt: VerifiedMove, result: TierMoveResult): void {
+  const config = receipt.embeddingLedger ?? options.embeddingLedger;
+  if (!config) return;
+  const { sources, destinations, raise } = receipt;
+  const replaced = receipt.replacedSuperseded ?? {};
+  const entryId = receipt.rehomeTagged
+    ? rowRehomeReceiptId(options.set.ledger, options.identity, result.generation)
+    : `tier-move:${options.set.ledger.ledgerId()}:${tierLedgerIdentityKey(options.identity)}:${result.generation}`;
+  const entry: EmbeddingLedgerEntry = {
+    entry_id: entryId, recorded_at: new Date().toISOString(), kind: 'note',
+    what: `Tier move of one item (${raise ? 'raise' : 'lateral or lower'}) from ${sources.map(copy => copy.corpusId).join(', ')} `
+      + `to ${destinations.map(copy => `${copy.corpusId} (${copy.layers})`).join(', ')}: `
+      + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, `
+      + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. `
+      + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(', ') || 'none'}.`
+      + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced)
+        .map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(', ')}.` : ''),
+    scope: { corpora: [...new Set([...sources.map(copy => copy.corpusId), ...destinations.map(copy => copy.corpusId)])],
+      chunks: Object.fromEntries(destinations.map(copy => [copy.corpusId, copy.chunksWritten + copy.chunksKept])) },
+    ...(config.why ? { why: config.why } : {}), approved_by: config.approvedBy, status: 'complete',
+  };
+  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+}
+
+/** Retry durable note writes even when the move receipt has already been cleared. */
+export async function flushTierMoveNotes(ledger: TierLedger): Promise<void> {
+  for (const { key, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
+    const note = JSON.parse(value) as { path: string; entry: EmbeddingLedgerEntry };
+    await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+    if (ledger.readMeta(key) === value) ledger.writeMeta(key, '');
+  }
 }
 
 function purgeReceiptKey(identity: TierLedgerIdentity): string {
@@ -480,61 +489,70 @@ function copyFingerprint(copy: ConnectorStoreItemCopy, layers: TierCopyLayers): 
   })).digest('hex');
 }
 
-function finishVerifiedMove(options: TierMoveOptions, receipt: VerifiedMove): TierMoveResult {
+function finishVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): TierMoveResult {
   const { set, identity } = options;
   const ledger = set.ledger;
   const contentDestination = copyServingLayer(receipt.placement, 'content');
   const stableStore = set.store((contentDestination ?? receipt.placement[0]!).trustDomain);
   if (!stableStore) throw new Error('Verified destination unavailable.');
-  return ledger.withGenerationFence(identity, receipt.generation, () => stableStore.withItemCopyWriteFence(identity, () => {
-    const record = ledger.getCurrent(identity)!;
-    if (record.state !== 'moving' || record.targetMetadataTier !== receipt.target.metadataTier
-      || record.targetContentTier !== receipt.target.contentTier) throw new TierLedgerGenerationConflictError();
+  return stableStore.withItemCopyWriteFence(identity, () => {
+    // The content destination stays stable. Verification precedes the ledger
+    // writer, so exporting large content never monopolizes routing writes.
     for (const copy of receipt.placement) {
       const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
       if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
         throw new Error('Verified move destination changed; source remains held.');
       }
     }
-    // Validate the complete flip (including current overrides) FIRST. It is
-    // uncommitted and invisible until every separate-store purge commits.
-    // A process death rolls it back, leaving the durable receipt for retry.
-    const contentCopy = copyServingLayer(receipt.placement, 'content');
-    const content = contentCopy ?? copyServingLayer(set.placementFor({
-      ...receipt.target, state: 'current', metadataPending: false, contentPending: false, contentRead: true,
-      ...(receipt.flipOptions.decidedBy === 'override' ? { decidedBy: 'override' as const } : {}),
-    }).copies, 'content');
-    // No body was planned: version/vector-only remnants can be removed, but
-    // never erase an unverified body that did not reach the destination.
-    if (receipt.raise && content && !contentCopy && ledger.copies(identity).some(copy =>
-      trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain)
-      && (set.store(copy.trustDomain)?.exportItemCopy(identity)?.chunks.length ?? 0) > 0)) {
-      throw new Error('A lower body has no verified destination; move remains pending.');
-    }
-    const flipped = ledger.completeMove(identity, receipt.flipOptions);
-    const metadata = copyServingLayer(receipt.placement, 'metadata');
-    if (receipt.raise && content) {
-      for (const copy of ledger.copies(identity)) {
-        if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain)) continue;
-        const store = set.store(copy.trustDomain);
-        if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
-          throw new Error('Lower store unavailable or ledger binding changed; move purge remains pending.');
-        }
-        store.stripCopyContent(identity, { keepMetadata: !!metadata
-          && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+    return ledger.withGenerationFence(identity, receipt.generation, () => {
+      const record = ledger.getCurrent(identity)!;
+      // An abandoned/replaced move can reuse the same generation and target.
+      // Only the still-authoritative durable receipt may authorize this flip.
+      if (ledger.readMeta(purgeReceiptKey(identity)) !== JSON.stringify(receipt)) throw new TierLedgerGenerationConflictError();
+      if (record.state !== 'moving' || record.targetMetadataTier !== receipt.target.metadataTier
+        || record.targetContentTier !== receipt.target.contentTier) throw new TierLedgerGenerationConflictError();
+      // Validate the complete flip (including current overrides) FIRST. It is
+      // uncommitted and invisible until every separate-store purge commits.
+      // A process death rolls it back, leaving the durable receipt for retry.
+      const contentCopy = copyServingLayer(receipt.placement, 'content');
+      const content = contentCopy ?? copyServingLayer(set.placementFor({
+        ...receipt.target, state: 'current', metadataPending: false, contentPending: false, contentRead: true,
+        ...(receipt.flipOptions.decidedBy === 'override' ? { decidedBy: 'override' as const } : {}),
+      }).copies, 'content');
+      // No body was planned: version/vector-only remnants can be removed, but
+      // never erase an unverified body that did not reach the destination.
+      if (receipt.raise && content && !contentCopy && ledger.copies(identity).some(copy =>
+        trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain)
+        && (set.store(copy.trustDomain)?.copyContentState(identity)?.chunks ?? 0) > 0)) {
+        throw new Error('A lower body has no verified destination; move remains pending.');
       }
-    }
-    if (receipt.raise && content) ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-    options.afterPurge?.();
-    ledger.writeMeta(purgeReceiptKey(identity), '');
-    return {
-      outcome: 'moved', raise: receipt.raise, generation: flipped.generation,
-      destinations: receipt.destinations,
-      supersededCorpora: ledger.copies(identity).filter(copy => copy.state === 'superseded'
-        && copy.supersededByGeneration === flipped.generation).map(copy => copy.corpusId),
-      chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0),
-    };
-  }));
+      const flipped = ledger.completeMove(identity, receipt.flipOptions);
+      const metadata = copyServingLayer(receipt.placement, 'metadata');
+      if (receipt.raise && content) {
+        for (const copy of ledger.copies(identity)) {
+          if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain)) continue;
+          const store = set.store(copy.trustDomain);
+          if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
+            throw new Error('Lower store unavailable or ledger binding changed; move purge remains pending.');
+          }
+          store.stripCopyContent(identity, { keepMetadata: !!metadata
+            && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+        }
+      }
+      if (receipt.raise && content) ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
+      options.afterPurge?.();
+      ledger.writeMeta(purgeReceiptKey(identity), '');
+      const result: TierMoveResult = {
+        outcome: 'moved', raise: receipt.raise, generation: flipped.generation,
+        destinations: receipt.destinations,
+        supersededCorpora: ledger.copies(identity).filter(copy => copy.state === 'superseded'
+          && copy.supersededByGeneration === flipped.generation).map(copy => copy.corpusId),
+        chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0),
+      };
+      queueMoveNote(options, receipt, result);
+      return result;
+    });
+  });
 }
 
 async function moveToSecrets(options: TierMoveOptions, expectedGeneration: number): Promise<TierMoveResult> {
@@ -544,7 +562,10 @@ async function moveToSecrets(options: TierMoveOptions, expectedGeneration: numbe
   // policy's (secrets-disposition.ts), decided in one place.
   const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
   let located = false;
-  for (const copy of copies) {
+  const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+  const names = copyServingLayer(ordered.filter(copy => copy.state === 'current'), 'metadata')
+    ?? copyServingLayer(ordered, 'metadata');
+  for (const copy of names ? [names, ...ordered.filter(copy => copy !== names)] : ordered) {
     if (located) break;
     const domain = set.domainForCorpus(copy.corpusId);
     const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;

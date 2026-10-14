@@ -225,3 +225,156 @@ test('a second executor resumes a first executor partial purge instead of recopy
   expect(contentCounts(f.paths.internal)).toEqual(empty);
   expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
 });
+
+test('override revocation after lower strip resumes verified destination instead of replanning empty source', async () => {
+  const x = await fixture(); const f = x.f;
+  f.ledger.setOverride(x.identity, { kind: 'tier', tier: 'secure' });
+  const { applyOwnerOverrides } = await import('../src/workers/connector-store/tier-override-settle.ts');
+  expect(applyOwnerOverrides({ set: f.set }).raised).toBe(1);
+  const target = { metadataTier: 'secure' as const, contentTier: 'secure' as const };
+  await expect(moveTieredItem({ set: f.set, identity: x.identity, target,
+    afterPurge: () => { throw new Error('crash'); } })).rejects.toThrow('crash');
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+  f.ledger.clearOverride(x.identity);
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  expect(f.ledger.getCurrent(x.identity)).toMatchObject({ state: 'current', contentTier: 'secure', metadataTier: 'secure' });
+  expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+});
+
+test('abandon removes verified receipt before another move queues at the same generation', async () => {
+  const x = await fixture(); const f = x.f;
+  await expect(moveTieredItem({ set: f.set, identity: x.identity,
+    target: { metadataTier: 'private', contentTier: 'private' },
+    afterVerified: () => { throw new Error('crash'); } })).rejects.toThrow('crash');
+  const generation = f.ledger.getCurrent(x.identity)!.generation;
+  const key = `tier-move-verified:${x.identity.provider}\0${x.identity.accountScope}\0\0${x.identity.providerItemId}`;
+  expect(f.ledger.readMeta(key)).toBeTruthy();
+  f.ledger.abandonMove(x.identity, { expectedGeneration: generation });
+  expect(f.ledger.readMeta(key)).toBe('');
+  expect(f.ledger.getCurrent(x.identity)!.generation).toBe(generation);
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+  expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+});
+
+test.each(['empty', 'stale'] as const)('repair preserves lower content when destination body is %s', async damage => {
+  const x = await fixture(); const f = x.f;
+  const retained = f.stores.internal!.exportItemCopy(x.identity)!;
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  f.stores.internal!.importItemCopy(retained, { trustTier: 'S3', syncConnectorId: 'old', layers: 'both' });
+  const db = new Database(f.paths.secure_local);
+  if (damage === 'empty') db.query('DELETE FROM chunks').run();
+  else db.query('UPDATE items SET source_version = ? WHERE provider_item_id = ?').run('new-unread-version', 'mail');
+  db.close();
+  const report = purgeLowerTierContent(f.set);
+  expect(report.failed).toBe(1);
+  expect(contentCounts(f.paths.internal).chunks).toBe(1);
+});
+
+test('maintenance finishes, persists done across restart, and neither exports nor scans the corpus again', async () => {
+  const x = await fixture(); const f = x.f;
+  await f.set.repairLowerContent(); // let startup note flush settle
+  let scans = 0; let exports = 0;
+  const originalScan = f.ledger.listRouted.bind(f.ledger);
+  const originalExport = f.stores.secure_local!.exportItemCopy.bind(f.stores.secure_local!);
+  f.ledger.listRouted = options => { scans++; return originalScan(options); };
+  f.stores.secure_local!.exportItemCopy = identity => { exports++; return originalExport(identity); };
+  await f.set.repairLowerContent({ nowMs: Date.now() + 1_000 });
+  purgeLowerTierContent(f.set, { maintenance: true });
+  expect(scans).toBe(0); expect(exports).toBe(0);
+  expect(f.ledger.readMeta('lower-content-purge-done-v2')).toBe('1');
+  const reopened = x.restart();
+  expect(reopened.ledger.readMeta('lower-content-purge-done-v2')).toBe('1');
+});
+
+test('repair reads content proof without exports and writes its durable embedding note outside the ledger writer', async () => {
+  const x = await fixture(); const f = x.f;
+  const retained = f.stores.internal!.exportItemCopy(x.identity)!;
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  f.stores.internal!.importItemCopy(retained, { trustTier: 'S3', syncConnectorId: 'old', layers: 'both' });
+  f.stores.secure_local!.exportItemCopy = () => { throw new Error('sweep must not export'); };
+  const path = `${f.dir}/repair-ledger.jsonl`;
+  expect(purgeLowerTierContent(f.set, { embeddingLedger: { path, approvedBy: 'system-automatic' } }).purged).toBe(1);
+  const { flushTierMoveNotes } = await import('../src/workers/connector-store/tier-move.ts');
+  await flushTierMoveNotes(f.ledger);
+  const { readEmbeddingLedger } = await import('../src/workers/embedding-ledger.ts');
+  const notes = (await readEmbeddingLedger(path)).entries.filter(entry => entry.entry_id?.startsWith('tier-content-repair:'));
+  expect(notes).toHaveLength(1);
+  expect(notes[0]!.scope?.chunks).toEqual({ [f.stores.internal!.corpusId]: 1 });
+});
+
+test.each(['direct', 'sweep'] as const)('a verified move resumed by %s writes the normal embedding note exactly once', async via => {
+  const x = await fixture(); const f = x.f;
+  const path = `${f.dir}/move-ledger.jsonl`;
+  const embeddingLedger = { path, approvedBy: 'system-automatic' as const };
+  await expect(moveTieredItem({ set: f.set, identity: x.identity, target, embeddingLedger,
+    afterPurge: () => { throw new Error('crash'); } })).rejects.toThrow('crash');
+  if (via === 'direct') await moveTieredItem({ set: f.set, identity: x.identity, target, embeddingLedger });
+  else {
+    expect(purgeLowerTierContent(f.set, { maintenance: true, embeddingLedger }).resumed).toBe(1);
+    const { flushTierMoveNotes } = await import('../src/workers/connector-store/tier-move.ts');
+    await flushTierMoveNotes(f.ledger);
+  }
+  const { readEmbeddingLedger } = await import('../src/workers/embedding-ledger.ts');
+  expect((await readEmbeddingLedger(path)).entries.filter(entry => entry.entry_id?.startsWith('tier-move:'))).toHaveLength(1);
+  const { flushTierMoveNotes } = await import('../src/workers/connector-store/tier-move.ts');
+  await flushTierMoveNotes(f.ledger);
+  expect((await readEmbeddingLedger(path)).entries.filter(entry => entry.entry_id?.startsWith('tier-move:'))).toHaveLength(1);
+});
+
+test('an unfinished repair page waits for the maintenance cadence rather than each sniffer tick', async () => {
+  const x = await fixture(); const f = x.f;
+  await f.set.repairLowerContent();
+  f.ledger.writeMeta('lower-content-purge-done-v2', '');
+  const original = f.ledger.listRouted.bind(f.ledger);
+  let scans = 0;
+  f.ledger.listRouted = options => { scans++; return original(options); };
+  const now = Date.now() + 5 * 60_000;
+  await f.set.repairLowerContent({ nowMs: now });
+  expect(scans).toBe(1);
+  // Leave work outstanding to distinguish cadence from the done watermark.
+  f.ledger.writeMeta('lower-content-purge-done-v2', '');
+  for (let tick = 1; tick <= 10; tick++) await f.set.repairLowerContent({ nowMs: now + tick * 1_000 });
+  expect(scans).toBe(1);
+  await f.set.repairLowerContent({ nowMs: now + 5 * 60_000 });
+  expect(scans).toBe(2);
+});
+
+test('an abandoned executor cannot flip a new move with the same generation and target', async () => {
+  const x = await fixture(); const f = x.f;
+  const target = { metadataTier: 'private' as const, contentTier: 'private' as const };
+  await expect(moveTieredItem({ set: f.set, identity: x.identity, target, afterVerified: () => {
+    const generation = f.ledger.getCurrent(x.identity)!.generation;
+    f.ledger.abandonMove(x.identity, { expectedGeneration: generation });
+    f.ledger.stageMove(x.identity, { expectedGeneration: generation, target,
+      destination: f.set.placementFor({ ...target, state: 'current', metadataPending: false, contentPending: false, contentRead: true }).copies,
+      hideSource: false });
+  } })).rejects.toMatchObject({ name: 'TierLedgerGenerationConflictError' });
+  expect(f.ledger.getCurrent(x.identity)?.state).toBe('moving');
+  expect(contentCounts(f.paths.internal).chunks).toBe(1);
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  expect(f.ledger.getCurrent(x.identity)?.state).toBe('current');
+});
+
+test('failed receipts rotate without starving a later valid receipt or historical repair', async () => {
+  const x = await fixture(); const f = x.f;
+  await expect(moveTieredItem({ set: f.set, identity: x.identity, target,
+    afterVerified: () => { throw new Error('crash'); } })).rejects.toThrow('crash');
+  const receiptKey = `tier-move-verified:${x.identity.provider}\0${x.identity.accountScope}\0\0${x.identity.providerItemId}`;
+  const receipt = f.ledger.readMeta(receiptKey)!;
+  // Unknown identities model unavailable recovery obligations ahead of a live
+  // receipt. They fail, remain durable, and must not consume every later pass.
+  for (let i = 0; i < 205; i++) f.ledger.writeMeta(`tier-move-verified:aaa\0personal\0\0${String(i).padStart(3, '0')}`, receipt);
+  f.ledger.writeMeta('lower-content-purge-done-v2', '');
+  const first = purgeLowerTierContent(f.set, { maintenance: true });
+  expect(first.checked).toBeLessThanOrEqual(200);
+  expect(first.failed).toBe(100);
+  expect(first.checked).toBeGreaterThan(100); // historical identities also got budget
+  purgeLowerTierContent(f.set, { maintenance: true });
+  const third = purgeLowerTierContent(f.set, { maintenance: true });
+  expect(third.resumed).toBe(1);
+  expect(f.ledger.getCurrent(x.identity)?.state).toBe('current');
+  expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+  expect(f.ledger.metaEntries('tier-move-verified:')).toHaveLength(205); // failed obligations retained
+});

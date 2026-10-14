@@ -510,7 +510,7 @@ export class EmailClient {
   async revalidateSourceAnswer(result: unknown): Promise<unknown> {
     if (!result || typeof result !== 'object' || typeof (result as { answer?: unknown }).answer !== 'string') return result;
     const ticket = sourceAnswerTickets.get(result);
-    if (!ticket) return withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
+    if (!ticket) return withheldSourceAnswer('Olympus withheld this answer because the engine did not provide a privacy release ticket. Update Olympus, then ask again.');
     try {
       const verdict = asRecord(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }),
@@ -518,7 +518,7 @@ export class EmailClient {
       if (verdict.allowed === true) return result;
       return withheldSourceAnswer(typeof verdict.withheld === 'string' ? verdict.withheld : ANSWER_RELEASE_UNVERIFIED);
     } catch {
-      return withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
+      return withheldSourceAnswer('Olympus withheld this answer because the engine could not verify its privacy release ticket. Check that Olympus is running and up to date, then ask again.');
     }
   }
 

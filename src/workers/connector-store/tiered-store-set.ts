@@ -101,6 +101,9 @@ import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
+import { flushTierMoveNotes, type TierMoveOptions } from './tier-move.ts';
+
+export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { applyOwnerOverrides } from './tier-override-settle.ts';
@@ -264,6 +267,9 @@ export class TieredStoreSet {
   private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
   private lastRowRehome: TierRowRehomeReport | undefined;
 
+  private lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
+  private lowerContentRepair: Promise<void> | undefined;
+
   constructor(options: TieredStoreSetOptions) {
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
     this.setId = options.setId;
@@ -293,7 +299,7 @@ export class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
-    this.repairLowerContent();
+    void this.repairLowerContent();
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -313,14 +319,27 @@ export class TieredStoreSet {
     return store;
   }
 
-  /** Bounded upgrade repair; only corpus identifiers and counts reach logs. */
-  repairLowerContent(): void {
+  /** Startup plus a five-minute maintenance cadence; completed sweeps idle durably. */
+  repairLowerContent(options: { nowMs?: number; embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): Promise<void> {
+    if (this.lowerContentRepair) return this.lowerContentRepair;
+    const now = options.nowMs ?? Date.now();
+    if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS) return Promise.resolve();
+    this.lastLowerContentRepairAt = now;
     try {
-      purgeLowerTierContent(this, { log: (corpus, copies, chunks) => {
-        if (chunks > 0) console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
-      } });
+      purgeLowerTierContent(this, { maintenance: true,
+        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
+        log: (corpus, copies, chunks) => {
+          if (chunks > 0) console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
+        },
+      });
+      const pending = flushTierMoveNotes(this.ledger).catch(() => {
+        // The flip's durable note obligation stays pending for maintenance.
+      }).finally(() => { this.lowerContentRepair = undefined; });
+      this.lowerContentRepair = pending;
+      return pending;
     } catch {
-      // Startup and sync must remain available; maintenance retries the page.
+      // Startup and sync remain available; maintenance retries the page.
+      return Promise.resolve();
     }
   }
 
@@ -575,7 +594,7 @@ export class TieredStoreSet {
    * directions (tier-override-settle.ts). Never fails the sync.
    */
   private async settleStoredItems(): Promise<void> {
-    this.repairLowerContent();
+    void this.repairLowerContent();
     try {
       applyOwnerOverrides({ set: this });
     } catch {

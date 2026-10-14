@@ -1,4 +1,4 @@
-import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, ANSWER_RELEASE_UNVERIFIED, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import type { UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import {
@@ -984,11 +984,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json() as { ticket?: unknown };
-          pruneReleaseTickets();
           const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
-          const reason = entry && options.sourceAnswerReleaseCheck
-            ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck)
-            : ANSWER_RELEASE_UNVERIFIED;
+          // Look up before pruning so a late collection has an actionable reason.
+          const reason = entry?.expires !== undefined && entry.expires <= Date.now()
+            ? 'Olympus withheld this answer because its privacy release ticket expired after 15 minutes. Ask again.'
+            : !entry
+              ? 'Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again.'
+              : options.sourceAnswerReleaseCheck
+                ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck)
+                : 'Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.';
+          pruneReleaseTickets();
           return json({ ...(reason ? { withheld: reason } : { allowed: true }) });
         }
 
