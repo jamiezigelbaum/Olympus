@@ -252,6 +252,7 @@ describe('Gmail connector-store lane', () => {
     };
     const connector = new GoogleGmailSourceConnector({
       account: 'personal',
+      credentialBroker: fakeBroker(),
       apiClient: fakeGmailClient([message]),
       maxMessages: 10,
     });
@@ -297,6 +298,7 @@ describe('Gmail connector-store lane', () => {
     };
     const connector = new GoogleGmailSourceConnector({
       account: 'personal',
+      credentialBroker: fakeBroker(),
       apiClient: fakeGmailClient([message]),
       maxMessages: 10,
     });
@@ -542,6 +544,7 @@ function gmailLane(input: {
       secureStore,
       account: 'personal',
       ...(input.sniffer ? { tierClassification: { sniffer: input.sniffer } } : {}),
+      credentialBroker: fakeBroker(),
       apiClient: input.client,
       maxMessages: input.maxMessages,
       internalEmbeddingProvider: provider,

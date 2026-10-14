@@ -47735,10 +47735,10 @@ class GoogleGmailSourceConnector {
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    const metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
+    let metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
-    const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
     const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
@@ -47815,7 +47815,7 @@ class GoogleGmailSourceConnector {
       pageToken = page2.nextPageToken;
       const pageTruncated = messagesExamined < listed.length;
       const legDone = !pageToken && !pageTruncated;
-      const enterMetadataLeg = legDone && splitsAtCutoff;
+      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
       const done = legDone && !enterMetadataLeg;
       const promoted = promotedWatermark({
         highWaterMs,
@@ -47840,7 +47840,13 @@ class GoogleGmailSourceConnector {
         ...nextCursor ? { nextCursor } : {},
         done
       };
-      if (done || !pageToken || items.length === 0 && messagesFetched > 0 || pageTruncated)
+      if (done || pageTruncated)
+        break;
+      if (enterMetadataLeg) {
+        metadataLeg = true;
+        query = this.metadataLegQuery(cutoffMs);
+        requestedPageTokens.clear();
+      } else if (!pageToken)
         break;
     }
   }
@@ -74247,7 +74253,11 @@ function schedulerTaskCounts(scheduler) {
   return output;
 }
 function metadataTraversalCompleteFromSchedulers(schedulers) {
-  const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "sync"));
+  const tasks = schedulers.flatMap((scheduler) => {
+    const sync = scheduler.tasks.filter((task) => task.kind === "sync");
+    const primary = sync.filter((task) => task.metadata_walk_role === "primary");
+    return primary.length > 0 ? primary : sync;
+  });
   if (tasks.length === 0)
     return;
   const walks = [];
@@ -132968,6 +132978,7 @@ ${request.taskId}`);
     return {
       id: state.task.id,
       kind: state.task.kind,
+      ...state.task.metadataWalkRole ? { metadata_walk_role: state.task.metadataWalkRole } : {},
       ...state.lastErrorKind === "scope_root_missing" && state.task.scopePath ? { missing_scope_path: state.task.scopePath } : {},
       interval_seconds: Math.round(configuredIntervalMs / 1000),
       effective_interval_seconds: Math.round(effectiveIntervalMs / 1000),
@@ -133487,6 +133498,7 @@ function createGmailConnectorStoreSchedulerSource(input) {
       {
         id: "gmail.email_store_pull",
         kind: "sync",
+        metadataWalkRole: "primary",
         writer: true,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
@@ -133507,6 +133519,7 @@ function createGmailConnectorStoreSchedulerSource(input) {
       {
         id: "gmail.email_store_reconcile",
         kind: "sync",
+        metadataWalkRole: "maintenance",
         writer: true,
         intervalMs: liveConfig.storeReconcileIntervalMs,
         freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,
