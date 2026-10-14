@@ -159,3 +159,26 @@ test('a worker-disabled engine starts no desktop bridge and leaves the port free
     rmSync(root, { recursive: true, force: true });
   }
 }, 20_000);
+
+test('worker health requires two consecutive failures, success resets them; logout is immediate', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-health-'));
+  const transport = { platform: 'linux', env: { HOME: root, XDG_RUNTIME_DIR: root } };
+  const socketPath = prepareWorkerSocket(transport)!;
+  const reserve = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+  const port = reserve.port!; await reserve.stop(true);
+  let healthy = true, desktop = true;
+  const host = startLinuxOwnerBridgeHost({ port, socketPath, transport, desktopReady: async () => desktop,
+    workerReady: async () => healthy, fetchSocket: async () => new Response() });
+  const probe = async () => { await host.probe(); await Bun.sleep(5); };
+  try {
+    await waitFor(() => host.status().state === 'listening');
+    const origin = host.status().origin;
+    healthy = false; await probe(); expect(host.status().state).toBe('listening');
+    healthy = true; await probe();
+    healthy = false; await probe(); expect(host.status().state).toBe('listening');
+    await probe(); expect(host.status().state).toBe('restarting');
+    healthy = true; await probe(); expect(host.status().state).toBe('listening');
+    expect(host.status().origin).toBe(origin);
+    desktop = false; await probe(); expect(host.status().state).toBe('headless');
+  } finally { host.close(); rmSync(root, { recursive: true, force: true }); }
+});

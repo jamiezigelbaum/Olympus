@@ -583,12 +583,27 @@ cookies or runs scripts. Old session Hosts and every Host mismatch refuse.
 `olympus dashboard` asks the private socket to open an owner ticket: exclusive
 0600 HTML inside the validated 0700 runtime directory. The trusted desktop
 opener receives only the absolute filename in its separate systemd scope;
-no secret enters argv. The file probes the current session origin in the
-actual browser before navigating to `/owner-proof#<single-use-ticket>`.
+no secret enters argv. The file holds a random challenge and the expected
+HMAC-SHA256(ticket, challenge). Before navigating, its script asks the current
+session origin's `GET /owner-proof?challenge=…` for that answer. Only an exact
+match permits same-window navigation to `/owner-proof#<single-use-ticket>`.
+The probe sends the challenge alone, never the ticket. A fake listener's wrong
+or missing answer leaves a clear refusal in the private file without sending
+the ticket. This is an additional layer, not connection-bound authentication:
+a hostile listener able to relay to a real bridge could relay the challenge
+answer too. Holding both loopback families, and revoking every ticket before
+either is released, is the load-bearing boundary. A restarting worker returns a CORS-readable retry response; both
+the probe and redemption wait with “Olympus is restarting…” wording.
 Resolution failure stays on a clear refusal with the SSH fallback, never the
-fixed origin. Proof consumption is atomic, expires after 60 seconds and
-removes the file. Ticket opening is limited to once per ten seconds globally.
-Only one pending ticket and at most sixteen 12-hour owner sessions are held.
+fixed origin. Redemption claims the ticket exclusively before asynchronous
+session establishment and removes the file. Transport failures and worker 503
+responses retry; other session refusals are final. When the worker restarts,
+only the same live, unexpired, unreplaced claim can retry; its file is not
+recreated and its 60-second expiry is never extended. Success permanently
+spends it before publishing the session. CLI/control-socket and browser confirmation each have a ten-second limiter
+and one pending ticket; browser requests cannot replace the CLI's pending file
+or consume its limiter. Unauthenticated `POST /owner-open` ignores the posted
+target and opens only `/dashboard`. At most sixteen 12-hour owner sessions are held.
 
 An HttpOnly, SameSite=Lax, host-only cookie is bound to this bridge instance.
 **Cookies alone are insufficient:** cookies cross ports, so every content
@@ -621,7 +636,13 @@ observer in the long-lived standalone engine host performs bounded desktop probe
 HTTP requests only read its snapshot, never spawn subprocesses. When the
 observer detects logout or server-mode enable it closes the listener and
 revokes proofs; requests immediately refuse the unavailable snapshot. Relogin creates a new
-origin. A port collision leaves the owner socket running, opens no replacement
+origin. The bridge binds `127.0.0.1` and `[::1]` at the configured port as one
+listener lifecycle. A collision on either family releases both and reports
+`port_in_use`; no partial listener is published. Only IPv6 `EADDRNOTAVAIL` or
+`EAFNOSUPPORT` permits IPv4 alone, explicitly reported as
+`desktop_bridge.ipv6=unavailable`. Release of either socket revokes the epoch
+and releases both; a subsequent bind gets a new origin. A port collision leaves
+the owner socket running, opens no replacement
 listener and reports `desktop_bridge.state=port_in_use` plus its remedy through
 socket health, engine status and doctor. Headless hosts open no TCP listener.
 Mac browser, socket-free transport, and page output are unchanged.
@@ -629,7 +650,11 @@ Mac browser, socket-free transport, and page output are unchanged.
 **Invariant: an origin and its owner sessions may be reused only while their
 TCP listener has remained continuously bound; every release revokes the epoch.**
 The standalone engine host owns the listener, in-memory hashed sessions and
-readiness observer. A worker settings reload, crash or kill releases only its
+readiness observer. The host probes the real worker's `/v1/health` over its
+private socket. Two consecutive health failures mark it restarting; one
+success resets the count. Desktop absence still revokes immediately without
+waiting for worker health. Status is durably written only on a change.
+A worker settings reload, crash or kill releases only its
 Unix socket: the host keeps the TCP port bound and returns a constant styled
 “Olympus is restarting…” page with automatic retry in the same window, no
 bootstrap or proof material. The worker asks an owner-only 0600 Unix control
@@ -652,8 +677,10 @@ state/PKCE approval transaction. Never expose it through an unauthenticated
 HTTP endpoint or logs. Bound attempts and atomically consume it; CSRF, origin
 checks and explicit consent still apply. This protects approval but does not
 by itself prevent TCP port squatting. A stable port number is insufficient:
-the host must hold the listening socket throughout any reused epoch. Fail on
-collisions and never submit an owner code to an unverified worker.
+the host must hold both loopback families throughout any reused epoch, because
+Chromium may resolve the random `.localhost` name to `::1` first. IPv4 custody
+alone leaves the same port available to an IPv6 squatter from another account.
+Fail on collisions and prove listener identity before submitting an owner code.
 
 Conditional headless connection sequence after the owner's choice:
 
@@ -1200,15 +1227,29 @@ start Olympus. Open the owner's ticket using `olympus dashboard`. The old tab
 must not read owner pages or storage or obtain the new cookie. Restart the
 worker by saving a setting: its existing window and owner session must survive,
 the host must serve the restarting page during the gap, and a second process
-must fail to bind that port with EADDRINUSE. Kill the worker and repeat: the
-host still holds TCP. Restart or kill the host: leave a benign squatter's tab
+must fail to bind that port on **both** `127.0.0.1` and `[::1]` with
+EADDRINUSE. Check `ss -ltnp` shows both. Kill the worker and repeat: the
+host still holds both TCP sockets. Restart or kill the host: leave a benign squatter's tab
 at the old random origin alive while the port is released, then reopen Olympus
 and verify a fresh origin refuses the old cookies and proofs. Confirm `/sw.js` requests with
 `Service-Worker: script` refuse and browser registration is blocked by CSP.
 Log out and inspect from another owner SSH session: only the Unix socket
 remains after the bounded reconciliation interval. Log back in and verify a
 new origin. Explicit server mode must likewise remove the listener. Hold the
-port with another process and confirm doctor/status report the collision.
+port on `[::1]` with another ordinary account while IPv4 is free, and repeat
+with IPv4 occupied. Confirm doctor/status report `port_in_use` and the other
+family is released too. On a host without IPv6, confirm status explicitly
+reports `ipv6=unavailable`. After SIGKILL of the host, inspect `ss -ltnp` and
+verify neither socket is left held by an orphan.
+
+In headful Chromium and Firefox, confirm native `.localhost` resolution on
+real IPv6 loopback. With a benign fake listener answering `/owner-proof`, open
+an unconsumed private file and verify it stays there, reports identity refusal,
+and sends only the challenge; no request or navigation may carry the ticket.
+Restore Olympus, reload the file during worker downtime, and verify the retry
+wording and eventual dashboard in the same window without a flash, popup or
+close. Exercise the real `xdg-open`/`systemd-run` environment and logout/relogin
+against `graphical-session.target`; the engine host now launches the opener.
 
 If browser name resolution fails, the private file must show a refusal with
 SSH instructions, never navigate to the fixed origin. For headless/remote
@@ -1244,7 +1285,7 @@ in the API client, and complete a tool call; revoke that key and verify a
 subsequent call fails. Never paste keys into the shell runbook or logs.
 
 From a separate ordinary Linux account, try reaching the recorded socket
-using `curl --unix-socket "$SOCKET" http://localhost/health` after setting
+using `curl --unix-socket "$SOCKET" http://localhost/v1/health` after setting
 `SOCKET` to the path printed above. Expect permission denied, including when
 browser-like headers are supplied. Do not relax directory/socket permissions.
 Complete one Personal and one Private question; Private content stays in the

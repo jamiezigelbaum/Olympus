@@ -5482,7 +5482,11 @@ export async function main(): Promise<void> {
         const base = `http://127.0.0.1:${port}`;
         const response = await workerFetch(`${base}/dashboard/control/session`, { method: 'POST',
           headers: { Authorization: `Bearer ${authToken ?? ''}`, Origin: base }, redirect: 'error', signal: AbortSignal.timeout(5_000) });
-        if (!response.ok) throw new Error('Owner dashboard session refused.');
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
+          return null;
+        }
         await response.body?.cancel();
         return response.headers.getSetCookie();
       },

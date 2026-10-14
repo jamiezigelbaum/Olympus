@@ -16,13 +16,17 @@ export function startLinuxOwnerBridgeHost(options: Omit<LinuxOwnerBridgeOptions,
 }) {
   let closed = false, probing = false, workerProbing = false, ready = false, workerReady = false;
   const manager = manageLinuxOwnerBridge({ ...options, platform: 'linux', listenerOwner: 'engine-host', ready: () => !closed && ready, workerReady: () => workerReady });
+  let workerFailures = 0;
   // Worker availability never delays or coalesces a desktop-presence probe.
   const probeWorker = async () => {
     if (closed || workerProbing) return;
     workerProbing = true;
     try {
       const value = ready && await options.workerReady().catch(() => false);
-      if (!closed) workerReady = ready && value;
+      if (!closed) {
+        workerFailures = value ? 0 : workerFailures + 1;
+        workerReady = ready && (value || (workerReady && workerFailures < 2));
+      }
     } finally { workerProbing = false; if (!closed) options.onChange?.(); }
   };
   const probe = async () => {
@@ -34,7 +38,7 @@ export function startLinuxOwnerBridgeHost(options: Omit<LinuxOwnerBridgeOptions,
       ready = desktop;
       // Publish logout BEFORE waiting for a potentially unavailable worker.
       manager.refresh();
-      if (!desktop) workerReady = false;
+      if (!desktop) { workerReady = false; workerFailures = 0; }
       void probeWorker();
     } catch { ready = false; workerReady = false; }
     finally { probing = false; if (!closed) { manager.refresh(); options.onChange?.(); } }

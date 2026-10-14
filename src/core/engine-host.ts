@@ -177,12 +177,16 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   };
   let desktopBridge: ReturnType<typeof startLinuxOwnerBridgeHost> | undefined;
   const statusPath = engineStatusPath(dataEnv);
+  let lastStatus: string | undefined;
   const writeStatus = () => {
-    status.updated_at = now();
     if (desktopBridge) status.desktop_bridge = desktopBridge.status();
+    const content = JSON.stringify({ ...status, updated_at: undefined });
+    if (content === lastStatus) return;
+    status.updated_at = now();
     try {
       mkdirSync(join(statusPath, '..'), { recursive: true, mode: 0o700 });
       writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}\n`);
+      lastStatus = content;
     } catch {
       // Advisory: olympus engine status falls back to launchctl alone.
     }
@@ -201,8 +205,10 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     serviceHealth: {
       reportFailure(error) {
         const message = error.message;
+        const state = /is starting\.$/.test(message) ? 'starting' : 'failing';
+        if (status.services[id]?.state === state && status.services[id]?.message === message) { writeStatus(); return; }
         status.services[id] = {
-          state: /is starting\.$/.test(message) ? 'starting' : 'failing',
+          state,
           message,
           updated_at: now(),
         };
@@ -210,6 +216,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
         writeStatus();
       },
       clearFailure() {
+        if (status.services[id]?.state === 'ok' && status.services[id]?.message === null) { writeStatus(); return; }
         status.services[id] = { state: 'ok', message: null, updated_at: now() };
         writeStatus();
       },
@@ -269,13 +276,17 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
         return desktop.ready && !resolveServerMode({ platform: options.platform ?? process.platform, env: dataEnv, fileEnv: readWorkerSetupEnv({ env: dataEnv, workerEnvPath: paths.workerEnvPath }), desktopReady: () => desktop.ready }).remote;
       },
       workerReady: async () => {
-        const response = await fetchSocket(base + '/health', { headers: { Authorization: `Bearer ${authToken() ?? ''}` }, signal: AbortSignal.timeout(1_000) });
+        const response = await fetchSocket(base + '/v1/health', { headers: { Authorization: `Bearer ${authToken() ?? ''}` }, signal: AbortSignal.timeout(1_000) });
         await response.body?.cancel(); return response.ok;
       },
       fetchSocket: request => fetchSocket(request, { redirect: 'manual' }),
       establishDashboard: async () => {
         const response = await fetchSocket(base + '/dashboard/control/session', { method: 'POST', headers: { Authorization: `Bearer ${authToken() ?? ''}`, Origin: base }, signal: AbortSignal.timeout(5_000) });
-        if (!response.ok) throw new Error('Owner dashboard session refused.');
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
+          return null;
+        }
         await response.body?.cancel(); return response.headers.getSetCookie();
       },
     });

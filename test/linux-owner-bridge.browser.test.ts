@@ -162,3 +162,50 @@ for (const kind of ['chromium', 'firefox']) {
     } finally { bridge?.close(); listener.stop(true); socket.stop(true); callback.stop(true); connections.close(); await browser.close(); rmSync(root, { recursive: true, force: true }); }
   }, 90_000);
 }
+
+// Deliberately bypass the dual-family manager here: identity proof must also
+// refuse a listener that cannot answer, in addition to dual-family custody.
+for (const kind of ['chromium', 'firefox']) {
+  test.skipIf(!playwrightPath)(`${kind}: fake listener cannot receive the private ticket; probe and redemption retry restarts`, async () => {
+    const playwright = await import(playwrightPath!);
+    const browser = await playwright[kind].launch({ headless: true, ...(kind === 'chromium' ? { args: ['--no-sandbox'] } : {}) });
+    const root = mkdtempSync(join(tmpdir(), 'owner-identity-'));
+    const transport = { platform: 'linux', env: { HOME: root, XDG_RUNTIME_DIR: root } };
+    const socketPath = prepareWorkerSocket(transport)!;
+    const socket = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch: () => new Response() }));
+    let bridge!: LinuxOwnerBridge, real = false, workerReady = true, ticketPath = '';
+    const seen: string[] = [];
+    const listener = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(r) {
+      seen.push(r.url + ' ' + (r.method === 'POST' ? await r.clone().text() : ''));
+      return real ? bridge.handle(r) : new Response('fake listener', { headers: { 'Access-Control-Allow-Origin': '*' } });
+    } });
+    let establishments = 0;
+    bridge = new LinuxOwnerBridge({ port: listener.port!, socketPath, transport, ready: () => true, workerReady: () => workerReady,
+      establishDashboard: async () => { if (++establishments === 1) throw new Error('Worker socket restarted before its next health probe.'); return []; },
+      fetchSocket: async () => new Response('<!doctype html><html><head></head><body><h1>PRIVATE DASHBOARD</h1></body></html>', { headers: { 'Content-Type': 'text/html' } }),
+      openFile: async p => { ticketPath = p; } });
+    try {
+      await bridge.openTicket('/dashboard');
+      const file = pathToFileURL(ticketPath).href;
+      const ticket = readFileSync(ticketPath, 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+      const owner = await browser.newPage();
+      await owner.goto(file);
+      await owner.waitForFunction(() => document.body.textContent?.includes('could not prove its identity'));
+      expect(owner.url()).toBe(file);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.join(' ')).not.toContain(ticket);
+      // The same, unconsumed file can retry a genuine bridge through downtime.
+      real = true; workerReady = false;
+      await owner.reload();
+      await owner.waitForFunction(() => document.body.textContent?.includes('Olympus is restarting…'));
+      expect(owner.url()).toBe(file);
+      // Reload DURING the file's CORS probe must retain the retry wording.
+      await owner.reload();
+      await owner.waitForFunction(() => document.body.textContent?.includes('Olympus is restarting…'));
+      workerReady = true;
+      await owner.waitForURL(bridge.origin + '/dashboard');
+      expect(await owner.locator('h1').textContent()).toBe('PRIVATE DASHBOARD');
+      expect(establishments).toBe(2);
+    } finally { bridge.close(); listener.stop(true); socket.stop(true); await browser.close(); rmSync(root, { recursive: true, force: true }); }
+  }, 45_000);
+}

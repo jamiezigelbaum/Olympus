@@ -7686,7 +7686,7 @@ var init_remote_request_body = __esm(() => {
 });
 
 // src/core/linux-owner-bridge.ts
-import { createHash as createHash4, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash4, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync5, openSync as openSync5, writeFileSync as writeFileSync5, unlinkSync as unlinkSync2 } from "node:fs";
 import { dirname as dirname10, join as join15 } from "node:path";
 function randomOwnerHostname() {
@@ -7783,7 +7783,7 @@ function proofPage() {
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
- try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After'))await new Promise(resolve=>setTimeout(resolve,1000));else break;}while(true);
+ try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
@@ -7808,12 +7808,11 @@ class LinuxOwnerBridge {
   hostname;
   origin;
   entryOrigin;
-  ticket;
+  tickets = new Map;
   sessions = [];
-  lastOpen = -Infinity;
+  lastOpen = { control: -Infinity, browser: -Infinity };
   closed = false;
   now;
-  ticketTimer;
   constructor(options) {
     this.options = options;
     this.now = options.now ?? Date.now;
@@ -7829,45 +7828,57 @@ class LinuxOwnerBridge {
     this.sessions = [];
     this.clearTicket();
   }
-  clearTicket() {
-    if (this.ticketTimer)
-      clearTimeout(this.ticketTimer);
-    if (this.ticket) {
+  clearTicket(ticket) {
+    for (const [lane, current2] of this.tickets) {
+      if (ticket && current2 !== ticket)
+        continue;
+      if (current2.timer)
+        clearTimeout(current2.timer);
       try {
-        unlinkSync2(this.ticket.path);
+        unlinkSync2(current2.path);
       } catch {}
+      this.tickets.delete(lane);
     }
-    this.ticket = undefined;
   }
-  async openTicket(target) {
+  async openTicket(target, lane = "control") {
     if (!safeTarget(target) || !this.live())
       throw new Error("Desktop owner confirmation is unavailable.");
-    if (this.now() - this.lastOpen < 1e4)
+    if (this.now() - this.lastOpen[lane] < 1e4)
       throw new Error("Wait ten seconds before opening another owner ticket.");
-    this.lastOpen = this.now();
+    this.lastOpen[lane] = this.now();
     if (validateWorkerSocket(this.options.transport) !== this.options.socketPath)
       throw new Error("Owner socket changed.");
-    this.clearTicket();
-    const value = secret();
+    const previous = this.tickets.get(lane);
+    if (previous)
+      this.clearTicket(previous);
+    const value = secret(), challenge = secret();
+    const answer = createHmac("sha256", value).update(challenge).digest("base64url");
     const path = join15(dirname10(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
     const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
-fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'}).then(r=>{if(!r.ok)throw new Error();location.replace(${JSON.stringify(url)});}).catch(()=>{document.getElementById('message').textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. " + DESKTOP_BRIDGE_REMEDY)};});</script>`;
+(async function(){
+ const message=document.getElementById('message');
+ try{let r;do{r=await fetch(${JSON.stringify(this.origin + "/owner-proof?challenge=" + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ if(!r.ok||await r.text()!==${JSON.stringify(answer)}){message.textContent='Olympus refused: the private ticket expired or this listener could not prove its identity. The private ticket was not sent. Run olympus dashboard again.';return;}
+ location.replace(${JSON.stringify(url)});
+ }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
+})();</script>`;
     const fd = openSync5(path, "wx", 384);
     try {
       writeFileSync5(fd, html);
     } finally {
       closeSync5(fd);
     }
-    this.ticket = { value, target, path, expires: this.now() + TICKET_MS };
-    this.ticketTimer = setTimeout(() => this.clearTicket(), TICKET_MS);
-    this.ticketTimer.unref();
+    const ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
+    this.tickets.set(lane, ticket);
+    ticket.timer = setTimeout(() => this.clearTicket(ticket), TICKET_MS);
+    ticket.timer.unref();
     try {
       await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
       if (!this.live())
         throw new Error("Graphical session ended.");
     } catch (error) {
-      this.clearTicket();
+      this.clearTicket(ticket);
       throw error;
     }
   }
@@ -7897,10 +7908,18 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
     const site = request.headers.get("sec-fetch-site");
     if (request.method !== "GET" && request.method !== "HEAD" && (origin !== this.origin || site !== null && site !== "same-origin"))
       return refusal();
+    if (url.pathname === "/owner-proof" && request.method === "GET") {
+      if (!url.searchParams.has("challenge"))
+        return proofPage();
+      const challenge = url.searchParams.get("challenge");
+      const ticket = [...this.tickets.values()].find((t) => t.expires > this.now() && equal(challenge, t.challenge));
+      const response2 = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting() : new Response(createHmac("sha256", ticket.value).update(ticket.challenge).digest("base64url"), { headers: { "Cache-Control": "no-store" } });
+      response2.headers.set("Access-Control-Allow-Origin", "*");
+      response2.headers.set("Access-Control-Expose-Headers", "Retry-After");
+      return response2;
+    }
     if (this.options.workerReady?.() === false)
       return restarting();
-    if (url.pathname === "/owner-proof" && request.method === "GET")
-      return proofPage();
     if (url.pathname === "/owner-proof" && request.method === "POST") {
       let body2;
       try {
@@ -7908,18 +7927,37 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
       } catch {
         return refusal();
       }
-      const ticket = this.ticket;
+      const ticket = [...this.tickets.values()].find((t) => equal(body2.ticket, t.value));
       if (!this.live() || !ticket || ticket.expires <= this.now() || !equal(body2.ticket, ticket.value))
         return refusal();
-      this.clearTicket();
+      if (ticket.claimed)
+        return restarting();
+      ticket.claimed = true;
+      try {
+        unlinkSync2(ticket.path);
+      } catch {}
+      const current2 = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
       let dashboardCookies;
       try {
-        dashboardCookies = await this.options.establishDashboard?.() ?? [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (result === null) {
+          this.clearTicket(ticket);
+          return refusal();
+        }
+        dashboardCookies = result;
       } catch {
+        if (this.live() && current2()) {
+          ticket.claimed = false;
+          return restarting();
+        }
+        this.clearTicket(ticket);
         return refusal(503);
       }
-      if (!this.live())
+      if (!this.live() || !current2()) {
+        this.clearTicket(ticket);
         return refusal(503);
+      }
+      this.clearTicket(ticket);
       const cookie2 = secret(), proof2 = secret();
       const session2 = { cookieHash: hashSecret(cookie2), proofHash: hashSecret(proof2), expires: this.now() + SESSION_MS };
       this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session2];
@@ -7935,8 +7973,7 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
     }
     if (url.pathname === "/owner-open" && request.method === "POST") {
       try {
-        const body2 = JSON.parse(await boundedBody(request, 20000));
-        await this.openTicket(body2.target);
+        await this.openTicket("/dashboard", "browser");
         return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
       } catch {
         return refusal(429);
@@ -8049,9 +8086,34 @@ function manageLinuxOwnerBridge(options) {
       return;
     const candidate = new LinuxOwnerBridge(options);
     try {
-      listener = options.listen ? options.listen(candidate) : Bun.serve({ hostname: "127.0.0.1", port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) });
+      if (options.listen)
+        listener = options.listen(candidate);
+      else {
+        const servers = [];
+        const release = () => {
+          candidate.close();
+          for (const server of servers)
+            server.stop(true);
+        };
+        let ipv6 = "listening";
+        try {
+          for (const hostname of ["127.0.0.1", "::1"]) {
+            try {
+              servers.push(Bun.serve({ hostname, port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) }));
+            } catch (error) {
+              if (hostname !== "::1" || !["EADDRNOTAVAIL", "EAFNOSUPPORT"].includes(error.code ?? ""))
+                throw error;
+              ipv6 = "unavailable";
+            }
+          }
+        } catch (error) {
+          release();
+          throw error;
+        }
+        listener = { stop: release, ipv6 };
+      }
       bridge = candidate;
-      status = { state: "listening", origin: bridge.origin, listener_owner: options.listenerOwner ?? "worker" };
+      status = { state: "listening", origin: bridge.origin, listener_owner: options.listenerOwner ?? "worker", ...listener.ipv6 ? { ipv6: listener.ipv6 } : {} };
     } catch (error) {
       candidate.close();
       status = {
@@ -8661,7 +8723,7 @@ __export(exports_worker_auth, {
   dashboardQueryTokenFromWorkerAuthToken: () => dashboardQueryTokenFromWorkerAuthToken,
   applyWorkerSetupEnv: () => applyWorkerSetupEnv
 });
-import { createHmac } from "node:crypto";
+import { createHmac as createHmac2 } from "node:crypto";
 import { readFileSync as readFileSync16, statSync as statSync9 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { join as join19 } from "node:path";
@@ -8688,7 +8750,7 @@ function dashboardQueryTokenFromWorkerAuthToken(authToken) {
   const token = optionalToken(authToken);
   if (!token)
     return;
-  return `dash_${createHmac("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
+  return `dash_${createHmac2("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
 }
 function workerAuthTokenFromSetupEnv(options = {}) {
   return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
@@ -9522,7 +9584,7 @@ var init_worker_service = __esm(() => {
 });
 
 // src/core/oauth-relay.ts
-import { createHmac as createHmac2, randomBytes as randomBytes4, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes4, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 function oauthRelayUrl(env = process.env) {
   const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
   if (!override)
@@ -9678,7 +9740,7 @@ function verifyOAuthRelayState(state, expectation) {
   };
 }
 function relaySignature(segment, key) {
-  return createHmac2("sha256", Buffer.from(key, "base64url")).update(segment, "ascii").digest("base64url");
+  return createHmac3("sha256", Buffer.from(key, "base64url")).update(segment, "ascii").digest("base64url");
 }
 function constantTimeEquals(left, right) {
   const a = Buffer.from(left, "utf8");
@@ -63941,7 +64003,7 @@ var exports_zkapi_confine_fetch = {};
 __export(exports_zkapi_confine_fetch, {
   linuxConfinementFetch: () => linuxConfinementFetch
 });
-import { createHmac as createHmac3, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
+import { createHmac as createHmac4, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 import { createConnection } from "node:net";
 function abortError() {
   return new DOMException("This operation was aborted", "AbortError");
@@ -63950,7 +64012,7 @@ function authError(reason) {
   return Object.assign(new Error(`api_peer_unauthenticated: ${reason}`), { code: "EAUTH" });
 }
 function bridgeMac(token, role, name, ...parts) {
-  const hmac = createHmac3("sha256", token);
+  const hmac = createHmac4("sha256", token);
   hmac.update(`zkapi-confine/${role}/${name}\x00`);
   for (const part of parts)
     hmac.update(part);
@@ -86945,14 +87007,17 @@ import { dirname as dirname60, join as join81 } from "node:path";
 function startLinuxOwnerBridgeHost(options) {
   let closed = false, probing = false, workerProbing = false, ready = false, workerReady = false;
   const manager = manageLinuxOwnerBridge({ ...options, platform: "linux", listenerOwner: "engine-host", ready: () => !closed && ready, workerReady: () => workerReady });
+  let workerFailures = 0;
   const probeWorker = async () => {
     if (closed || workerProbing)
       return;
     workerProbing = true;
     try {
       const value2 = ready && await options.workerReady().catch(() => false);
-      if (!closed)
-        workerReady = ready && value2;
+      if (!closed) {
+        workerFailures = value2 ? 0 : workerFailures + 1;
+        workerReady = ready && (value2 || workerReady && workerFailures < 2);
+      }
     } finally {
       workerProbing = false;
       if (!closed)
@@ -86969,8 +87034,10 @@ function startLinuxOwnerBridgeHost(options) {
         return;
       ready = desktop;
       manager.refresh();
-      if (!desktop)
+      if (!desktop) {
         workerReady = false;
+        workerFailures = 0;
+      }
       probeWorker();
     } catch {
       ready = false;
@@ -88594,14 +88661,19 @@ async function startEngineHost(options) {
   };
   let desktopBridge;
   const statusPath = engineStatusPath(dataEnv);
+  let lastStatus;
   const writeStatus = () => {
-    status.updated_at = now();
     if (desktopBridge)
       status.desktop_bridge = desktopBridge.status();
+    const content = JSON.stringify({ ...status, updated_at: undefined });
+    if (content === lastStatus)
+      return;
+    status.updated_at = now();
     try {
       mkdirSync41(join85(statusPath, ".."), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}
 `);
+      lastStatus = content;
     } catch {}
   };
   const makeServices = options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath));
@@ -88615,8 +88687,13 @@ async function startEngineHost(options) {
     serviceHealth: {
       reportFailure(error) {
         const message2 = error.message;
+        const state = /is starting\.$/.test(message2) ? "starting" : "failing";
+        if (status.services[id]?.state === state && status.services[id]?.message === message2) {
+          writeStatus();
+          return;
+        }
         status.services[id] = {
-          state: /is starting\.$/.test(message2) ? "starting" : "failing",
+          state,
           message: message2,
           updated_at: now()
         };
@@ -88624,6 +88701,10 @@ async function startEngineHost(options) {
         writeStatus();
       },
       clearFailure() {
+        if (status.services[id]?.state === "ok" && status.services[id]?.message === null) {
+          writeStatus();
+          return;
+        }
         status.services[id] = { state: "ok", message: null, updated_at: now() };
         writeStatus();
       }
@@ -88689,15 +88770,19 @@ async function startEngineHost(options) {
         return desktop.ready && !resolveServerMode({ platform: options.platform ?? process.platform, env: dataEnv, fileEnv: readWorkerSetupEnv({ env: dataEnv, workerEnvPath: paths.workerEnvPath }), desktopReady: () => desktop.ready }).remote;
       },
       workerReady: async () => {
-        const response = await fetchSocket(base + "/health", { headers: { Authorization: `Bearer ${authToken() ?? ""}` }, signal: AbortSignal.timeout(1000) });
+        const response = await fetchSocket(base + "/v1/health", { headers: { Authorization: `Bearer ${authToken() ?? ""}` }, signal: AbortSignal.timeout(1000) });
         await response.body?.cancel();
         return response.ok;
       },
       fetchSocket: (request) => fetchSocket(request, { redirect: "manual" }),
       establishDashboard: async () => {
         const response = await fetchSocket(base + "/dashboard/control/session", { method: "POST", headers: { Authorization: `Bearer ${authToken() ?? ""}`, Origin: base }, signal: AbortSignal.timeout(5000) });
-        if (!response.ok)
-          throw new Error("Owner dashboard session refused.");
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          if (response.status === 503)
+            throw new Error("Owner dashboard session is restarting.");
+          return null;
+        }
         await response.body?.cancel();
         return response.headers.getSetCookie();
       }
@@ -128068,7 +128153,7 @@ var init_request_peer = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac4, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createHmac as createHmac5, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -128088,7 +128173,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = createHmac4("sha256", options.sessionSecret?.trim() || randomBytes24(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
+  const sessionSecret = createHmac5("sha256", options.sessionSecret?.trim() || randomBytes24(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -128467,7 +128552,7 @@ function isDashboardControlRoute(request) {
   ]).has(new URL(request.url).pathname);
 }
 function hmacTag(authToken, context2, ...parts) {
-  const mac2 = createHmac4("sha256", authToken).update(context2);
+  const mac2 = createHmac5("sha256", authToken).update(context2);
   for (const part of parts)
     mac2.update("\x00").update(part);
   return mac2.digest("base64url");
@@ -128631,7 +128716,7 @@ function verifyGatewayCallbackPeerHeader(value2, authToken) {
     return;
   const peer = normalizeGatewayCallbackPeer(value2.slice(0, separator));
   const presented = value2.slice(separator + 1);
-  const expected = createHmac4("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${peer}`).digest("base64url");
+  const expected = createHmac5("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${peer}`).digest("base64url");
   const presentedBytes = Buffer.from(presented, "ascii");
   const expectedBytes = Buffer.from(expected, "ascii");
   if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual7(presentedBytes, expectedBytes))
@@ -160647,8 +160732,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           redirect: "error",
           signal: AbortSignal.timeout(5000)
         });
-        if (!response.ok)
-          throw new Error("Owner dashboard session refused.");
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          if (response.status === 503)
+            throw new Error("Owner dashboard session is restarting.");
+          return null;
+        }
         await response.body?.cancel();
         return response.headers.getSetCookie();
       }

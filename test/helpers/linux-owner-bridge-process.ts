@@ -24,7 +24,8 @@ if (mode === 'host') {
     const socketPath = prepareWorkerSocket()!;
     const server = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch(request) {
       const path = new URL(request.url).pathname;
-      if (path === '/health') return Response.json({ status: 'ok' });
+      if (path === '/v1/health') return Response.json({ status: 'ok' });
+      if (path === '/health') return new Response('Not found', { status: 404 });
       // Like the worker: a dashboard session is bound to the origin it was minted for,
       // and the bridge forwards browser requests as 127.0.0.1.
       if (path === '/dashboard/control/session') {
