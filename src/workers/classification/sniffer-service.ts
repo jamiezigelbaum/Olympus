@@ -22,7 +22,7 @@ import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
-import { snifferMaterialCarriesSecret, snifferPromptVersions } from './sniffer.ts';
+import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
@@ -571,6 +571,7 @@ export class TierSnifferService {
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
     this.settleStoredItems();
+    this.recoverMissingQuestions();
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
       // and held Private, until the model is there. A model whose download
@@ -629,6 +630,7 @@ export class TierSnifferService {
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
+    this.recoverMissingQuestions(true);
     const rejudged = this.rejudge();
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
@@ -751,6 +753,91 @@ export class TierSnifferService {
     // came while it was queued: apply the override now, not a tick later.
     if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
     return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
+  }
+
+  /**
+   * The resolver drains the question queue, so it cannot see a lost enqueue,
+   * an unread item with no possible excerpt, or an orphaned ledger row.
+   * Reconcile a bounded, durable page before model availability/approval.
+   */
+  private recoverMissingQuestions(allowReask = false): void {
+    // Separate cursors keep model-independent recovery and approved re-asking
+    // from skipping alternating pages of a large ledger.
+    const cursorKey = allowReask ? 'sniffer_missing_question_reask_cursor_v1' : 'sniffer_missing_question_cursor_v1';
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const ledger = this.ledgerAt(ledgerPath);
+        if (this.options.installed.forLedger(ledgerPath).unavailableReason) continue;
+        const queue = this.options.installed.snifferStoreForLedger(ledgerPath);
+        const set = tierSetForLedger(ledgerPath);
+        const stores = set?.openStores() ?? this.options.stores().filter(store =>
+          ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath
+            || tierLedgerPathForStore(store.dbPath) === ledgerPath));
+        // An unavailable store is not evidence that its items were deleted.
+        if (stores.length === 0 || stores.some(store => !store.exportItemCopy)) continue;
+        const saved = ledger.readMeta(cursorKey);
+        const after = saved ? JSON.parse(saved) as TierLedgerIdentity : undefined;
+        const rows = ledger.listPending({ limit: 100, ...(after ? { after } : {}) });
+        let settled = 0;
+        let retired = 0;
+        for (const row of rows) {
+          const identity = recordIdentity(row);
+          const missingMetadata = row.metadataPending && !queue.questionFor(identity, 'metadata');
+          const missingContent = (row.contentPending || !row.metadataPending) && !queue.questionFor(identity, 'content');
+          // Existing questions include durable Secrets cleanup retries. Let the
+          // resolver finish them before reconciling any remaining missing pass.
+          if (queue.questionFor(identity, 'metadata') || queue.questionFor(identity, 'content')) continue;
+          try {
+            // Routed copy rows must all be backed by a readable configured store.
+            if (row.routed && ledger.copies(identity).some(copy =>
+              !set?.domainForCorpus(copy.corpusId) || !set.store(copy.trustDomain)?.exportItemCopy)) continue;
+            const copies = stores.map(store => store.exportItemCopy!(identity)).filter(copy => copy !== undefined);
+            if (copies.length === 0) {
+              // Routing records its plan before the page lands its store rows.
+              // Never retire a just-listed item in that transient interval.
+              if (this.clockMs() - Date.parse(row.decidedAt) < DEFAULT_TIER_SNIFFER_MAX_PASS_MS) continue;
+              if (ledger.retireAbsentPending(row)) {
+                queue.deleteQuestion(identity, 'metadata');
+                queue.deleteQuestion(identity, 'content');
+                retired++;
+              }
+              continue;
+            }
+            if (!missingMetadata && !missingContent) continue;
+            // Preserve the existing content-question repair where the stored
+            // body and configured classifier can reconstruct the question.
+            const classification = set?.classification();
+            if (set && row.contentRead && row.contentPending && !row.metadataPending
+              && (row.contentTier === 'private' || row.contentTier === 'public')
+              && classification?.sniffer && !classification.unavailableReason) {
+              // Cached verdicts and reconstructed questions use the approved
+              // pass; only conservative Private settlement precedes approval.
+              if (!allowReask) continue;
+              rejudgeStoredContent(set, row, { sniffer: classification.sniffer,
+                ...(classification.retirePublic ? { retirePublic: true } : {}),
+                report: emptyTierRejudgeReport(), autoMoves: this.autoMovesFor(set), hideRaises: true });
+              if (ledger.getCurrent(identity)?.state !== 'pending'
+                || queue.questionFor(identity, 'metadata') || queue.questionFor(identity, 'content')) continue;
+            }
+            const planner = tierSetPlannerForLedger(ledgerPath);
+            if (ledger.settleMissingQuestions(row, {
+              missingMetadata, missingContent,
+              snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
+              stillMissing: () => (!missingMetadata || !queue.questionFor(identity, 'metadata'))
+                && (!missingContent || !queue.questionFor(identity, 'content')),
+              ...(planner ? { placementFor: planner } : {}),
+            })) settled++;
+          } catch {
+            // Read/write failures keep the item held; the cursor wraps and retries.
+          }
+        }
+        const last = rows.at(-1);
+        ledger.writeMeta(cursorKey, rows.length === 100 && last ? JSON.stringify(recordIdentity(last)) : '');
+        if (settled || retired) this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
+      } catch {
+        // A queue/ledger that cannot be read remains held, retried next tick.
+      }
+    }
   }
 
   private async drainMoves(): Promise<TierAutoMoveReport | undefined> {

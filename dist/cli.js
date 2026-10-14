@@ -21566,6 +21566,66 @@ class TierLedger {
         `).all(limit);
     return rows.map(recordFromRow);
   }
+  settleMissingQuestions(record, options) {
+    const identity = {
+      provider: record.provider,
+      accountScope: record.accountScope,
+      providerItemId: record.providerItemId,
+      ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+    };
+    return this.db.transaction(() => {
+      const current2 = this.getCurrent(identity);
+      if (!current2 || current2.state !== "pending" || JSON.stringify(current2) !== JSON.stringify(record) || current2.decidedBy === "override" || this.getOverride(identity)?.kind === "tier" || !options.stillMissing())
+        return false;
+      if (current2.routed && !options.placementFor)
+        return false;
+      const next = rowOf(current2);
+      if (options.missingMetadata && next.metadataPending) {
+        next.metadataTier = maxTier(next.metadataTier, "secure");
+        next.metadataPending = false;
+        next.reasons = [
+          ...next.reasons.filter((reason) => !isOpenSnifferReason(reason, "metadata")),
+          `metadata:sniffer:${options.snifferId}:fail_safe:missing_question`
+        ];
+      }
+      if (options.missingContent && (next.contentPending || !next.metadataPending)) {
+        next.contentTier = maxTier(next.contentTier, "secure");
+        next.contentPending = false;
+        next.reasons = [
+          ...next.reasons.filter((reason) => !isOpenSnifferReason(reason, "content")),
+          `content:sniffer:${options.snifferId}:fail_safe:missing_question`
+        ];
+      }
+      next.contentTier = maxTier(next.contentTier, next.metadataTier);
+      next.decidedBy = "sniffer";
+      const decision = decisionOfRow(next);
+      if (current2.routed) {
+        this.recordRoutedPlacement(identity, decision, options.placementFor(decision), {
+          guard: { generation: current2.generation, override: this.getOverride(identity) },
+          stagedLandingAllowed: true
+        });
+      } else
+        this.writeRow(identity, next, undefined, current2);
+      return true;
+    })();
+  }
+  retireAbsentPending(record) {
+    const identity = {
+      provider: record.provider,
+      accountScope: record.accountScope,
+      providerItemId: record.providerItemId,
+      ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+    };
+    return this.db.transaction(() => {
+      const current2 = this.getCurrent(identity);
+      if (!current2 || current2.state !== "pending" || JSON.stringify(current2) !== JSON.stringify(record) || this.getOverride(identity)?.kind === "tier")
+        return false;
+      this.deleteCopies(identity);
+      this.db.query(`DELETE FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
+      return true;
+    })();
+  }
   counts() {
     const byState = { pending: 0, current: 0, moving: 0 };
     const byContentTier = { public: 0, private: 0, secure: 0, secrets: 0 };
@@ -71608,6 +71668,10 @@ function withState(phase, index, phases, source, now, embeddingRuntime) {
       return { ...phase, state: "done", state_words: dashboardPhaseUnreadableWords(phase.measure.done, unreadable) };
     }
     return { ...phase, state: "done", state_words: "Done" };
+  }
+  const held = source.tier_classification?.pending_classification_items ?? 0;
+  if (phase.id === "embedding" && phase.measure.kind === "ratio" && held > 0 && held >= phase.measure.total - phase.measure.done - (phase.unreadable ?? 0)) {
+    return { ...phase, state: "waiting", state_words: "Waiting to be checked" };
   }
   const previous = index > 0 ? phases[index - 1] : undefined;
   if (previous !== undefined && measureDone(previous.measure) === 0 && measureDone(phase.measure) === 0) {
@@ -135231,6 +135295,7 @@ class TierSnifferService {
   async tick(signal) {
     const { lane } = this.options;
     this.settleStoredItems();
+    this.recoverMissingQuestions();
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       try {
         this.options.startModel?.();
@@ -135275,6 +135340,7 @@ class TierSnifferService {
       await this.drainMoves();
       return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions2.approval };
     }
+    this.recoverMissingQuestions(true);
     const rejudged = this.rejudge();
     const targets = [];
     for (const ledgerPath of this.ledgerPaths()) {
@@ -135396,6 +135462,77 @@ class TierSnifferService {
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
+  }
+  recoverMissingQuestions(allowReask = false) {
+    const cursorKey = allowReask ? "sniffer_missing_question_reask_cursor_v1" : "sniffer_missing_question_cursor_v1";
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const ledger = this.ledgerAt(ledgerPath);
+        if (this.options.installed.forLedger(ledgerPath).unavailableReason)
+          continue;
+        const queue = this.options.installed.snifferStoreForLedger(ledgerPath);
+        const set2 = tierSetForLedger(ledgerPath);
+        const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath || tierLedgerPathForStore(store.dbPath) === ledgerPath);
+        if (stores.length === 0 || stores.some((store) => !store.exportItemCopy))
+          continue;
+        const saved = ledger.readMeta(cursorKey);
+        const after = saved ? JSON.parse(saved) : undefined;
+        const rows = ledger.listPending({ limit: 100, ...after ? { after } : {} });
+        let settled = 0;
+        let retired = 0;
+        for (const row of rows) {
+          const identity = recordIdentity(row);
+          const missingMetadata = row.metadataPending && !queue.questionFor(identity, "metadata");
+          const missingContent = (row.contentPending || !row.metadataPending) && !queue.questionFor(identity, "content");
+          if (queue.questionFor(identity, "metadata") || queue.questionFor(identity, "content"))
+            continue;
+          try {
+            if (row.routed && ledger.copies(identity).some((copy) => !set2?.domainForCorpus(copy.corpusId) || !set2.store(copy.trustDomain)?.exportItemCopy))
+              continue;
+            const copies = stores.map((store) => store.exportItemCopy(identity)).filter((copy) => copy !== undefined);
+            if (copies.length === 0) {
+              if (this.clockMs() - Date.parse(row.decidedAt) < DEFAULT_TIER_SNIFFER_MAX_PASS_MS)
+                continue;
+              if (ledger.retireAbsentPending(row)) {
+                queue.deleteQuestion(identity, "metadata");
+                queue.deleteQuestion(identity, "content");
+                retired++;
+              }
+              continue;
+            }
+            if (!missingMetadata && !missingContent)
+              continue;
+            const classification = set2?.classification();
+            if (set2 && row.contentRead && row.contentPending && !row.metadataPending && (row.contentTier === "private" || row.contentTier === "public") && classification?.sniffer && !classification.unavailableReason) {
+              if (!allowReask)
+                continue;
+              rejudgeStoredContent(set2, row, {
+                sniffer: classification.sniffer,
+                ...classification.retirePublic ? { retirePublic: true } : {},
+                report: emptyTierRejudgeReport(),
+                autoMoves: this.autoMovesFor(set2),
+                hideRaises: true
+              });
+              if (ledger.getCurrent(identity)?.state !== "pending" || queue.questionFor(identity, "metadata") || queue.questionFor(identity, "content"))
+                continue;
+            }
+            const planner = tierSetPlannerForLedger(ledgerPath);
+            if (ledger.settleMissingQuestions(row, {
+              missingMetadata,
+              missingContent,
+              snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
+              stillMissing: () => (!missingMetadata || !queue.questionFor(identity, "metadata")) && (!missingContent || !queue.questionFor(identity, "content")),
+              ...planner ? { placementFor: planner } : {}
+            }))
+              settled++;
+          } catch {}
+        }
+        const last = rows.at(-1);
+        ledger.writeMeta(cursorKey, rows.length === 100 && last ? JSON.stringify(recordIdentity(last)) : "");
+        if (settled || retired)
+          this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
+      } catch {}
+    }
   }
   async drainMoves() {
     try {
