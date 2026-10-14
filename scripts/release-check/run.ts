@@ -38,7 +38,7 @@ import {
   buildReport, renderHtml, scanReport,
   type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type ReleaseReport, type ReportFile,
 } from './report.ts';
-import { evaluateArtifactScan, evaluateObservation, type QuestionObservation } from './suite.ts';
+import { evaluateArtifactScan, evaluateObservation, evaluateSmokeVerdict, type QuestionObservation } from './suite.ts';
 import { AgentApiError, readAgentKey, runXaiAgent, type AgentSpec, type ToolBridge, type ToolDefinition } from './agents.ts';
 import { codexLoginAvailable, looksLikeClaudeSetupToken, runClaudeCode, runCodex } from './cli-agents.ts';
 import { cachingRelay, startMcpProxy, type McpExchange, type Relay } from './mcp-proxy.ts';
@@ -167,9 +167,10 @@ function machineToolBridge(run: Run): ToolBridge & { tools(): Promise<ToolDefini
   };
 }
 
-function evidenceTitlesOf(structured: unknown): string[] {
-  const evidence = (structured as { evidence?: Array<{ title?: string }> } | null)?.evidence ?? [];
-  return evidence.map((item) => item.title ?? '').filter(Boolean);
+/** The evidence items a search returned, with the ids a reply cites them by. Items without a title carry no name to check and are left out. */
+function evidenceOf(structured: unknown): Array<{ id: string; title: string }> {
+  const evidence = (structured as { evidence?: Array<{ id?: string; title?: string }> } | null)?.evidence ?? [];
+  return evidence.filter((item) => item.title).map((item) => ({ id: item.id ?? '', title: item.title ?? '' }));
 }
 
 async function bundleAgent(workDir: string): Promise<string> {
@@ -308,7 +309,8 @@ function exchangesObservation(question: SuiteQuestion, agentId: string, finalTex
       ]),
     ],
     answerText: finalText,
-    evidenceTitles: toolCalls.flatMap((c) => evidenceTitlesOf(c.structured)),
+    evidenceTitles: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.title)),
+    evidenceIds: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.id)),
     privateNote: toolCalls.some((c) => privateNoteKindIn(c.outputText, c.structured) !== null),
     ms,
     ...(error ? { error } : toolCalls.length === 0 ? { error: 'the agent never called the search tool' } : {}),
@@ -454,6 +456,8 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
       return;
     }
     run.add({ id: 'relay.reachable', title: 'The machine is reachable through the production relay', status: 'pass', detail: `ChatGPT-protocol grant minted; ${(out.result.tools as string[]).length} tool(s) listed` });
+    // The smoke's own verdict stands: its private-content and panel checks are stronger than anything re-derived here.
+    agent.checks.push(evaluateSmokeVerdict(out.result.exit, (out.result.smokeChecks ?? []) as string[], run.markers));
     for (const question of SUITE_QUESTIONS) {
       const row = results.find((r) => r.id === question.id);
       if (!row) {

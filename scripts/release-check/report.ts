@@ -87,14 +87,30 @@ function allChecks(machine: MachineReport): CheckResult[] {
   return [...machine.checks, ...machine.agents.flatMap((agent) => agent.checks)];
 }
 
-/** Totals and the verdict. A skip never fails a run; a failed check, a warning-free error list is required. */
+/** An agent counts as having asked a question only if it ran and produced checks. */
+function askedAQuestion(agent: AgentReport): boolean {
+  return agent.ran && agent.checks.length > 0;
+}
+
+/**
+ * Totals and the verdict. A skip never fails a run, but a run in which every agent was skipped asked the product nothing,
+ * so it cannot pass. A failed check or any run problem fails it.
+ */
 export function buildReport(input: ReleaseReportInput): ReleaseReport {
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
   for (const machine of input.machines) {
     for (const check of allChecks(machine)) counts[check.status] += 1;
   }
-  const failed = counts.fail > 0 || input.errors.length > 0 || input.machines.length === 0;
-  return { schema: 'olympus.release-check.report.v1', ...input, verdict: failed ? 'fail' : 'pass', counts };
+  const errors = [...input.errors];
+  for (const machine of input.machines) {
+    if (!machine.agents.some(askedAQuestion)) {
+      const problem = `${machine.label}: no agent asked a question (${machine.agents.length === 0 ? 'none was configured' : 'every agent was skipped'}), so the run proves nothing about answers`;
+      // A report is rebuilt from an earlier report; the same problem is recorded once.
+      if (!errors.includes(problem)) errors.push(problem);
+    }
+  }
+  const failed = counts.fail > 0 || errors.length > 0 || input.machines.length === 0;
+  return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', counts };
 }
 
 const STATUS_LABEL: Record<CheckStatus, string> = { pass: 'PASS', fail: 'FAIL', warn: 'WARN', skip: 'SKIP' };

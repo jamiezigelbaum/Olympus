@@ -454,7 +454,8 @@ async function smoke(questionsFile: string): Promise<never> {
   const realLog = console.log;
   console.log = (...parts: unknown[]) => { printed.push(parts.map(String).join(' ')); };
   let tools: string[] = [];
-  let exit = 2;
+  /** The smoke's own verdict: 0 clean, anything else a failure. Failures from a Private question's earlier warm-up attempts are tolerated; its last attempt counts. */
+  let exit: number | undefined;
   const startedAt = Date.now();
   /** What each Private question looked like on each attempt: panel state and which fixed note, never text. */
   const attempts: Record<string, Array<{ panelState: string | null; noteKind: string | null; atS: number }>> = {};
@@ -486,16 +487,18 @@ async function smoke(questionsFile: string): Promise<never> {
     const priv = questions.filter((q) => q.kind === 'private');
     const rest = questions.filter((q) => q.kind !== 'private');
     for (const q of priv) {
+      let code: number;
       for (;;) {
-        exit = await ask([q]);
+        code = await ask([q]);
         const latest = observed.find((row) => row.id === q.id)?.obs;
         if (latest?.panel !== undefined || (Date.now() - startedAt) / 1000 > PRIVATE_WARMUP_S) break;
         await sleep(PRIVATE_WARMUP_POLL_S * 1000);
       }
+      exit = Math.max(exit ?? 0, code);
     }
     if (rest.length > 0) {
       const code = await ask(rest);
-      exit = Math.max(exit === 2 ? 0 : exit, code);
+      exit = Math.max(exit ?? 0, code);
     }
   } finally {
     console.log = realLog;
@@ -522,7 +525,7 @@ async function smoke(questionsFile: string): Promise<never> {
     };
   });
   const lines = printed.filter((line) => /^\s+(FAIL|warn):/.test(line) || /^\s+(PASS|\d+ failure)/.test(line)).map((line) => line.trim());
-  emit({ ok: true, exit, tools, results, smokeChecks: lines });
+  emit({ ok: true, exit: exit ?? 1, tools, results, smokeChecks: lines });
 }
 
 // ---------------------------------------------------------------------------
