@@ -503,6 +503,31 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
     expect(reopened.requestId).not.toBe(page.requestId);
   });
 
+  test('a disconnected grant is no longer reported as Connected; reopening gets a fresh form', async () => {
+    const verifier = 'q'.repeat(50);
+    const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
+    const authorization = relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, code_challenge: challenge });
+    const page = await openConsent(authorization);
+    const code = new URL((await submitConsent(page, { action: 'approve' })).headers.get('location')!).searchParams.get('code')!;
+    expect((await exchange(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, code, verifier)).status).toBe(200);
+    expect((await openConsent(authorization)).html).toContain('<h1>Connected</h1>');
+    store.revoke(store.list()[0]!.id);
+    const reopened = await openConsent(authorization);
+    expect(reopened.html).not.toContain('<h1>Connected</h1>');
+    expect(reopened.html).toContain('Connect Claude to Olympus?');
+    expect(await (await submitConsent({ ...page, cookie: '' }, { action: 'approve' })).text()).not.toContain('<h1>Connected</h1>');
+  });
+
+  test('a reopened form stays valid for its full window', async () => {
+    const authorization = relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI });
+    const first = await openConsent(authorization);
+    clock += 9 * 60_000;
+    const again = await openConsent(authorization);
+    expect(again.requestId).toBe(first.requestId);
+    clock += 5 * 60_000;
+    expect((await submitConsent(again, { action: 'approve' })).status).toBe(303);
+  });
+
   test('a code presented twice revokes the connection and its Connected receipt', async () => {
     const verifier = 'y'.repeat(50);
     const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');

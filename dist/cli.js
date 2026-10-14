@@ -151867,11 +151867,13 @@ function createRemoteOAuthHandler(options) {
     sweep();
     const transaction = sha2566(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
-      if ([...completed.values()].some((receipt) => receipt.connected && receipt.transaction === transaction))
+      if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
       for (const [id, entry2] of pending) {
-        if (!entry2.demo && entry2.transaction === transaction)
-          return consentPage(id, entry2, u);
+        if (entry2.demo || entry2.transaction !== transaction)
+          continue;
+        entry2.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
+        return consentPage(id, entry2, u);
       }
     }
     admitPending();
@@ -151921,7 +151923,7 @@ function createRemoteOAuthHandler(options) {
     if (!entry.demo) {
       if (completed.size >= MAX_COMPLETED_CONSENTS)
         completed.delete(completed.keys().next().value);
-      completed.set(requestId, { csrf: entry.csrf, transaction: entry.transaction, expiresAt: now() + COMPLETED_CONSENT_TTL_MS, connected: false });
+      completed.set(requestId, { csrf: entry.csrf, transaction: entry.transaction, expiresAt: now() + COMPLETED_CONSENT_TTL_MS });
     }
     return redirectWithParams(entry.redirectUri, { code, state: entry.state, iss: u.issuer });
   };
@@ -151929,7 +151931,16 @@ function createRemoteOAuthHandler(options) {
     const receipt = completed.get(requestId);
     if (!receipt || !constantTimeEqual(csrf, receipt.csrf))
       return;
-    return receiptPage(receipt.connected);
+    return receiptPage(liveReceipt(receipt));
+  };
+  const liveReceipt = (receipt) => {
+    if (receipt.connectionId === undefined)
+      return false;
+    try {
+      return options.connections().list().some((connection) => connection.id === receipt.connectionId && connection.revokedAt === null);
+    } catch {
+      return false;
+    }
   };
   const demoPost = async (request, u) => {
     const settings = demoSettings(u);
@@ -152111,7 +152122,7 @@ function createRemoteOAuthHandler(options) {
       issued.connectionId = granted.connection.id;
       const receipt = issued.receipt ? completed.get(issued.receipt) : undefined;
       if (receipt)
-        receipt.connected = true;
+        receipt.connectionId = granted.connection.id;
       return tokenResponse(granted.tokens);
     }
     if (grantType === "refresh_token") {

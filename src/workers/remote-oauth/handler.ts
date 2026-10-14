@@ -195,8 +195,8 @@ interface ConsentReceipt {
   csrf: string;
   transaction: string;
   expiresAt: number;
-  /** True only after the code was exchanged and the connection exists. */
-  connected: boolean;
+  /** The connection the code's exchange created; Connected only while it is live. */
+  connectionId?: string;
 }
 
 export function isRemoteOAuthRequest(request: Request): boolean {
@@ -354,9 +354,12 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     // already consumed; an approval whose code was never exchanged gets a
     // fresh form, so a lost redirect never strands the client.
     if (u.installId && !demo) {
-      if ([...completed.values()].some((receipt) => receipt.connected && receipt.transaction === transaction)) return receiptPage(true);
+      if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt))) return receiptPage(true);
       for (const [id, entry] of pending) {
-        if (!entry.demo && entry.transaction === transaction) return consentPage(id, entry, u);
+        if (entry.demo || entry.transaction !== transaction) continue;
+        // The form is served again with a fresh cookie, so it is valid as long.
+        entry.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
+        return consentPage(id, entry, u);
       }
     }
     admitPending();
@@ -410,7 +413,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     pending.delete(requestId);
     if (!entry.demo) {
       if (completed.size >= MAX_COMPLETED_CONSENTS) completed.delete(completed.keys().next().value!);
-      completed.set(requestId, { csrf: entry.csrf, transaction: entry.transaction, expiresAt: now() + COMPLETED_CONSENT_TTL_MS, connected: false });
+      completed.set(requestId, { csrf: entry.csrf, transaction: entry.transaction, expiresAt: now() + COMPLETED_CONSENT_TTL_MS });
     }
     return redirectWithParams(entry.redirectUri, { code, state: entry.state, iss: u.issuer });
   };
@@ -421,7 +424,19 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   const completedPage = (requestId: string, csrf: string): Response | undefined => {
     const receipt = completed.get(requestId);
     if (!receipt || !constantTimeEqual(csrf, receipt.csrf)) return undefined;
-    return receiptPage(receipt.connected);
+    return receiptPage(liveReceipt(receipt));
+  };
+
+  // Connected means the grant this approval produced still exists: a
+  // disconnect from the dashboard, the CLI or /connect/revoke ends it, and an
+  // unreadable store never claims a connection.
+  const liveReceipt = (receipt: ConsentReceipt): boolean => {
+    if (receipt.connectionId === undefined) return false;
+    try {
+      return options.connections().list().some((connection) => connection.id === receipt.connectionId && connection.revokedAt === null);
+    } catch {
+      return false;
+    }
   };
 
   /**
@@ -614,7 +629,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       });
       issued.connectionId = granted.connection.id;
       const receipt = issued.receipt ? completed.get(issued.receipt) : undefined;
-      if (receipt) receipt.connected = true;
+      if (receipt) receipt.connectionId = granted.connection.id;
       return tokenResponse(granted.tokens);
     }
     if (grantType === 'refresh_token') {
