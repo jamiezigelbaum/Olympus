@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from '../../core/linux-engine-layout.ts';
 // Owner tier rules (design docs/design/per-item-four-tier-classification.md,
 // section 2.4): `~/.olympus/tier-rules.json`, owner-only, validated on every
 // read.
@@ -66,13 +67,14 @@ export interface TierRulesValidationResult {
   permissionsTightened?: boolean;
 }
 
-export function defaultTierRulesPath(): string {
+export function defaultTierRulesPath(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'tier-rules.json');
   return join(homedir(), '.olympus', 'tier-rules.json');
 }
 
 export function resolveTierRulesPath(options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {}): string {
   const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath();
+  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
 }
 
 /**

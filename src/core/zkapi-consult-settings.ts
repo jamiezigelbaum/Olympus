@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 // Owner-declared settings for the zkAPI route used by anonymous answers
 // (design: docs/design/frontier-consult-lane.md, track Z).
 //
@@ -289,7 +290,7 @@ export function zkapiDaemonPortSet(): ReadonlySet<number> {
 export function sovereigntyPolicyPath(env: Record<string, string | undefined> = process.env): string {
   return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()
-    || join(env.HOME?.trim() || homedir(), '.olympus', 'sovereignty.json');
+    || (process.platform === 'linux' ? resolveLinuxEngineLayout(env).sovereigntyPath : join(env.HOME?.trim() || homedir(), '.olympus', 'sovereignty.json'));
 }
 
 /** The policy file that currently cannot be read, if any. */

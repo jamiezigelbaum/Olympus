@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 // Ingestion dispositions: a source-neutral, fail-closed ingestion primitive.
 //
 // Owner directive 2026-07-28. Some folders in a user's file storage are the
@@ -1257,7 +1258,8 @@ function parseFolderIds(value: unknown, label: string): SourceIngestionExclusion
  * Same directory as the per-source ingestion policies, because setup writes
  * both and an operator looking for one should find the other beside it.
  */
-export function defaultSourceIngestionExclusionsPath(): string {
+export function defaultSourceIngestionExclusionsPath(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'sources', 'ingestion-exclusions.json');
   return join(homedir(), '.olympus', 'sources', 'ingestion-exclusions.json');
 }
 
@@ -1286,7 +1288,7 @@ export function loadSourceIngestionExclusions(
   const env = options.env ?? process.env;
   const path = options.exclusionsPath?.trim()
     || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()
-    || defaultSourceIngestionExclusionsPath();
+    || defaultSourceIngestionExclusionsPath(env);
   if (!existsSync(path)) return { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules: [] };
   return parseSourceIngestionExclusions(JSON.parse(readFileSync(path, 'utf8')) as unknown, path);
 }

@@ -2,6 +2,7 @@
 
 ## 1.0.0 - 2026-10-13
 
+- Linux upgrades preserve privacy preferences and keep settings inside the installation so purge removes them.
 - **Olympus 1.0.** The first full release, for Mac and for Omarchy Linux.
 - **Olympus on Linux.** A standalone engine that runs as your user (Omarchy
   first): an installer and uninstaller, an Omarchy launcher and status

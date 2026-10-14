@@ -1,7 +1,7 @@
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { userInfo } from 'node:os';
@@ -104,7 +104,7 @@ export function systemdMust(exec: EngineExec, args: string[]): string {
 
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync, removeFileDurablySync, syncDirectorySync } from './atomic-file.ts';
-import { createLinuxPrivateDirectory, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { createLinuxPrivateDirectory, legacyLinuxSettings, isLegacyLinuxSetting, LEGACY_LINUX_SETTINGS_DIRECTORIES, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { engineBuildIdentity, engineServicePaths, reconcileEngineConfig, seedEngineSovereignty, resolveEngineProgram, waitForQuietEngine, waitForEngineHealthy,
  type EngineInstallOptions, type EngineInstallResult, type EngineServiceOptions, type EngineHealthDeps, type EngineHealthProof, type EngineLifecycleCheckpoint, type EngineRollbackResult } from './engine-service.ts';
 import { reapRecordedEngineChildren, readEngineChildren, parseProcessTable } from './engine-children.ts';
@@ -354,6 +354,7 @@ interface LinuxInstallTransaction {
  generationCreated?: boolean;
  generationArtifact?:LinuxMachineArtifact;
  desktopIconSha256?:string;
+ legacySettings?: Record<string, LinuxFileSnapshot>;
  /** Write-ahead intent: only unit-search links absent before systemctl link. */
  newUnitLinks?:string[];
  priorUnitLinks?:Array<{path:string;target:string}>;
@@ -439,6 +440,9 @@ function readInstallTransaction(layout: LinuxEngineLayout): LinuxInstallTransact
   ?snapshot.backupPath===undefined&&snapshot.sha256===undefined&&snapshot.mode===undefined
   :typeof snapshot.backupPath==='string'&&dirname(resolve(snapshot.backupPath))===backupDir&&/^file-[0-9]+[.]backup$/.test(basename(snapshot.backupPath))
    &&/^[0-9a-f]{64}$/.test(snapshot.sha256??'')&&Number.isInteger(snapshot.mode)&&snapshot.mode!>=0&&snapshot.mode!<=0o777));
+ const legacy=value.legacySettings;
+ if(legacy!==undefined && (!legacy || typeof legacy!=='object' || Array.isArray(legacy)
+  || Object.entries(legacy).some(([name,snapshot],index)=>!isLegacyLinuxSetting(name)||!snapshotValid(snapshot)||!snapshot.present||snapshot.backupPath!==join(backupDir,`file-${10000+index}.backup`)))) throw new Error('Invalid legacy settings recovery journal.');
  const createdAllowed=new Set(transactionCreatedFiles(layout));const absent=value?.before?.absentCreatedFiles;
  if (value.schema !== 'olympus.engine.install-transaction.v1'||!['install','rollback'].includes(value.action)|| !['preparing','activating','rollback_required','qualified','recovered'].includes(value.phase)
   ||(value.priorUnitLinks!==undefined&&(!Array.isArray(value.priorUnitLinks)
@@ -508,6 +512,55 @@ function writeTransactionDesktop(layout:LinuxEngineLayout,program:EngineProgram,
  writeLinuxDesktopEntry(layout,program.workingDirectory,exec);
 }
 
+function legacySettingTarget(layout: LinuxEngineLayout, name: string): string {
+ return join(layout.configDir, name);
+}
+function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
+ const files=legacyLinuxSettings(layout);
+ for(const name of files){const target=legacySettingTarget(layout,name);assertLinuxManagedPath(target);
+  if(lstatSync(target,{throwIfNoEntry:false}))throw new Error(`Legacy Olympus settings conflict at ${target}; nothing was migrated.`);}
+ return files;
+}
+/** Called only after the old engine releases custody. Journal every byte before moving any. */
+function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
+ const files=assertLegacySettingDestinations(layout); if(!files.length)return;
+ const snapshots:Record<string,LinuxFileSnapshot>={};
+ for(const [index,name] of files.entries()){
+  const source=join(layout.home,'.olympus',name);
+  snapshots[name]=writeSnapshot(transaction.backupDir,10000+index,readFileSync(source),lstatSync(source).mode&0o777);
+ }
+ transaction.legacySettings=snapshots;writeInstallTransaction(layout,transaction);
+ for(const name of files){
+  const source=join(layout.home,'.olympus',name),target=legacySettingTarget(layout,name);
+  assertLinuxManagedPath(source);assertLinuxManagedPath(target);
+  if(hashFile(source)!==snapshots[name]!.sha256)throw new Error('Legacy Olympus settings changed during migration.');
+  createLinuxPrivateDirectory(dirname(target));copyFileSync(source,target,constants.COPYFILE_EXCL);chmodSync(target,0o600);
+  syncCopiedFile(target);syncDirectorySync(dirname(target));removeFileDurablySync(source);
+ }
+}
+function restoreLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
+ // Validate every existing source/destination before touching any of them.
+ for(const [name,snapshot] of Object.entries(transaction.legacySettings??{})){
+  snapshotBytes(snapshot);
+  for(const path of [join(layout.home,'.olympus',name),legacySettingTarget(layout,name)]){
+   assertLinuxManagedPath(path);if(existsSync(path)&&hashFile(path)!==snapshot.sha256)throw new Error(`Migrated settings changed at ${path}; retained for recovery.`);
+  }
+ }
+ for(const [name,snapshot] of Object.entries(transaction.legacySettings??{})){
+  restoreOptionalFile(join(layout.home,'.olympus',name),snapshot);
+  removeFileDurablySync(legacySettingTarget(layout,name));
+ }
+}
+function cleanupLegacySettingsDirectories(layout: LinuxEngineLayout): void {
+ // rmdir only: never acquire recursive deletion authority over legacy data.
+ for(const name of [...LEGACY_LINUX_SETTINGS_DIRECTORIES, ''].sort((a,b)=>b.length-a.length)){
+  const path=join(layout.home,'.olympus',name);
+  if(!lstatSync(path,{throwIfNoEntry:false}))continue;
+  assertLinuxManagedPath(path,process.getuid!(),'directory');
+  if(readdirSync(path).length===0){rmdirSync(path);syncDirectorySync(dirname(path));}
+ }
+}
+
 function restoreInstallTransaction(layout: LinuxEngineLayout, exec: EngineExec, options: EngineServiceOptions): LinuxInstallTransaction | undefined {
  const transaction = readInstallTransaction(layout);
  if (!transaction) return undefined;
@@ -521,6 +574,7 @@ function restoreInstallTransaction(layout: LinuxEngineLayout, exec: EngineExec, 
  const stoppedFacts=inspectSystemdEngine(layout,exec);assertKnown(stoppedFacts);
  removeReleasedWorkerSocket(layout,currentFacts,stoppedFacts,options);
  removeNewUnitLinks(layout, transaction);
+ restoreLegacySettings(layout,transaction);
  for (const [path, snapshot] of Object.entries(transaction.before.files)) restoreOptionalFile(path, snapshot);
  if(Object.hasOwn(transaction.before.files,linuxDesktopEntryPaths(layout).desktop))refreshLinuxDesktopCaches(layout);
  for(const path of transaction.before.absentCreatedFiles)removeFileDurablySync(path);
@@ -646,6 +700,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   preflightLinuxDesktopEntry(l);
   for (const path of unitLinkCandidates(l)) assertLinuxManagedPath(dirname(path),process.getuid!(),'directory');
   assertNoInterruptedInstall(l);
+  assertLegacySettingDestinations(l);
   const before=inspectSystemdEngine(l,exec); assertKnown(before);
   if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':'would_seed',path:l.sovereigntyPath},action:'dry_run'};
   requireLinuxApprovalTransport(source);
@@ -688,6 +743,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    removeReleasedWorkerSocket(l,before,inspectSystemdEngine(l,exec),options);
    transaction.phase='activating'; writeInstallTransaction(l,transaction);
    lifecycleCheckpoint(options,'activating_published');
+   migrateLegacySettings(l,transaction);
    selectLinuxSecretBackend({encryptedFilePath:l.secretsPath,keyFilePath:l.secretsKeyPath,backendFilePath:join(l.configDir,'secret-backend.json')},
     (options.env ?? process.env).OLYMPUS_SECRET_STORE_BACKEND?.trim() || 'auto');
    for(const path of [paths.logPath,paths.errorLogPath]) { assertLinuxManagedPath(path); if(!existsSync(path)) writePrivateFileAtomicSync(path,''); }
@@ -765,6 +821,7 @@ export async function recoverInterruptedLinuxEngineInstall(
   if(!transaction)return {recovered:false};
   assertDesktopTransactionTargets(layout,transaction);
   if(transaction.phase==='qualified'){
+   cleanupLegacySettingsDirectories(layout);
    pruneOldGenerations(layout);refreshMachineArtifacts(layout,false);cleanupTransactionBackup(transaction);removeFileDurablySync(transactionPath(layout));return {recovered:true};
   }
   if(transaction.phase==='recovered'){
@@ -803,6 +860,7 @@ export async function settleLinuxEngineInstall(
   if (health.ok) {
    transaction.phase='qualified';writeInstallTransaction(layout,transaction);
    lifecycleCheckpoint(options,'qualified_published');
+   cleanupLegacySettingsDirectories(layout);
    pruneOldGenerations(layout);
    refreshMachineArtifacts(layout,false);
    lifecycleCheckpoint(options,'receipt_finalized');
@@ -829,6 +887,7 @@ export function stopLinuxEngine(options: EngineServiceOptions & { reap?: EngineC
  const l=linuxLayoutFor(options), exec=options.exec ?? linuxEngineExec; assertInstalled(l);
  return locked(l,()=>{
   assertNoInterruptedInstall(l);
+  assertLegacySettingDestinations(l);
   const before=inspectSystemdEngine(l,exec); assertKnown(before); if(before.active && !before.control_group)throw new Error('Engine cgroup custody is unknown; stop refused.'); waitForQuietEngine(options);
   systemdMust(exec,['disable','--now',SYSTEMD_ENGINE_UNIT]);
   const after=inspectSystemdEngine(l,exec); assertKnown(after);

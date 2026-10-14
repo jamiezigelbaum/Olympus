@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from '../../core/linux-engine-layout.ts';
 // The owner's privacy profile (owner ruling 2026-10-01): set once in setup,
 // inside ChatGPT, and editable later from the dashboard.
 //
@@ -93,13 +94,14 @@ export interface PrivacyProfilePathOptions {
   env?: Record<string, string | undefined>;
 }
 
-export function defaultPrivacyProfilePath(): string {
+export function defaultPrivacyProfilePath(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'privacy.json');
   return join(homedir(), '.olympus', 'privacy.json');
 }
 
 export function resolvePrivacyProfilePath(options: PrivacyProfilePathOptions = {}): string {
   const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_PRIVACY_PROFILE_ENV]?.trim() || defaultPrivacyProfilePath();
+  return options.path?.trim() || env[OLYMPUS_PRIVACY_PROFILE_ENV]?.trim() || defaultPrivacyProfilePath(env);
 }
 
 /** The file's modification stamp, for callers that re-read only when it changes. */

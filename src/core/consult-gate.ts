@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 /**
  * Consult outbound gate (docs/design/frontier-consult-lane.md, section A.4).
  *
@@ -1288,7 +1289,7 @@ export const CONSULT_VOCABULARY_MAX_USER_PACKS = 8;
  * time; a pack whose file does not match is skipped (its words stay refused).
  */
 export function consultUserVocabularyDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join(env.HOME?.trim() || homedir(), '.olympus', 'consult', 'vocabulary');
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (process.platform === 'linux' ? join(resolveLinuxEngineLayout(env).configDir, 'consult', 'vocabulary') : join(env.HOME?.trim() || homedir(), '.olympus', 'consult', 'vocabulary'));
 }
 
 export interface ConsultVocabulary {

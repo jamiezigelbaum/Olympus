@@ -280,3 +280,38 @@ for (const failure of ['none', 'link', 'start', 'health', 'parent', 'replacement
   }
  },20_000);
 }
+
+for (const failure of [false, true]) test(`legacy privacy migration ${failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
+ const l=layout();publishLinuxEngineReceipt(l);
+ const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
+ const original=JSON.stringify({schemaVersion:1,description:'Synthetic health preference',rules:[],updatedAt:'2026-10-14T00:00:00Z'});
+ writeFileSync(join(legacy,'privacy.json'),original,{mode:0o600});
+ let linked=false,active=false,enabled=false;
+ const exec:EngineExec=(command,args)=>{
+  if(command==='systemctl'&&args[0]==='--version')return good('systemd 256');
+  if(command==='loginctl')return good('yes');if(command==='systemd-analyze')return good();
+  if(args.includes('olympus-worker.service'))return good('LoadState=not-found');if(args.includes('--property=Version'))return good('256');
+  if(args.includes('show'))return linked?good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled?'enabled':'disabled'}\nMainPID=${active?42:0}\nControlGroup=\nFragmentPath=${l.unitPath}\n`):good('LoadState=not-found');
+  if(args.includes('link'))linked=true;if(args.includes('enable'))enabled=true;if(args.includes('disable')){enabled=false;active=false;}if(args.includes('start'))active=true;if(args.includes('stop'))active=false;
+  return good();
+ };
+ const options={platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home),consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true};
+ const result=installEngine(options);
+ const target=join(l.configDir,'privacy.json');
+ expect(readFileSync(target,'utf8')).toBe(original);expect(statSync(target).mode&0o777).toBe(0o600);
+ expect(existsSync(join(legacy,'privacy.json'))).toBe(false);
+ const read=Bun.spawnSync([process.execPath,'-e',`const { readPrivacyProfile } = await import('./src/workers/classification/privacy-profile.ts');console.log(JSON.stringify(readPrivacyProfile()));`],{env:linuxEngineEnvironment(l),stdout:'pipe',stderr:'pipe'});
+ expect(read.exitCode).toBe(0);expect(JSON.parse(read.stdout.toString()).description).toBe('Synthetic health preference');
+ await settleLinuxEngineInstall(options,{ok:!failure,expected_build:result.program.build??null,running_build:result.program.build??null,pid:42,worker:'ok',waited_ms:0});
+ if(failure){expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe(original);expect(existsSync(target)).toBe(false);}
+ else{expect(readFileSync(target,'utf8')).toBe(original);expect(existsSync(legacy)).toBe(false);}
+},30_000);
+
+test('legacy privacy migration refuses a destination conflict without changing either file', () => {
+ const l=layout();publishLinuxEngineReceipt(l);const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
+ writeFileSync(join(legacy,'privacy.json'),'old',{mode:0o600});writeFileSync(join(l.configDir,'privacy.json'),'new',{mode:0o600});
+ const exec:EngineExec=(command,args)=>command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):good('LoadState=not-found');
+ expect(()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)})).toThrow();
+ expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe('old');expect(readFileSync(join(l.configDir,'privacy.json'),'utf8')).toBe('new');
+ expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
+},15_000);

@@ -51,7 +51,7 @@ function tempHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'olympus-outside-help-'));
   cleanups.push(() => {
     try {
-      chmodSync(join(home, '.olympus'), 0o700);
+      chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o700);
     } catch {
       // not always present
     }
@@ -845,8 +845,8 @@ function adapter(input: {
   /** This computer's network confinement; default: a confined platform (never the host's). */
   confinement?: ZkapiConfinement;
 }) {
-  const path = join(input.home, '.olympus', 'sovereignty.json');
-  mkdirSync(join(input.home, '.olympus'), { recursive: true, mode: 0o700 });
+  const path = join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
+  mkdirSync(join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
   const config = policyWith(input.zkapi ?? true, input.profileOverrides);
   writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
   const reloads: number[] = [];
@@ -859,7 +859,7 @@ function adapter(input: {
     secretPresent: (ref) => ref === 'env:OLYMPUS_ZKAPI_API_KEY' && env.OLYMPUS_ZKAPI_API_KEY !== undefined,
     requestReload: () => { reloads.push(1); return input.reload ?? true; },
     env,
-    statePath: join(input.home, '.olympus', 'zkapi-consult-state.json'),
+    statePath: join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'),
     now: () => new Date('2026-10-07T12:00:00.000Z'),
     readiness: async (options) => { probes.push(options); if (input.probeConfinement) await options.confinement?.check?.(); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
@@ -1039,11 +1039,11 @@ describe('the adapter: status', () => {
     const home = tempHome();
     expect(summaryOf(await adapter({ home, zkapi: false }).backend.status())).toEqual({ state: 'route_not_configured' });
     const second = adapter({ home: tempHome() });
-    writeFileSync(join(second.env.HOME, '.olympus', 'consult.json'), '{bad', { mode: 0o600 });
+    writeFileSync(join(second.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), '{bad', { mode: 0o600 });
     expect(summaryOf(await second.backend.status())).toEqual({ state: 'invalid' });
     const third = tempHome();
     const { backend, env } = adapter({ home: third });
-    writeFileSync(join(third, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/w' } } }), { mode: 0o600 });
+    writeFileSync(join(third, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/w' } } }), { mode: 0o600 });
     expect(summaryOf(await backend.status())).toEqual({ state: 'fence_held' });
     const value = await backend.status();
     expect(value.route.state === 'configured' && value.route.readiness?.fences).toEqual([{ scope: zkapiFenceScope({ env }), at: '2026-10-07T10:00:00.000Z', thisWallet: true }]);
@@ -1051,8 +1051,8 @@ describe('the adapter: status', () => {
 
   test('a failing probe reads as readiness unavailable, never as ready', async () => {
     const home = tempHome();
-    mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
-    const path = join(home, '.olympus', 'sovereignty.json');
+    mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
+    const path = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
     const config = policyWith(true);
     writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
     const backend = createDashboardConsultAdapter({
@@ -1103,7 +1103,7 @@ describe('the adapter: turning outside help on and off', () => {
     const home = tempHome();
     const noRoute = adapter({ home, zkapi: false }).backend;
     expect(await noRoute.setEnabled({ enabled: true, revision: 0 })).toMatchObject({ ok: false, httpStatus: 409, code: 'route_not_configured' });
-    expect(existsSync(join(home, '.olympus', 'consult.json'))).toBe(false);
+    expect(existsSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'))).toBe(false);
     const second = tempHome();
     const incomplete = adapter({ home: second, profileOverrides: { acknowledgements: { version: 2, accepted: ALL_IDS } } }).backend;
     expect(await incomplete.setEnabled({ enabled: true, revision: 0 })).toMatchObject({ ok: false, httpStatus: 409, code: 'acknowledgements_incomplete' });
@@ -1119,9 +1119,9 @@ describe('the adapter: turning outside help on and off', () => {
     expect((await backend.setEnabled({ enabled: true, revision: 0 })).ok).toBe(true);
     expect(await backend.setEnabled({ enabled: false, revision: 0 })).toEqual({ ok: false, httpStatus: 409, code: 'conflict', message: expect.stringContaining('changed somewhere else'), revision: 1 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 1, enabled: true } });
-    writeFileSync(join(home, '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
+    writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
     expect(await backend.setEnabled({ enabled: false, revision: 0 })).toMatchObject({ ok: false, httpStatus: 409, code: 'settings_invalid' });
-    expect(readFileSync(join(home, '.olympus', 'consult.json'), 'utf8')).toBe('{"v":1');
+    expect(readFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), 'utf8')).toBe('{"v":1');
     expect(await backend.setEnabled({ enabled: false, revision: 0, replace_invalid: true })).toMatchObject({ ok: true, revision: 1 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: false } });
   });
@@ -1136,13 +1136,13 @@ describe('the adapter: turning outside help on and off', () => {
     const older = tempHome();
     const { backend: olderBackend, env: olderEnv } = adapter({ home: older });
     // A file written before the level existed reads as Standard; sending still needs the current statements.
-    writeFileSync(join(older, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 4, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
+    writeFileSync(join(older, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 4, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     expect((await olderBackend.status()).settings.level).toBe('unnamed');
     expect((await olderBackend.setEnabled({ enabled: false, revision: 4 })).ok).toBe(true);
     expect((await olderBackend.setEnabled({ enabled: true, revision: 5 })).ok).toBe(true);
     expect(readConsultSettings({ env: olderEnv })).toMatchObject({ state: 'valid', settings: { revision: 6, enabled: true, level: 'unnamed' } });
     // A damaged file replaced without a choice is written Strict, and off: a repair never widens the scope.
-    writeFileSync(join(older, '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
+    writeFileSync(join(older, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
     expect((await olderBackend.setEnabled({ enabled: false, revision: 0, replace_invalid: true })).ok).toBe(true);
     expect(readConsultSettings({ env: olderEnv })).toMatchObject({ state: 'valid', settings: { enabled: false, level: 'general' } });
   });
@@ -1150,7 +1150,7 @@ describe('the adapter: turning outside help on and off', () => {
   test('level: choosing a level is never refused for the statements; on with stale statements stays on and reads paused', async () => {
     // The owner's state: outside help on, no level key, statements accepted at an older version.
     const stale = adapter({ home: tempHome(), profileOverrides: { acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION - 2, accepted: ['per_consult_cost', 'deposit_fee'] } } });
-    writeFileSync(join(stale.env.HOME, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
+    writeFileSync(join(stale.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     expect(summaryOf(await stale.backend.status())).toEqual({ state: 'needs_acceptance' });
     for (const [revision, level] of [[3, 'general'], [4, 'unnamed'], [5, 'general']] as const) {
       expect(await stale.backend.setEnabled({ enabled: true, revision, level })).toEqual({ ok: true, status_message: 'Saved. Anonymous answers stay paused until you accept the statements on this page.', revision: revision + 1 });
@@ -1170,7 +1170,7 @@ describe('the adapter: turning outside help on and off', () => {
   test('the owner\'s Save, end to end: the real card script against the real worker and adapter saves the level and says it is paused', async () => {
     const home = tempHome();
     const stale = adapter({ home, profileOverrides: { acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION - 2, accepted: [] } } });
-    writeFileSync(join(home, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
+    writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     const fetcher = worker(stale.backend);
     const { cookie, csrf } = await localSession(fetcher);
     const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
@@ -1316,7 +1316,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     }
     expect(readFileSync(path, 'utf8')).toBe(before);
     expect(reloads).toEqual([]);
-    expect(readdirSync(join(home, '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
+    expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
     // Once the disk cooperates the same save goes through, atomically.
     expect((await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' })).ok).toBe(true);
     expect((JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig).modelProfiles['zkapi-consult']?.zkapi?.fundingDate).toBe('2026-10-05');
@@ -1360,7 +1360,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     const { backend, recoveries, env } = adapter({ home, secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'clear', settlement: 'confirmed' } as never, elapsedMs: 1 } });
     expect(await backend.recover({})).toMatchObject({ ok: false, code: 'confirmation_required' });
     expect(await backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 409, code: 'no_unresolved_session' });
-    const statePath = join(home, '.olympus', 'zkapi-consult-state.json');
+    const statePath = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json');
     const other = 'b'.repeat(32);
     writeFileSync(statePath, JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [other]: { at: '2026-10-06T09:00:00.000Z', configDir: '/other' } } }), { mode: 0o600 });
     expect(await backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 409, code: 'unresolved_session_other_wallet' });
@@ -1374,17 +1374,17 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     expect((recoveries[0] as { secretRef?: string }).secretRef).toBe('env:OLYMPUS_ZKAPI_API_KEY');
     // Settlement not confirmed: the fence is still held, and the message says so.
     const pending = adapter({ home: tempHome(), secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'held', settlement: 'pending' } as never, elapsedMs: 1 } });
-    writeFileSync(join(pending.env.HOME, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: pending.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
+    writeFileSync(join(pending.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: pending.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
     expect(await pending.backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 502, code: 'recovery_incomplete' });
     const failed = adapter({ home: tempHome(), secret: 'k' });
-    writeFileSync(join(failed.env.HOME, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: failed.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
+    writeFileSync(join(failed.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: failed.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
     expect(await failed.backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 502, code: 'transport_failed' });
   });
 
   test('abandon marks exactly the named fence abandoned, with confirmation, and keeps it as a record', async () => {
     const home = tempHome();
     const { backend } = adapter({ home });
-    const statePath = join(home, '.olympus', 'zkapi-consult-state.json');
+    const statePath = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json');
     const scope = 'c'.repeat(32);
     writeFileSync(statePath, JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [scope]: { at: '2026-10-06T09:00:00.000Z', configDir: '/other' } } }), { mode: 0o600 });
     expect(await backend.abandon({ scope })).toMatchObject({ ok: false, code: 'confirmation_required' });

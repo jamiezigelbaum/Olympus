@@ -196,3 +196,15 @@ test('the standalone engine keeps Telegram stores under its own data root, never
     expect(path).not.toContain('openclaw');
   }
 });
+
+test('owned Linux install accepts its legacy privacy file, but not unknown files or symlinks', () => {
+  const { home, env } = fixture(); const layout = resolveLinuxEngineLayout(env); publishLinuxEngineReceipt(layout);
+  const legacy = join(home, '.olympus'); mkdirSync(legacy, { mode: 0o700 });
+  writeFileSync(join(legacy, 'privacy.json'), JSON.stringify({ schemaVersion: 1, description: 'synthetic', rules: [] }), { mode: 0o600 });
+  expect(() => preflightLinuxEngineLayout(layout)).not.toThrow();
+  writeFileSync(join(legacy, 'unrelated'), 'keep', { mode: 0o600 });
+  expect(() => preflightLinuxEngineLayout(layout)).toThrow();
+  rmSync(join(legacy, 'unrelated')); rmSync(join(legacy, 'privacy.json'));
+  symlinkSync(join(home, 'elsewhere'), join(legacy, 'privacy.json'));
+  expect(() => preflightLinuxEngineLayout(layout)).toThrow();
+});

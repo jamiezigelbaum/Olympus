@@ -435,7 +435,9 @@ test('explicit purge removes only Olympus roots and restores receipt-proven ling
   const unrelated = join(h.home, '.local/share/unrelated');
   writeFileSync(unrelated, 'keep');
   for (const root of [receipt.configDir, receipt.dataDir, receipt.stateDir, receipt.cacheDir]) writeFileSync(join(root, 'personal'), 'remove');
+  writeFileSync(join(receipt.configDir, 'privacy.json'), JSON.stringify({ schemaVersion: 1, description: 'Synthetic health preference', rules: [] }), { mode: 0o600 });
   const r = h.uninstall({}, ['--purge', '--yes', '--restore-linger']);
+  expect(existsSync(join(receipt.configDir, 'privacy.json'))).toBe(false);
   expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
   expect(r.stdout).toContain('data, settings, secrets, models, logs, caches and recovery state were removed');
   expect(r.stdout).toContain('pre-install linger state was restored');

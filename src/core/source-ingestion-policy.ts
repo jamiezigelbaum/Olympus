@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -82,7 +83,8 @@ const DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS = [
   'kindle',
 ] as const;
 
-export function defaultDropboxIngestionPolicyPath(): string {
+export function defaultDropboxIngestionPolicyPath(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).configDir, 'sources', 'dropbox.personal.ingestion.json');
   return join(homedir(), '.olympus', 'sources', 'dropbox.personal.ingestion.json');
 }
 
@@ -231,7 +233,7 @@ export function loadDropboxIngestionPolicy(options: SourceIngestionPolicyLoadOpt
   const path = options.policyPath?.trim()
     || env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH?.trim()
     || env.OLYMPUS_SOURCE_INGESTION_POLICY_PATH?.trim()
-    || defaultDropboxIngestionPolicyPath();
+    || defaultDropboxIngestionPolicyPath(env);
   if (existsSync(path)) {
     return validateDropboxPolicy(
       parseSourceIngestionPolicy(JSON.parse(readFileSync(path, 'utf8')) as unknown, path),

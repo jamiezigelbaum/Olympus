@@ -265,7 +265,7 @@ export function resolveSourceIngestionExclusionsPath(
 ): string {
   return explicitPath?.trim()
     || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()
-    || defaultSourceIngestionExclusionsPath();
+    || defaultSourceIngestionExclusionsPath(env);
 }
 
 /**
