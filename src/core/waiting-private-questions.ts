@@ -105,7 +105,8 @@ const SELECTED_ITEM_FIELDS = [
 
 /** Answer text and citation locators only; evidence identities contain no source text. */
 export interface StoredPrivateAnswer {
-  status: 'answered' | 'not_found';
+  status: 'answered' | 'not_found' | 'withdrawn';
+  reason?: string;
   answer?: string;
   citations: Array<{ title?: string; source?: string; date?: string; url?: string; localPath?: string }>;
   sentItems?: Array<{ title?: string; source?: string; date?: string }>;
@@ -617,8 +618,15 @@ export function openWaitingPrivateQuestionStore(
     },
 
     invalidate(ref) {
-      return db.query('UPDATE waiting_questions SET result = NULL, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
-        .run(ref.id, ref.generation, ref.connectionId).changes > 0;
+      return db.transaction(() => {
+        // Withdraw answer text and locators, retaining the owner's disclosure record.
+        const row = db.query('SELECT destination, result FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?').get(ref.id, ref.generation, ref.connectionId) as { destination: string; result: string | null } | null;
+        const old = row?.result ? JSON.parse(row.result) as StoredPrivateAnswer : undefined;
+        const disclosure = row?.destination === 'venice' && old?.sentItems
+          ? JSON.stringify({ status: 'withdrawn', reason: 'Sent to Venice, but the sources changed. The answer was withdrawn.', sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
+        return db.query('UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
+          .run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
+      }).immediate();
     },
 
     deleteForCorpora(corpusIds, knownCorpusIds) {

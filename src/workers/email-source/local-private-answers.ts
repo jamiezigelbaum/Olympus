@@ -35,6 +35,14 @@ import {
   type LocalAnswerResult,
 } from '../source-index/local-answer.ts';
 
+export const LOCAL_AGENT_INBOX_ID = '@local:agents';
+export function anonymousInboxConnectionId(caller?: { connection_id?: string; display_name?: string }) {
+  return caller?.connection_id ?? LOCAL_AGENT_INBOX_ID;
+}
+export function localInboxLabel(id: string): string | undefined {
+  return id === '@local:You' ? 'You' : id === LOCAL_AGENT_INBOX_ID ? 'Local agent' : id.startsWith('@local:') ? `Local agent: ${id.slice(7)}` : undefined;
+}
+
 export const LOCAL_PRIVATE_ANSWERS_PATH = '/dashboard/private-answers';
 const TOKEN_TTL_MS = 30 * 60_000;
 const MAX_TOKENS = 400;
@@ -254,6 +262,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     wake();
   };
   const answerBody = (result: LocalAnswerResult | StoredPrivateAnswer, session: string, q?: WaitingQuestion): Record<string, unknown> => {
+    if (result.status === 'withdrawn') return { status: 'withdrawn', sent_items: result.sentItems, reason: result.reason };
     if (result.status !== 'answered') return { status: result.status, ...('leftOut' in result ? { left_out: result.leftOut } : {}) };
     sweep();
     const citations: LocalCitationView[] = result.citations.map(citation => {
@@ -365,14 +374,17 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
             try { result = venice ? await options.veniceAnswer!(request) : await answerFor(request); } catch { result = { status: 'failed' }; }
             if (result.status === 'answered') {
               const check = await eligible(result.read);
-              if (check !== 'eligible') return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
+              if (check !== 'eligible') {
+                if (venice && result.sentItems) result = { status: 'withdrawn', sentItems: result.sentItems, reason: check === 'unknown' ? 'Sent to Venice, but source eligibility could not be checked. No answer was kept.' : 'Sent to Venice, but the sources changed. No answer was kept.' };
+                else return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
+              }
             }
-            if (ref && (result.status === 'answered' || result.status === 'not_found')) {
+            if (ref && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) {
               retained = currentStore?.saveAnswer?.(ref, result.status === 'answered'
                 ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
-                : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
+                : result.status === 'withdrawn' ? { ...result, citations: [], unanswered: [], leftOut: [], read: [] } : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
             }
-            if (ref && !retained && (result.status === 'answered' || result.status === 'not_found')) return refused(410, 'gone', W.deleted);
+            if (ref && !retained && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) return refused(410, 'gone', W.deleted);
             return { status: 200, body: { ok: true, ...answerBody(result, session, ref ? currentStore?.get(ref.id) : undefined) } };
           } finally { if (ref && !retained) currentStore?.acknowledge(ref); }
         } finally { running = false; }
@@ -381,11 +393,14 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         const q = typeof body.id === 'string' ? store()?.get(body.id) : undefined;
         if (!q || !current(q)) return refused(410, 'gone', 'That answer was deleted');
         if (!q.result) return { status: 200, body: { ok: true, status: q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering' } };
+        if (q.result.status === 'withdrawn') return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
         const check = await eligible(q.result.read);
         if (check === 'unknown') return { status: 200, body: { ok: true, status: 'check_unavailable' } };
         if (check === 'ineligible' || !current(q)) {
           invalidate(q);
-          return { status: 200, body: { ok: true, status: q.path === 'venice' ? 'changed' : 'answering' } };
+          const fresh = store()?.get(q.id);
+          const withdrawn = fresh?.result;
+          return { status: 200, body: { ok: true, ...(withdrawn?.status === 'withdrawn' ? { generation: fresh!.generation, ...answerBody(withdrawn, session) } : { status: q.path === 'venice' ? 'changed' : 'answering' }) } };
         }
         return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q), ...(q.path === 'anonymous' ? { sent: q.question } : {}) } };
       }
@@ -452,26 +467,32 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
  * Anonymous questions have no retrieval context, source identities or citations. */
 export async function askWithAnonymousInbox(
   input: import('../../core/consult-ask.ts').ConsultAskInput,
-  options: { deliveredToPanel?: boolean; local?: boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
+  options: { deliveredToPanel?: boolean; local?: boolean; isActive?: (id: string) => boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
 ): Promise<import('../../core/consult-ask.ts').ConsultAskResult> {
   if (options.deliveredToPanel) return options.ask(input);
   if (typeof input.question !== 'string' || !input.question.trim()) return { ok: false, code: 'transport_unavailable', message: 'Type a question first.' };
   const store = options.store();
   const ref = store?.record(store.ticket(options.connectionId), { question: W.anonymousPending, surface: 'remote', state: 'waiting', path: 'anonymous' });
   if (!store || !ref) return { ok: false, code: 'transport_unavailable', message: W.inboxBeforeSend };
+  const acknowledge = () => { try { store.acknowledge(ref); } catch { /* Closed/deleted store: never restore the row. */ } };
   if (!options.local && !store.reserveAutoAnswer(ref, 'anonymous')) {
-    store.acknowledge(ref);
+    acknowledge();
     return { ok: false, code: 'transport_unavailable', message: W.anonymousRateLimit };
   }
   try {
-    const result = await options.ask(input);
+    const result = await options.ask({ ...input, stillAuthorized: () => {
+      try {
+        const current = store.get(ref.id);
+        return !!current && current.generation === ref.generation && current.connectionId === ref.connectionId && options.isActive?.(ref.connectionId) !== false && input.stillAuthorized?.() !== false;
+      } catch { return false; }
+    } });
     if (result.ok) {
-      if (!store.saveAnswer(ref, { status: 'answered', answer: result.reply, citations: [], unanswered: [], leftOut: [], read: [] }, result.sent)) store.acknowledge(ref);
+      if (!store.saveAnswer(ref, { status: 'answered', answer: result.reply, citations: [], unanswered: [], leftOut: [], read: [] }, result.sent)) acknowledge();
     }
-    else store.acknowledge(ref);
+    else acknowledge();
     return result;
   } catch {
-    store.acknowledge(ref);
+    acknowledge();
     return { ok: false, code: 'transport_unavailable', message: W.anonymousFailed };
   }
 }

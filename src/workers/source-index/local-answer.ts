@@ -85,6 +85,7 @@ export type LocalAnswerResult =
   | { status: 'no_model' }
   | { status: 'model_downloading'; percent?: number }
   /** An item the answer read changed tier or went away before it was shown. */
+  | { status: 'withdrawn'; sentItems: Array<{ title?: string; source?: string; date?: string }>; reason: string }
   | { status: 'changed' }
   | { status: 'failed' };
 

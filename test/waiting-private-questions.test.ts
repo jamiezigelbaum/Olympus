@@ -523,7 +523,7 @@ test('v3 retained private answers migrate additively to v4 alongside anonymous a
   store.close();
   // Reconstruct the v3 shape an already-installed inbox has, preserving its data.
   const legacy = new Database(path);
-  legacy.exec('ALTER TABLE waiting_questions DROP COLUMN answer_path');
+  legacy.exec('ALTER TABLE waiting_questions DROP COLUMN answer_path; ALTER TABLE waiting_questions DROP COLUMN destination');
   legacy.query('UPDATE schema_version SET version = 3 WHERE store_id = ?').run('waiting-private-questions');
   legacy.close();
   const upgraded = openWaitingPrivateQuestionStore(path); stores.push(upgraded);

@@ -1,5 +1,5 @@
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
-import { askWithAnonymousInbox } from './local-private-answers.ts';
+import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
@@ -4469,7 +4469,7 @@ export async function main(): Promise<void> {
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
-        store: waitingQuestionStore, connectionId: caller?.connection_id ?? `@local:${caller?.display_name ?? 'An agent'}`, ask: askAnonymouslyNow,
+        store: waitingQuestionStore, connectionId: anonymousInboxConnectionId(caller), isActive: connectionActive, ask: askAnonymouslyNow,
       })
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
@@ -4844,7 +4844,7 @@ export async function main(): Promise<void> {
       ...input,
       level: consultAskLevelFromSettings(read.state === 'valid' ? read.settings.level : DEFAULT_CONSULT_SETTINGS.level),
     }, {
-      store: waitingQuestionStore, connectionId: '@local:You', local: true,
+      store: waitingQuestionStore, connectionId: '@local:You', local: true, isActive: connectionActive,
       ask: request => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: 'transport_unavailable', message: PRIVATE_ANSWERS_COPY.anonymousNotSetUp }),
     });
   };
@@ -4942,7 +4942,7 @@ export async function main(): Promise<void> {
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
       isActive: connectionActive,
       store: waitingQuestionStore,
-      connectionName: (connectionId) => connectionId.startsWith('@local:') ? connectionId.slice(7) : remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
       ...(openCitedFile ? {
         openFile: openCitedFile,
@@ -4958,7 +4958,7 @@ export async function main(): Promise<void> {
     localPrivateAnswers = createLocalPrivateAnswers({
       destinations: () => ({ computer: 'not_set_up', venice: 'not_set_up' }),
       store: waitingQuestionStore, isActive: connectionActive,
-      connectionName: (id) => id.startsWith('@local:') ? id.slice(7) : remoteConnections()?.list().find(c => c.id === id)?.displayName,
+      connectionName: (id) => localInboxLabel(id) ?? remoteConnections()?.list().find(c => c.id === id)?.displayName,
       answer: async () => ({ status: 'no_model' }),
       eligible: async items => items.map(() => false),
       anonymousAsk: localAnonymousAsk,

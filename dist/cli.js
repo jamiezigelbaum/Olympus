@@ -16538,7 +16538,12 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       return db.query("UPDATE waiting_questions SET attempts = attempts + 1, next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").run(now() + delay, ref.id, ref.generation, ref.connectionId).changes > 0;
     },
     invalidate(ref) {
-      return db.query("UPDATE waiting_questions SET result = NULL, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(ref.id, ref.generation, ref.connectionId).changes > 0;
+      return db.transaction(() => {
+        const row = db.query("SELECT destination, result FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").get(ref.id, ref.generation, ref.connectionId);
+        const old = row?.result ? JSON.parse(row.result) : undefined;
+        const disclosure = row?.destination === "venice" && old?.sentItems ? JSON.stringify({ status: "withdrawn", reason: "Sent to Venice, but the sources changed. The answer was withdrawn.", sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
+        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
+      }).immediate();
     },
     deleteForCorpora(corpusIds, knownCorpusIds) {
       const ids = new Set(corpusIds);
@@ -46033,8 +46038,11 @@ function createAnalystSourceIndexAnswerHandler(options) {
           localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
           cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
           trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
-            local?.beforeVeniceDispatch(dispatchPack, dispatchPack.candidates.map((candidate) => candidateCorpus.get(candidate) ?? ""));
-            return analyst.analyze(dispatchPack, analyzeOptions);
+            const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
+            const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
+            const sentPack = local ? { ...dispatchPack, candidates: dispatchPack.candidates.filter((candidate) => !omitted.has(candidate)) } : dispatchPack;
+            local?.beforeVeniceDispatch(sentPack, sentPack.candidates.map((candidate) => candidateCorpus.get(candidate) ?? ""));
+            return analyst.analyze(sentPack, analyzeOptions);
           } })
         };
       };
@@ -109075,14 +109083,23 @@ var init_local_answer = __esm(() => {
 // src/workers/email-source/local-private-answers.ts
 var exports_local_private_answers = {};
 __export(exports_local_private_answers, {
+  localInboxLabel: () => localInboxLabel,
   inboxEvidenceIdentity: () => inboxEvidenceIdentity,
   createLocalPrivateAnswers: () => createLocalPrivateAnswers,
   createLocalAnswerPath: () => createLocalAnswerPath,
   askWithAnonymousInbox: () => askWithAnonymousInbox,
-  LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH
+  anonymousInboxConnectionId: () => anonymousInboxConnectionId,
+  LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH,
+  LOCAL_AGENT_INBOX_ID: () => LOCAL_AGENT_INBOX_ID
 });
 import { lstatSync as lstatSync33 } from "node:fs";
 import { randomBytes as randomBytes20 } from "node:crypto";
+function anonymousInboxConnectionId(caller) {
+  return caller?.connection_id ?? LOCAL_AGENT_INBOX_ID;
+}
+function localInboxLabel(id) {
+  return id === "@local:You" ? "You" : id === LOCAL_AGENT_INBOX_ID ? "Local agent" : id.startsWith("@local:") ? `Local agent: ${id.slice(7)}` : undefined;
+}
 function createLocalAnswerPath(options) {
   const lanes = (request) => options.lanes(request, "built_in_only");
   const eligible = async (items) => {
@@ -109215,6 +109232,8 @@ function createLocalPrivateAnswers(options) {
     wake();
   };
   const answerBody = (result, session, q) => {
+    if (result.status === "withdrawn")
+      return { status: "withdrawn", sent_items: result.sentItems, reason: result.reason };
     if (result.status !== "answered")
       return { status: result.status, ..."leftOut" in result ? { left_out: result.leftOut } : {} };
     sweep();
@@ -109364,13 +109383,17 @@ function createLocalPrivateAnswers(options) {
             }
             if (result.status === "answered") {
               const check = await eligible(result.read);
-              if (check !== "eligible")
-                return { status: 200, body: { ok: true, status: check === "unknown" ? "check_unavailable" : "changed" } };
+              if (check !== "eligible") {
+                if (venice && result.sentItems)
+                  result = { status: "withdrawn", sentItems: result.sentItems, reason: check === "unknown" ? "Sent to Venice, but source eligibility could not be checked. No answer was kept." : "Sent to Venice, but the sources changed. No answer was kept." };
+                else
+                  return { status: 200, body: { ok: true, status: check === "unknown" ? "check_unavailable" : "changed" } };
+              }
             }
-            if (ref && (result.status === "answered" || result.status === "not_found")) {
-              retained = currentStore?.saveAnswer?.(ref, result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), ...result.sentItems ? { sentItems: result.sentItems } : {}, unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
+            if (ref && (result.status === "answered" || result.status === "not_found" || result.status === "withdrawn")) {
+              retained = currentStore?.saveAnswer?.(ref, result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), ...result.sentItems ? { sentItems: result.sentItems } : {}, unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : result.status === "withdrawn" ? { ...result, citations: [], unanswered: [], leftOut: [], read: [] } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
             }
-            if (ref && !retained && (result.status === "answered" || result.status === "not_found"))
+            if (ref && !retained && (result.status === "answered" || result.status === "not_found" || result.status === "withdrawn"))
               return refused(410, "gone", DASHBOARD_PRIVATE_ANSWERS_COPY.deleted);
             return { status: 200, body: { ok: true, ...answerBody(result, session, ref ? currentStore?.get(ref.id) : undefined) } };
           } finally {
@@ -109387,12 +109410,16 @@ function createLocalPrivateAnswers(options) {
           return refused(410, "gone", "That answer was deleted");
         if (!q.result)
           return { status: 200, body: { ok: true, status: q.path === "venice" && q.answeredAt ? "changed" : q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering" } };
+        if (q.result.status === "withdrawn")
+          return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
         const check = await eligible(q.result.read);
         if (check === "unknown")
           return { status: 200, body: { ok: true, status: "check_unavailable" } };
         if (check === "ineligible" || !current2(q)) {
           invalidate(q);
-          return { status: 200, body: { ok: true, status: q.path === "venice" ? "changed" : "answering" } };
+          const fresh2 = store()?.get(q.id);
+          const withdrawn = fresh2?.result;
+          return { status: 200, body: { ok: true, ...withdrawn?.status === "withdrawn" ? { generation: fresh2.generation, ...answerBody(withdrawn, session) } : { status: q.path === "venice" ? "changed" : "answering" } } };
         }
         return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q), ...q.path === "anonymous" ? { sent: q.question } : {} } };
       }
@@ -109483,24 +109510,36 @@ async function askWithAnonymousInbox(input, options) {
   const ref = store?.record(store.ticket(options.connectionId), { question: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPending, surface: "remote", state: "waiting", path: "anonymous" });
   if (!store || !ref)
     return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.inboxBeforeSend };
+  const acknowledge = () => {
+    try {
+      store.acknowledge(ref);
+    } catch {}
+  };
   if (!options.local && !store.reserveAutoAnswer(ref, "anonymous")) {
-    store.acknowledge(ref);
+    acknowledge();
     return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousRateLimit };
   }
   try {
-    const result = await options.ask(input);
+    const result = await options.ask({ ...input, stillAuthorized: () => {
+      try {
+        const current2 = store.get(ref.id);
+        return !!current2 && current2.generation === ref.generation && current2.connectionId === ref.connectionId && options.isActive?.(ref.connectionId) !== false && input.stillAuthorized?.() !== false;
+      } catch {
+        return false;
+      }
+    } });
     if (result.ok) {
       if (!store.saveAnswer(ref, { status: "answered", answer: result.reply, citations: [], unanswered: [], leftOut: [], read: [] }, result.sent))
-        store.acknowledge(ref);
+        acknowledge();
     } else
-      store.acknowledge(ref);
+      acknowledge();
     return result;
   } catch {
-    store.acknowledge(ref);
+    acknowledge();
     return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousFailed };
   }
 }
-var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
+var LOCAL_AGENT_INBOX_ID = "@local:agents", LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
   init_vocabulary();
   init_tier_ledger();
@@ -129194,11 +129233,19 @@ function privateAnswersClientScript(input) {
       if (!outcome.ok) { button.textContent = errorText(outcome); button.disabled = true; }
     });
   }
+  function renderSent(parent, result) {
+    if (!Array.isArray(result.sent_items)) return;
+    parent.appendChild(el('div', 'palabel', config.copy.sentItems));
+    var sentList = el('ul', 'pasrc');
+    result.sent_items.forEach(function (item) { sentList.appendChild(el('li', '', [item.title, item.source, item.date].filter(Boolean).join(' · '))); });
+    parent.appendChild(sentList);
+  }
   // Shared Markdown builds text-only DOM nodes; no model HTML is interpreted.
   function render(out, result, question) {
     var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
+    if (status === 'withdrawn') { renderSent(card, result); card.appendChild(el('p', 'pamsg', result.reason)); return; }
     if (status === 'answered') {
       var box = el('div', 'paanswer answer');
       var markdown = window.olympusMarkdown;
@@ -129211,12 +129258,7 @@ function privateAnswersClientScript(input) {
       card.appendChild(box);
       if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
-      if (Array.isArray(result.sent_items)) {
-        meta.appendChild(el('div', 'palabel', config.copy.sentItems));
-        var sentList = el('ul', 'pasrc');
-        result.sent_items.forEach(function (item) { sentList.appendChild(el('li', '', [item.title, item.source, item.date].filter(Boolean).join(' · '))); });
-        meta.appendChild(sentList);
-      }
+      renderSent(meta, result);
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
         meta.appendChild(el('div', 'palabel', config.copy.sources));
@@ -129304,7 +129346,7 @@ function privateAnswersClientScript(input) {
     }
     render(out, outcome.result, question);
     var generation = outcome.result.generation;
-    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
+    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found' || outcome.result.status === 'withdrawn') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
       var ack = await send({ action: 'seen', id: id, generation: generation });
       if (ack.ok) { seen[id] = generation; row.classList.remove('unread'); }
     }
@@ -155595,36 +155637,49 @@ function createVeniceInboxAnswer(options) {
       throw new Error(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed);
     const read = [];
     const sentItems = [];
+    let dispatched = false;
+    const sent = new Set;
+    const withdrawn = (reason) => ({ status: "withdrawn", sentItems, reason });
     const corpusIds = options.corpusIds();
     if (!corpusIds.length)
       return { status: "not_found", leftOut: [] };
     const request = { ...localAnswerRequest(input.question, input.selectors), corpus_ids: corpusIds, retrieval_mode: "keyword", analyst_provider: "venice" };
-    const result = await options.handler.answer(request, {
-      beforeVeniceDispatch(pack, corpusIds2) {
-        if (options.state() !== "ready" || input.stillAuthorized?.() === false)
-          throw new Error(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed);
-        pack.candidates.forEach((candidate, i) => {
-          const item = { ...candidate, corpusId: corpusIds2[i] ?? "" };
-          read.push(inboxEvidenceIdentity(item));
-          const citation = candidate.provenance.citation ?? {};
-          sentItems.push({ ...citation.title ? { title: citation.title } : {}, source: candidate.provenance.sourceItem.provider, ...citation.authoredAt ? { date: citation.authoredAt } : {} });
-        });
-      }
-    });
-    if (result.audit.answer_synthesis.analyst_backend !== "venice")
-      return { status: "failed" };
-    const allowed = await options.eligible(read);
-    if (allowed.length !== read.length || allowed.some((value2) => !value2))
-      return { status: "changed" };
-    return {
-      status: "answered",
-      answer: result.answer,
-      read,
-      sentItems,
-      citations: result.evidence.map((item) => ({ ...item.title ? { title: item.title } : {}, source: item.provider, ...item.authored_at ? { date: item.authored_at } : {}, ...item.uri?.startsWith("https://") ? { url: item.uri } : {} })),
-      unanswered: [],
-      leftOut: [...new Set(result.audit.skipped_corpora.filter((item) => !["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"].includes(item.reason)).map((item) => options.sourceName?.(item.corpus_id) ?? DASHBOARD_PRIVATE_ANSWERS_COPY.oneSource))]
-    };
+    try {
+      const result = await options.handler.answer(request, {
+        beforeVeniceDispatch(pack, corpusIds2) {
+          if (options.state() !== "ready" || input.stillAuthorized?.() === false)
+            throw new Error(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed);
+          dispatched = true;
+          pack.candidates.forEach((candidate, i) => {
+            const item = { ...candidate, corpusId: corpusIds2[i] ?? "" };
+            const identity = inboxEvidenceIdentity(item);
+            const key2 = JSON.stringify(identity);
+            if (sent.has(key2))
+              return;
+            sent.add(key2);
+            read.push(identity);
+            const citation = candidate.provenance.citation ?? {};
+            sentItems.push({ ...citation.title ? { title: citation.title } : {}, source: candidate.provenance.sourceItem.provider, ...citation.authoredAt ? { date: citation.authoredAt } : {} });
+          });
+        }
+      });
+      if (result.audit.answer_synthesis.analyst_backend !== "venice")
+        return dispatched ? withdrawn("Sent to Venice, but no Venice answer was kept.") : { status: "failed" };
+      const allowed = await options.eligible(read);
+      if (allowed.length !== read.length || allowed.some((value2) => !value2))
+        return withdrawn("Sent to Venice, but the sources changed before the answer could be shown.");
+      return {
+        status: "answered",
+        answer: result.answer,
+        read,
+        sentItems,
+        citations: result.evidence.map((item) => ({ ...item.title ? { title: item.title } : {}, source: item.provider, ...item.authored_at ? { date: item.authored_at } : {}, ...item.uri?.startsWith("https://") ? { url: item.uri } : {} })),
+        unanswered: [],
+        leftOut: [...new Set(result.audit.skipped_corpora.filter((item) => !["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"].includes(item.reason)).map((item) => options.sourceName?.(item.corpus_id) ?? DASHBOARD_PRIVATE_ANSWERS_COPY.oneSource))]
+      };
+    } catch {
+      return dispatched ? withdrawn("Sent to Venice, but no answer could be kept.") : { status: "failed" };
+    }
   };
 }
 var init_venice_inbox_answer = __esm(() => {
@@ -160279,7 +160334,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     sourceAnswerReleaseCheck: createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow"),
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
       store: waitingQuestionStore,
-      connectionId: caller?.connection_id ?? `@local:${caller?.display_name ?? "An agent"}`,
+      connectionId: anonymousInboxConnectionId(caller),
+      isActive: connectionActive,
       ask: askAnonymouslyNow
     }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
@@ -160560,6 +160616,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       store: waitingQuestionStore,
       connectionId: "@local:You",
       local: true,
+      isActive: connectionActive,
       ask: (request) => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp })
     });
   };
@@ -160643,7 +160700,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
       isActive: connectionActive,
       store: waitingQuestionStore,
-      connectionName: (connectionId) => connectionId.startsWith("@local:") ? connectionId.slice(7) : remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
       ...openCitedFile ? {
         openFile: openCitedFile,
@@ -160661,7 +160718,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       destinations: () => ({ computer: "not_set_up", venice: "not_set_up" }),
       store: waitingQuestionStore,
       isActive: connectionActive,
-      connectionName: (id) => id.startsWith("@local:") ? id.slice(7) : remoteConnections()?.list().find((c) => c.id === id)?.displayName,
+      connectionName: (id) => localInboxLabel(id) ?? remoteConnections()?.list().find((c) => c.id === id)?.displayName,
       answer: async () => ({ status: "no_model" }),
       eligible: async (items) => items.map(() => false),
       anonymousAsk: localAnonymousAsk

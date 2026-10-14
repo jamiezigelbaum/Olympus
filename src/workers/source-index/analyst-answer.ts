@@ -516,8 +516,13 @@ export function createAnalystSourceIndexAnswerHandler(
           localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
           cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
           trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
-            local?.beforeVeniceDispatch(dispatchPack, dispatchPack.candidates.map(candidate => candidateCorpus.get(candidate) ?? ''));
-            return analyst.analyze(dispatchPack, analyzeOptions);
+            // Page asks use the same content-bearing candidates as the computer path.
+            // Keep the full detail for the existing fail-closed release checks.
+            const skip = new Set([...(analysisDetail.namesOnlyCandidateIndexes ?? []), ...(analysisDetail.contentPrivateCandidateIndexes ?? [])]);
+            const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
+            const sentPack = local ? { ...dispatchPack, candidates: dispatchPack.candidates.filter(candidate => !omitted.has(candidate)) } : dispatchPack;
+            local?.beforeVeniceDispatch(sentPack, sentPack.candidates.map(candidate => candidateCorpus.get(candidate) ?? ''));
+            return analyst.analyze(sentPack, analyzeOptions);
           } }),
         };
       };

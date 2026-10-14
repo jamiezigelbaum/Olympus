@@ -1126,6 +1126,21 @@ describe('the Private answers page', () => {
     expect(page.posts.at(-1)!.body).toEqual({ action: 'open', token: 'A'.repeat(32) });
   });
 
+  test('a withdrawn Venice answer shows its sent list and reason as text, and marks the receipt seen', async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'read'
+      ? { ok: true, status: 'withdrawn', reason: 'Sent to Venice, but no answer was kept. <img src=x>', sent_items: [{ title: '<script>bad()</script>', source: 'test', date: '2026-10-15' }], generation: 9 }
+      : { ok: true, status: 'read' } }));
+    (page.document.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await page.settle();
+    const out = page.document.querySelector('[data-pa-question] [data-pa-out]')!;
+    expect(out.textContent).toContain('Items sent to Venice');
+    expect(out.textContent).toContain('<script>bad()</script>');
+    expect(out.textContent).toContain('Sent to Venice, but no answer was kept. <img src=x>');
+    expect(out.querySelector('img, script, .paanswer, .paopen')).toBeNull();
+    expect(page.posts.map(post => post.body)).toEqual([{ action: 'read', id: 'wq_1' }, { action: 'seen', id: 'wq_1', generation: 9 }]);
+    expect(page.document.querySelector('[data-pa-question]')!.classList.contains('unread')).toBe(false);
+  });
+
   test('opening a retained not-found answer marks it read without deleting it', async () => {
     const page = renderAndRun(body => ({ status: 200, body: body.action === 'read'
       ? { ok: true, status: 'not_found', left_out: ['Cloud-only source'], generation: 8 }

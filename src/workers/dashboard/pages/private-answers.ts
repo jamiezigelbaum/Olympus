@@ -288,11 +288,19 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (!outcome.ok) { button.textContent = errorText(outcome); button.disabled = true; }
     });
   }
+  function renderSent(parent, result) {
+    if (!Array.isArray(result.sent_items)) return;
+    parent.appendChild(el('div', 'palabel', config.copy.sentItems));
+    var sentList = el('ul', 'pasrc');
+    result.sent_items.forEach(function (item) { sentList.appendChild(el('li', '', [item.title, item.source, item.date].filter(Boolean).join(' · '))); });
+    parent.appendChild(sentList);
+  }
   // Shared Markdown builds text-only DOM nodes; no model HTML is interpreted.
   function render(out, result, question) {
     var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
+    if (status === 'withdrawn') { renderSent(card, result); card.appendChild(el('p', 'pamsg', result.reason)); return; }
     if (status === 'answered') {
       var box = el('div', 'paanswer answer');
       var markdown = window.olympusMarkdown;
@@ -305,12 +313,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       card.appendChild(box);
       if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
-      if (Array.isArray(result.sent_items)) {
-        meta.appendChild(el('div', 'palabel', config.copy.sentItems));
-        var sentList = el('ul', 'pasrc');
-        result.sent_items.forEach(function (item) { sentList.appendChild(el('li', '', [item.title, item.source, item.date].filter(Boolean).join(' · '))); });
-        meta.appendChild(sentList);
-      }
+      renderSent(meta, result);
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
         meta.appendChild(el('div', 'palabel', config.copy.sources));
@@ -398,7 +401,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     }
     render(out, outcome.result, question);
     var generation = outcome.result.generation;
-    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
+    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found' || outcome.result.status === 'withdrawn') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
       var ack = await send({ action: 'seen', id: id, generation: generation });
       if (ack.ok) { seen[id] = generation; row.classList.remove('unread'); }
     }

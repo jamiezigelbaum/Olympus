@@ -29,29 +29,41 @@ export function createVeniceInboxAnswer(options: {
     if (options.state() !== 'ready' || input.stillAuthorized?.() === false) throw new Error(W.veniceNotAllowed);
     const read: PrivateEvidenceItem[] = [];
     const sentItems: Array<{ title?: string; source?: string; date?: string }> = [];
+    let dispatched = false;
+    const sent = new Set<string>();
+    const withdrawn = (reason: string): LocalAnswerResult => ({ status: 'withdrawn', sentItems, reason });
     const corpusIds = options.corpusIds();
     if (!corpusIds.length) return { status: 'not_found', leftOut: [] };
     const request = { ...localAnswerRequest(input.question, input.selectors), corpus_ids: corpusIds, retrieval_mode: 'keyword' as const, analyst_provider: 'venice' as const };
-    const result = await options.handler.answer(request, {
-      beforeVeniceDispatch(pack, corpusIds) {
-        // Repeated at the actual dispatch, after the shared handler's live release checks.
-        if (options.state() !== 'ready' || input.stillAuthorized?.() === false) throw new Error(W.veniceNotAllowed);
-        pack.candidates.forEach((candidate, i) => {
-          const item = { ...candidate, corpusId: corpusIds[i] ?? '' } as unknown as PrivateEvidenceItem;
-          read.push(inboxEvidenceIdentity(item));
-          const citation = candidate.provenance.citation ?? {};
-          sentItems.push({ ...(citation.title ? { title: citation.title } : {}), source: candidate.provenance.sourceItem.provider, ...(citation.authoredAt ? { date: citation.authoredAt } : {}) });
-        });
-      },
-    });
-    // A fallback is a useful source_answer result, but cannot be labeled as a Venice answer.
-    if (result.audit.answer_synthesis.analyst_backend !== 'venice') return { status: 'failed' };
-    const allowed = await options.eligible(read);
-    if (allowed.length !== read.length || allowed.some(value => !value)) return { status: 'changed' };
-    return {
-      status: 'answered', answer: result.answer, read, sentItems,
-      citations: result.evidence.map(item => ({ ...(item.title ? { title: item.title } : {}), source: item.provider, ...(item.authored_at ? { date: item.authored_at } : {}), ...(item.uri?.startsWith('https://') ? { url: item.uri } : {}) })),
-      unanswered: [], leftOut: [...new Set(result.audit.skipped_corpora.filter(item => !['not_requested', 'trust_domain_not_allowed', 'corpus_not_allowed'].includes(item.reason)).map(item => options.sourceName?.(item.corpus_id) ?? W.oneSource))],
-    };
+    try {
+      const result = await options.handler.answer(request, {
+        beforeVeniceDispatch(pack, corpusIds) {
+          // Repeated at the actual dispatch, after the shared handler's live release checks.
+          if (options.state() !== 'ready' || input.stillAuthorized?.() === false) throw new Error(W.veniceNotAllowed);
+          dispatched = true;
+          pack.candidates.forEach((candidate, i) => {
+            const item = { ...candidate, corpusId: corpusIds[i] ?? '' } as unknown as PrivateEvidenceItem;
+            const identity = inboxEvidenceIdentity(item);
+            const key = JSON.stringify(identity);
+            if (sent.has(key)) return;
+            sent.add(key);
+            read.push(identity);
+            const citation = candidate.provenance.citation ?? {};
+            sentItems.push({ ...(citation.title ? { title: citation.title } : {}), source: candidate.provenance.sourceItem.provider, ...(citation.authoredAt ? { date: citation.authoredAt } : {}) });
+          });
+        },
+      });
+      // A fallback is a useful source_answer result, but cannot be labeled as a Venice answer.
+      if (result.audit.answer_synthesis.analyst_backend !== 'venice') return dispatched ? withdrawn('Sent to Venice, but no Venice answer was kept.') : { status: 'failed' };
+      const allowed = await options.eligible(read);
+      if (allowed.length !== read.length || allowed.some(value => !value)) return withdrawn('Sent to Venice, but the sources changed before the answer could be shown.');
+      return {
+        status: 'answered', answer: result.answer, read, sentItems,
+        citations: result.evidence.map(item => ({ ...(item.title ? { title: item.title } : {}), source: item.provider, ...(item.authored_at ? { date: item.authored_at } : {}), ...(item.uri?.startsWith('https://') ? { url: item.uri } : {}) })),
+        unanswered: [], leftOut: [...new Set(result.audit.skipped_corpora.filter(item => !['not_requested', 'trust_domain_not_allowed', 'corpus_not_allowed'].includes(item.reason)).map(item => options.sourceName?.(item.corpus_id) ?? W.oneSource))],
+      };
+    } catch {
+      return dispatched ? withdrawn('Sent to Venice, but no answer could be kept.') : { status: 'failed' };
+    }
   };
 }
