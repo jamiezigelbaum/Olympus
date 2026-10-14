@@ -499,11 +499,10 @@ export class EmailClient {
     const ticket = data._release_ticket;
     delete data._release_ticket;
     const result = parseSourceIndexAnswerResult(data);
-    if (options.caller?.surface === 'mcp') {
-      if (typeof ticket === 'string' && /^[A-Za-z0-9_-]{43}$/.test(ticket)) sourceAnswerTickets.set(result, ticket);
-      return await this.revalidateSourceAnswer(result) as SourceIndexAnswerResult;
-    }
-    return result;
+    // Remote calls carry their manifest in-process to their own output boundary.
+    if (options.caller?.surface === 'remote') return result;
+    if (typeof ticket === 'string' && /^[A-Za-z0-9_-]{43}$/.test(ticket)) sourceAnswerTickets.set(result, ticket);
+    return await this.revalidateSourceAnswer(result) as SourceIndexAnswerResult;
   }
 
   /** Current-tier check for an answer collected from a local in-memory job. */

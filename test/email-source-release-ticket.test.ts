@@ -23,8 +23,10 @@ function client(fetcher: EmailFetch): EmailClient {
   return new EmailClient(config, new DirectHttpEmailTransport(fetcher));
 }
 
-describe('stdio release ticket diagnostics', () => {
-  test.each(['private', 'legacy'] as const)('cached Private-derived answer follows current posture and explicit consent (%s)', async (tier) => {
+describe('local release ticket diagnostics', () => {
+  test.each([
+    ['private', 'mcp'], ['legacy', 'mcp'], ['private', 'native'], ['private', 'cli'],
+  ] as const)('cached Private-derived answer follows current posture and explicit consent (%s, %s)', async (tier, surface) => {
     let posture: 'allow' | 'approval' = 'allow';
     let includeSecureLocalContent = false;
     const worker = createEmailSourceWorker({
@@ -39,7 +41,7 @@ describe('stdio release ticket diagnostics', () => {
     });
     try {
       const email = client(async (input, init) => worker.fetch(new Request(input, init)));
-      const cached = await email.sourceAnswer({ question: 'fixture?', caller: { surface: 'mcp' } });
+      const cached = await email.sourceAnswer({ question: 'fixture?', caller: { surface } });
       expect(cached.answer).toBe(answer.answer);
       posture = 'approval';
       const withheld = await email.revalidateSourceAnswer(cached);
@@ -47,7 +49,7 @@ describe('stdio release ticket diagnostics', () => {
       expect(JSON.stringify(withheld)).not.toContain(answer.answer);
       // Explicit consent in the manifest still permits Private under approval.
       includeSecureLocalContent = true;
-      const explicit = await email.sourceAnswer({ question: 'fixture?', includeSecureLocalContent: true, caller: { surface: 'mcp' } });
+      const explicit = await email.sourceAnswer({ question: 'fixture?', includeSecureLocalContent: true, caller: { surface } });
       expect(explicit.answer).toBe(answer.answer);
     } finally { worker.close(); }
   });
@@ -77,9 +79,9 @@ describe('stdio release ticket diagnostics', () => {
     }
   });
 
-  test('an older engine without a ticket is withheld with update instructions', async () => {
+  test.each(['mcp', 'native', 'cli'] as const)('an older engine without a ticket is withheld with update instructions (%s)', async surface => {
     const email = client(async () => Response.json(answer));
-    const result: unknown = await email.sourceAnswer({ question: 'fixture?', caller: { surface: 'mcp' } });
+    const result: unknown = await email.sourceAnswer({ question: 'fixture?', caller: { surface } });
     expect(result).toEqual({
       answer: 'Olympus withheld this answer because the engine did not provide a privacy release ticket. Update Olympus, then ask again.', evidence: [],
     });

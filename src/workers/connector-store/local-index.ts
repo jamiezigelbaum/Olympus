@@ -3319,6 +3319,8 @@ export class LocalConnectorStore {
        * hides them). Default `both`.
        */
       layers?: 'metadata' | 'content' | 'both';
+      /** The caller verified the copied chunks match the source row under its write fence. */
+      sourceTextCurrent?: boolean;
     },
   ): ConnectorStoreItemCopyImportSummary {
     const sensitivity = buildSourceSensitivity({ trustTier: options.trustTier, trustDomain: this.trustDomain });
@@ -3433,6 +3435,7 @@ export class LocalConnectorStore {
         }
         if (strippedMedia) this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
       }
+      if (!namesOnly && options.sourceTextCurrent) this.clearItemTextVersion(itemPk);
       this.refreshFtsForItem(itemPk);
       const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
 
@@ -3848,8 +3851,9 @@ export class LocalConnectorStore {
   /** Lightweight purge proof; no text, vectors or owners are exported. */
   copyContentState(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): {
     chunks: number; vectors: number; versions: number; currentText: boolean; names: boolean;
+    sourceVersion: string | null; contentHash: string | null; updatedAt: string | null;
   } | undefined {
-    const row = this.db.query(`SELECT
+    const row = this.db.query(`SELECT i.source_version, i.content_hash, i.updated_at,
       (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
       (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
       (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
@@ -3858,9 +3862,11 @@ export class LocalConnectorStore {
       FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`)
       .get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as {
         chunks: number; vectors: number; versions: number; current_text: number; names: number;
+        source_version: string | null; content_hash: string | null; updated_at: string | null;
       } | null;
     return row ? { chunks: row.chunks, vectors: row.vectors, versions: row.versions,
-      currentText: row.current_text === 1, names: row.names === 1 } : undefined;
+      currentText: row.current_text === 1, names: row.names === 1,
+      sourceVersion: row.source_version, contentHash: row.content_hash, updatedAt: row.updated_at } : undefined;
   }
 
   /** Keep a verified destination stable while another SQLite file is purged. */

@@ -21357,12 +21357,11 @@ class EmailClient {
     const ticket = data._release_ticket;
     delete data._release_ticket;
     const result = parseSourceIndexAnswerResult(data);
-    if (options.caller?.surface === "mcp") {
-      if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
-        sourceAnswerTickets.set(result, ticket);
-      return await this.revalidateSourceAnswer(result);
-    }
-    return result;
+    if (options.caller?.surface === "remote")
+      return result;
+    if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
+      sourceAnswerTickets.set(result, ticket);
+    return await this.revalidateSourceAnswer(result);
   }
   async revalidateSourceAnswer(result) {
     if (!result || typeof result !== "object" || typeof result.answer !== "string")
