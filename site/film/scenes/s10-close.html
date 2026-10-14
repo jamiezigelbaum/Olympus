@@ -1,0 +1,75 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    @font-face{font-family:"Nunito";font-weight:200 1000;font-display:block;src:url("assets/fonts/nunito.woff2") format("woff2");}
+    @font-face{font-family:"Arimo";font-weight:700;font-display:block;src:url("assets/fonts/arimo-700.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    #s10-close-lift { position: absolute; left: 330px; top: 200px; width: 1260px; height: 760px; border-radius: 40px;
+      background: rgba(150, 90, 50, 0.32); filter: blur(60px); opacity: 0; }
+    #s10-close-line { position: absolute; left: 96px; top: 128px; font-family: "Newsreader"; font-size: 118px; font-weight: 300;
+      line-height: 1.02; letter-spacing: -0.02em; color: var(--ink); white-space: nowrap; }
+    #s10-close-line .ln { display: block; }
+    #s10-close-line em { font-style: italic; }
+    #s10-close-plate { position: absolute; left: 884px; top: 128px; width: 440px; height: 440px; background: var(--plate);
+      border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--rule), 0 16px 30px -14px rgba(120, 70, 40, 0.45); }
+    #s10-close-plate .img { position: absolute; left: 18px; top: 18px; width: 404px; height: 404px; overflow: hidden; border-radius: 2px; }
+    #s10-close-plate img { width: 404px; height: 404px; display: block; }
+    #s10-close-plate .veil { position: absolute; inset: 0; background: var(--bar); }
+    #s10-close-url { left: 0; top: 0; font-size: 100px; border-width: 9px; border-radius: 34px; padding: 6px 44px 14px; }
+  </style>
+  <div id="root" data-composition-id="s10-close" data-width="1920" data-height="1080">
+    <div class="pan" id="s10-close-pan"><div class="cam" id="s10-close-cam"><div class="shake" id="s10-close-shake">
+      <div id="s10-close-lift"></div>
+    </div></div></div>
+  </div>
+  <script>
+    (function () {
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s10-close"], B = C.beats;
+      const $ = (id) => document.getElementById("s10-close-" + id);
+      const shake = $("shake");
+      const P = O.page(shake, { header: ["Olympus", "Open source · No account"] });
+      const S = P.sheet;
+      S.insertAdjacentHTML("beforeend", `
+        <div id="s10-close-line"><span class="ln">Keep your</span><span class="ln">private things</span><span class="ln"><em>private.</em></span></div>
+        <div id="s10-close-plate"><div class="img"><img src="assets/mountain-warm.jpg" alt="" /><div class="veil"></div></div></div>`);
+      const btn = O.button(S, "Add Olympus to your AI", { kind: "clay", x: 96, y: 520, w: 610, h: 100, fs: 44 });
+      // the biggest stamp of the film, last (on bare paper, full ink)
+      const url = O.make("div", "stamp solid", S, "olympusplugin.ai"); url.id = "s10-close-url";
+      const pl = $("plate");
+
+      O.ready(() => {
+        const tl = gsap.timeline({ paused: true });
+        const end = C.dur + (C.tail || 0);
+        O.drift(tl, $("cam"), end, { dx: -10, s1: 1.016 });
+        // The final sheet is laid on the stack: it comes down from above the frame over the terms page, its shadow
+        // darkening under it as it nears the stack, and settles with a small knock.
+        const LD = 0.55, F = O.FR;
+        tl.fromTo(P.page, { y: -1130, rotation: -2.5 }, { y: 0, rotation: 0, duration: LD, ease: "power3.inOut" }, B.land);
+        tl.fromTo($("lift"), { opacity: 0, y: -120, scale: 1.1 }, { opacity: 0.75, y: 0, scale: 1, duration: LD, ease: "power2.in" }, B.land);
+        tl.to($("lift"), { opacity: 0, duration: 0.3, ease: "power2.out" }, B.land + LD);
+        tl.to(shake, { y: 4, duration: F, ease: "none" }, B.land + LD);
+        tl.to(shake, { y: 0, duration: 0.18, ease: "power2.out" }, B.land + LD + F);
+
+        // The line rises word by word; "private." lands last, in italic.
+        O.rise(tl, O.split($("line")), B.line, { dur: 0.6, stagger: 0.08 });
+        // The mountain slides in and develops, slower than the first time: the payoff image. Never cropped.
+        const ps = O.spring(0.75, 9.5);
+        tl.fromTo(pl, { x: 700, rotation: 6 }, { x: 0, rotation: -1, duration: 0.8, ease: ps }, B.plate - ps.land * 0.8);
+        O.develop(tl, pl.querySelector("img"), pl.querySelector(".veil"), B.plate + 0.05, 1.2);
+        // The button extrudes from the paper.
+        O.extrude(tl, btn, B.button, { dur: 0.32 });
+        // Last: the URL slams down as the biggest stamp of the film, and the frame holds.
+        gsap.set(url, { x: 96 + 1228 / 2 - url.offsetWidth / 2 + 30, y: 662 });
+        O.stamp(tl, url, B.url, { from: 1.35, rot: -3, squash: 0.1, fall: 0.14, jolt: [shake], amp: 5, ink: 1 });
+        tl.set({}, {}, end);
+        window.__timelines["s10-close"] = tl;
+      });
+    })();
+  </script>
+</template>
+</body></html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install Olympus with OpenClaw</title>
+  <meta name="description" content="Run Olympus as an OpenClaw plugin on Linux, a server, or a Mac.">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <p class="crumb"><a href="/install/">All apps</a></p>
+      <h1>Install with OpenClaw</h1>
+      <p class="lede">On Linux, on a server, or on a Mac that already runs OpenClaw, Olympus installs as an OpenClaw plugin. Your OpenClaw agents use it natively: nothing to paste, no connector to add.</p>
+
+      <h2>Before you start</h2>
+      <ul>
+        <li>OpenClaw 2026.7.1 or later, on macOS or Linux. On Linux, Olympus is tested on Omarchy (Arch Linux, x86_64).</li>
+        <li>A Node version your OpenClaw supports, and Bun 1.2 or later.</li>
+      </ul>
+
+      <h2 id="linux">On Linux</h2>
+      <p>On Omarchy you can also <a href="/install/#linux">install Olympus with one line</a>, without OpenClaw. With OpenClaw on Linux, install these first so that Olympus can read scans and pictures of text, search photos by what is in them and transcribe voice notes (on Omarchy):</p>
+      <pre><code>sudo pacman -S --needed tesseract tesseract-data-eng poppler libvips libheif ffmpeg</code></pre>
+      <p>Anonymous answers work on a Mac and on supported Linux x64 computers once Olympus's network isolation checks pass. Apple Messages is Mac only.</p>
+
+      <h2>Install</h2>
+      <p>The easy way is to ask an agent. Paste this into OpenClaw, or any agent that can use a terminal:</p>
+      <pre><code>Install Olympus by reading https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md and following it step by step. Walk me through setup and ask me about my data and privacy preferences.</code></pre>
+      <p>It checks the release, installs the plugin, and walks you through your sources and your privacy choices. To do it by hand instead, follow the <a href="https://github.com/jamiezigelbaum/Olympus/blob/main/docs/QUICKSTART.md">Quickstart</a>.</p>
+
+      <h2>Open the dashboard</h2>
+      <ul>
+        <li><strong>In OpenClaw's Control UI</strong> (2026.9.2 or later): turn on <strong>Settings</strong>, <strong>Labs</strong>, <strong>Custom plugin UI</strong>, and Olympus appears in the sidebar.</li>
+        <li><strong>From the command line:</strong> run <code>olympus dashboard</code>. The link works once, for 15 minutes.</li>
+        <li><strong>On a server:</strong> run <code>olympus dashboard --no-open</code> there, and open the link through an SSH tunnel on the same port: <code>ssh -N -L PORT:127.0.0.1:PORT you@your-server</code>.</li>
+      </ul>
+
+      <h2>Good to know</h2>
+      <ul>
+        <li>To keep one OpenClaw agent away from Olympus, add the Olympus tools to that agent's deny list in <code>agents.list[].tools</code>.</li>
+        <li>Remote access, which lets apps in the cloud reach Olympus, is off under OpenClaw until you turn it on from the dashboard's <strong>Agents</strong> page.</li>
+        <li>To remove it: <code>olympus worker uninstall</code> keeps your data; <code>olympus data delete --all</code> removes it.</li>
+      </ul>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

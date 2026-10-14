@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect ChatGPT to Olympus</title>
+  <meta name="description" content="Add Olympus to ChatGPT and approve it once on your computer.">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <p class="crumb"><a href="/install/">All apps</a></p>
+      <h1>Connect ChatGPT</h1>
+      <p class="lede">ChatGPT reaches Olympus on your computer through the Olympus relay. You approve it once, on that computer, with one click: no code to copy and no account to create.</p>
+      <div class="note">
+        <p>Olympus is on its way to ChatGPT's app directory. Until it is listed, you add it yourself as a custom MCP server; if ChatGPT doesn't offer that, turn on Developer mode first. OpenAI decides which accounts have Developer mode; in a work or school workspace, an admin may need to allow it.</p>
+      </div>
+
+      <h2>Before you start</h2>
+      <ul>
+        <li><strong>Olympus installed on your computer.</strong> <a href="/install/#install">One line in a terminal</a>. On Omarchy, ChatGPT may still say Olympus needs a Mac; it works on Omarchy too.</li>
+        <li><strong>Be at that computer.</strong> The approval opens in its browser.</li>
+      </ul>
+
+      <h2>Connect</h2>
+      <ol class="flow">
+        <li><strong>Add Olympus.</strong> In ChatGPT, open <strong>Plugins</strong>, choose <strong>+</strong>, then <strong>Add custom MCP server</strong>. If you don't see <strong>Add custom MCP server</strong>, turn on <strong>Developer mode</strong> in <strong>Settings</strong> first.</li>
+        <li><strong>Fill it in.</strong> Name it <strong>Olympus</strong>, choose <strong>OAuth</strong>, and paste this address as the URL:
+          <pre><code>https://mcp.olympusplugin.ai/mcp</code></pre>
+          Then save it.</li>
+        <li><strong>Approve on your computer.</strong> A page opens in your computer's browser, <em>Approve ChatGPT on your Mac</em> (it says Mac on Omarchy too), and moves on by itself to <em>Connect ChatGPT to Olympus?</em> Choose <strong>Connect</strong>. That click is how Olympus knows the computer is yours.</li>
+        <li><strong>Connect your sources.</strong> Ask ChatGPT <em>Show my Olympus dashboard</em>. Choose <strong>Connect</strong> next to Dropbox, Gmail or Google Drive, pick folders, then <strong>Save and start</strong>. For Gmail and Google Drive, <strong>Connect</strong> gives you a link to open on your computer, where Google sign-in happens.</li>
+        <li><strong>Ask.</strong> Ask about your own things in plain words. Anything Private is answered on your computer and shown in a panel marked <strong>Not sent to ChatGPT</strong>.</li>
+      </ol>
+
+      <h2>Good to know</h2>
+      <ul>
+        <li>If the approval page says <em>Olympus did not answer on this computer</em>, it opened somewhere other than the computer where Olympus runs. Start again from ChatGPT on that computer.</li>
+        <li>Your computer needs to be awake and online for ChatGPT to reach Olympus. It opens no ports; it only makes an outgoing connection. <a href="/help/mac-offline/">If ChatGPT says your computer is offline</a>.</li>
+        <li>The relay passes requests between ChatGPT and your computer. It stores and logs no questions, answers or tokens, but like any HTTPS service it handles them in transit.</li>
+        <li>To disconnect, remove Olympus from your plugins in ChatGPT. On the computer, the dashboard's <strong>Agents</strong> page (under <strong>On this computer</strong>) lists connected apps, each with <strong>Revoke</strong>.</li>
+      </ul>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

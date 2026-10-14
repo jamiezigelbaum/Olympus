@@ -37,8 +37,35 @@ if [ ! -f "$SITE_DIR/index.html" ]; then
   echo "No index.html in $SITE_DIR; refusing to publish." >&2
   exit 1
 fi
+# Films are not in Git (site/media/.gitignore): a checkout without them would
+# publish a broken poster and a 404 after Play, and --delete would remove the
+# host's copies. Every /media/ file a page names, and the .mp4 and poster of
+# every data-film, must be here.
+missing=()
+while IFS= read -r ref; do
+  case "$ref" in
+    data-film=*) name="${ref#data-film=\"}"; name="${name%\"}"
+      set -- "/media/$name.mp4" "/media/$name-poster.jpg" ;;
+    *) set -- "$ref" ;;
+  esac
+  for path in "$@"; do
+    [ -s "$SITE_DIR$path" ] || missing+=("$path")
+  done
+done < <(grep -rhoE 'data-film="[^"]+"|/media/[A-Za-z0-9._-]+' --include='*.html' "$SITE_DIR" | sort -u)
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "Refusing to publish: missing $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')(copy the films from the Olympus Brand folder into site/media/)." >&2
+  exit 1
+fi
 if ! bun "$SITE_DIR/../scripts/publish-release-to-site.ts" --check; then
   echo "Refusing to publish: run bun scripts/publish-release-to-site.ts first." >&2
+  exit 1
+fi
+# The Linux installer is a build product too (gitignored): when a page offers
+# it, it must be here and check out, or --delete would leave every Omarchy
+# install command a 404.
+if grep -rqF '/install-linux.sh' --include='*.html' "$SITE_DIR" &&
+   ! bun "$SITE_DIR/../scripts/publish-release-to-site.ts" --linux --check; then
+  echo "Refusing to publish: the site offers install-linux.sh; run bun scripts/publish-release-to-site.ts --linux --artifact <artifact> first." >&2
   exit 1
 fi
 

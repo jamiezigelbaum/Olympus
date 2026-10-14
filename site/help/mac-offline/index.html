@@ -3,43 +3,46 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ChatGPT says your computer is offline - Olympus help</title>
-  <meta name="description" content="What to do when ChatGPT says Olympus cannot reach your computer.">
-  <meta name="color-scheme" content="light dark">
+  <title>Your AI says your computer is offline - Olympus help</title>
+  <meta name="description" content="What to do when your AI app says Olympus cannot reach your computer.">
+  <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
   <link rel="stylesheet" href="/style.css">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="site">
-    <div class="wrap">
-      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
-      <nav class="site" aria-label="Main">
-        <ul>
-        <li><a href="/">Home</a></li>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/help/mac-offline/" aria-current="page">Help</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        </ul>
-      </nav>
-    </div>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
   </header>
   <main id="main">
     <div class="wrap">
-      <h1>ChatGPT says your computer is offline</h1>
-      <p class="lede">Olympus answers from your computer, so your computer has to be awake, online and running Olympus. When it is not, ChatGPT shows "Your computer is offline" and answers pause. Nothing is lost; answers resume when the computer is back.</p>
+      <h1>Your AI says your computer is offline</h1>
+      <p class="lede">Olympus answers from your computer, so your computer has to be awake, online and running Olympus. When it is not, your AI app says your computer is offline (in ChatGPT, "Your computer is offline") and answers pause. Nothing is lost; answers resume when the computer is back.</p>
 
       <h2>1. Wake your computer</h2>
       <ul>
         <li>Open the lid or press a key, and log in.</li>
         <li>Check the computer is connected to the internet.</li>
-        <li>If your computer often sleeps while you are away, you can keep it awake while plugged in: in System Settings, open <strong>Battery</strong> (or <strong>Energy</strong>) and turn on the option that prevents automatic sleeping when the display is off.</li>
+        <li>If your computer often sleeps while you are away, keep it awake while plugged in.
+          <ul>
+            <li><strong>Mac:</strong> in System Settings, open <strong>Battery</strong> (or <strong>Energy</strong>) and turn on the option that prevents automatic sleeping when the display is off.</li>
+            <li><strong>Omarchy:</strong> a locked screen or a dark display is fine; Olympus keeps running. Leave the lid open, since closing it puts the computer to sleep, and if you have set it to suspend when idle, turn that off.</li>
+          </ul>
+        </li>
       </ul>
 
       <h2>2. Check Olympus is running</h2>
-      <p>Open Terminal on your computer and run:</p>
+      <p>Open a terminal on your computer and run:</p>
       <pre><code>olympus engine status</code></pre>
       <ul>
         <li><code>"ok": true</code> means the engine is running and answering on your computer.</li>
@@ -51,27 +54,27 @@
       <p>To see recent log lines (they contain no message content or tokens):</p>
       <pre><code>olympus engine logs --lines 50</code></pre>
 
-      <h2>3. Try again in ChatGPT</h2>
-      <p>Ask your question again, or open the Olympus dashboard in the ChatGPT sidebar. It shows whether your computer is connected and when it was last seen.</p>
+      <h2>3. Try again in your AI app</h2>
+      <p>Ask your question again. In ChatGPT you can also open the Olympus dashboard in the sidebar: it shows whether your computer is connected and when it was last seen.</p>
 
       <h2>Still offline?</h2>
       <ul>
         <li>A VPN, firewall or network filter on the computer may block the outgoing connection to <code>mcp.olympusplugin.ai</code>. Olympus needs only an outgoing HTTPS connection; it opens no ports on your computer.</li>
-        <li>If you have just uninstalled and reinstalled Olympus, you may need to approve ChatGPT again on your computer.</li>
+        <li>If you have just uninstalled and reinstalled Olympus, you may need to approve your AI app again on your computer.</li>
         <li>Otherwise, <a href="/support/">contact support</a> and include the output of <code>olympus engine status</code>. Check it first: it contains file paths on your computer, but no message content.</li>
       </ul>
     </div>
   </main>
-  <footer class="site">
-    <div class="wrap">
-      <ul>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        <li><a href="/terms/">Terms</a></li>
-      </ul>
-      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
-    </div>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
   </footer>
 </body>
 </html>

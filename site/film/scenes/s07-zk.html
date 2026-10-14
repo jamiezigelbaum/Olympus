@@ -1,0 +1,75 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    /* the same layout as the Venice.ai sheet, so the two read as a pair */
+    .s07-k { position: absolute; left: 96px; font-family: "Newsreader"; color: var(--ink); white-space: nowrap; }
+    #s07-zk-head { top: 124px; font-size: 124px; font-weight: 300; line-height: 1.02; letter-spacing: -0.02em; }
+    #s07-zk-head .ln { display: block; }
+    #s07-zk-head em { font-style: italic; }
+    #s07-zk-whos { display: inline-block; }
+    #s07-zk-sub { position: absolute; left: 96px; top: 448px; font-family: "Martian Mono"; font-size: 44px; color: var(--mid); white-space: nowrap; }
+    /* (website) what zkAPI is, under the subhead, and where it comes from, as a footer that mirrors the header */
+    #s07-zk-more { position: absolute; left: 96px; top: 580px; font-family: "Newsreader"; font-size: 64px; font-weight: 300;
+      line-height: 1.16; color: var(--ink); white-space: nowrap; }
+    #s07-zk-more .ln { display: block; }
+    #s07-zk-cred { position: absolute; left: 96px; right: 96px; top: 784px; padding-top: 22px; border-top: 1.5px solid var(--rule);
+      font-family: "Martian Mono"; font-size: 19px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+    #s07-zk-cred .nc { text-transform: none; }
+    /* the redaction that grows to fill the frame and becomes the cut (the next page opens on it) */
+    #s07-zk-plum { position: absolute; left: 0; top: 0; width: 10px; height: 10px; opacity: 0; transform-origin: 0 0; }
+  </style>
+  <div id="root" data-composition-id="s07-zk" data-width="1920" data-height="1080">
+    <div class="pan" id="s07-zk-pan"><div class="cam" id="s07-zk-cam"><div class="shake" id="s07-zk-shake"></div></div></div>
+    <div id="s07-zk-plum"></div>
+  </div>
+  <script>
+    (function () {
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s07-zk"], B = C.beats;
+      const $ = (id) => document.getElementById("s07-zk-" + id);
+      const shake = $("shake");
+      const P = O.page(shake, { header: ['Route: <span class="nc">zkAPI</span> · Tor', "Ask anonymously"] });
+      P.sheet.insertAdjacentHTML("beforeend", `
+        <div class="s07-k" id="s07-zk-head"><span class="ln">zkAPI hides</span><span class="ln"><em id="s07-zk-whos">who’s</em> asking.</span></div>
+        <div id="s07-zk-sub">Paid anonymously · sent over Tor</div>
+        <div id="s07-zk-more"><span class="ln">No account, no card, no name.</span><span class="ln">Just proof the question is paid for.</span></div>
+        <div id="s07-zk-cred"><span>Open source · <span class="nc">zkAPI</span>, from OpenAnonymity and the Ethereum Foundation</span></div>`);
+      const plum = $("plum");
+
+      O.ready(() => {
+        const tl = gsap.timeline({ paused: true });
+        const end = C.dur + (C.tail || 0);
+        // Under the Venice.ai letter as it folds and leaves: the page waits, then its headline rises.
+        O.drift(tl, $("cam"), end, { dx: -8, s1: 1.008 });
+        // its header waits until the Venice.ai letter has left, so the letter is never labelled zkAPI
+        O.cut(tl, P.sheet.querySelectorAll(".hd > span"), B.hd);
+        O.rise(tl, O.split($("head")), B.head, { dur: 0.6, stagger: 0.07 });
+        O.rise(tl, O.split($("sub")), B.sub, { dur: 0.45, stagger: 0.04 });
+        O.rise(tl, O.split($("more")), B.sub + 0.25, { dur: 0.45, stagger: 0.04 });
+        O.cut(tl, $("cred").children, B.sub + 0.5);
+
+        // "who's" is redacted ...
+        const W = $("whos");
+        O.redact(tl, W, B.whos, { shake });
+        // ... then the redaction grows to fill the frame while the camera pushes into it: the plum is the cut.
+        const css = getComputedStyle(document.documentElement), ink = css.getPropertyValue("--type").trim(), plumC = css.getPropertyValue("--bar").trim();
+        // where the word is on screen at the push: its layout box through the camera's drift at that moment
+        const f = B.push / end, s = 1 + 0.008 * f, b = O.box(W, P.page);
+        const r = { x: 960 + (b.x - 960) * s - 8 * f, y: 540 + (b.y - 540) * s, w: b.w * s, h: b.h * s };
+        const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+        const d = C.dur - B.push;
+        tl.set(plum, { opacity: 1, x: r.x - 4, y: r.y + r.h * 0.1, width: r.w + 8, height: r.h * 0.84, backgroundColor: ink }, B.push);
+        tl.to(plum, { x: -60, y: -60, width: 2040, height: 1200, backgroundColor: plumC, duration: d, ease: "power3.in" }, B.push);
+        tl.fromTo($("pan"), { scale: 1, transformOrigin: `${cx}px ${cy}px` }, { scale: 2.4, duration: d, ease: "power3.in", immediateRender: false }, B.push);
+        tl.set({}, {}, end);
+        window.__timelines["s07-zk"] = tl;
+      });
+    })();
+  </script>
+</template>
+</body></html>

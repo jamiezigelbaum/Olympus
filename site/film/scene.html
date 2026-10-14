@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- One scene of the launch film, played on the home page. The scene files, paper.js and the clock are the film's own
+       (marketing repo, projects/olympus/launch-video at a2772ab): same type, same typewriter redaction, same timing.
+       The home page frames this at 1920x1080, scales it, and drives it (by seeking its timeline): the card arrives as
+       the stage scrolls into view, and the scene plays when it reaches the middle of the screen. ?s=<scene id> picks the scene; &still shows its last frame. -->
+  <meta name="viewport" content="width=1920, height=1080">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <script src="lib/gsap.min.js"></script>
+  <script src="lib/timeline.js"></script>
+  <script src="lib/paper.js"></script>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    @font-face{font-family:"Nunito";font-weight:200 1000;font-display:block;src:url("assets/fonts/nunito.woff2") format("woff2");}
+    @font-face{font-family:"Arimo";font-weight:700;font-display:block;src:url("assets/fonts/arimo-700.woff2") format("woff2");}
+    :root { --peach: #fcd0a8; --sweep: #f8d9bb; --cream: #efe4d5; --paper: #f7f0e4; --ink: #33251d; --bar: #3b2430;
+      --clay: #b27e65; --red: #d8432f; --muted: #9b8573; --rule: #d9cbb8; --rule-soft: #e2d5c2; --plate: #e9dccb;
+      --card: #fffaf2; --card-rule: #dccbb4; --mid: #77504a; --type: #1d1613; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* No desk: the page's own background shows through, so the paper lies on the website itself. */
+    html, body { width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+    #stage { position: absolute; inset: 0; }
+    /* The film's hand-offs from the Her film's last frame have no place on the page. */
+    #s02-choice-her, #s02-choice-veil, #s01-open-her { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <script>
+    (function () {
+      "use strict";
+      var q = new URLSearchParams(location.search), id = q.get("s"), still = q.has("still");
+      if (!/^s\d\d-[a-z]+$/.test(id || "") || !window.OLY_TL.scenes[id]) return;
+      window.__timelines = {};
+
+      // A scene ends where the film moves on from it (its page turn, pan or slide-off), not at the end of its clip:
+      // a frame before that beat, since whatever the beat sets (zkAPI's redaction growing into the cut) is the next
+      // scene's.
+      var C = window.OLY_TL.scenes[id], B = C.beats;
+      var end = [B.out, B.turn, B.pan, B.push].filter(function (t) { return t != null; })[0];
+      end = end == null ? C.dur : end - 0.02;
+
+      fetch("scenes/" + id + ".html").then(function (r) { return r.text(); }).then(function (html) {
+        var doc = new DOMParser().parseFromString(html, "text/html");
+        var frag = doc.querySelector("template").content;
+        // keep the hand-off elements (the scene's timeline addresses them) but never fetch their frames
+        Array.prototype.forEach.call(frag.querySelectorAll('img[src*="handoff/"]'), function (img) { img.removeAttribute("src"); });
+        var stage = document.getElementById("stage");
+        Array.prototype.forEach.call(frag.childNodes, function (n) {
+          if (n.nodeName === "SCRIPT") {
+            var s = document.createElement("script");
+            s.textContent = n.textContent;
+            stage.appendChild(s);
+          } else {
+            stage.appendChild(document.importNode(n, true));
+          }
+        });
+        // OLY.ready waits for the fonts, then the scene registers its timeline. The home page drives it from its own
+        // clock (seek, never play), so a frame the browser throttles can't stall a scene halfway.
+        var tries = 0;
+        (function wait() {
+          var tl = window.__timelines[id];
+          if (!tl) return ++tries < 1900 ? setTimeout(wait, 16) : undefined;   // a scene that never registers: give up after ~30 s
+          tl.pause();
+
+          // In the film each page enters as part of the cut from the page before (rising, sliding in from the
+          // right, dropping from above, with a shadow under it), or lies already uncovered by that page's turn.
+          // On the website every card arrives the same way instead (the stand-in entry below), so the film's
+          // page entries come out and every scene starts with its page in place.
+          var movers = Array.prototype.slice.call(document.querySelectorAll('#stage .page, #s06-venice-letter, #stage [id$="-lift"]'));
+          var ends = [];
+          tl.getChildren(true, true, false).forEach(function (tw) {
+            var lift = tw.targets().some(function (t) { return /-lift$/.test(t.id || ""); });
+            var entry = tw.startTime() <= 0.6 && ("x" in tw.vars || "y" in tw.vars) &&
+              tw.targets().some(function (t) { return movers.indexOf(t) >= 0; });
+            if (lift || entry) { tw.progress(1); tw.kill(); if (entry) ends.push(tw.startTime() + tw.duration()); }
+          });
+          movers.forEach(function (m) { if (/-lift$/.test(m.id)) m.style.opacity = "0"; });
+          // The anonymous question opens on the other half of a cut: the zkAPI page's redaction grew to fill the
+          // frame, and here that plum pulls back to one inked square. Without the push before it, it would open
+          // on a plum block, so it opens on its page.
+          var plum = document.getElementById("s08-zkq-plum"), cam = document.getElementById("s08-zkq-cam");
+          if (plum) {
+            tl.getChildren(true, true, false).forEach(function (tw) {
+              var tg = tw.targets();
+              if (tg.indexOf(plum) >= 0 || (tg.indexOf(cam) >= 0 && "scale" in tw.vars && tw.startTime() < 0.1)) { tw.progress(1); tw.kill(); }
+            });
+            plum.style.opacity = "0";
+          }
+          // the small knock as a dropped page lands (the close) goes with its entry
+          tl.getChildren(true, true, false).forEach(function (tw) {
+            var shake = tw.targets().some(function (t) { return /-shake$/.test(t.id || ""); });
+            if (shake && ends.some(function (e) { return Math.abs(tw.startTime() - e) < 0.1; })) { tw.progress(1); tw.kill(); }
+          });
+
+          // On the page a few beats come sooner than in the film (Jamie, 2026-10-12). Venice.ai's typewriter starts a
+          // beat faster, and everything after it moves up with it; the anonymous question's red highlights start a
+          // beat faster, and only they move: the rest of that card keeps the film's timing.
+          var SOONER = { "s06-venice": { at: "strike", by: 0.6 }, "s08-zkq": { at: "hl1", by: 0.75, only: ".s08-hl" } };
+          var so = SOONER[id];
+          if (so) {
+            var from = B[so.at];
+            tl.getChildren(false, true, true).forEach(function (c) {
+              if (c.startTime() < from - (so.only ? 0.1 : 0.001)) return;   // a sweep's first frame is just before its beat
+              if (so.only && !(c.targets && c.targets().some(function (x) { return x.matches && x.matches(so.only); }))) return;
+              c.startTime(c.startTime() - so.by);
+            });
+            if (!so.only) end -= so.by;
+          }
+
+          // The stand-in entry: the card rises in the way the film's sources page does (y 1100 -> 0, power3.inOut).
+          var enter = gsap.fromTo(stage, { y: 1100 }, { y: 0, duration: 0.6, ease: "power3.inOut", paused: true });
+
+          // While a card waits for the middle of the screen it holds its first frame. A word the film starts
+          // mid-rise at 0 (it rose behind the page before) would show as a stub, so it stays hidden until the scene
+          // plays.
+          function hold() {
+            Array.prototype.forEach.call(document.querySelectorAll("#stage .wi"), function (wi) {
+              if (gsap.getProperty(wi, "yPercent") > 0.5) wi.parentNode.style.visibility = "hidden";
+            });
+          }
+          function release() {
+            Array.prototype.forEach.call(document.querySelectorAll("#stage .w"), function (w) { w.style.visibility = ""; });
+          }
+
+          // Some scenes open on a stretch where nothing shows moving (in the film the page before was still leaving
+          // over them: the Venice letter folds away over the first two seconds of zkAPI; the anonymous question's
+          // words rise inside a bubble that only fades in later). On the page a scene starts at its first visible
+          // movement, less a frame or two.
+          function at0(tw) { var t = tw.startTime(), p = tw.parent; while (p && p !== tl) { t += p.startTime(); p = p.parent; } return t; }
+          function shown(x, t) {    // at time t, is x laid out and inside something not faded out?
+            if (x.nodeType !== 1 || getComputedStyle(x).display === "none") return false;
+            for (var p = x.parentElement; p && p !== stage; p = p.parentElement) {
+              var cs = getComputedStyle(p);
+              if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) return false;
+            }
+            return true;
+          }
+          var moves = [];
+          tl.getChildren(true, true, false).forEach(function (tw) {
+            var t = at0(tw);
+            if (tw.duration() >= end - 0.01) return;                                     // the camera's drift
+            if (tw.duration() === 0 && t < 0.001) return;                                 // starting states
+            if (tw.targets().some(function (x) { return /-(cam|pan)$/.test(x.id || ""); })) return;
+            moves.push({ t: t, tw: tw });
+          });
+          moves.sort(function (a, b) { return a.t - b.t; });
+          var first = end;
+          for (var i = 0; i < moves.length && moves[i].t < first; i++) {
+            tl.seek(moves[i].t + 0.05, false);
+            if (moves[i].tw.targets().some(function (x) { return shown(x); })) first = moves[i].t;
+          }
+          var start = Math.max(0, Math.min(first, end) - 0.05);
+
+          var at = parseFloat(q.get("at"));
+          tl.seek(still ? end : isNaN(at) ? start : at, false);
+          enter.progress(still || !isNaN(at) ? 1 : 0);
+          if (!still && isNaN(at)) hold();
+          window.olympusScene = { tl: tl, start: start, end: end, enter: enter, release: release };
+        })();
+      });
+
+    })();
+  </script>
+</body>
+</html>

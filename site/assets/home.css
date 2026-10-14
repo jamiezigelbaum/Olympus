@@ -1,0 +1,48 @@
+/* olympusplugin.ai home: the long launch film laid out down the page. Each .stage frames one of the film's own
+   scenes (/film/scene.html, 1920x1080), scaled to fit and cropped to the paper and its shadow; home.js plays each
+   once when it reaches the middle of the screen. The stages have no desk of their own: the paper lies on this page. */
+
+/* The heavens: full-bleed banner; the first page rises over its foot. */
+.heavens { position: relative; overflow: hidden; background: #07376d; }
+.heavens img { display: block; width: 100%; height: auto; min-height: 220px; object-fit: cover; object-position: 50% 30%; }
+
+.reel { display: grid; grid-template-columns: minmax(0, 1fr); gap: clamp(8px, 3vw, 40px); padding: 0 var(--gutter) 24px; }
+.reel > * { min-width: 0; }
+
+/* The film frame is cropped to x 190..1730 (the sheet is 250..1670), full height: 1540 x 1080. */
+.scene { width: 100%; max-width: calc(var(--sheet-max) * 1540 / 1420); margin: 0 auto; }
+.stage { position: relative; aspect-ratio: 1540 / 1080; overflow: hidden; }
+.stage iframe { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; border: 0; background: transparent;
+  transform-origin: 0 0; transform: scale(var(--k, 0.5)) translateX(-190px); pointer-events: none; }
+@media (max-width: 599px) { .scene { width: calc(100% + 2 * var(--gutter)); margin-inline: calc(var(--gutter) * -1); } }
+#intro { margin-top: clamp(-150px, -9vw, -40px); position: relative; }
+
+.actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 4px; padding: 0 var(--gutter); }
+.actions .small { color: inherit; opacity: 0.7; font-family: var(--font-mono); font-size: 12px; }
+.works { max-width: 44ch; margin: 0 auto; padding: 0 var(--gutter); text-align: center; font-size: clamp(17px, 1.6vw, 20px); color: var(--ink-soft); }
+
+/* The close: the film's own button and address, made clickable as one link over the stage. */
+.scene:has(.stage__link) { position: relative; }
+.stage__link { position: absolute; inset: 0; font-size: 0; color: transparent; border-radius: var(--radius-paper); }
+.stage__link:focus-visible { outline: 3px solid var(--focus); outline-offset: -12px; }
+
+.film { margin: 0 calc(var(--gutter) * -1); }
+.film__frame { position: relative; display: block; width: 100%; padding: 0; border: 0; background: #1a1314; cursor: pointer; }
+.film__frame img { display: block; width: 100%; height: auto; max-height: 86vh; object-fit: cover; }
+.film__play { position: absolute; left: 50%; top: 50%; width: 88px; height: 88px; margin: -44px 0 0 -44px; border-radius: 50%; background: rgba(247, 240, 228, 0.92); box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.5); transition: transform 0.2s var(--ease-out); }
+.film__play::after { content: ""; position: absolute; left: 36px; top: 28px; border-style: solid; border-width: 16px 0 16px 26px; border-color: transparent transparent transparent #33251d; }
+.film__frame:hover .film__play { transform: scale(1.06); }
+.film__caption { text-align: center; margin: 14px 0 0; }
+
+/* The film player. */
+.player { width: min(1100px, 94vw); padding: 0; border: 0; border-radius: var(--radius-paper); background: #1a1314; box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.6); }
+.player::backdrop { background: rgba(26, 19, 20, 0.82); }
+.player video { display: block; width: 100%; height: auto; }
+.player form { position: absolute; right: 8px; top: 8px; z-index: 1; margin: 0; }
+.player__close { font: 400 11px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: #f3e8da; background: rgba(26, 19, 20, 0.7); border: 0; border-radius: 4px; padding: 8px 10px; cursor: pointer; }
+
+
+/* The hero's mouse cursor, drawn over the whole window (home.js) so it can come in from the window's edge. */
+.cursor-layer { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 20; }
+.cursor-layer > div { position: absolute; left: 0; top: 0; width: 1px; height: 1px; transform-origin: 0 0; opacity: 0; }
+.cursor-layer svg { position: absolute; left: 0; top: 0; overflow: visible; }

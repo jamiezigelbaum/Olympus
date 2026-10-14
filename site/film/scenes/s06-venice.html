@@ -1,0 +1,123 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    @font-face{font-family:"Nunito";font-weight:200 1000;font-display:block;src:url("assets/fonts/nunito.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    #s06-venice-letter { position: absolute; inset: 0; }
+    /* The sheet is built three times, once per third, so it can fold like a letter: each third is a strip that
+       shows its slice of a full copy of the page (front) and plain paper behind (back). One shadow under them all. */
+    .s06-strip { position: absolute; left: 250px; width: 1420px; height: 296px; transform-style: preserve-3d; }
+    .s06-face { position: absolute; inset: 0; overflow: hidden; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+    .s06-face .fr { position: absolute; left: -250px; width: 1920px; height: 1080px; }
+    .s06-face .sheet-wrap { filter: none; }
+    .s06-back { transform: rotateX(180deg); background: var(--paper); }
+    .s06-shade { position: absolute; inset: 0; background: rgb(96, 60, 36); opacity: 0; }
+    #s06-venice-sh .sheet { background: var(--paper); }
+    .s06-k { position: absolute; left: 96px; font-family: "Newsreader"; color: var(--ink); white-space: nowrap; }
+    /* Laid out in the thirds so both creases fall in gutters: headline and claim in the top third, the question in
+       the middle third, the bottom third bare. */
+    .s06-head { top: 124px; font-size: 100px; font-weight: 300; line-height: 1.02; letter-spacing: -0.02em; }
+    .s06-sub { position: absolute; left: 96px; top: 238px; font-family: "Martian Mono"; font-size: 44px; line-height: 1; color: var(--mid); white-space: nowrap; }
+    .s06-head em { font-style: italic; }
+    .s06-lab { position: absolute; left: 96px; top: 324px; font-family: "Martian Mono"; font-size: 20px; letter-spacing: 0.08em; color: var(--mid); text-transform: uppercase; }
+    .s06-box { position: absolute; left: 96px; top: 360px; width: 1228px; background: var(--card); border: 1.5px solid var(--card-rule); border-radius: 18px;
+      padding: 30px 38px; font-family: "Newsreader"; font-weight: 400; font-size: 52px; line-height: 1.3; color: var(--ink); }
+    .s06-box .ln { display: block; white-space: nowrap; }
+    .s06-box .ln > span { display: inline-block; }
+    #s06-venice-sealed { left: 0; top: 0; font-size: 92px; }
+    #s06-venice-sh3 { height: 296px; filter: drop-shadow(0 22px 26px rgba(150,90,50,.34)) drop-shadow(0 6px 10px rgba(150,90,50,.2)); opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s06-venice" data-width="1920" data-height="1080">
+    <div class="pan" id="s06-venice-pan"><div class="cam" id="s06-venice-cam"><div class="shake" id="s06-venice-shake">
+      <div id="s06-venice-letter"></div>
+    </div></div></div>
+  </div>
+  <script>
+    (function () {
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s06-venice"], B = C.beats;
+      const $ = (id) => document.getElementById("s06-venice-" + id);
+      const shake = $("shake"), letter = $("letter");
+      const H3 = 296;  // a third of the sheet (O.SHEET.h = 888)
+
+      // the shadow: an empty sheet under the strips that shrinks with the letter as it folds
+      const sh = O.make("div", "sheet-wrap", letter); sh.id = "s06-venice-sh";
+      O.make("div", "sheet", sh);
+      // and the folded letter's own shadow (a squashed sheet's shadow is squashed too), faded in as the fold closes
+      const sh3 = O.make("div", "sheet-wrap", letter); sh3.id = "s06-venice-sh3";
+      sh3.style.top = O.SHEET.y + H3 + "px";
+      O.make("div", "sheet", sh3);
+
+      const strips = [0, 1, 2].map((k) => {
+        const st = O.make("div", "s06-strip", letter);
+        st.style.top = O.SHEET.y + k * H3 + "px";
+        const front = O.make("div", "s06-face", st), back = O.make("div", "s06-face s06-back", st);
+        const fr = O.make("div", "fr", front);
+        fr.setAttribute("data-layout-allow-overflow", "");  // a full-frame copy, clipped to its third on purpose
+        fr.style.top = -(O.SHEET.y + k * H3) + "px";
+        // one full copy of the page, frame coordinates
+        const P = O.page(fr, { header: ['Route: <span class="nc">Venice.ai</span>', "Ask privately"] });
+        P.sheet.insertAdjacentHTML("beforeend", `
+          <div class="s06-k s06-head">Venice.ai hides <em>what</em> you ask.</div>
+          <div class="s06-sub">Private models · nothing stored</div>
+          <div class="s06-lab">Question</div>
+          <div class="s06-box"><span class="ln"><span class="q1">“I lost $35,000 this year.</span></span><span class="ln"><span class="q2">How do I report it on my taxes?”</span></span></div>`);
+        return { st, front, back, sh: [O.make("div", "s06-shade", front), O.make("div", "s06-shade", back)],
+          head: P.sheet.querySelector(".s06-head"), sub: P.sheet.querySelector(".s06-sub"), lab: P.sheet.querySelector(".s06-lab"), box: P.sheet.querySelector(".s06-box"),
+          q1: P.sheet.querySelector(".q1"), q2: P.sheet.querySelector(".q2") };
+      });
+      const sealed = O.make("div", "stamp solid", letter, "NOT STORED"); sealed.id = "s06-venice-sealed";
+
+      O.ready(() => {
+        const tl = gsap.timeline({ paused: true });
+        const end = C.dur + C.tail;
+        O.drift(tl, $("cam"), end, { dx: -6, s1: 1.006 });
+        // the camera's pan down the dossier brings this sheet up from below (the same curve as the pan)
+        tl.fromTo(letter, { y: 1100 }, { y: 0, duration: T.scenes["s05-local"].tail, ease: "power3.inOut" }, 0);
+
+        // Every copy plays the same page: the headline rises, the question is dropped in word by word and held to be
+        // read (it's what you wouldn't want seen), then it is redacted whole, line by line.
+        strips.forEach((c) => {
+          O.rise(tl, O.split(c.head), B.head, { dur: 0.6, stagger: 0.07 });
+          O.rise(tl, O.split(c.sub), B.sub, { dur: 0.45, stagger: 0.04 });
+          O.cut(tl, c.lab, B.q - 0.45);
+          tl.fromTo(c.box, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "power3.out" }, B.q - 0.4);
+          O.drop(tl, O.split(c.box), B.q, { stagger: 0.035 });
+          const e1 = O.redact(tl, c.q1, B.strike, { shake });
+          O.redact(tl, c.q2, e1 + 0.04, { shake });
+        });
+
+        // The fold: the bottom third folds up over the middle, then the top third folds down over it, like a letter.
+        const FD = 0.34, F0 = B.fold, F1 = F0 + FD * 0.8;
+        gsap.set(strips[2].st, { transformOrigin: "50% 0%", transformPerspective: 2600 });
+        gsap.set(strips[0].st, { transformOrigin: "50% 100%", transformPerspective: 2600 });
+        [[strips[2], 180, F0], [strips[0], -180, F1]].forEach(([c, a, t]) => {
+          tl.fromTo(c.st, { rotationX: 0 }, { rotationX: a, duration: FD, ease: "power2.inOut" }, t);
+          // the face darkens as it turns away from the light; the back comes up shaded and clears
+          tl.fromTo(c.sh[0], { opacity: 0 }, { opacity: 0.28, duration: FD / 2, ease: "power2.in" }, t);
+          tl.set(c.sh[1], { opacity: 0.28 }, t + FD / 2);
+          tl.to(c.sh[1], { opacity: 0, duration: FD / 2, ease: "power2.out" }, t + FD / 2);
+        });
+        gsap.set(sh, { transformOrigin: "50% 0%" });
+        tl.to(sh, { scaleY: 2 / 3, duration: FD, ease: "power2.inOut" }, F0);
+        tl.to(sh, { y: H3, scaleY: 1 / 3, duration: FD, ease: "power2.inOut" }, F1);
+        tl.to(sh3, { opacity: 1, duration: FD, ease: "power2.in" }, F1);
+        // folded, the letter lifts off the page a little so it reads as an object, not a band
+        tl.to(letter, { y: -8, scale: 1.015, duration: 0.3, ease: "power2.out" }, F1 + FD);
+
+        // NOT STORED slams across the folded letter, then the letter slides off to the left.
+        gsap.set(sealed, { x: 960 - sealed.offsetWidth / 2, y: O.SHEET.y + 1.5 * H3 - sealed.offsetHeight / 2 });
+        O.stamp(tl, sealed, B.sealed, { rot: -6, jolt: [shake], amp: 5, ink: 1, from: 1.5 });
+        tl.to(letter, { y: -14, rotation: -1.2, duration: 0.14, ease: "power2.out" }, B.out - 0.1);
+        tl.to(letter, { x: -2200, rotation: -5, duration: 0.5, ease: "power3.in" }, B.out);
+        tl.set({}, {}, end);
+        window.__timelines["s06-venice"] = tl;
+      });
+    })();
+  </script>
+</template>
+</body></html>

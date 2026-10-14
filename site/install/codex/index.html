@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect Codex to Olympus</title>
+  <meta name="description" content="Add Olympus to Codex as a local MCP server.">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <p class="crumb"><a href="/install/">All apps</a></p>
+      <h1>Connect Codex</h1>
+      <p class="lede">Codex runs on your computer, so it talks to Olympus directly. No relay, and no remote access to turn on.</p>
+
+      <h2>Before you start</h2>
+      <ul>
+        <li><strong>Olympus installed on your computer.</strong> On a Mac or on Omarchy, that is <a href="/install/#install">one line in Terminal</a>; on a server or alongside OpenClaw, <a href="/install/openclaw/">install with OpenClaw</a>.</li>
+      </ul>
+
+      <h2>Add it for you</h2>
+      <p>Paste this into Codex:</p>
+      <pre><code>Add Olympus to Codex as a local MCP server.
+Find the olympus command: use ~/.local/bin/olympus if it exists. Otherwise run
+`openclaw plugins inspect olympus --json` and use &lt;plugin.rootDir&gt;/bin/olympus.
+Then run: codex mcp add olympus -- &lt;absolute path to olympus&gt; serve
+Do not change any other configuration. Afterwards, list the Olympus tools
+to confirm source_answer is there.</code></pre>
+
+      <h2>Or add it yourself</h2>
+      <pre><code>codex mcp add olympus -- ~/.local/bin/olympus serve</code></pre>
+      <p class="meta">If you installed with the one line, on a Mac or on Omarchy, the command is <code>~/.local/bin/olympus</code>. Under OpenClaw, it is <code>bin/olympus</code> inside the plugin folder: run <code>openclaw plugins inspect olympus --json</code> and use <code>plugin.rootDir</code>.</p>
+
+      <h2>Tell it when to ask Olympus</h2>
+      <p>Paste this into your <code>AGENTS.md</code>. Then it asks Olympus on its own whenever your own records might hold the answer.</p>
+      <pre><code>Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. You can ask it through its source_answer tool.
+
+Ask Olympus whenever my question might be answered from my own records: what someone told me, what a document or contract says, or when something happened. If you are not sure, ask it anyway. You do not need me to mention Olympus.
+
+Ask one question at a time, in plain words, and wait for each answer before asking the next. Answers can take a few minutes. If Olympus says it is still working and gives you a job_id, call source_answer_result with that job_id, again while it says working, and pass on the answer it returns. Do not ask the same question again.
+
+Pass on what Olympus answers with its citations, and say plainly what it could not find. Do not guess past it or fill gaps from memory.
+
+Use source_index_status only to check which of my sources are ready.</code></pre>
+
+      <h2>Good to know</h2>
+      <ul>
+        <li>Long answers are handed off: Codex gets a job id and collects the answer when it is ready. The instructions above tell it how.</li>
+        <li>To remove it: <code>codex mcp remove olympus</code>.</li>
+        <li>Using Claude Code too? <a href="/install/claude-code/">Connect Claude Code</a> the same way.</li>
+      </ul>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

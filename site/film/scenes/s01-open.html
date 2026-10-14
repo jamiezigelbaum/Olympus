@@ -1,0 +1,108 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    @font-face{font-family:"Nunito";font-weight:200 1000;font-display:block;src:url("assets/fonts/nunito.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    #s01-open-her { position: absolute; inset: 0; width: 1920px; height: 1080px; object-fit: cover; }
+    #s01-open-veil { position: absolute; inset: 0; opacity: 0;
+      background: radial-gradient(120% 90% at 30% 0%, var(--peach) 0%, var(--sweep) 45%, var(--cream) 100%); }
+    #s01-open-lift { position: absolute; left: 330px; top: 200px; width: 1260px; height: 760px; border-radius: 40px;
+      background: rgba(150, 90, 50, 0.32); filter: blur(60px); opacity: 0; }
+    .s01-k { position: absolute; left: 96px; color: var(--ink); font-family: "Newsreader"; }
+    #s01-open-intro { top: 226px; font-family: "Martian Mono"; font-size: 26px; letter-spacing: 0.14em; color: var(--clay); white-space: nowrap; }
+    #s01-open-name { top: 262px; font-size: 180px; font-weight: 300; letter-spacing: -0.025em; line-height: 1.02; white-space: nowrap;
+      clip-path: inset(-0.2em -0.3em -0.26em -0.3em); }
+    #s01-open-name .l, #s01-open-intro .l { display: inline-block; }
+    #s01-open-desc { top: 482px; width: 900px; font-size: 44px; line-height: 1.25; font-weight: 400; }
+    #s01-open-desc .ln { display: block; white-space: nowrap; }
+    #s01-open-plate { position: absolute; left: 946px; top: 134px; width: 384px; height: 384px; background: var(--plate);
+      border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--rule), 0 14px 26px -14px rgba(120, 70, 40, 0.45); }
+    #s01-open-plate .img { position: absolute; left: 16px; top: 16px; width: 352px; height: 352px; overflow: hidden; border-radius: 2px; }
+    #s01-open-plate img { width: 352px; height: 352px; display: block; }
+    #s01-open-plate .veil { position: absolute; inset: 0; background: var(--bar); }
+    #s01-open-cap { position: absolute; left: 946px; top: 600px; width: 384px; text-align: right; font-family: "Martian Mono";
+      font-size: 17px; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
+    #s01-open-clip { position: absolute; left: 988px; top: 100px; width: 46px; height: 120px; overflow: visible; }
+    #s01-open-private { left: 930px; top: 676px; font-size: 70px; }
+  </style>
+  <div id="root" data-composition-id="s01-open" data-width="1920" data-height="1080">
+    <img id="s01-open-her" src="assets/handoff/her-v14-last-clean.png" alt="" />
+    <div id="s01-open-veil"></div>
+    <div class="pan" id="s01-open-pan"><div class="cam" id="s01-open-cam"><div class="shake" id="s01-open-shake">
+      <div id="s01-open-lift"></div>
+    </div></div></div>
+  </div>
+  <script>
+    (function () {
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s01-open"], B = C.beats;
+      const $ = (id) => document.getElementById("s01-open-" + id);
+      const shake = $("shake");
+      const P = O.page(shake, { id: "s01-open-page", flap: true, header: ["File 0001 · Olympus", "Owner: you"] });
+      const S = P.sheet;
+      S.insertAdjacentHTML("beforeend", `
+        <div class="s01-k" id="s01-open-intro">${[..."INTRODUCING"].map((c) => `<span class="l">${c}</span>`).join("")}</div>
+        <div class="s01-k" id="s01-open-name">${[..."Olympus."].map((c) => `<span class="l">${c}</span>`).join("")}</div>
+        <div class="s01-k" id="s01-open-desc"><span class="ln">A private second brain that lives</span><span class="ln">on your computer and works with your AI.</span></div>`);
+      // The plate, its caption, the clip and the stamp are on the paper (the curl folds them away with it).
+      const pl = O.make("div", "", S); pl.id = "s01-open-plate";
+      pl.innerHTML = '<div class="img"><img src="assets/mountain-warm.jpg" alt="" /><div class="veil"></div></div>';
+      const cap = O.make("div", "", S, "Exhibit A · where your things live"); cap.id = "s01-open-cap";
+      S.insertAdjacentHTML("beforeend", `<svg id="s01-open-clip" viewBox="0 0 46 120"><path d="M14 34 V96 a9 9 0 0 0 18 0 V22 a14 14 0 0 0 -28 0 V100 a18 18 0 0 0 36 0 V40" fill="none" stroke="var(--muted)" stroke-width="4.5" stroke-linecap="round"/></svg>`);
+      // on bare paper, full ink: it must read on a phone
+      const stamp = O.make("div", "stamp solid", S, C.opts.stamp || "PRIVATE"); stamp.id = "s01-open-private";
+      // opts.stamp (short cut, Jamie 2026-10-11: NOT FOR SALE): a longer word, a size down, right edge on the plate's (946 + 384)
+      if (C.opts.stamp) Object.assign(stamp.style, { left: "auto", right: O.SHEET.w - 1330 + "px", fontSize: "60px" });
+      const tl = gsap.timeline({ paused: true });
+      O.drift(tl, $("cam"), C.dur + C.tail, { dx: -12, s1: 1.012 });
+
+      // 0 Hand-off: the last frame of the Her film blurs and warms into the desk while File 0001 rises onto it.
+      // In the short cut (opts.under) the hero page does the hand-off and this page lies under it, revealed by its turn.
+      const UNDER = !!C.opts.under;
+      if (T.standalone || UNDER) {
+        gsap.set([$("her"), $("veil")], { opacity: 0 });
+      } else {
+        tl.fromTo($("her"), { filter: "blur(0px)" }, { filter: "blur(28px)", duration: B.land, ease: "power1.in" }, 0);
+        tl.fromTo($("veil"), { opacity: 0 }, { opacity: 1, duration: B.land - 0.08, ease: "power1.in" }, 0.08);
+        tl.set($("her"), { opacity: 0 }, B.land + 0.05);
+        // the veil hands over to the desk underneath (so the next page shows under the curl at the turn)
+        tl.to($("veil"), { opacity: 0, duration: 0.8, ease: "power1.inOut" }, B.land + 0.1);
+      }
+      const sp = O.spring(0.8), RD = 1.0, r0 = B.land - sp.land * RD;
+      const startY = T.standalone ? 300 : 1010;
+      if (!UNDER) tl.fromTo(P.page, { y: startY, rotation: -2, scale: 1.035, transformOrigin: "50% 60%" },
+        { y: 0, rotation: 0, scale: 1, duration: RD, ease: sp }, T.standalone ? 0 : Math.max(0, r0));
+      if (!UNDER) tl.fromTo($("lift"), { opacity: 0.9, y: startY, scale: 1.08 }, { opacity: 0, y: 0, scale: 0.94, duration: RD * 0.75, ease: sp }, T.standalone ? 0 : Math.max(0, r0));
+
+      // 1 INTRODUCING tracks in; Olympus. rises letter by letter (2-frame stagger), the full stop last, on the beat.
+      // (tracking as per-letter x: letter-spacing would snap to whole pixels under frame seeking)
+      [...$("intro").querySelectorAll(".l")].forEach((l, i) => tl.fromTo(l, { x: i * 0.26 * 26 }, { x: 0, duration: 0.7, ease: "expo.out" }, B.olympus - 0.62));
+      tl.fromTo($("intro"), { opacity: 0 }, { opacity: 1, duration: 0.2, ease: "power1.out" }, B.olympus - 0.62);
+      O.rise(tl, [...$("name").querySelectorAll(".l")], B.olympus, { dur: 0.55, stagger: 2 * O.FR, from: 120 });
+      // the descriptor rises as two lines, word by word
+      const words = [...$("desc").querySelectorAll(".ln")].flatMap((l) => O.split(l));
+      O.rise(tl, words, B.desc, { dur: 0.6, stagger: 0.05 });
+
+      // The plate slides in from the right; the paperclip snaps it on the beat; then it develops from the shadows up.
+      tl.fromTo([pl, cap], { x: 780, rotation: 7 }, { x: 0, rotation: -1.2, duration: 0.8, ease: O.spring(0.75, 9.5) }, B.plate - O.spring(0.75, 9.5).land * 0.8);
+      tl.fromTo($("clip"), { opacity: 0, rotation: -28, y: -26, transformOrigin: "50% 80%" }, { opacity: 1, rotation: -4, y: 0, duration: 2 * O.FR, ease: "power2.in" }, B.plate - 2 * O.FR);
+      tl.to($("clip"), { rotation: 0, duration: 0.2, ease: "back.out(3)" }, B.plate);
+      tl.fromTo([pl], { y: 0 }, { y: 3, duration: O.FR, ease: "none", immediateRender: false }, B.plate);
+      tl.to([pl], { y: 0, duration: 0.18, ease: "power2.out" }, B.plate + O.FR);
+      // opts.lit (short cut): the print arrives already developed, so the close's develop is the only one
+      if (C.opts.lit) gsap.set(pl.querySelector(".veil"), { opacity: 0 });
+      else O.develop(tl, pl.querySelector("img"), pl.querySelector(".veil"), B.plate + 0.04, 0.6);
+      O.stamp(tl, stamp, B.stamp, { rot: -8, jolt: [shake], amp: 4, ink: 1 });
+
+      // Turn the page: the corner curls from the bottom right and the sheet leaves to the top left (the next page is under it).
+      O.peel(tl, P, B.turn, { dur: C.tail });
+      tl.set({}, {}, C.dur + C.tail);
+      window.__timelines["s01-open"] = tl;
+    })();
+  </script>
+</template>
+</body></html>

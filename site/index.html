@@ -3,81 +3,163 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Olympus: ask ChatGPT about your own mail, files and notes</title>
-  <meta name="description" content="Olympus is a private knowledge engine on your Mac. ChatGPT can ask it questions; your data stays on your Mac.">
-  <meta name="color-scheme" content="light dark">
+  <title>Olympus: your privacy and the best AI</title>
+  <meta name="description" content="Olympus is a private second brain that lives on your computer and works with any AI. You decide what each model sees.">
+  <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
-  <link rel="stylesheet" href="/style.css">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta property="og:title" content="Olympus: your privacy and the best AI">
+  <meta property="og:description" content="A private second brain that lives on your computer and works with any AI.">
+  <meta property="og:image" content="https://olympusplugin.ai/assets/img/banner-1200.jpg">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/assets/home.css">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <script>if (window.matchMedia && !matchMedia("(prefers-reduced-motion: reduce)").matches && !/[?&]still\b/.test(location.search)) document.documentElement.classList.add("motion");</script>
+  <script src="/assets/home.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="site">
-    <div class="wrap">
-      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
-      <nav class="site" aria-label="Main">
-        <ul>
-        <li><a href="/" aria-current="page">Home</a></li>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/help/mac-offline/">Help</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        </ul>
-      </nav>
-    </div>
+
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="#how">How it works</a>
+      <a href="/help/mac-offline/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
   </header>
-  <main id="main">
-    <div class="wrap">
-      <h1>Ask ChatGPT about your own mail, files and notes.</h1>
-      <p class="lede">Olympus is a private knowledge engine that runs on your Mac. ChatGPT can ask it questions. Your data stays on your Mac.</p>
-      <div class="cta">
-        <a class="button" href="/install/">Install on your Mac</a>
-        <a class="button secondary" href="/privacy/">How your data is handled</a>
+
+  <!-- The heavens: the banner is artwork only, full-bleed, nothing written on it. -->
+  <div class="heavens" role="img" aria-label="The Olympus mountain crowned by its palace, with gods in the sky and climbers at their camps">
+    <picture>
+      <source media="(min-width: 1100px)" srcset="/assets/img/banner-2160.jpg">
+      <img src="/assets/img/banner-1200.jpg" alt="" width="2157" height="729" fetchpriority="high">
+    </picture>
+  </div>
+
+  <!-- The long launch film, scene by scene down the page. Each stage is one of the film's own scenes (/film/), played
+       once when it reaches the middle of the screen; the words are here too, for screen readers and search. -->
+  <main id="main" class="reel">
+
+    <section class="scene" aria-labelledby="s01-open-title" data-scene id="intro">
+      <div class="visually-hidden">
+        <h1 id="s01-open-title">Introducing Olympus.</h1>
+        <p>A private second brain that lives on your computer and works with your AI.</p>
       </div>
-
-      <h2>What it does</h2>
-      <p>Olympus reads the sources you choose: accounts you already have such as Dropbox, Gmail and Google Drive, and sources such as X bookmarks or Readwise that you set up on your Mac. It builds a search index on your Mac. When you ask ChatGPT something like "what did Sam send me about the lease?", ChatGPT asks Olympus, and Olympus answers with citations to your own items.</p>
-
-      <ul class="points">
-        <li><strong>Your index stays on your Mac.</strong> Olympus has no cloud copy of your mail, files or notes. Only what a question needs leaves the Mac, and only to the ChatGPT conversation you are in.</li>
-        <li><strong>Private and Secret items never go to ChatGPT.</strong> Olympus sorts every item into one of three tiers: Personal, Private or Secret. ChatGPT only ever receives Personal material. Private items are answered on your Mac and shown only to you, in a private Olympus panel that is never sent to ChatGPT. Secrets such as passwords and keys are never read by any model.</li>
-        <li><strong>You approve ChatGPT on your Mac.</strong> Connecting ChatGPT takes one click on an approval page that opens on your Mac. There is no Olympus account and no password to create.</li>
-        <li><strong>One secure connection.</strong> ChatGPT reaches your Mac through the Olympus relay at <code>mcp.olympusplugin.ai</code>. The relay forwards requests over an encrypted connection your Mac opens. It stores no content and logs no content or tokens.</li>
-      </ul>
-
-      <h2>The three tiers</h2>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr><th scope="col">Tier</th><th scope="col">Examples</th><th scope="col">Can ChatGPT see it?</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>Personal</td><td>Everyday mail, meeting notes, plans, receipts for ordinary purchases, newsletters and saved articles</td><td>Yes, when it helps answer your question</td></tr>
-            <tr><td>Private</td><td>Health, money, legal and identity matters, and whatever you tell Olympus is private for you</td><td>No. Answered on your Mac, in a private panel only you see</td></tr>
-            <tr><td>Secret</td><td>Passwords, recovery codes, private keys</td><td>No. Never read by any model</td></tr>
-          </tbody>
-        </table>
+      <div class="stage" data-film-scene="s01-open" aria-hidden="true"></div>
+      <div class="actions">
+        <a class="btn" href="/install/">Add Olympus to your AI</a>
       </div>
-      <p class="meta">Olympus judges each item on its own, not each folder or account. When Private items match a question, ChatGPT is told only that some matching items are Private; the answer from them appears in the Olympus panel under ChatGPT's reply, visible only to you. A Private item's file name can still be visible to ChatGPT; what it says never is.</p>
+    </section>
 
-      <h2>What you need</h2>
-      <ul>
-        <li>A Mac running a recent version of macOS.</li>
-        <li>ChatGPT, with the Olympus plugin added. Installing uses the ChatGPT desktop app for Mac.</li>
-        <li>Your Mac awake and online when you ask. If it is asleep, ChatGPT will say <a href="/help/mac-offline/">your Mac is offline</a>.</li>
-      </ul>
-    </div>
+    <section class="scene" aria-labelledby="s02-choice-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s02-choice-title">Your privacy and the best AI.</h2>
+        <p>Not one or the other: both.</p>
+      </div>
+      <div class="stage" data-film-scene="s02-choice" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s03-sources-title" data-scene id="how">
+      <div class="visually-hidden">
+        <h2 id="s03-sources-title">Your whole life, in one place.</h2>
+        <p>Gmail, Google Drive, Dropbox, Telegram, WhatsApp, X bookmarks and Readwise, or build your own. Stored and searched only on your computer: the search index is built there, by a model that runs even on a computer with 8 GB of memory. There is no Olympus cloud and no hosted copy of your things.</p>
+      </div>
+      <div class="stage" data-film-scene="s03-sources" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s04-classify-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s04-classify-title">Every item, judged on its own.</h2>
+        <p>Each email, file and message is marked Personal, Private or Secret. Once Olympus recognizes a Secret, like a private key or saved password, it is never sent or answered from. Labels are automatic and can be wrong. New items count as Personal until Olympus has checked them.</p>
+      </div>
+      <div class="stage" data-film-scene="s04-classify" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s02-hero-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s02-hero-title">Your machine, your memory.</h2>
+        <p>When an app asks for full access to everything, Olympus blocks it.</p>
+      </div>
+      <div class="stage" data-film-scene="s02-hero" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s05-local-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s05-local-title">Your computer answers first.</h2>
+        <p>Small models built into Olympus run on your computer, a Mac or an Omarchy computer: Qwen3.5 for private answers (2B or 4B, depending on memory), EmbeddingGemma 2 for search and photos, Qwen3-ASR for voice notes, and Apple Vision on a Mac or Tesseract on Linux for scans. In ChatGPT, private answers are written on your computer and shown only in a private panel.</p>
+      </div>
+      <div class="stage" data-film-scene="s05-local" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s06-venice-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s06-venice-title">Venice.ai hides what you ask.</h2>
+        <p>Optional: private models that, under Venice's own terms, keep nothing you send.</p>
+      </div>
+      <div class="stage" data-film-scene="s06-venice" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s07-zk-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s07-zk-title">zkAPI hides who&rsquo;s asking.</h2>
+        <p>Paid anonymously and sent over Tor. No account, no card, no name: just proof the question is paid for. What you ask can still identify you. zkAPI is open source, from OpenAnonymity and the Ethereum Foundation. Anonymous answers work on a Mac and on Omarchy (x64), and are off until you turn them on in Olympus on your computer, on its Private answers page (olympusplugin.ai/open/private).</p>
+      </div>
+      <div class="stage" data-film-scene="s07-zk" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s08-zkq-title" data-scene>
+      <div class="visually-hidden">
+        <h3 id="s08-zkq-title">How an anonymous question leaves your computer.</h3>
+        <p>Unless you choose to send it as written or give it your own instructions, your computer first rewrites the question without your name, your numbers or your accounts. It pays for the question anonymously and, unless you turn Tor off, sends it over three Tor hops, with a fresh key for each question.</p>
+      </div>
+      <div class="stage" data-film-scene="s08-zkq" aria-hidden="true"></div>
+    </section>
+
+    <!-- The launch film: a live-action moment between scenes -->
+    <section class="film" aria-labelledby="film-title">
+      <h2 id="film-title" class="visually-hidden">The launch film</h2>
+      <button class="film__frame" type="button" data-film="launch-film" aria-label="Play the launch film, 1 minute 20 seconds">
+        <img src="/media/launch-film-poster.jpg" alt="" width="1280" height="720" loading="lazy">
+        <span class="film__play" aria-hidden="true"></span>
+      </button>
+      <p class="film__caption label">The launch film · 1:20</p>
+    </section>
+
+    <section class="scene" aria-labelledby="s09-terms-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s09-terms-title">Open source. No account. Any agent.</h2>
+      </div>
+      <div class="stage" data-film-scene="s09-terms" aria-hidden="true"></div>
+      <p class="works">Works with ChatGPT, Claude, Claude Code, Codex, Dots, Grok, Grok Bot, OpenClaw and Hermes, or any app that speaks MCP. <a href="https://github.com/jamiezigelbaum/Olympus">Read the code on GitHub</a>.</p>
+    </section>
+
+    <section class="scene" aria-labelledby="s10-close-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s10-close-title">Keep your private things private.</h2>
+      </div>
+      <div class="stage" data-film-scene="s10-close" aria-hidden="true"></div>
+      <a class="stage__link" href="/install/">Add Olympus to your AI</a>
+    </section>
   </main>
-  <footer class="site">
-    <div class="wrap">
-      <ul>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        <li><a href="/terms/">Terms</a></li>
-      </ul>
-      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
-    </div>
+
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/mac-offline/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
   </footer>
+
+  <dialog class="player" aria-label="Film">
+    <form method="dialog"><button class="player__close">Close</button></form>
+    <video controls playsinline preload="none"></video>
+  </dialog>
 </body>
 </html>

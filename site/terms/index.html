@@ -10,46 +10,45 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Olympus terms of service</title>
   <meta name="description" content="The terms for using Olympus, its ChatGPT plugin, relay and website.">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
   <link rel="stylesheet" href="/style.css">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="site">
-    <div class="wrap">
-      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
-      <nav class="site" aria-label="Main">
-        <ul>
-        <li><a href="/">Home</a></li>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/help/mac-offline/">Help</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        </ul>
-      </nav>
-    </div>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
   </header>
   <main id="main">
     <div class="wrap">
 
       <h1>Terms of service</h1>
-      <p class="meta">Effective 10 October 2026.</p>
+      <p class="meta">Effective 13 October 2026.</p>
 
-      <p>These terms are an agreement between you and Open Coordination Unlimited, Inc. ("OCU", "we", "us") about your use of Olympus: the Olympus software that runs on your Mac, the Olympus plugin for ChatGPT, the relay at <code>mcp.olympusplugin.ai</code>, and this website (together, "Olympus"). By using Olympus you agree to these terms. Our <a href="/privacy/">privacy policy</a> explains how data is handled.</p>
+      <p>These terms are an agreement between you and Open Coordination Unlimited, Inc. ("OCU", "we", "us") about your use of Olympus: the Olympus software that runs on your computer (a Mac, or a Linux computer running Omarchy), the Olympus plugin for ChatGPT, its connections to Claude, Grok and other AI apps, the relay at <code>mcp.olympusplugin.ai</code>, and this website (together, "Olympus"). By using Olympus you agree to these terms. Our <a href="/privacy/">privacy policy</a> explains how data is handled.</p>
 
       <h2>1. What Olympus is</h2>
-      <p>Olympus indexes sources you choose on your own Mac and answers questions about them, including questions asked through ChatGPT. The software runs on your computer. The relay passes requests between ChatGPT and your Mac. Olympus is not made by or affiliated with OpenAI, Google, Dropbox, Venice or zkAPI.</p>
+      <p>Olympus indexes sources you choose on your own computer and answers questions about them, including questions asked through ChatGPT, Claude, Grok or another AI app you connect. The software runs on your computer. The relay passes requests between those apps and your computer. Olympus is not made by or affiliated with OpenAI, Anthropic, xAI, Google, Dropbox, Venice or zkAPI.</p>
 
       <h2>2. Eligibility</h2>
-      <p>You must be at least 13 years old, the same minimum age as ChatGPT, and allowed to use ChatGPT under OpenAI's terms. If you are under 18, you need permission from a parent or guardian, who agrees to these terms for you. Olympus is not directed at children under 13. If you use Olympus for an organization, you confirm you may bind it to these terms.</p>
+      <p>You must be at least 13 years old, the same minimum age as ChatGPT, and allowed to use the AI apps you connect under their providers' terms. If you are under 18, you need permission from a parent or guardian, who agrees to these terms for you. Olympus is not directed at children under 13. If you use Olympus for an organization, you confirm you may bind it to these terms.</p>
 
       <h2>3. Your content and accounts</h2>
       <ul>
-        <li>Your content remains yours. OCU claims no ownership of it. Olympus stores your source collection and index on your Mac; selected information is transmitted through our relay and to the services described in the <a href="/privacy/">privacy policy</a>.</li>
-        <li>You may connect only accounts and content you are entitled to access, and you remain responsible for complying with the terms of those services (for example Google, Dropbox and OpenAI).</li>
-        <li>You are responsible for your Mac, its security, and who can use it. Anyone who can use your Mac while it is unlocked may be able to approve connections to Olympus.</li>
+        <li>Your content remains yours. OCU claims no ownership of it. Olympus stores your source collection and index on your computer; selected information is transmitted through our relay and to the services described in the <a href="/privacy/">privacy policy</a>.</li>
+        <li>You may connect only accounts and content you are entitled to access, and you remain responsible for complying with the terms of those services (for example Google, Dropbox, OpenAI, Anthropic and xAI).</li>
+        <li>You are responsible for your computer, its security, and who can use it. Anyone who can use your computer while it is unlocked may be able to approve connections to Olympus.</li>
+        <li>Keep your own backups. Olympus is designed to read your sources, not change them, but it is new software and can have bugs. Deleting Olympus's data cannot be undone.</li>
       </ul>
 
       <h2>4. Software licence</h2>
@@ -59,30 +58,32 @@
       <p>You agree not to:</p>
       <ul>
         <li>use Olympus to access content or accounts you are not authorized to access;</li>
-        <li>attack, overload, probe or bypass the security or limits of the relay, or use it for anything other than connecting your own Olympus to ChatGPT;</li>
-        <li>use Olympus to break the law or to violate the rights of others, or in breach of OpenAI's usage policies;</li>
+        <li>attack, overload, probe or bypass the security or limits of the relay, or use it for anything other than connecting your own Olympus to the AI apps you use;</li>
+        <li>use Olympus to break the law or to violate the rights of others, or in breach of the usage policies of the AI apps you connect;</li>
+        <li>use Olympus in violation of export-control or sanctions laws, including from a country subject to comprehensive US sanctions or if you are on a US government restricted-party list;</li>
         <li>use the reviewer demo for anything other than evaluating Olympus.</li>
       </ul>
       <p>We may suspend or block an install's access to the relay to protect the service or other users, or if these terms are broken.</p>
 
       <h2>6. Answers can be wrong</h2>
-      <p>Olympus and ChatGPT generate answers automatically from your sources. Answers can be incomplete or wrong, and automatic tier labels can be wrong. Check important answers against the cited items. Olympus is not a substitute for professional advice, including medical, legal or financial advice.</p>
+      <p>Olympus and the AI apps you connect generate answers automatically from your sources. Answers can be incomplete or wrong, and automatic tier labels can be wrong. Check important answers against the cited items. Olympus is not a substitute for professional advice, including medical, legal or financial advice.</p>
 
       <h2>7. Availability and changes</h2>
-      <p>Olympus only answers while your Mac is awake, online and running it. We provide the relay without any promise of availability, and we may change, suspend or discontinue any part of Olympus. We will try to give reasonable notice of significant changes. Olympus is currently free. If we ever introduce charges, we will tell you in advance and you will not be charged without agreeing. Optional services you choose to set up yourself, such as Venice or zkAPI, are provided and priced by those services under their own terms; OCU does not sell them.</p>
+      <p>Olympus only answers while your computer is awake, online and running it. We provide the relay without any promise of availability, and we may change, suspend or discontinue any part of Olympus. We will try to give reasonable notice of significant changes. Olympus is currently free. If we ever introduce charges, we will tell you in advance and you will not be charged without agreeing. Optional services you choose to set up yourself, such as Venice or zkAPI, are provided and priced by those services under their own terms; OCU does not sell them.</p>
 
       <h2>8. Third-party services</h2>
-      <p>ChatGPT, Google, Dropbox, Venice, zkAPI and other services you use with Olympus are provided by third parties under their own terms. We are not responsible for them.</p>
-      <p>If you set up anonymous questions, your zkAPI account is your own and is set up and managed outside ChatGPT. OCU does not sell zkAPI access or receive, hold or have custody of your zkAPI funds. You choose which questions to send and are responsible for your account, its keys on your Mac and any balance you add. zkAPI's own fees, expiry rules, availability and risk of loss apply; OCU cannot guarantee recovery or refunds.</p>
+      <p>ChatGPT, Claude, Grok, Google, Dropbox, Venice, zkAPI and other services you use with Olympus are provided by third parties under their own terms. We are not responsible for them.</p>
+      <p>If you connect WhatsApp, Olympus uses an unofficial client, which WhatsApp's terms do not allow. WhatsApp may restrict or ban accounts that use one. Connecting it is your choice, and OCU is not responsible for what WhatsApp does with your account.</p>
+      <p>If you set up anonymous questions, your zkAPI account is your own and is set up and managed outside ChatGPT. OCU does not sell zkAPI access or receive, hold or have custody of your zkAPI funds. You choose which questions to send and are responsible for your account, its keys on your computer and any balance you add. zkAPI's own fees, expiry rules, availability and risk of loss apply; OCU cannot guarantee recovery or refunds.</p>
 
       <h2>9. Disclaimer</h2>
-      <p>To the fullest extent permitted by law, Olympus is provided "as is" and "as available", without warranties of any kind, express or implied, including warranties of merchantability, fitness for a particular purpose, and non-infringement.</p>
+      <p><strong>TO THE FULLEST EXTENT PERMITTED BY LAW, OLYMPUS IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.</strong></p>
 
       <h2>10. Limitation of liability</h2>
-      <p>To the fullest extent permitted by law, OCU is not liable for indirect, incidental, special, consequential or punitive damages, or for loss of profits, goodwill or data, arising from Olympus. OCU's aggregate liability for all claims arising out of or relating to Olympus or these terms, whether in contract, tort or otherwise, will not exceed the greater of US$100 and the amounts you paid OCU for Olympus during the 12 months before the event giving rise to the first claim. Nothing in these terms excludes or limits liability or consumer rights that applicable law does not permit us to exclude or limit.</p>
+      <p><strong>TO THE FULLEST EXTENT PERMITTED BY LAW, OCU IS NOT LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, OR FOR LOSS OF PROFITS, GOODWILL OR DATA, ARISING FROM OLYMPUS. OCU'S AGGREGATE LIABILITY FOR ALL CLAIMS ARISING OUT OF OR RELATING TO OLYMPUS OR THESE TERMS, WHETHER IN CONTRACT, TORT OR OTHERWISE, WILL NOT EXCEED THE GREATER OF US$100 AND THE AMOUNTS YOU PAID OCU FOR OLYMPUS DURING THE 12 MONTHS BEFORE THE EVENT GIVING RISE TO THE FIRST CLAIM. NOTHING IN THESE TERMS EXCLUDES OR LIMITS LIABILITY OR CONSUMER RIGHTS THAT APPLICABLE LAW DOES NOT PERMIT US TO EXCLUDE OR LIMIT.</strong></p>
 
       <h2>11. Ending use</h2>
-      <p>You may stop using Olympus at any time: disconnect it in ChatGPT, uninstall it, and delete its data as described in the <a href="/privacy/#controls">privacy policy</a>. We may end these terms or your access to the relay as described in section 5.</p>
+      <p>You may stop using Olympus at any time: disconnect it in ChatGPT or the other AI apps you use, uninstall it, and delete its data as described in the <a href="/privacy/#controls">privacy policy</a>. We may end these terms or your access to the relay as described in section 5.</p>
 
       <h2>12. Governing law</h2>
       <p>Subject to mandatory consumer law and jurisdiction rules, these terms are governed by the laws of the State of Wyoming, USA, without regard to conflict-of-law rules, and any dispute arising from these terms or Olympus must be brought in the state or federal courts located in Wyoming, and you and OCU consent to their jurisdiction. Nothing in these terms limits rights you have under the consumer protection laws of the place where you live, including any right to bring a claim in your local courts.</p>
@@ -104,16 +105,16 @@
       Email: support@olympusplugin.ai (<a href="mailto:support@olympusplugin.ai">write to us</a>)</p>
     </div>
   </main>
-  <footer class="site">
-    <div class="wrap">
-      <ul>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        <li><a href="/terms/">Terms</a></li>
-      </ul>
-      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
-    </div>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
   </footer>
 </body>
 </html>

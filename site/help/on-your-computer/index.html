@@ -4,79 +4,108 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fix it on your computer - Olympus help</title>
-  <meta name="description" content="What to do when the Olympus dashboard in ChatGPT says to fix something on your computer.">
-  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="What is only in Olympus on your computer (Private answers and anonymous answers, Keys, Agents, Build a connector), how to open it, and how to fix what Olympus asks you to fix there.">
+  <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
   <link rel="stylesheet" href="/style.css">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="site">
-    <div class="wrap">
-      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
-      <nav class="site" aria-label="Main">
-        <ul>
-        <li><a href="/">Home</a></li>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/help/mac-offline/" aria-current="page">Help</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        </ul>
-      </nav>
-    </div>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
   </header>
   <main id="main">
     <div class="wrap">
       <h1>Fix it on your computer</h1>
-      <p class="lede">A few things can only be set up on your computer, because they need a key or a pairing that never goes through ChatGPT. When the Olympus dashboard in ChatGPT says to do something on your computer, this page says what.</p>
+      <p class="lede">A few things can only be set up on your computer, because they need a key, a pairing or your private things, none of which go through your AI app. When Olympus says to do something on your computer, this page says what and where.</p>
+
+      <h2 id="only-here">What is only on your computer</h2>
+      <p>These live only in Olympus on your computer, under <strong>On this computer</strong>. No AI app can show them or change them.</p>
+      <ul>
+        <li><strong>Private answers</strong>: questions your agents asked that need your private things, waiting for you to answer them on this computer, and the <strong>Anonymous answers</strong> switch. <a href="/open/private/">Open Private answers</a>.</li>
+        <li><strong>Keys</strong>: your Venice, Readwise and X keys.</li>
+        <li><strong>Agents</strong>: remote access, and the agents connected to Olympus, each with <strong>Revoke</strong>.</li>
+        <li><strong>Build a connector</strong>: for a source Olympus does not have yet.</li>
+      </ul>
+      <p>To reach them, <a href="#open-olympus">open Olympus on your computer</a>, then choose <strong>Open</strong> next to the one you want under <strong>On this computer</strong>.</p>
 
       <h2 id="open-olympus">Open Olympus on your computer</h2>
-      <p>From the Olympus dashboard in ChatGPT, <strong>Connect</strong> and <strong>Fix this on your computer</strong> open Olympus on your computer for you: if your browser asks whether to open Olympus, choose <strong>Open</strong>. If nothing opens (on a phone, or with an older Olympus), open Terminal on your computer and run:</p>
+      <p>On the computer running Olympus, go to <a href="/open/dashboard/">olympusplugin.ai/open/dashboard</a> and choose <strong>Open Olympus</strong>; if your browser asks whether to open Olympus, choose <strong>Open</strong>. In ChatGPT, <strong>Connect</strong> and <strong>Fix this on your computer</strong> in the Olympus dashboard do the same for you. If nothing opens (on a phone, or with an older Olympus), open a terminal on your computer and run:</p>
       <pre><code>olympus dashboard</code></pre>
-      <p>It opens the Olympus dashboard in your computer's browser. The link works once, for 15 minutes; run the command again for a new one. If Terminal says Olympus is not running, see <a href="/help/mac-offline/">ChatGPT says your computer is offline</a>.</p>
+      <p>It opens the Olympus dashboard in your computer's browser. The link works once, for 15 minutes; run the command again for a new one. If the terminal says Olympus is not running, see <a href="/help/mac-offline/">Your AI says your computer is offline</a>.</p>
 
-      <h2 id="connect">Connect a source ChatGPT can't connect</h2>
-      <p>ChatGPT connects Gmail, Google Drive and Dropbox. These sources are connected on your computer instead:</p>
+      <h3 id="headless">On a Linux computer without a screen</h3>
+      <p>If Olympus runs on an Omarchy computer you reach over SSH, only your own account there can open Olympus or approve an AI app. From the computer you sit at, open a secure tunnel to it (<code>olympus doctor</code> on that computer prints the exact path for your user; it looks like this):</p>
+      <pre><code>ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:/run/user/1000/olympus/worker.sock you@your-computer</code></pre>
+      <p>Then, on that computer, run <code>olympus dashboard --no-open</code> and open the link it prints on the computer you sit at.</p>
+      <p>Approving ChatGPT, Claude or Grok works the same way: the approval page opens through the tunnel.</p>
+      <p>Signing in to Gmail or Google Drive works through the tunnel too: keep it open, open the sign-in link on the computer you sit at, and Google returns you to Olympus through it. Without the tunnel, the last page after you allow access does not load. Its address still finishes the sign-in: copy the whole address from the address bar and, on the computer running Olympus, run (keeping the quotes):</p>
+      <pre><code>olympus connect finish 'http://127.0.0.1:8010/oauth/callback/gmail?…'</code></pre>
+      <p>Do it within 10 minutes of choosing <strong>Connect</strong>; after that, choose <strong>Connect</strong> again.</p>
+
+      <h2 id="google">Connect Gmail or Google Drive</h2>
+      <p>Google sign-in happens on the computer where Olympus runs, so your Google account connects straight to it. In ChatGPT, <strong>Connect</strong> gives you a link: open it on that computer and it continues to Google. On a phone the link says to open it on your computer instead; Gmail and Google Drive cannot be connected from a phone. If Olympus runs on a computer you reach over SSH, see <a href="#headless">On a Linux computer without a screen</a>.</p>
+      <p>If you connected Google with a version of Olympus before 1.0.0, choose <strong>Reconnect Google</strong> in the dashboard after you update: the old sign-in service is retired, so the old connection can no longer renew.</p>
+
+      <h2 id="connect">Connect your sources</h2>
+      <p>Every source can be connected from the Olympus dashboard on your computer. In ChatGPT, Dropbox can also be connected from the Olympus dashboard there, and <strong>Connect</strong> next to Gmail or Google Drive gives you a link to open on your computer (see <a href="#google">Connect Gmail or Google Drive</a>). These are only ever connected on your computer:</p>
       <ul>
         <li><strong>X bookmarks</strong> use an X developer app of your own.</li>
         <li><strong>Readwise</strong> uses your Readwise access token, pasted on your computer.</li>
         <li><strong>Telegram</strong> and <strong>WhatsApp</strong> pair with your computer.</li>
       </ul>
-      <p><a href="#open-olympus">Open Olympus on your computer</a>, find the source under <strong>Sources</strong> and choose <strong>Connect</strong>; the page walks you through it. Then choose <strong>Check again</strong> in the dashboard in ChatGPT.</p>
+      <p><a href="#open-olympus">Open Olympus on your computer</a>, find the source under <strong>Sources</strong> and choose <strong>Connect</strong>; the page walks you through it. In ChatGPT, then choose <strong>Check again</strong> in the Olympus dashboard there.</p>
       <p><strong>Gmail and Google Drive, when Google sign-in is full.</strong> Google limits how many people can sign in through Olympus's own Google app. When the dashboard says Google sign-in is full for the moment, connect Gmail and Google Drive with a Google app of your own instead: <a href="#open-olympus">open Olympus on your computer</a>, choose <strong>Set up</strong> next to Gmail or Google Drive and follow the steps. When Google asks, publish your app to production; an app left in testing stops signing in after 7 days.</p>
 
       <h2 id="reconnect">Reconnect a source</h2>
-      <p>When X bookmarks or Readwise stop syncing because their sign-in or token expired, <a href="#open-olympus">open Olympus on your computer</a>, find the source under <strong>Sources</strong> and reconnect it (for Readwise, paste a new token). Gmail, Google Drive and Dropbox reconnect from ChatGPT with <strong>Reconnect</strong>.</p>
+      <p>When X bookmarks or Readwise stop syncing because their sign-in or token expired, <a href="#open-olympus">open Olympus on your computer</a>, find the source under <strong>Sources</strong> and reconnect it (for Readwise, paste a new token). Gmail, Google Drive and Dropbox reconnect the same way. In ChatGPT, Dropbox also reconnects with <strong>Reconnect</strong> in the Olympus dashboard; for Gmail and Google Drive, <strong>Reconnect</strong> there gives you a link to open on your computer.</p>
+
+      <h2 id="private">Answer private questions, or turn on anonymous answers</h2>
+      <p>Both are on the <strong>Private answers</strong> page on your computer: <a href="/open/private/">open Private answers</a>, or <a href="#open-olympus">open Olympus on your computer</a> and choose <strong>Open</strong> next to <strong>Private answers</strong> under <strong>On this computer</strong>. Not under <strong>Models</strong>: that is only for changing models.</p>
+      <ul>
+        <li><strong>Waiting questions.</strong> When ChatGPT asks something only your private things can answer, or another agent's private answer could not be given, the question waits here, and <strong>Needs you</strong> on your computer says so. Choose <strong>Answer</strong> to answer it on this computer with the model built into Olympus, or <strong>Dismiss</strong>. You can also ask your own question in <strong>Ask privately</strong>. Nothing on this page leaves your computer.</li>
+        <li><strong>Anonymous answers</strong> are under <strong>Anonymous answers</strong> on the same page. They work on a Mac and on Omarchy (x64), and are off until you turn them on there; your agent can then send a question anonymously, through zkAPI and Tor, using your own zkAPI account.</li>
+      </ul>
+      <p>In Olympus versions before 1.0.0 there is no Private answers page: <strong>Anonymous answers</strong> has its own row under <strong>On this computer</strong>.</p>
 
       <h2 id="answers">Answers have stopped working</h2>
       <p>This means the answer model you set up on your computer cannot be reached. <a href="#open-olympus">Open Olympus on your computer</a> and look under <strong>Models</strong>:</p>
       <ul>
-        <li>If you use <strong>Venice</strong>, check that its key is still valid and your account has credit, and paste a new key if needed.</li>
+        <li>If you use <strong>Venice</strong>, check that your account has credit, and that its key is still valid: keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. Paste a new key there if needed.</li>
         <li>If you use a <strong>local model</strong>, make sure the model server it names is running on your computer.</li>
       </ul>
-      <p>Then choose <strong>Check again</strong> in the dashboard in ChatGPT. Personal answers in ChatGPT keep working meanwhile.</p>
+      <p>Then choose <strong>Check again</strong> (in ChatGPT, in the Olympus dashboard there). Personal answers keep working meanwhile.</p>
 
       <h2 id="search">Search has stopped working</h2>
       <p>Your computer uses a custom search (embedding) model that cannot be reached. Make sure the model server it names under <strong>Models</strong> is running on your computer, then choose <strong>Check again</strong>. Changing the search model means indexing everything again, so Olympus only does that on your computer, when you ask.</p>
 
       <h2 id="models">Change models</h2>
-      <p>Models and their keys are set up on your computer, never in ChatGPT: <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. The built-in models need no setup.</p>
+      <p>Models are set up on your computer, never in your AI app: <a href="/open/fix/models/">open Models on your computer</a>, or <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. Their keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. The built-in models need no setup. Anonymous answers are not here: they are on <a href="#private">Private answers</a>.</p>
 
       <h2>Still stuck?</h2>
       <p><a href="/support/">Contact support</a> and include the output of <code>olympus engine status</code>. Check it first: it contains file paths on your computer, but no message content.</p>
     </div>
   </main>
-  <footer class="site">
-    <div class="wrap">
-      <ul>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        <li><a href="/terms/">Terms</a></li>
-      </ul>
-      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
-    </div>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
   </footer>
 </body>
 </html>

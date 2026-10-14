@@ -1,0 +1,87 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    .s05-k { position: absolute; left: 96px; font-family: "Newsreader"; color: var(--ink); white-space: nowrap; }
+    #s05-local-head { top: 124px; font-size: 128px; font-weight: 300; line-height: 1.02; letter-spacing: -0.02em; }
+    #s05-local-head .ln { display: block; }
+    #s05-local-head em { font-style: italic; }
+    .s05-row { position: absolute; left: 96px; width: 640px; height: 70px; }
+    .s05-row .rule { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--rule); transform-origin: 0 50%; }
+    .s05-row .nm { position: absolute; left: 0; bottom: 14px; font-family: "Newsreader"; font-weight: 400; font-size: 40px; line-height: 1; color: var(--ink); white-space: nowrap; }
+    .s05-row .use { position: absolute; right: 0; bottom: 15px; font-family: "Newsreader"; font-style: italic; font-size: 40px; line-height: 1; color: var(--mid); white-space: nowrap; }
+    #s05-local-foot { top: 792px; font-size: 44px; font-style: italic; color: var(--mid); }
+    /* the private answer: a paper panel that lifts out of the sheet (the cream extrusion of the Her panel) */
+    #s05-local-panel { position: absolute; left: 812px; top: 418px; width: 512px; padding: 26px 30px 26px; background: var(--card);
+      border: 1.5px solid var(--card-rule); border-radius: 18px; }
+    #s05-local-panel .lab { font-family: "Martian Mono"; font-size: 18px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+    #s05-local-panel .ans { margin-top: 16px; font-family: "Newsreader"; font-weight: 400; font-size: 44px; line-height: 1.22; color: var(--ink); text-wrap: balance; }
+    #s05-local-panel .ns { margin-top: 18px; font-family: "Newsreader"; font-style: italic; font-size: 40px; line-height: 1.1; color: var(--clay); white-space: nowrap; }
+  </style>
+  <div id="root" data-composition-id="s05-local" data-width="1920" data-height="1080">
+    <div class="pan" id="s05-local-pan"><div class="cam" id="s05-local-cam"><div class="shake" id="s05-local-shake"></div></div></div>
+  </div>
+  <script>
+    (function () {
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s05-local"], B = C.beats;
+      const $ = (id) => document.getElementById("s05-local-" + id);
+      const shake = $("shake");
+      const P = O.page(shake, { header: ["Route: this computer", "Built-in models · No account"] });
+      const S = P.sheet;
+      S.insertAdjacentHTML("beforeend", `
+        <div class="s05-k" id="s05-local-head"><span class="ln">Your computer</span><span class="ln"><em>answers first.</em></span></div>
+        <div class="s05-k" id="s05-local-foot">Small models · built in · run on your computer</div>
+        <div id="s05-local-panel"><div class="lab">Private · from your computer</div>
+          <div class="ans" id="s05-local-ans">Your accountant flagged the $35,000 loss.</div>
+          <div class="ns" id="s05-local-ns">Not sent to the cloud.</div></div>`);
+      // FACTS.md: the four small models built in
+      const MODELS = [["Qwen3.5", "private answers"], ["EmbeddingGemma 2", "search · photos"], ["Qwen3-ASR", "voice notes"], ["Apple Vision · Tesseract", "scans"]];
+      const rows = MODELS.map(([nm, use], i) => {
+        const r = O.make("div", "s05-row", S, `<div class="rule"></div><div class="nm">${nm}</div><div class="use">${use}</div>`);
+        gsap.set(r, { top: 418 + i * 74 });
+        return r;
+      });
+      const panel = $("panel");
+
+      O.ready(() => {
+        const tl = gsap.timeline({ paused: true });
+        const end = C.dur + C.tail;
+        O.drift(tl, $("cam"), end, { dx: -12, s1: 1.012 });
+        // Paper on paper: this sheet slides in over the feed from the right and settles.
+        tl.fromTo(P.page, { x: 1780, rotation: 2.2 }, { x: 0, rotation: 0, duration: T.scenes["s04-classify"].tail, ease: "power3.inOut" }, 0);
+
+        // The headline rises; "answers first." lands on the beat.
+        O.rise(tl, O.split($("head")), B.head, { dur: 0.6, stagger: 0.07 });
+        // The model rows draw in like a spec sheet, one every 0.2 s: hairline, then the name, then what it does.
+        const step = (B.rowsLast - B.rows) / (rows.length - 1);
+        rows.forEach((r, i) => {
+          const land = B.rows + i * step;
+          tl.fromTo(r.querySelector(".rule"), { scaleX: 0 }, { scaleX: 1, duration: 0.4, ease: "expo.out" }, land - 0.12);
+          tl.fromTo(r.querySelector(".nm"), { x: 24, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" }, land - O.AT * 0.45);
+          tl.fromTo(r.querySelector(".use"), { x: 16, opacity: 0 }, { x: 0, opacity: 1, duration: 0.4, ease: "expo.out" }, land + 0.06 - O.AT * 0.4);
+        });
+        O.rise(tl, O.split($("foot")), B.foot, { dur: 0.5, stagger: 0.03 });
+
+        // The answer panel lifts out of the paper on a spring; its text rises inside it.
+        const sp = O.spring(0.72, 9);
+        tl.fromTo(panel, { y: 18, scale: 0.94, opacity: 0, boxShadow: "0 0px 0px -10px rgba(120, 70, 40, 0)" },
+          { y: 0, scale: 1, opacity: 1, duration: 0.7, ease: sp, immediateRender: true }, B.panel - sp.land * 0.7);
+        tl.to(panel, { boxShadow: "0 26px 36px -18px rgba(120, 70, 40, 0.42)", duration: 0.5, ease: "power2.out" }, B.panel - 0.2);
+        O.cut(tl, panel.querySelector(".lab"), B.panel);
+        O.rise(tl, O.split($("ans")), B.answer, { dur: 0.5, stagger: 0.05 });
+        O.rise(tl, O.split($("ns")), B.answer + 0.35, { dur: 0.45, stagger: 0.05 });
+
+        // The camera pans on down the dossier to the Venice.ai sheet.
+        tl.to($("pan"), { y: -1100, duration: C.tail, ease: "power3.inOut" }, B.out);
+        tl.set({}, {}, end);
+        window.__timelines["s05-local"] = tl;
+      });
+    })();
+  </script>
+</template>
+</body></html>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    @font-face{font-family:"Nunito";font-weight:200 1000;font-display:block;src:url("assets/fonts/nunito.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    .s09-l { position: absolute; left: 96px; font-family: "Newsreader"; font-size: 118px; font-weight: 300; line-height: 1.02;
+      letter-spacing: -0.02em; color: var(--ink); white-space: nowrap; }
+    .s09-st { left: 0; top: 0; }
+  </style>
+  <div id="root" data-composition-id="s09-terms" data-width="1920" data-height="1080">
+    <div class="pan" id="s09-terms-pan"><div class="cam" id="s09-terms-cam"><div class="shake" id="s09-terms-shake"></div></div></div>
+  </div>
+  <script>
+    (function () {
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s09-terms"], B = C.beats;
+      const $ = (id) => document.getElementById("s09-terms-" + id);
+      const shake = $("shake");
+      const P = O.page(shake, { header: ["Olympus", "Terms"] });
+      const S = P.sheet;
+      // FACTS.md: MIT licence, no Olympus account, any MCP client. Each stamp is bigger than the last.
+      const TERMS = [["Open source.", "MIT", 58], ["No account.", "No sign-up", 66], ["Any agent.", "Any MCP", 76]];
+      const lines = TERMS.map(([txt, st, fs], i) => {
+        const l = O.make("div", "s09-l", S, txt);
+        gsap.set(l, { top: 150 + i * 196 });
+        const s = O.make("div", "stamp solid s09-st", S, st.toUpperCase());
+        s.style.fontSize = fs + "px";
+        return { l, s, top: 150 + i * 196 };
+      });
+
+      O.ready(() => {
+        const tl = gsap.timeline({ paused: true });
+        const end = C.dur + C.tail;
+        // Under the zkAPI page as it turns: the terms are uncovered, then each line rises and its stamp slams.
+        O.drift(tl, $("cam"), end, { dx: -12, s1: 1.012 });
+        const RIGHT = 1300;
+        lines.forEach(({ l, s, top }, i) => {
+          const k = i + 1;
+          O.rise(tl, O.split(l), B["l" + k], { dur: 0.6, stagger: 0.08 });
+          // right-aligned to the text column, centred on its line, each a little more askew; the page jolts on each
+          gsap.set(s, { x: RIGHT - s.offsetWidth, y: top + 66 - s.offsetHeight / 2 });
+          O.stamp(tl, s, B["t" + k], { rot: [-6, 4, -7][i], jolt: [shake], amp: 3 + i, ink: 1, from: 1.4 + i * 0.08 });
+        });
+        tl.set({}, {}, end);
+        window.__timelines["s09-terms"] = tl;
+      });
+    })();
+  </script>
+</template>
+</body></html>
