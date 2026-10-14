@@ -538,6 +538,52 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.record({ jobId: job!, status: 'indexed', leaseToken: lease!.leaseToken, derivations: [sheet] }).artifactsRecorded).toBe(1);
   });
 
+  for (const restoreBeforeRecord of [false, true]) for (const errorKind of ['store_item_secrets', 'store_item_not_eligible', 'source_scope_superseded', 'egress_policy_trust_tier']) {
+    test(`restoring an unchanged blocked file only retires its Secrets block: ${errorKind}, before settlement=${restoreBeforeRecord}`, async () => {
+      const dir = workspace('olympus-secret-side-jobs-');
+      const fx = fixture(dir);
+      const jobs = jobStore(dir);
+      await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      const request = { refs: [{ ...ref(GARDEN), sourceVersion: 'v1', contentHash: 'unchanged' }], extractorKind: 'text', extractorVersion: 'v1' };
+      const job = jobs.enqueue(request).jobRefs[0]!.jobId;
+      const lease = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs[0]!;
+      fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
+      expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+      if (!restoreBeforeRecord) jobs.record({ jobId: job, status: 'blocked_policy', errorKind, leaseToken: lease.leaseToken });
+      expect(jobs.get(job)?.ref.name).toBeUndefined();
+
+      fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'private' });
+      applyOwnerOverrides({ set: fx.set });
+      // Restoration alone does not run a job before its store copy is back.
+      expect(jobs.get(job)?.status).toBe(restoreBeforeRecord ? 'leased' : 'blocked_policy');
+      expect(jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs).toEqual([]);
+      await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      if (restoreBeforeRecord) {
+        // A listing can return while the old worker is still settling. It must
+        // neither revoke that lease nor spend the restoration debt.
+        expect(jobs.enqueue(request).jobsForced).toBe(0);
+        expect(jobs.get(job)?.status).toBe('leased');
+        jobs.record({ jobId: job, status: 'blocked_policy', errorKind, leaseToken: lease.leaseToken });
+      }
+      const enqueued = jobs.enqueue(request);
+      const wasSecret = errorKind === 'store_item_secrets';
+      expect(enqueued.jobRefs[0]!.jobId).toBe(job);
+      expect(enqueued.jobsForced).toBe(wasSecret ? 1 : 0);
+      expect(jobs.get(job)).toMatchObject({ status: wasSecret ? 'queued' : 'blocked_policy', ref: { name: GARDEN.name } });
+      if (!wasSecret) {
+        expect(jobs.get(job)?.lastErrorKind).toBe(errorKind);
+        expect(jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs).toEqual([]);
+        return;
+      }
+      expect(jobs.get(job)?.lastErrorKind).toBeUndefined();
+      const reread = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs[0]!;
+      expect(reread.jobId).toBe(job);
+      jobs.record({ jobId: job, status: 'indexed', leaseToken: reread.leaseToken });
+      expect(jobs.enqueue(request).jobsForced).toBe(0);
+      expect(jobs.get(job)?.status).toBe('indexed');
+    });
+  }
+
   test('a job ledger only a closed runtime knew still has its marker retired on restore', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);

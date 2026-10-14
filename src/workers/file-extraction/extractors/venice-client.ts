@@ -106,6 +106,7 @@ export class VeniceVlmClient implements VlmClient {
         throw new Error('Venice extraction model has no approved remote destination.');
       }
 
+      await request.assertRemoteEgressAllowed?.();
       const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {

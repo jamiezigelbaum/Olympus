@@ -256,6 +256,12 @@ export interface ExtractorInput {
   job: ExtractorJobContext;
   bytes?: Uint8Array;
   localPath?: string;
+  /**
+   * Runner-owned live gate. Remote readers call it after local preparation,
+   * and forward it to clients that await model preparation before sending.
+   * A refusal throws and settles with the runner's pre-fetch policy outcome.
+   */
+  assertRemoteEgressAllowed?: () => Promise<void>;
   mimeType?: string;
   sizeBytes?: number;
 }
@@ -428,6 +434,10 @@ export interface ExtractorRegistry {
  * Vision-model client seam. Tests supply a fake; wiring supplies a client.
  */
 export interface VlmDescribeRequest {
+  /**
+   * Recheck after any asynchronous model preparation, before sending bytes.
+   */
+  assertRemoteEgressAllowed?: () => Promise<void>;
   bytes: Uint8Array;
   mimeType: string;
   prompt: string;

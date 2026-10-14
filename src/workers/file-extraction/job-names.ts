@@ -226,15 +226,18 @@ export function retireExtractionJobRedaction(
         DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
         WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      // Its indexed jobs lost their artifacts (and its store copies their
-      // extracted text) when it became Secrets: each is read again at its
-      // next enqueue, which a plan pass makes only once the restored store
-      // copy exists (queued now, a worker could find no copy to land in).
+      // Indexed jobs lost their artifacts; jobs whose extraction found a
+      // Secret were blocked by the sink. Both need a reread after restoration,
+      // including workers still settling the refusal. Other policy blocks
+      // stay settled. Wait for the next enqueue, once the restored store copy
+      // exists, so the worker has a copy to land in.
       if (retired > 0 && rereadsTableExists(db)) {
         db.query(`
           INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
           SELECT job_id FROM extraction_jobs
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND status = 'indexed'
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+            AND (status IN ('indexed', 'leased')
+              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
         `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };
@@ -255,7 +258,14 @@ function artifactsTableExists(db: Database): boolean {
  */
 export function takeRestoredReread(db: Database, jobId: string): boolean {
   if (!rereadsTableExists(db)) return false;
-  return db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
+  const job = db.query(`SELECT status, last_error_kind FROM extraction_jobs WHERE job_id = ?`).get(jobId) as
+    { status: string; last_error_kind: string | null } | null;
+  // A listing can overlap the old worker's settlement. Keep its debt and
+  // lease intact until the outcome tells us whether a reread is needed.
+  if (job?.status === 'leased') return false;
+  const owed = db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
+  return owed && (job?.status === 'indexed'
+    || (job?.status === 'blocked_policy' && job.last_error_kind === 'store_item_secrets'));
 }
 
 function rereadsTableExists(db: Database): boolean {

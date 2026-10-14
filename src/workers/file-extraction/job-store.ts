@@ -697,10 +697,11 @@ export class LocalFileExtractionJobStore {
         const jobId = existing?.job_id ?? makeJobId();
         // An item that became Secrets keeps no name here, even when this pass
         // listed it before it did (job-names.ts).
-        const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
+        const redacted = itemNameRedacted(this.db, ref);
+        const name = redacted ? null : ref.name ?? null;
         // A job whose item left Secrets is read again, as if forced (its
         // artifacts went with its name). Owed until a pass can queue it.
-        const reread = existing !== undefined && existing !== null && status === 'queued'
+        const reread = !redacted && existing !== undefined && existing !== null && status === 'queued'
           && takeRestoredReread(this.db, existing.job_id);
         const forceExisting = Boolean(existing) && (force || reread) && status === 'queued';
         const reset = forceExisting ? 1 : 0;

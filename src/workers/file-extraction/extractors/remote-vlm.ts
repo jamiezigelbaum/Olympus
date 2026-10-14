@@ -169,7 +169,9 @@ export function createRemoteVlmExtractor(options: RemoteVlmExtractorOptions = {}
           ? withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING, 'pdf_rendered_first_page'])
           : withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING]);
       }
+      await input.assertRemoteEgressAllowed?.();
       const described = await client.describe({
+        ...(input.assertRemoteEgressAllowed ? { assertRemoteEgressAllowed: input.assertRemoteEgressAllowed } : {}),
         bytes: payload.bytes,
         mimeType: payload.mimeType,
         prompt,
