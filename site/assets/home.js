@@ -17,7 +17,7 @@
     f.tabIndex = -1;
     f.setAttribute("aria-hidden", "true");
     f.setAttribute("scrolling", "no");
-    f.src = "/film/scene.html?s=" + encodeURIComponent(stage.getAttribute("data-film-scene")) + (motion ? "" : "&still");
+    f.src = "/film/scene.html?v=1.0.0&s=" + encodeURIComponent(stage.getAttribute("data-film-scene")) + (motion ? "" : "&still");
     stage.appendChild(f);
     frames.set(scene, f);
   });

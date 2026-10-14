@@ -830,6 +830,7 @@ export interface DashboardSourceCard {
      * needs-attention count. Absent when the corpus publishes no such count.
      */
     unreadable_items?: number;
+    settled_unreadable_items?: number;
   };
   /** File populations the user deliberately added to Olympus. Excluded files are omitted. */
   ingestion_selection?: {
@@ -3103,14 +3104,13 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     const value = card.coverage.not_read_by_policy_items;
     return value === undefined ? sum : (sum ?? 0) + value;
   }, undefined);
-  // Same absent-means-untouched rule. Summing only the corpora that publish an
-  // eligible count means the aggregate denominator is the sum of exactly those
-  // corpora's own denominators, never a mix of one corpus's eligible items and
-  // another's indexed total.
-  const eligibleItems = cards.reduce<number | undefined>((sum, card) => {
-    const value = card.coverage.answer_ready_eligible_items;
-    return value === undefined ? sum : (sum ?? 0) + value;
-  }, undefined);
+  // Once one corpus publishes its own denominator, include every sibling's
+  // effective population too: a Personal names copy cannot erase the Private
+  // content store from the source's total.
+  const eligibleItems = cards.some(card => card.coverage.answer_ready_eligible_items !== undefined)
+    ? cards.reduce((sum, card) => sum + answerReadyEligibleItems(card.coverage.indexed_items,
+      card.coverage.not_read_by_policy_items, card.coverage.answer_ready_eligible_items), 0)
+    : undefined;
   const unreadable = cards.reduce<number | undefined>((sum, card) => {
     const value = card.coverage.unreadable_items;
     return value === undefined ? sum : (sum ?? 0) + value;
@@ -3147,6 +3147,8 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     needs_review_items: 0,
     ...(notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {}),
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
+    ...(cards.some(card => card.coverage.settled_unreadable_items !== undefined)
+      ? { settled_unreadable_items: cards.reduce((sum, card) => sum + (card.coverage.settled_unreadable_items ?? 0), 0) } : {}),
     ...(unreadable !== undefined ? { unreadable_items: unreadable } : {}),
   });
 }
@@ -4431,7 +4433,9 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const embeddedFiles = counts[ITEMS_EMBEDDED_COUNT_KEY];
   const needsReviewItems = sumCounts(counts, DASHBOARD_NEEDS_REVIEW_REASONS.map((reason) => reason.count_key));
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
-  const eligibleItems = answerReadyEligibleFromCounts(counts);
+  const eligibleItems = answerReadyEligibleFromCounts(counts)
+    ?? (counts.content_elsewhere_items === undefined ? undefined
+      : Math.max(0, indexedItems - (notReadByPolicy ?? 0) - counts.content_elsewhere_items));
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
     indexed_items: indexedItems,
@@ -4441,6 +4445,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
     needs_review_items: needsReviewItems,
     ...(notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {}),
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
+    ...(counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items }),
     ...(unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}),
   };
 }

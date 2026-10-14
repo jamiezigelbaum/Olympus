@@ -13389,6 +13389,10 @@ var init_vocabulary = __esm(() => {
   ]);
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
+    privacy_check_missing: {
+      one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
+      other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
+    },
     damaged_or_unsupported: {
       one: "{count} file is damaged or in a format Olympus can't read",
       other: "{count} files are damaged or in a format Olympus can't read"

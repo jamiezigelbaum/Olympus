@@ -97,7 +97,7 @@ describe('the view model carries a count per closed reason', () => {
   });
 
   test('the engine knows one reason today', () => {
-    expect(DASHBOARD_UNREADABLE_REASON_CODES).toEqual(['damaged_or_unsupported']);
+    expect(DASHBOARD_UNREADABLE_REASON_CODES).toEqual(['damaged_or_unsupported', 'privacy_check_missing']);
   });
 });
 
@@ -216,6 +216,17 @@ describe('the panel renders See why', () => {
     expect(Array.from(why.querySelectorAll('li')).map((node) => node.textContent))
       .toEqual(["2 files are damaged or in a format Olympus can't read"]);
     expect(why.querySelector('.why-note')!.textContent).toBe(DASHBOARD_UNREADABLE_NOTE);
+  });
+
+  test('missing privacy material lists the items and says how to retry without claiming damage', () => {
+    const win = mount(fresh({ unreadable: { count: 2, names: ['Welcome one', 'Welcome two'],
+      reasons: [{ code: 'privacy_check_missing', count: 2 }] } }));
+    const why = win.document.querySelector('details.why')!;
+    expect(why.textContent).toContain('Welcome one');
+    expect(why.textContent).toContain('Welcome two');
+    expect(why.textContent).toContain('Sync now');
+    expect(why.textContent).not.toContain('damaged');
+    expect(why.textContent).not.toContain('does not retry');
   });
 
   test('one file is singular; past the alarm share the note says it may be Olympus', () => {

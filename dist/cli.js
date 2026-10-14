@@ -22917,7 +22917,18 @@ class TierLedger {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
   corpusCopyIdentities(corpusId, filter) {
-    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
+    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" ? `copy_state = 'current' AND layers = 'metadata'
+            AND EXISTS (SELECT 1 FROM tier_items t
+              WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+                AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+                AND t.state = 'current' AND t.content_read = 0
+                AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+                AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
+                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            AND NOT EXISTS (SELECT 1 FROM tier_copies other
+              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+                AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
+                AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
             AND NOT EXISTS (
               SELECT 1 FROM tier_copies other
               WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
@@ -25597,6 +25608,17 @@ function sourceIndexFtsQuery(query, options = {}) {
   const suffix = options.prefix === false ? "" : "*";
   const exact = queryInitialisms(query);
   return terms.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : suffix}`).join(" OR ");
+}
+function sourceIndexTopicTokens(query) {
+  const foreignStopwords = foreignQueryStopwords(query, FTS_QUERY_STOPWORDS);
+  const tokens = [];
+  for (const match of query.matchAll(TOKEN_PATTERN2)) {
+    const raw = match[0]?.trim().toLowerCase();
+    if (!raw || FTS_QUERY_STOPWORDS.has(raw) || foreignStopwords.has(raw) && !/^[\p{Lu}]{2,}$/u.test(match[0]))
+      continue;
+    tokens.push(raw);
+  }
+  return tokens;
 }
 function sourceIndexFtsTerms(query) {
   const seen = new Set;
@@ -29420,7 +29442,8 @@ function createConnectorStoreCorpusAdapter(options) {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.hasEmbeddings(embeddingProvider.modelId);
-    const keywordLane = connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, hybrid ? { prefix: false, locate: false } : { locate: false });
+    const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    const keywordLane = relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions), options.localKeywordFallback, ftsOptions);
     const rows = [...keywordLane.rows];
     let semanticOnly = 0;
     let incomplete = false;
@@ -29646,7 +29669,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
   const complete = new Set;
   for (const concepts of [plain.concepts, content.concepts]) {
     for (const [id, matched] of concepts.matched)
-      if (matched >= concepts.total)
+      if (!ftsOptions.relaxed && matched >= concepts.total)
         complete.add(id);
   }
   const seen = new Set;
@@ -29665,7 +29688,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId))
   ];
-  const baseline = keywordExpansionDisabled() ? undefined : withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions));
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions));
   const enriched = new Map(ordered.map((row) => [row.sourceItem.localItemId, row]));
   const allRows = baseline ? [
     ...baseline.allRows.map((row) => complete.has(row.sourceItem.localItemId) ? enriched.get(row.sourceItem.localItemId) ?? row : row),
@@ -29685,23 +29708,11 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []])
   };
 }
-function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled) {
+function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled, ftsOptions = {}) {
   if (!enabled || strict.rows.length > 0)
     return strict;
-  const relaxed = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { relaxed: true });
-  const allRows = relaxed.rows;
-  return {
-    rows: allRows.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
-    allRows,
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
-      saturated: relaxed.saturated
-    },
-    matchedItemIds: new Set(allRows.map((row) => row.sourceItem.localItemId)),
-    completeItemIds: new Set
-  };
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true });
+  return { ...relaxed, completeItemIds: new Set };
 }
 function connectorStoreRowHasContent(row) {
   return row.chunk !== undefined || row.contentMatched === true;
@@ -31510,8 +31521,7 @@ function toFtsQuery(query, options = {}) {
 }
 function toRelaxedLocalFtsQuery(query) {
   const terms = new Set;
-  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    const term = match[0];
+  for (const term of sourceIndexTopicTokens(query)) {
     if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term))
       continue;
     terms.add(term);
@@ -36819,6 +36829,44 @@ var init_local_index = __esm(() => {
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
     }
+    settledUnreadableItems(scope) {
+      if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
+        return [];
+      const ledger = this.visibilityLedger();
+      if (!ledger)
+        return [];
+      const identities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_settled_unreadable");
+      const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
+      const account = normalizeOptionalAccountScope(scope?.accountScope);
+      const lookup3 = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
+      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
+        AND COALESCE(i.provider_conversation_id, '') = ?
+        ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`);
+      const out = [];
+      for (const identity of identities) {
+        const override = ledger.getOverride(identity);
+        if (override?.kind === "tier" && override.tier === "secrets")
+          continue;
+        const row = lookup3.get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? "", ...account ? [account] : [], ...filters.params);
+        const record = ledger.getCurrent(identity);
+        if (!row || !record)
+          continue;
+        out.push({
+          ref: {
+            corpusId: this.corpusId,
+            provider: identity.provider,
+            accountScope: identity.accountScope,
+            providerItemId: identity.providerItemId,
+            localItemId: row.local_item_id,
+            approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
+            ...row.title ? { name: row.title } : {},
+            ...row.source_version ? { sourceVersion: row.source_version } : {}
+          },
+          failedAt: record.decidedAt
+        });
+      }
+      return out;
+    }
     status(scope) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
@@ -36864,6 +36912,8 @@ var init_local_index = __esm(() => {
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
+          AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -36893,7 +36943,7 @@ var init_local_index = __esm(() => {
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
         ) AS full_ingestion_files
-    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+    `).get(...itemParams, ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
       let policyDeferredItems = 0;
       if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
         const rows = this.db.query(`
@@ -36955,6 +37005,7 @@ var init_local_index = __esm(() => {
         tierMoveInProgress: tier.moving,
         ...namesOnlyKept(this.db, tier.metadataLayer)
       } : undefined;
+      const settledUnreadableItems = this.settledUnreadableItems(scope).length;
       const last = this.db.query(`SELECT * FROM sync_runs
        WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
@@ -36970,6 +37021,8 @@ var init_local_index = __esm(() => {
           embeddedChunks: counts.embedded_chunks,
           syncRuns: counts.sync_runs,
           itemsWithText: counts.items_with_text,
+          ...counts.content_elsewhere_items > 0 ? { contentElsewhereItems: counts.content_elsewhere_items } : {},
+          ...settledUnreadableItems > 0 ? { settledUnreadableItems } : {},
           ...scope ? {
             files: counts.files,
             folders: counts.folders,
@@ -47066,7 +47119,7 @@ async function searchPrivateEvidence(input) {
     include_secure_local_content: true,
     max_results: maxResults
   };
-  const lanes = input.lanes(request);
+  const lanes = input.lanes(request, "private_search");
   const build = async (adapters) => {
     const detail = await buildEvidencePackDetailed({
       question,
@@ -47124,7 +47177,7 @@ async function probePrivateMatch(input) {
       include_secure_local: true,
       include_secure_local_content: false
     };
-    const lanes = input.lanes(request);
+    const lanes = input.lanes(request, "private_search");
     const corpusIds = sourceAnswerCorpusIds(request);
     const excluded = lanes.excludedCorpusIds ?? new Set;
     const gate = (hits) => lanes.visibilityGate ? lanes.visibilityGate(hits) : hits;
@@ -71603,8 +71656,12 @@ var init_vocabulary = __esm(() => {
     explainOff: "Syncing is paused until you turn this off."
   };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
-  DASHBOARD_UNREADABLE_REASON_CODES = ["damaged_or_unsupported"];
+  DASHBOARD_UNREADABLE_REASON_CODES = ["damaged_or_unsupported", "privacy_check_missing"];
   DASHBOARD_UNREADABLE_REASON_WORDS = {
+    privacy_check_missing: {
+      one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
+      other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
+    },
     damaged_or_unsupported: {
       one: "{count} file is damaged or in a format Olympus can't read",
       other: "{count} files are damaged or in a format Olympus can't read"
@@ -73103,6 +73160,9 @@ function createSourceIndexStatusHandler(options = {}) {
           return cached2.status;
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
         const status = store ? connectorStoreStatus(corpus, store.status(statusScope), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
+        if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
+          status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
+        }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope) : enforced;
         const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined) : withBacklog;
@@ -73242,6 +73302,11 @@ function connectorStoreStatus(corpus, status, readinessCounts, extractionThrough
       embedded_chunks: forModel?.embeddedChunks ?? status.counts.embeddedChunks,
       sync_runs: status.counts.syncRuns,
       [ITEMS_WITH_TEXT_COUNT_KEY]: status.counts.itemsWithText,
+      ...(status.counts.contentElsewhereItems ?? 0) > 0 ? { content_elsewhere_items: status.counts.contentElsewhereItems } : {},
+      ...(status.counts.settledUnreadableItems ?? 0) > 0 ? {
+        settled_unreadable_items: status.counts.settledUnreadableItems,
+        [UNREADABLE_ITEMS_COUNT_KEY]: (readinessCounts?.[UNREADABLE_ITEMS_COUNT_KEY] ?? 0) + status.counts.settledUnreadableItems
+      } : {},
       ...status.counts.fullIngestionFiles === undefined ? {} : { scope_full_ingestion_files: status.counts.fullIngestionFiles },
       ...status.counts.scopeMetadataOnlyFiles === undefined ? {} : { scope_metadata_only_files: status.counts.scopeMetadataOnlyFiles },
       ...status.counts.policyDeferredItems === undefined ? {} : { scope_policy_deferred_files: status.counts.policyDeferredItems },
@@ -74343,10 +74408,7 @@ function aggregateCoverage(cards) {
     const value2 = card.coverage.not_read_by_policy_items;
     return value2 === undefined ? sum2 : (sum2 ?? 0) + value2;
   }, undefined);
-  const eligibleItems = cards.reduce((sum2, card) => {
-    const value2 = card.coverage.answer_ready_eligible_items;
-    return value2 === undefined ? sum2 : (sum2 ?? 0) + value2;
-  }, undefined);
+  const eligibleItems = cards.some((card) => card.coverage.answer_ready_eligible_items !== undefined) ? cards.reduce((sum2, card) => sum2 + answerReadyEligibleItems(card.coverage.indexed_items, card.coverage.not_read_by_policy_items, card.coverage.answer_ready_eligible_items), 0) : undefined;
   const unreadable = cards.reduce((sum2, card) => {
     const value2 = card.coverage.unreadable_items;
     return value2 === undefined ? sum2 : (sum2 ?? 0) + value2;
@@ -74377,6 +74439,7 @@ function aggregateCoverage(cards) {
     needs_review_items: 0,
     ...notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {},
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
+    ...cards.some((card) => card.coverage.settled_unreadable_items !== undefined) ? { settled_unreadable_items: cards.reduce((sum2, card) => sum2 + (card.coverage.settled_unreadable_items ?? 0), 0) } : {},
     ...unreadable !== undefined ? { unreadable_items: unreadable } : {}
   });
 }
@@ -75052,7 +75115,7 @@ function coverageFromCounts(counts) {
   const embeddedFiles = counts[ITEMS_EMBEDDED_COUNT_KEY];
   const needsReviewItems = sumCounts(counts, DASHBOARD_NEEDS_REVIEW_REASONS.map((reason) => reason.count_key));
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
-  const eligibleItems = answerReadyEligibleFromCounts(counts);
+  const eligibleItems = answerReadyEligibleFromCounts(counts) ?? (counts.content_elsewhere_items === undefined ? undefined : Math.max(0, indexedItems - (notReadByPolicy ?? 0) - counts.content_elsewhere_items));
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
     indexed_items: indexedItems,
@@ -75062,6 +75125,7 @@ function coverageFromCounts(counts) {
     needs_review_items: needsReviewItems,
     ...notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {},
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
+    ...counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items },
     ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}
   };
 }
@@ -122216,7 +122280,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (stall.length)
       add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
     if (lines.length) {
-      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.reasons.some((reason) => reason.code === "privacy_check_missing") ? "" : unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     }
     return box;
   }
@@ -133614,13 +133678,13 @@ var init_query_planner = __esm(() => {
 
 // src/workers/email-source/source-answer-lanes.ts
 function createSourceAnswerLanes(deps) {
-  return (request, embedding) => {
+  return (request, mode) => {
     const searchScopes = new Map;
     const requestEmbeddings = new Map;
     const requestEmbedding = (store) => {
       if (!requestEmbeddings.has(store.corpusId)) {
         const configured = deps.embeddingProvider(store);
-        const provider = embedding === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
+        const provider = mode === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
         requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
       }
       return requestEmbeddings.get(store.corpusId);
@@ -133648,7 +133712,7 @@ function createSourceAnswerLanes(deps) {
       return createConnectorStoreCorpusAdapter({
         store,
         retrievalMode: request.retrieval_mode ?? "keyword",
-        localKeywordFallback: embedding === "built_in_only",
+        localKeywordFallback: mode === "built_in_only" || mode === "private_search" && store.trustDomain === "secure_local",
         ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
         ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
         ...filters ? { filters } : {},
@@ -138523,7 +138587,10 @@ function unreadableView(definition, card, count) {
   const target = openUnreadableSourceFor(definition.source_id);
   return {
     count,
-    reasons: [{ code: "damaged_or_unsupported", count }],
+    reasons: [
+      ...count > (card.coverage.settled_unreadable_items ?? 0) ? [{ code: "damaged_or_unsupported", count: count - (card.coverage.settled_unreadable_items ?? 0) }] : [],
+      ...(card.coverage.settled_unreadable_items ?? 0) > 0 ? [{ code: "privacy_check_missing", count: Math.min(count, card.coverage.settled_unreadable_items) }] : []
+    ],
     ...card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? { many: true } : {},
     ...names.length > 0 ? { names } : {},
     ...rest > 0 ? {
@@ -138920,6 +138987,7 @@ function scrubCard(definition, card) {
       needs_review_items: count(card.coverage.needs_review_items),
       ...finite(card.coverage.not_read_by_policy_items) ? { not_read_by_policy_items: count(card.coverage.not_read_by_policy_items) } : {},
       ...finite(card.coverage.answer_ready_eligible_items) ? { answer_ready_eligible_items: count(card.coverage.answer_ready_eligible_items) } : {},
+      ...finite(card.coverage.settled_unreadable_items) ? { settled_unreadable_items: count(card.coverage.settled_unreadable_items) } : {},
       ...finite(card.coverage.unreadable_items) ? { unreadable_items: count(card.coverage.unreadable_items) } : {}
     },
     ingestion_health: {
@@ -159038,8 +159106,21 @@ async function main() {
       executor: sourceWatchExecutor
     })
   } : undefined;
+  const locateUnreadableItem = (ref) => {
+    for (const store of connectorStores) {
+      if (store.corpusId !== ref.corpusId)
+        continue;
+      const found = store.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
+      if (found)
+        return {
+          ...found.locatorUri ? { locatorUri: found.locatorUri } : {},
+          ...found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}
+        };
+    }
+    return;
+  };
   const unreadableVerdict = createUnreadableVerdict({
-    locate: (ref) => fileExtractionRuntime?.locateItem(ref),
+    locate: locateUnreadableItem,
     lanes: () => tierLanes
   });
   const extractionReadinessLedger = fileExtractionRuntime ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
@@ -159080,11 +159161,17 @@ async function main() {
   const unreadableOpenTargets = {
     dropbox: unreadableDropboxTargets()
   };
-  const unreadableFiles = extractionReadinessLedger && fileExtractionRuntime ? createUnreadableFiles({
-    items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
+  const unreadableFiles = createUnreadableFiles({
+    items: (corpusId) => {
+      const items = [
+        ...extractionReadinessLedger?.unreadableItems(corpusId) ?? [],
+        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)))
+      ];
+      return Array.from(new Map(items.map((item) => [item.ref.localItemId, item])).values());
+    },
     verdict: unreadableVerdict,
-    locate: (ref) => fileExtractionRuntime.locateItem(ref),
-    openTarget: (provider, locator) => Object.hasOwn(unreadableOpenTargets, provider) ? unreadableOpenTargets[provider](locator) : provider === "google_drive" && googleFilePage(locator) ? { url: locator } : undefined,
+    locate: locateUnreadableItem,
+    openTarget: (provider, locator) => Object.hasOwn(unreadableOpenTargets, provider) ? unreadableOpenTargets[provider](locator) : provider === "google_drive" && googleFilePage(locator) ? { url: locator } : provider === "gmail" && /^https:\/\/mail\.google\.com\/mail\/u\/0\/#all\/[A-Za-z0-9_-]+$/.test(locator) ? { url: locator } : undefined,
     ...process.platform === "darwin" ? {
       openFile: async (path, eligible) => {
         if (!await eligible())
@@ -159099,11 +159186,12 @@ async function main() {
         });
       }
     } : {}
-  }) : undefined;
+  });
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
     corpusDefinitions: () => sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
     connectorStores,
     connectorStoreStatusScope,
+    ...unreadableFiles ? { unreadableCount: (corpusId) => unreadableFiles.recheck(corpusId).unreadable } : {},
     retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain],
     retrievalAvailability,
     tierClassification: () => {

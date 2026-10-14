@@ -2,7 +2,9 @@
 
 ## 1.0.1 - unreleased
 
-- On Linux, signing out ends the owner session, settings restarts keep your window, and opening Olympus shows its dashboard opening view in the same window.
+- On Linux, signing out ends the owner session, saving settings keeps your Olympus window working, and Olympus opens in one window without a flash.
+- Private search finds items when not every word matches, keeping readable content ahead of title-only matches.
+- Progress finishes when names-only copies have content elsewhere; items settled without readable content appear under problems with a way to find them.
 - Private items can be found by meaning, on your computer only. Installs still on the 1.0.0 default privacy settings switch over automatically, keeping your other settings; privacy settings managed by OpenClaw stay as they are.
 - Fixed content and prepared answers remaining available after an item moves from Personal to Private.
 

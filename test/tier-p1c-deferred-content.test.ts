@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite';
 // P1c: a lane whose text arrives after listing (the shared extraction factory
 // reads it later), on per-tier stores (design
 // per-item-four-tier-classification.md, sections 2, 3.2 and 3.3).
@@ -12,6 +13,7 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { tieredExtractionView } from '../src/workers/connector-store/tiered-extraction.ts';
@@ -412,5 +414,44 @@ describe('P1c: status counts a names copy awaiting its text as a file to read', 
     expect(after.itemsWithText).toBe(1);
     expect(after.fullIngestionFiles).toBe(1);
     expect(lane.stores.secure_local!.status({}).counts.itemsWithText).toBe(LEGACY.length + 1);
+  });
+});
+
+// These extra cases leave the original Full-folder regression above unchanged.
+describe('settled names copies', () => {
+  test('only current content elsewhere removes a names copy from the work population', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [NEW[1]!]);
+    expect(lane.stores.internal!.status().counts.contentElsewhereItems ?? 0).toBe(0);
+    await lane.sink.accept(request(NEW[1]!.id, NEW[1]!.body));
+    expect(lane.stores.internal!.status().counts.contentElsewhereItems).toBe(1);
+    const db = new Database(lane.ledger.dbPath);
+    db.exec("UPDATE tier_copies SET copy_state = 'superseded' WHERE layers = 'content'");
+    db.close();
+    expect(lane.stores.internal!.status().counts.contentElsewhereItems ?? 0).toBe(0);
+    expect(lane.stores.internal!.status({}).counts.fullIngestionFiles).toBe(1);
+  });
+
+  test('unread fail-safe settlement is counted and findable, then clears when content lands; Secrets never count', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [NEW[1]!]);
+    const identity = identityOf(NEW[1]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+      decidedBy: 'sniffer' as const, snifferId: 'fixture',
+      contentTier: 'secure' as const, contentRead: false, contentPending: false, metadataPending: false,
+      reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
+    lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+    const store = lane.stores.internal!;
+    expect(store.status().counts.settledUnreadableItems).toBe(1);
+    expect(store.settledUnreadableItems().map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
+    expect(store.status({}).counts.fullIngestionFiles).toBe(1);
+    lane.ledger.setOverride(identity, { kind: 'tier', tier: 'secrets' });
+    expect(store.settledUnreadableItems()).toEqual([]);
+    lane.ledger.setOverride(identity, { kind: 'not_secret' });
+    await lane.sink.accept(request(NEW[1]!.id, NEW[1]!.body));
+    expect(store.settledUnreadableItems()).toEqual([]);
+    expect(store.status().counts.contentElsewhereItems).toBe(1);
   });
 });

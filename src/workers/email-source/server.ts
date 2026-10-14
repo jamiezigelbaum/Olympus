@@ -3289,7 +3289,7 @@ export async function main(): Promise<void> {
   );
   // `embedding: 'built_in_only'` builds the same lanes for answers on this
   // computer alone (source-index/local-answer.ts, source-answer-lanes.ts).
-  let sourceAnswerLanes: ((request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => AnalystAnswerLanes) | undefined;
+  let sourceAnswerLanes: ReturnType<typeof createSourceAnswerLanes> | undefined;
   const analystSourceAnswer = sourceIndexAnswerEnabled
     ? await (async () => {
       const analystLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
@@ -3501,8 +3501,17 @@ export async function main(): Promise<void> {
   // unreadable, on any host; an item no store serves any more is left out of
   // both the count and the list. Source-neutral: every lane's ledger and
   // secret index, by corpus.
+  const locateUnreadableItem = (ref: { corpusId: string; localItemId: string }) => {
+    for (const store of connectorStores) {
+      if (store.corpusId !== ref.corpusId) continue;
+      const found = store.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
+      if (found) return { ...(found.locatorUri ? { locatorUri: found.locatorUri } : {}),
+        ...(found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}) };
+    }
+    return undefined;
+  };
   const unreadableVerdict = createUnreadableVerdict({
-    locate: (ref) => fileExtractionRuntime?.locateItem(ref),
+    locate: locateUnreadableItem,
     lanes: () => tierLanes,
   });
   const extractionReadinessLedger = fileExtractionRuntime
@@ -3551,16 +3560,22 @@ export async function main(): Promise<void> {
   const unreadableOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
     dropbox: unreadableDropboxTargets(),
   };
-  const unreadableFiles = extractionReadinessLedger && fileExtractionRuntime
-    ? createUnreadableFiles({
-        items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
+  const unreadableFiles = createUnreadableFiles({
+        items: (corpusId) => {
+          const items = [...(extractionReadinessLedger?.unreadableItems(corpusId) ?? []),
+            ...connectorStores.filter(store => store.corpusId === corpusId)
+              .flatMap(store => store.settledUnreadableItems(connectorStoreStatusScope(store)))];
+          return Array.from(new Map(items.map(item => [item.ref.localItemId, item])).values());
+        },
         verdict: unreadableVerdict,
-        locate: (ref) => fileExtractionRuntime.locateItem(ref),
+        locate: locateUnreadableItem,
         // The provider's own resolver, else a Drive file's own Google page.
         // Nothing else opens: a locator is provider data, not a link to trust.
         openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
           ? unreadableOpenTargets[provider]!(locator)
-          : provider === 'google_drive' && googleFilePage(locator) ? { url: locator } : undefined),
+          : provider === 'google_drive' && googleFilePage(locator) ? { url: locator }
+          : provider === 'gmail' && /^https:\/\/mail\.google\.com\/mail\/u\/0\/#all\/[A-Za-z0-9_-]+$/.test(locator)
+            ? { url: locator } : undefined),
         ...(process.platform === 'darwin'
           ? {
               openFile: async (path: string, eligible: () => Promise<boolean>) => {
@@ -3576,8 +3591,7 @@ export async function main(): Promise<void> {
               },
             }
           : {}),
-      })
-    : undefined;
+      });
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
       // Read per request: a per-tier store its tier set creates while the
@@ -3586,6 +3600,7 @@ export async function main(): Promise<void> {
         .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
       connectorStores,
       connectorStoreStatusScope,
+      ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId).unreadable } : {}),
       retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain as keyof typeof sovereigntyEngine.config.retrieval.trustDomains],
       retrievalAvailability,
       tierClassification: () => {
