@@ -1038,6 +1038,68 @@ export class TierLedger {
     return (rows as TierItemRow[]).map(recordFromRow);
   }
 
+  /**
+   * Repair a pending decision whose question was never persisted or was lost.
+   * Missing material is uncertainty, so only a Private raise is permitted.
+   * Unread content stays unread: a later extraction may still land normally.
+   */
+  settleMissingQuestions(
+    record: TierLedgerRecord,
+    options: {
+      missingMetadata: boolean;
+      missingContent: boolean;
+      snifferId: string;
+      stillMissing: () => boolean;
+      placementFor?: (decision: TierDecision) => TierPlacementPlan;
+    },
+  ): boolean {
+    const identity: TierLedgerIdentity = { provider: record.provider, accountScope: record.accountScope,
+      providerItemId: record.providerItemId, ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}) };
+    return this.db.transaction(() => {
+      const current = this.getCurrent(identity);
+      if (!current || current.state !== 'pending' || JSON.stringify(current) !== JSON.stringify(record)
+        || current.decidedBy === 'override' || this.getOverride(identity)?.kind === 'tier' || !options.stillMissing()) return false;
+      if (current.routed && !options.placementFor) return false;
+      const next = rowOf(current);
+      if (options.missingMetadata && next.metadataPending) {
+        next.metadataTier = maxTier(next.metadataTier, 'secure');
+        next.metadataPending = false;
+        next.reasons = [...next.reasons.filter(reason => !isOpenSnifferReason(reason, 'metadata')),
+          `metadata:sniffer:${options.snifferId}:fail_safe:missing_question`];
+      }
+      if (options.missingContent && (next.contentPending || !next.metadataPending)) {
+        next.contentTier = maxTier(next.contentTier, 'secure');
+        next.contentPending = false;
+        next.reasons = [...next.reasons.filter(reason => !isOpenSnifferReason(reason, 'content')),
+          `content:sniffer:${options.snifferId}:fail_safe:missing_question`];
+      }
+      next.contentTier = maxTier(next.contentTier, next.metadataTier);
+      next.decidedBy = 'sniffer';
+      const decision = decisionOfRow(next);
+      if (current.routed) {
+        this.recordRoutedPlacement(identity, decision, options.placementFor!(decision), {
+          guard: { generation: current.generation, override: this.getOverride(identity) }, stagedLandingAllowed: true,
+        });
+      } else this.writeRow(identity, next, undefined, current);
+      return true;
+    })();
+  }
+
+  /** Retire only an unchanged pending row after every relevant store confirmed absence. */
+  retireAbsentPending(record: TierLedgerRecord): boolean {
+    const identity: TierLedgerIdentity = { provider: record.provider, accountScope: record.accountScope,
+      providerItemId: record.providerItemId, ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}) };
+    return this.db.transaction(() => {
+      const current = this.getCurrent(identity);
+      if (!current || current.state !== 'pending' || JSON.stringify(current) !== JSON.stringify(record)
+        || this.getOverride(identity)?.kind === 'tier') return false;
+      this.deleteCopies(identity);
+      this.db.query(`DELETE FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
+      return true;
+    })();
+  }
+
   /** Content-free counts for status surfaces. */
   counts(): { items: number; byState: Record<TierLedgerState, number>; byContentTier: Record<TierKey, number> } {
     const byState: Record<TierLedgerState, number> = { pending: 0, current: 0, moving: 0 };

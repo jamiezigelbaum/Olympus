@@ -518,6 +518,13 @@ function withState(
     }
     return { ...phase, state: 'done', state_words: 'Done' };
   }
+  // Held classification is automatic work, with no repair for the owner.
+  // Only replace a stall when the entire embedding remainder is accounted for.
+  const held = source.tier_classification?.pending_classification_items ?? 0;
+  if (phase.id === 'embedding' && phase.measure.kind === 'ratio'
+    && held > 0 && held >= phase.measure.total - phase.measure.done - (phase.unreadable ?? 0)) {
+    return { ...phase, state: 'waiting', state_words: 'Waiting to be checked' };
+  }
   const previous = index > 0 ? phases[index - 1] : undefined;
   if (previous !== undefined && measureDone(previous.measure) === 0 && measureDone(phase.measure) === 0) {
     return { ...phase, state: 'waiting', state_words: `Waiting for ${previous.label.toLowerCase()}` };
