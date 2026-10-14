@@ -13,6 +13,7 @@
   network isolation checks pass, using zkAPI 0.1.6-olympus4 or a later
   reviewed build. Older Linux builds show the existing update guidance.
   Other Linux hosts stay unavailable.
+- **Anonymous answer startup failures name the wallet companion** when zkAPI reports that it stopped, without saving its output or wallet details.
 - **Linux full removal cleans up empty cache and state folders** when the
   installer recorded creating them. Pre-existing folders and other files stay.
 - **Linux install rollback removes the service link it created**, including

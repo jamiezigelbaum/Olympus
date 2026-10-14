@@ -69,6 +69,7 @@ const plan = fs.existsSync(planPath) ? JSON.parse(fs.readFileSync(planPath, 'utf
 if (process.argv[2] === '--version') { console.log('zkapi-clientd ' + plan.version); process.exit(0); }
 if (process.argv[2] === 'serve' && process.argv[3] === '--help') { console.log(plan.noSupervisor ? 'Usage: serve' : '--relay-url --companion-proxy-listen --wallet-api-listen --require-managed-companion --require-companion-custody'); process.exit(0); }
 if (process.argv[2] !== 'serve') process.exit(2);
+if (plan.startupError) { console.error(plan.startupError); process.exit(1); }
 const flagValue = (flag) => { const i = process.argv.indexOf(flag); return i < 0 ? undefined : process.argv[i + 1]; };
 const proxyListen = flagValue('--companion-proxy-listen');
 const walletListen = flagValue('--wallet-api-listen');
@@ -203,6 +204,7 @@ export interface Plan {
   torNeverBootstraps?: boolean;
   torDiesAfterMs?: number;
   startDelayMs?: number;
+  startupError?: string;
   policyNeverLoads?: boolean;
   modelMissing?: boolean;
   allowance?: number;
