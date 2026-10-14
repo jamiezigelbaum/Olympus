@@ -2,7 +2,7 @@
 
 ## 1.1.0 - unreleased
 
-- Two side-by-side ways to ask: privately on your computer, or anonymously with outside help; both answers arrive in the inbox.
+- One question, three places it can go: this computer, Venice, zkAPI; answers arrive in the inbox.
 
 - Questions agents send that need your Private items are answered on your computer automatically; the agent links you to the answer in Olympus.
 

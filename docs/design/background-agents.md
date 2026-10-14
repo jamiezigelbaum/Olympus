@@ -79,11 +79,24 @@ line and one page, and loses a page.
 
 ## Design
 
-### A. Private answers inbox (owner decision 2026-10-14, 1.1.0)
+### A. Inbox (owner decision 2026-10-14, 1.1.0)
 
 This supersedes **answered on demand** and **no Private synthesis runs for
 nobody** for agent questions whose panel does not claim them. 1.0.1 ships
 first; this 1.1.0 branch must not land before it.
+
+**Owner questions.** One box offers This computer, Venice and zkAPI as parallel
+destinations. The computer uses the built-in local model. Venice uses the same
+approved Private source_answer route agents use, only when the current privacy
+settings already permit it, with release checks before dispatch and no Secret
+content. zkAPI uses its existing writer and gate. All answers reach Inbox with
+destination, who asked, relative time and exact time on hover. zkAPI shows exact
+sent text; Venice shows all sent item titles. Setup/disallowed/busy states stay
+visible. Copy is in vocabulary.ts; one CSS grid block owns alignment and phone
+stacking. Final layout/copy await the separate owner design-probe review.
+Migration v5 adds a destination marker while preserving v4 private/anonymous rows.
+Venice source withdrawal clears the retained answer but never resends it without
+an owner ask. Agent-initiated rules and ChatGPT's no-duplication rule remain.
 
 **Arrival.** A ChatGPT Private match records the question independently of
 its panel job. Other agents record when their Private part was withheld,
@@ -260,7 +273,7 @@ same-provider exclusion can't be applied.
    newest first and unread in bold; click opens the full Markdown answer with
    a bold question, sources and left-out beneath. Only Delete and Delete all
    (one confirmation), no Answer or Dismiss. Deep links open and scroll the
-   named row. Ask privately and Ask anonymously sit side by side above the inbox (stacked on phones). Anonymous setup, balance, switch and writer checks live in Models on the Keys settings page. Light/dark and
+   named row. One question box offers This computer, Venice and zkAPI in aligned columns above Inbox (stacked on phones). Anonymous setup, balance, switch and writer checks live in Models on the Keys settings page. Light/dark and
    390/1280-wide proof includes unread, opened list/bold and Answering… rows.
 3. **Agents page, Connect an agent:** ChatGPT, Grok, Muse, Other, each with
    its own short steps; the choice sets the provider (D).

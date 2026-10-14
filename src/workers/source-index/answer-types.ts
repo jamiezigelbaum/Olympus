@@ -272,5 +272,6 @@ export interface SourceIndexInternalContextItem {
 }
 
 export interface SourceIndexAnswerHandler {
-  answer(request: SourceIndexAnswerRequest): Promise<SourceIndexAnswerResult>;
+  // Local-only observation; never parsed from a wire request. Called after release checks.
+  answer(request: SourceIndexAnswerRequest, local?: { beforeVeniceDispatch: (pack: import('../../core/contracts.ts').EvidencePack, corpusIds: readonly string[]) => void }): Promise<SourceIndexAnswerResult>;
 }

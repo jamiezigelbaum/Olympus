@@ -738,7 +738,7 @@ export function previewOutsideHelp(on: boolean): import('../src/workers/dashboar
 
 /** Synthetic inbox questions: never anyone's source text. */
 const PREVIEW_WAITING = [
-  { id: 'wq_preview_1', question: 'What did the landlord say about the deposit?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 50 * 60_000).toISOString(), unchecked: false, state: 'answered', unread: true, answeredAt: new Date(NOW.getTime() - 49 * 60_000).toISOString() },
+  { path: 'venice', id: 'wq_preview_1', question: 'What did the landlord say about the deposit?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 50 * 60_000).toISOString(), unchecked: false, state: 'answered', unread: true, answeredAt: new Date(NOW.getTime() - 49 * 60_000).toISOString() },
   { path: 'anonymous', id: 'wq_preview_2', question: 'What are general tenant deposit rules?', from: 'Grok Bot', askedAt: new Date(NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false, state: 'answered', unread: false, answeredAt: new Date(NOW.getTime() - 119 * 60_000).toISOString() },
   { id: 'wq_preview_3', question: 'Which flight did I book for March?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 26 * 3_600_000).toISOString(), unchecked: false, state: 'answering', unread: false },
 ] as const;
@@ -768,6 +768,8 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
   const listed = previewWaitingQuestions(count);
   if (body.action === 'list') return Response.json({ ok: true, ...listed });
   if (body.action === 'ask') return Response.json(answered);
+  if (body.action === 'ask_venice') return Response.json({ ...answered, sent_items: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox' }] });
+  if (body.action === 'ask_anonymous') return Response.json({ ...answered, sent: 'Prepared synthetic question', citations: [] });
   if (body.action === 'open') return Response.json({ ok: true, status: 'opened' });
   if (body.action === 'delete_all') {
     listed.questions.forEach((question) => previewDeleted.add(question.id));
@@ -775,7 +777,7 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
   }
   const question = listed.questions.find((item) => item.id === body.id);
   if (!question) return Response.json({ ok: false, error: { code: 'gone', message: 'That answer was deleted' } }, { status: 410 });
-  if (body.action === 'read') return Response.json(question.state === 'answered' ? { ...answered, ...('path' in question && question.path === 'anonymous' ? { sent: question.question, answer: '**Outside help · preview only.** Deposit rules depend on the tenancy and location. Check the applicable public guidance.', citations: [], unanswered: [], left_out: [] } : {}) } : { ok: true, status: question.state });
+  if (body.action === 'read') return Response.json(question.state === 'answered' ? { ...answered, ...(question.path === 'venice' ? { sent_items: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox' }] } : {}), ...('path' in question && question.path === 'anonymous' ? { sent: question.question, answer: '**Outside help · preview only.** Deposit rules depend on the tenancy and location. Check the applicable public guidance.', citations: [], unanswered: [], left_out: [] } : {}) } : { ok: true, status: question.state });
   if (body.action === 'seen') {
     previewSeen.add(question.id);
     return Response.json({ ok: true, status: 'seen' });
@@ -897,7 +899,7 @@ if (import.meta.main) {
           // The pretend session is a local one, so Private answers shows its list.
           outsideHelpLocalSession: unlocked,
           outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
-          privateAnswers: { available: true, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount) } : {}) },
+          privateAnswers: { available: true, destinations: { computer: 'ready', venice: url.searchParams.get('venice') === 'ready' ? 'ready' : url.searchParams.get('venice') === 'unset' ? 'not_set_up' : 'not_allowed' }, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount) } : {}) },
         },
       }), undefined, url.searchParams.get('theme')), cookies);
     }

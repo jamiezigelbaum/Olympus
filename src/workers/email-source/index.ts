@@ -548,7 +548,7 @@ export interface EmailSourceWorkerOptions {
      * (workers/http.ts). Absent: the page says it is unavailable and the route
      * answers 501.
      */
-    privateAnswers?: Pick<LocalPrivateAnswers, 'waiting' | 'waitingCount' | 'handle'>;
+    privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
@@ -1353,6 +1353,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 outsideHelpLocalSession: localSession,
                 privateAnswers: {
                   available: sourceDashboard?.privateAnswers !== undefined,
+                  ...(controlSessionCsrfToken !== undefined && localSession ? { destinations: sourceDashboard?.privateAnswers?.destinations() } : {}),
                   ...(waiting ? { waiting } : {}),
                 },
               },

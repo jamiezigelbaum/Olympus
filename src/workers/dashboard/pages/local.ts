@@ -77,20 +77,21 @@ export interface DashboardPageOptions {
    */
   privateAnswers?: {
     available: boolean;
+    destinations?: import('../../email-source/venice-inbox-answer.ts').AskDestinationStates | undefined;
     waiting?: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean };
   };
 }
 
 /** One question waiting for this computer, as the Private answers page lists it. */
 export interface DashboardWaitingQuestion {
-  path?: 'private' | 'anonymous';
+  path?: 'private' | 'anonymous' | 'venice';
   id: string;
   question: string;
   /** Who asked: the connection's name. */
   from: string;
   askedAt: string;
   unchecked: boolean;
-  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued';
+  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
   unread?: boolean;
   answeredAt?: string;
 }
@@ -154,7 +155,9 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view.model_setup),
-    renderModelSetup(view.model_setup),
+    `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup)}</div>`,
+    view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySetting)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySettingHelp)}</p></section>`,
     `<section id="anonymous"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...(options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
     sources.length === 0 ? '' : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0

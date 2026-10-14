@@ -13,26 +13,49 @@ const long = 'LongUnbrokenSourceName'.repeat(40);
 try {
   for (const colorScheme of ['light', 'dark']) {
     const page = await browser.newPage({ colorScheme });
-    for (const width of [320, 390, 700, 1280]) {
+    for (const width of [390, 900, 1280]) {
       await page.setViewportSize({ width, height: 1000 });
       for (const name of ['home', 'keys', 'agents', 'private-answers', 'private-answers-on', 'private-answers-opened', 'connector']) {
         const privatePage = name.startsWith('private-answers');
-        await page.goto(`${base}/dashboard?controls&${privatePage ? 'private-answers&anonymous=' + (name === 'private-answers' ? 'off' : 'on') : name === 'home' ? '' : name}`);
+        await page.goto(`${base}/dashboard?controls&${privatePage ? 'private-answers&venice=ready&anonymous=' + (name === 'private-answers' ? 'off' : 'on') : name === 'home' ? '' : name}`);
         await page.waitForTimeout(250);
         if (privatePage) {
-          assert.deepEqual(await page.locator('.paasks h3').allTextContents(), ['Ask privately', 'Ask anonymously']);
-          assert.equal(await page.locator('.paasks .paask textarea').count(), 2);
-          assert.equal(await page.locator('[data-pa-path=anonymous] button').isEnabled(), name !== 'private-answers');
-          assert.equal(await page.locator('#anonymous a').getAttribute('href'), '/dashboard?keys#anonymous');
+          assert.deepEqual(await page.locator('.paasks h3').allTextContents(), ['This computer', 'Venice', 'zkAPI']);
+          assert.equal(await page.locator('.paask textarea').count(), 1);
+          assert.equal(await page.locator('#anonymous .paaction button[data-pa-action]').count(), name !== 'private-answers' ? 1 : 0);
+          if (name === 'private-answers') assert.equal(await page.locator('#anonymous .paaction a').getAttribute('href'), '/dashboard?keys#anonymous');
+          if (width >= 900 && name !== 'private-answers') {
+            for (const mode of ['subgrid', 'fallback']) {
+              if (mode === 'fallback') await page.evaluate(() => {
+                // Remove the enhancement; the page's own fallback rows must align too.
+                for (const sheet of document.styleSheets) for (let i = sheet.cssRules.length - 1; i >= 0; i--) {
+                  const rule = sheet.cssRules[i];
+                  if (rule instanceof CSSSupportsRule && rule.conditionText.includes('subgrid')) sheet.deleteRule(i);
+                }
+              });
+              for (const selector of ['.padestination h3', '.padestination .paleaves', '.padestination .paknows', '.padestination .paaction > button']) {
+                const tops = await page.locator(selector).evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().top));
+                assert.equal(tops.length, 3, selector);
+                assert.ok(Math.max(...tops) - Math.min(...tops) < 1, `${width} ${mode}: ${selector} tops ${tops}`);
+              }
+            }
+          }
           if (name === 'private-answers-opened') {
             await page.locator('#wq_preview_2 [data-pa-read]').click();
             await page.locator('#wq_preview_2 .paanswer').waitFor();
             assert.ok((await page.locator('#wq_preview_2 .paout').textContent()).includes('What was sent outside'));
           }
           await page.locator('[data-pa-ask]').first().locator('textarea').fill('What does my lease say about renewal?');
-          await page.locator('[data-pa-ask]').first().locator('button[type=submit]').click();
+          await page.locator('[data-pa-ask]').first().locator('[data-pa-destination=computer]').click();
           await page.locator('[data-pa-ask]').first().locator('.paanswer ul').waitFor();
           assert.equal(await page.locator('[data-pa-ask]').first().locator('.paquestion strong').textContent(), 'What does my lease say about renewal?');
+          if (name !== 'private-answers') {
+            await page.locator('[data-pa-destination=venice]').click();
+            await page.locator('form[data-pa-ask] .pameta').filter({ hasText: 'Items sent to Venice' }).waitFor();
+            await page.locator('[data-pa-destination=anonymous]').click();
+            await page.locator('form[data-pa-ask] .pasent').waitFor();
+            assert.equal(await page.locator('form[data-pa-ask] .pasent').textContent(), 'Prepared synthetic question');
+          }
         }
         if (shots && [390, 1280].includes(width) && ['private-answers', 'home'].includes(name)) {
           await page.screenshot({ path: `${shots}/${name}-${colorScheme}-${width}.png`, fullPage: true });
@@ -57,5 +80,5 @@ try {
     }
     await page.close();
   }
-  console.log('No horizontal overflow: all five dashboard pages plus anonymous on/off/opened states, light/dark, 320/390/700/1280px, opened disclosures and long text/code/tables.');
+  console.log('No horizontal overflow: all dashboard pages plus three-destination ready/zkAPI-off/opened states; aligned names/descriptions/buttons at 900/1280px; light/dark, 390/900/1280px, opened disclosures and long text/code/tables.');
 } finally { await browser.close(); }

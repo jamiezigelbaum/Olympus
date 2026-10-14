@@ -43,7 +43,7 @@ const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,64}$/;
 
 /** One waiting question as the page lists it. Only to a local control session. */
 export interface WaitingQuestionView {
-  path?: 'private' | 'anonymous';
+  path?: 'private' | 'anonymous' | 'venice';
   id: string;
   question: string;
   /** Who asked: the connection's name ("ChatGPT", "Grok Bot"). */
@@ -51,7 +51,7 @@ export interface WaitingQuestionView {
   askedAt: string;
   /** The local probe could not tell yet whether Private items match. */
   unchecked: boolean;
-  state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued';
+  state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
   unread: boolean;
   answeredAt?: string;
 }
@@ -69,6 +69,8 @@ export interface LocalPrivateAnswersOptions {
   /** The computer's own ask identity; omitted by read-only/test adapters. */
   localConnectionId?: string;
   anonymousAsk?: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>;
+  destinations?: () => import('./venice-inbox-answer.ts').AskDestinationStates;
+  veniceAnswer?: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
   store: () => Pick<WaitingQuestionStore, 'list' | 'get' | 'dismiss' | 'dismissAll' | 'acknowledge'> & Partial<WaitingQuestionStore> | undefined;
   /** A connection's display name, by id; undefined when unknown. */
@@ -95,6 +97,7 @@ export interface LocalPrivateAnswersResponse {
 
 export interface LocalPrivateAnswers {
   /** The waiting list for the page; undefined when the store cannot be read. */
+  destinations(): import('./venice-inbox-answer.ts').AskDestinationStates;
   waiting(): { questions: WaitingQuestionView[]; olderRemoved: boolean } | undefined;
   /** How many questions wait, for the computer's Needs you line; 0 when unknown. */
   waitingCount(): number;
@@ -211,6 +214,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   const now = options.now ?? Date.now;
   const opens = new Map<string, OpenEntry>();
   let running = false;
+  let runningDestination: 'computer' | 'venice' = 'computer';
   let closed = false;
   let pass: Promise<void> | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -267,7 +271,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       }
       return view;
     });
-    return { status: 'answered', answer: result.answer, citations, unanswered: result.unanswered, left_out: result.leftOut };
+    return { status: 'answered', answer: result.answer, citations, ...('sentItems' in result && result.sentItems ? { sent_items: result.sentItems } : {}), unanswered: result.unanswered, left_out: result.leftOut };
   };
   const api: LocalPrivateAnswers = {
     start() {
@@ -287,14 +291,14 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         // Oldest first avoids starving a retry behind a busy connection.
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
           if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
-          if (q.path === 'anonymous' || q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
+          if (q.path === 'anonymous' || q.path === 'venice' || q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
           if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) continue;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
           if (!current(q)) continue;
           if ((result.status === 'answered' && await eligible(result.read) === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;
             const saved: StoredPrivateAnswer = result.status === 'answered'
-              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
+              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
               : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
             if (!currentStore.saveAnswer?.(refOf(q), saved)) currentStore.retry?.(refOf(q));
           } else currentStore.retry?.(refOf(q));
@@ -316,15 +320,16 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         return { questions: listed.questions.filter(q => active(q) && !hidden(q) && (q.path !== 'anonymous' || q.hasResult || q.result)).map(q => ({
           id: q.id, path: q.path ?? 'private', question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
           askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen,
-          state: q.hasResult || q.result ? 'answered' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
+          state: q.hasResult || q.result ? 'answered' : q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
           ...(q.answeredAt ? { answeredAt: q.answeredAt } : {}),
         })), olderRemoved: listed.olderRemoved };
       } catch { return undefined; }
     },
+    destinations() { const states = options.destinations?.() ?? { computer: 'ready' as const, venice: 'not_set_up' as const }; return running ? { ...states, [runningDestination]: 'busy' as const } : states; },
     waitingCount() { return api.waiting()?.questions.filter(q => q.unread && q.state === 'answered').length ?? 0; },
     async handle(body, session) {
       const action = body.action;
-      if (action === 'list') return { status: 200, body: { ok: true, ...api.waiting() } };
+      if (action === 'list') return { status: 200, body: { ok: true, ...api.waiting(), destinations: api.destinations() } };
       if (action === 'ask_anonymous') {
         if (!options.anonymousAsk) return refused(503, 'unavailable', W.anonymousNotSetUp);
         const result = await options.anonymousAsk({ question: typeof body.question === 'string' ? body.question : '' });
@@ -332,44 +337,50 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           ? { status: 200, body: { ok: true, status: 'answered', answer: result.reply, sent: result.sent, citations: [] } }
           : refused(400, result.code, result.message);
       }
-      if (action === 'ask') {
+      if (action === 'ask' || action === 'ask_venice') {
+        const venice = action === 'ask_venice';
+        if (running) return refused(429, 'busy', W.destinationBusy);
+        if (venice && (!options.veniceAnswer || api.destinations().venice !== 'ready')) return refused(403, 'venice_not_allowed', api.destinations().venice === 'not_set_up' ? W.veniceNotSetUp : W.veniceNotAllowed);
         const question = typeof body.question === 'string' ? body.question.trim() : '';
-        if (!question || question.length > MAX_QUESTION_CHARS) return refused(400, 'invalid_params', 'Type a question first.');
-        if (running) return refused(429, 'busy', 'Olympus is answering another question. Try again in a moment.');
+        if (!question || question.length > MAX_QUESTION_CHARS) return refused(400, 'invalid_params', W.emptyQuestion);
         running = true;
+        runningDestination = venice ? 'venice' : 'computer';
         try {
           const currentStore = store();
           const ticket = options.localConnectionId && currentStore?.ticket?.(options.localConnectionId);
-          const ref = ticket && currentStore?.record?.(ticket, { question, surface: 'remote', state: 'waiting', retainEachAsk: true, detail: body.detail === 'full' ? 'full' : 'summary' });
+          const ref = ticket && currentStore?.record?.(ticket, { question, ...(venice ? { path: 'venice' as const } : {}), surface: 'remote', state: 'waiting', retainEachAsk: true, detail: body.detail === 'full' ? 'full' : 'summary' });
           if (options.localConnectionId && !ref) {
             if (ref) currentStore?.acknowledge(ref);
             return refused(429, 'unavailable', W.inboxUnavailable);
           }
           let retained = false;
           try {
-            const result = await answerFor({ question, detail: body.detail === 'full' ? 'full' : 'summary' });
+            const request = { question, stillAuthorized: () => !closed && (!ref || !!currentStore?.get(ref.id) && currentStore.get(ref.id)?.generation === ref.generation), detail: body.detail === 'full' ? 'full' as const : 'summary' as const };
+            let result: LocalAnswerResult;
+            try { result = venice ? await options.veniceAnswer!(request) : await answerFor(request); } catch { result = { status: 'failed' }; }
             if (result.status === 'answered') {
               const check = await eligible(result.read);
               if (check !== 'eligible') return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
             }
             if (ref && (result.status === 'answered' || result.status === 'not_found')) {
               retained = currentStore?.saveAnswer?.(ref, result.status === 'answered'
-                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
+                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
                 : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
             }
-            return { status: 200, body: { ok: true, ...answerBody(result, session) } };
+            if (ref && !retained && (result.status === 'answered' || result.status === 'not_found')) return refused(410, 'gone', W.deleted);
+            return { status: 200, body: { ok: true, ...answerBody(result, session, ref ? currentStore?.get(ref.id) : undefined) } };
           } finally { if (ref && !retained) currentStore?.acknowledge(ref); }
         } finally { running = false; }
       }
       if (action === 'read') {
         const q = typeof body.id === 'string' ? store()?.get(body.id) : undefined;
         if (!q || !current(q)) return refused(410, 'gone', 'That answer was deleted');
-        if (!q.result) return { status: 200, body: { ok: true, status: q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering' } };
+        if (!q.result) return { status: 200, body: { ok: true, status: q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering' } };
         const check = await eligible(q.result.read);
         if (check === 'unknown') return { status: 200, body: { ok: true, status: 'check_unavailable' } };
         if (check === 'ineligible' || !current(q)) {
           invalidate(q);
-          return { status: 200, body: { ok: true, status: 'answering' } };
+          return { status: 200, body: { ok: true, status: q.path === 'venice' ? 'changed' : 'answering' } };
         }
         return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q), ...(q.path === 'anonymous' ? { sent: q.question } : {}) } };
       }

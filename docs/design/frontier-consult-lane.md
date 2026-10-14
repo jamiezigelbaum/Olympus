@@ -1,14 +1,23 @@
 # Anonymous answers: dashboard placement (1.1.0)
 
-## A.9 — Two ways to ask
+## A.9 — One question, three destinations (owner direction 2026-10-14)
 
-The Private answers page offers equal Ask privately and Ask anonymously panels
-above the inbox. They sit side by side on wide windows and stack on phones.
-Private asks use the built-in model on this computer; nothing leaves. Anonymous
-asks send only the prepared question, without the owner's name, to an outside
-model through zkAPI. The provider reads that question. The panel stays visible
-when anonymous answers are off or not set up, with a Go to Models link.
-The old #anonymous fragment lands on this panel.
+One question box sits above parallel This computer, Venice and zkAPI options.
+Names, what leaves, who could know and buttons share grid rows; the options
+stack in the same order on phones. Copy lives in vocabulary.ts and layout in
+one CSS block, pending tomorrow's owner review of the separate design probes.
+Every destination stays visible in ready, not-set-up, privacy-disallowed and
+answering states. Setup replaces Ask in that same row: Venice opens the existing
+Models/connect path and zkAPI opens Models #anonymous. A connected Venice key
+without Private permission links to the privacy setting explanation.
+The old #anonymous fragment lands on the zkAPI option.
+
+This computer uses only the built-in model. Venice uses the existing shared
+source_answer handler and the owner's approved secure_local pool, with the same
+current-evidence, release and catalog gates as agent Private answers. Its
+permission is rechecked at dispatch. A Secret item never enters the model pack.
+A local fallback cannot be labeled as Venice. No new inference lane is added.
+zkAPI continues through consult-ask's existing writer and outbound gate.
 
 ## A.10 — Settings and disclosure
 
@@ -20,7 +29,7 @@ or reply is added to status, logs, telemetry, shared JSON or Needs you text.
 ## A.14 — Answers in the local inbox
 
 Dashboard anonymous asks and agent tool asks retain the reply locally, labeled
-Anonymous and who asked. The question displayed is exactly what the writer sent
+zkAPI and who asked. The question displayed is exactly what the writer sent
 outside. Sealed ChatGPT question-panel answers bypass inbox recording because
 the panel already presents them. Direct ask_anonymously tool outcomes still
 return through their existing result/source_answer_result path.
@@ -35,3 +44,11 @@ budget. Reservations contain only a fixed placeholder, never the original
 anonymous question. Replies have local-control-only
 serving, export exclusion and data delete --all cleanup. Delete during a call or
 connection revocation prevents its late reply from restoring the row.
+
+Venice inbox rows show the titles of every item passed to that model, including
+uncited items, alongside sources. Those identities are rechecked on read/open.
+A withdrawn Venice answer asks the owner to ask again; no automatic cloud retry.
+All three destinations retain answers locally with who asked and relative time
+(exact time in the title attribute), under the heading Inbox and the line
+“Answers from all three, kept on this computer.” Nothing stored enters remote
+surfaces, exports, telemetry or shared JSON; delete --all removes all three.

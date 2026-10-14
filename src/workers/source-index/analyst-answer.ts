@@ -290,7 +290,7 @@ export function createAnalystSourceIndexAnswerHandler(
   const secureAnalystPoolState = options.secureAnalystPoolState
     ?? new SecureAnalystPoolState(options.secureAnalystPool);
   return {
-    async answer(request: SourceIndexAnswerRequest): Promise<SourceIndexAnswerResult> {
+    async answer(request: SourceIndexAnswerRequest, local?: Parameters<SourceIndexAnswerHandler['answer']>[1]): Promise<SourceIndexAnswerResult> {
       const startedAt = Date.now();
       const question = request.question?.trim();
       if (!question) {
@@ -515,7 +515,10 @@ export function createAnalystSourceIndexAnswerHandler(
         return {
           localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
           cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
-          trustedLeg: guarded,
+          trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
+            local?.beforeVeniceDispatch(dispatchPack, dispatchPack.candidates.map(candidate => candidateCorpus.get(candidate) ?? ''));
+            return analyst.analyze(dispatchPack, analyzeOptions);
+          } }),
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -580,8 +583,10 @@ export function createAnalystSourceIndexAnswerHandler(
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
+          // An owner Venice ask uses the already-approved Private pool even
+          // when this particular pack matched only Personal items. Agent routing is unchanged.
           ...(options.sovereigntyAnalystRoute
-            ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, analyst => live(localLeg(analyst)), analyst => live(cloudLeg(analyst)), analyst => live(trustedLeg(analyst))) }
+            ? { sovereigntyAnalystRoute: withLegPromptBudgets(local ? input => options.sovereigntyAnalystRoute!({ ...input, localOnly: true }) : options.sovereigntyAnalystRoute, analyst => live(localLeg(analyst)), analyst => live(cloudLeg(analyst)), analyst => live(trustedLeg(analyst))) }
             : {}),
           secureAnalystPoolState,
           ...(options.secureAnalystPool?.sloMs !== undefined

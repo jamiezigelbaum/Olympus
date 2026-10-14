@@ -863,9 +863,9 @@ function page(fetcher: Fetcher, headers: Record<string, string>, query = 'privat
 }
 
 describe('the worker serves Private answers only inside a local control session', () => {
-  test('the route: the Gateway bearer and every session it can mint are refused and nothing runs; a local session answers', async () => {
+  for (const path of ['private', 'anonymous', 'venice'] as const) test(`the ${path} route: the Gateway bearer and every session it can mint are refused and nothing runs; a local session answers`, async () => {
     const { store, controller } = scripted();
-    const ref = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'waiting' })!;
+    const ref = store.record(store.ticket('conn-a'), { path, question: 'Where is the lease?', surface: 'remote', state: 'waiting' })!;
     const calls: string[] = [];
     const counted: LocalPrivateAnswers = {
       ...controller,
@@ -886,7 +886,7 @@ describe('the worker serves Private answers only inside a local control session'
     }
     // Deep-link locators carry no authority: every answer read/list uses the
     // same local-only boundary, including widgets and dash_ read-only viewers.
-    for (const action of [{ action: 'read', id: ref.id }, { action: 'list' }]) {
+    for (const action of [{ action: 'read', id: ref.id }, { action: 'list' }, { action: 'ask_venice', question: 'Sentinel?' }, { action: 'ask_anonymous', question: 'Sentinel?' }, { action: 'ask', question: 'Sentinel?' }]) {
       expect((await fetcher(post(action, { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN }))).status).toBe(403);
       expect((await fetcher(post(action, { Authorization: 'Bearer dash_reader', Origin: ORIGIN }))).status).toBe(401);
       expect((await fetcher(post(action, { Origin: 'https://chatgpt.com' }))).status).toBe(401);
@@ -1024,6 +1024,7 @@ describe('the Private answers page', () => {
       outsideHelpLocalSession: true,
       privateAnswers: {
         available: true,
+        destinations: { computer: 'ready', venice: 'not_allowed' },
         waiting: {
           questions: [{ id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: new Date(DASHBOARD_PREVIEW_NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false, state: 'answered', unread: true }],
           olderRemoved: true,
@@ -1057,7 +1058,7 @@ describe('the Private answers page', () => {
       citations: [{ title: 'Lease', source: 'Dropbox' }], left_out: ['Gmail'],
     } }));
     expect([...page.document.querySelectorAll('.pa h3')].map((node) => node.textContent)).toEqual([
-      'Ask privately', 'Ask anonymously', 'Private inbox',
+      'This computer', 'Venice', 'zkAPI', 'Inbox',
     ]);
     const field = page.document.querySelector('textarea')!;
     (field as unknown as { value: string }).value = 'When do I renew?';
@@ -1200,9 +1201,10 @@ describe('the Private answers page', () => {
     const page = renderAndRun(() => ({ status: 500, body: {} }));
     const section = page.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT)!;
     expect(section.tagName).toBe('SECTION');
-    expect(section.textContent).toContain('Ask anonymously');
+    expect(section.textContent).toContain('zkAPI');
     expect(section.querySelector('a')!.getAttribute('href')).toContain('?keys#anonymous');
-    expect(page.document.querySelectorAll('.paasks .pasection .paask textarea').length).toBe(2);
+    expect(page.document.querySelectorAll('.paask textarea').length).toBe(1);
+    expect(page.document.querySelectorAll('.padestination').length).toBe(3);
   });
   test('the inbox renders temporary eligibility and queued states plainly without acknowledging an answer', async () => {
     for (const [status, words] of [['check_unavailable', "Couldn't check this answer right now"], ['queued', 'Queued on this computer.']] as const) {

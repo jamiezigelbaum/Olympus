@@ -61,6 +61,72 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+test('local owner Venice asks retain destination and all sent titles without copying passages', async () => {
+  const f = fixture();
+  const api = service(f, {
+    localConnectionId: '@local:You',
+    destinations: () => ({ computer: 'ready', venice: 'ready' }),
+    veniceAnswer: async () => ({ ...result(), sentItems: [{ title: 'Synthetic sent item', source: 'Dropbox' }] }),
+  });
+  expect((await api.handle({ action: 'ask_venice', question: 'Synthetic question?' }, 'owner')).body.status).toBe('answered');
+  const q = f.store.list().questions[0]!;
+  expect(q.path).toBe('venice');
+  expect(JSON.stringify(q.result?.read)).not.toContain(SOURCE_TEXT);
+  const read = await api.handle({ action: 'read', id: q.id }, 'owner');
+  expect(read.body.sent_items).toEqual([{ title: 'Synthetic sent item', source: 'Dropbox' }]);
+  const reopened = openWaitingPrivateQuestionStore(f.dbPath, { now: f.now });
+  cleanups.push(() => reopened.close());
+  expect(reopened.get(q.id)?.path).toBe('venice');
+});
+
+test('a denied Venice owner ask calls neither the local nor remote model and records nothing', async () => {
+  const f = fixture(); let calls = 0;
+  const api = service(f, { localConnectionId: '@local:You', destinations: () => ({ computer: 'ready', venice: 'not_allowed' }),
+    answer: async () => { calls++; return result(); }, veniceAnswer: async () => { calls++; return result(); } });
+  expect((await api.handle({ action: 'ask_venice', question: 'Private question?' }, 'owner')).status).toBe(403);
+  expect(calls).toBe(0); expect(f.store.list().questions).toEqual([]);
+});
+
+test('delete during a Venice call fences both storage and the local response', async () => {
+  const f = fixture(); const gate = deferred<LocalAnswerResult>();
+  const api = service(f, { localConnectionId: '@local:You', destinations: () => ({ computer: 'ready', venice: 'ready' }), veniceAnswer: () => gate.promise });
+  const pending = api.handle({ action: 'ask_venice', question: 'Private question?' }, 'owner');
+  await until(() => f.store.list().questions.length === 1);
+  await api.handle({ action: 'delete_all' }, 'owner'); gate.resolve(result());
+  const response = await pending;
+  expect(response.status).toBe(410); expect(JSON.stringify(response)).not.toContain(ANSWER);
+  expect(f.store.list().questions).toEqual([]);
+});
+
+test('withdrawing a Venice source never automatically resends the owner question', async () => {
+  const f = fixture(); const ref = record(f.store, { path: 'venice' }); f.store.saveAnswer(ref, stored()); let sent = 0;
+  const api = service(f, { eligible: async items => items.map(() => false), veniceAnswer: async () => { sent++; return result(); } });
+  expect((await api.handle({ action: 'read', id: ref.id }, 'owner')).body.status).toBe('changed');
+  await api.tick(); expect(sent).toBe(0); expect(f.store.get(ref.id)?.result).toBeUndefined();
+});
+
+test('an independently created v4 inbox keeps both old destinations when v5 adds Venice', () => {
+  const f = fixture(); const path = join(f.dir, 'v4.sqlite'); const db = new Database(path, { create: true });
+  db.exec(`CREATE TABLE schema_version (store_id TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+    INSERT INTO schema_version VALUES ('waiting-private-questions', 4, '2026-10-14');
+    CREATE TABLE waiting_questions (id TEXT PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE, connection_id TEXT NOT NULL,
+      surface TEXT NOT NULL, question TEXT NOT NULL, detail TEXT NOT NULL, selectors TEXT NOT NULL, state TEXT NOT NULL,
+      seen INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL, asked_at INTEGER NOT NULL, result TEXT, answered_at INTEGER,
+      attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+      answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private','anonymous')));
+    CREATE TABLE connection_revocations (connection_id TEXT PRIMARY KEY, generation INTEGER NOT NULL);
+    CREATE TABLE waiting_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL);`);
+  for (const kind of ['private', 'anonymous']) db.query('INSERT INTO waiting_questions (id,dedupe_key,connection_id,surface,question,detail,selectors,state,generation,asked_at,result,answered_at,answer_path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(kind, kind, 'old-agent', 'remote', kind + ' question', 'summary', '{}', 'waiting', 3, f.now(), JSON.stringify(stored()), f.now(), kind);
+  db.close();
+  const upgraded = openWaitingPrivateQuestionStore(path, { now: f.now }); cleanups.push(() => upgraded.close());
+  expect(upgraded.get('private')?.path).toBe('private'); expect(upgraded.get('anonymous')?.path).toBe('anonymous');
+  expect(upgraded.get('anonymous')?.result?.answer).toBe(ANSWER);
+  const ref = record(upgraded, { path: 'venice', retainEachAsk: true });
+  expect(upgraded.saveAnswer(ref, stored())).toBe(true); expect(upgraded.get(ref.id)?.path).toBe('venice');
+});
+
 describe('private inbox automatic answering', () => {
   test('start answers recorded remote matches without a click and later records wake it', async () => {
     const f = fixture();

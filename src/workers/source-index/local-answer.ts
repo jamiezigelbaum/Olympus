@@ -69,6 +69,7 @@ export type LocalAnswerResult =
       status: 'answered';
       answer: string;
       citations: PrivateAnswerSourceCitation[];
+      sentItems?: Array<{ title?: string; source?: string; date?: string }>;
       unanswered: string[];
       /** Sources that could not be searched on this computer, by name. */
       leftOut: string[];
@@ -93,6 +94,8 @@ export interface LocalAnswerRequest {
   selectors?: WaitingQuestionSelectors;
   detail?: PrivateAnswerDetail;
   signal?: AbortSignal;
+  /** Owner inbox generation; checked at a remote dispatch, never accepted from the wire. */
+  stillAuthorized?: () => boolean;
 }
 
 export interface LocalAnswerOptions {

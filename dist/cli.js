@@ -16386,9 +16386,9 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           const id = randomBytes9(16).toString("base64url");
           db.query(`
             INSERT INTO waiting_questions
-              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
-          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === "anonymous" ? "anonymous" : "private");
+              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path, destination)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
+          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === "anonymous" ? "anonymous" : "private", input.path === "venice" ? "venice" : null);
           ref = { id, generation: 1, connectionId: ticket.connectionId };
         }
         enforceBounds(ticket.connectionId, at);
@@ -16400,7 +16400,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       const at = now();
       if (db.query("SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1").get(at - WAITING_QUESTION_LIMITS.ttlMs))
         expire(at);
-      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result" : "*";
+      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result" : "*";
       const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`).all(now() - WAITING_QUESTION_LIMITS.ttlMs);
       const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
       return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
@@ -16577,7 +16577,7 @@ function toQuestion(row) {
   }
   return {
     id: row.id,
-    path: row.answer_path === "anonymous" ? "anonymous" : "private",
+    path: row.destination === "venice" ? "venice" : row.answer_path === "anonymous" ? "anonymous" : "private",
     connectionId: row.connection_id,
     surface: row.surface === "chatgpt" ? "chatgpt" : "remote",
     question: row.question,
@@ -16645,6 +16645,12 @@ function migrations() {
     up(db) {
       db.exec("ALTER TABLE waiting_questions ADD COLUMN answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private', 'anonymous'))");
     }
+  }, {
+    version: 5,
+    name: "ask_destination",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN destination TEXT CHECK(destination IS NULL OR destination = 'venice')");
+    }
   }];
 }
 function hardenPrivatePath(dbPath) {
@@ -16667,7 +16673,7 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 4, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 5, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
   WAITING_QUESTION_LIMITS = Object.freeze({
@@ -45848,7 +45854,7 @@ var DEFAULT_SECURE_ANALYST_POOL_SLO_MS = 60000, DEFAULT_SECURE_ANALYST_POOL_RESE
 function createAnalystSourceIndexAnswerHandler(options) {
   const secureAnalystPoolState = options.secureAnalystPoolState ?? new SecureAnalystPoolState(options.secureAnalystPool);
   return {
-    async answer(request) {
+    async answer(request, local) {
       const startedAt = Date.now();
       const question = request.question?.trim();
       if (!question) {
@@ -46020,7 +46026,10 @@ function createAnalystSourceIndexAnswerHandler(options) {
         return {
           localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
           cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
-          trustedLeg: guarded
+          trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
+            local?.beforeVeniceDispatch(dispatchPack, dispatchPack.candidates.map((candidate) => candidateCorpus.get(candidate) ?? ""));
+            return analyst.analyze(dispatchPack, analyzeOptions);
+          } })
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -46061,7 +46070,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, (analyst) => live(localLeg(analyst)), (analyst) => live(cloudLeg(analyst)), (analyst) => live(trustedLeg(analyst))) } : {},
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(local ? (input) => options.sovereigntyAnalystRoute({ ...input, localOnly: true }) : options.sovereigntyAnalystRoute, (analyst) => live(localLeg(analyst)), (analyst) => live(cloudLeg(analyst)), (analyst) => live(trustedLeg(analyst))) } : {},
           secureAnalystPoolState,
           ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
           ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
@@ -72309,7 +72318,7 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      privateAnswers: { title: "Private answers", line: "Private and anonymous answers kept on this computer" },
+      privateAnswers: { title: "Inbox", line: "Answers from all three, kept on this computer." },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
@@ -72747,9 +72756,37 @@ var init_vocabulary = __esm(() => {
     }
   };
   DASHBOARD_PRIVATE_ANSWERS_COPY = {
-    crumb: "Private answers",
-    title: "Private answers",
-    intro: "Two ways to ask. Answers stay in your inbox on this computer.",
+    crumb: "Inbox",
+    title: "Ask a question",
+    intro: "Choose where your question goes. Answers arrive in the inbox.",
+    computerName: "This computer",
+    veniceName: "Venice",
+    zkapiName: "zkAPI",
+    computerLeaves: "The model built into Olympus. Nothing leaves this computer.",
+    computerKnows: "No one else.",
+    veniceLeaves: "A cloud model at Venice. Your question and the Private items it needs go to Venice, which says it doesn't keep them.",
+    veniceKnows: "Venice, through your account.",
+    zkapiLeaves: "A cloud model, paid anonymously. Olympus removes names from your question first.",
+    zkapiKnows: "No one: the payment can't be traced to you.",
+    askComputer: "Ask this computer",
+    askVenice: "Ask Venice",
+    askZkapi: "Ask through zkAPI",
+    setUpComputer: "Set up this computer",
+    setUpVenice: "Set up Venice",
+    veniceKey: "Venice API key",
+    connectVenice: "Connect Venice",
+    veniceSetupHelp: "Connect your Venice account here, then check your privacy settings for Private answers.",
+    setUpZkapi: "Set up zkAPI",
+    veniceNotSetUp: "Venice is not set up. Connect it in Models.",
+    veniceNotAllowed: "Your privacy settings do not allow Venice to answer Private questions.",
+    privacySetting: "Privacy settings for Private answers",
+    privacySettingHelp: "Your sovereignty privacy preset controls whether Private items may go to Venice. The default keeps them on this computer. Ask your agent to show your current preset and, if you choose, change it with Olympus setup. Connecting a Venice key alone does not allow Private items to leave.",
+    changePrivacy: "Privacy settings",
+    zkapiNotSetUp: "zkAPI is not set up. Open its settings in Models.",
+    destinationBusy: "This destination is answering. Please wait.",
+    sentItems: "Items sent to Venice",
+    oneSource: "One source",
+    emptyQuestion: "Type a question first.",
     privateIntro: "Answered by the built-in model on this computer. Nothing leaves.",
     anonymousIntro: "Answered by a stronger outside model without your name. Your prepared question leaves this computer, paid through zkAPI.",
     anonymousAsk: "Ask anonymously",
@@ -72761,15 +72798,15 @@ var init_vocabulary = __esm(() => {
     anonymousRateLimit: "Too many questions. Try again later. Nothing was sent.",
     anonymousFailed: "Olympus could not answer this question.",
     goToModels: "Go to Models",
-    privatePath: "Private",
-    anonymousPath: "Anonymous",
+    privatePath: "This computer",
+    anonymousPath: "zkAPI",
     sent: "What was sent outside",
-    askLabel: "Ask privately",
+    askLabel: "Your question",
     askPlaceholder: "Ask about your private things",
     ask: "Ask",
-    waitingTitle: "Private inbox",
-    waitingIntro: "Private and anonymous answers, kept on this computer.",
-    noneWaiting: "Your private inbox is empty.",
+    waitingTitle: "Inbox",
+    waitingIntro: "Answers from all three, kept on this computer.",
+    noneWaiting: "Your inbox is empty.",
     olderRemoved: "Older private answers were removed.",
     delete: "Delete",
     deleteAll: "Delete all",
@@ -109106,6 +109143,7 @@ function createLocalPrivateAnswers(options) {
   const now = options.now ?? Date.now;
   const opens = new Map;
   let running = false;
+  let runningDestination = "computer";
   let closed = false;
   let pass;
   let timer;
@@ -109187,7 +109225,7 @@ function createLocalPrivateAnswers(options) {
       }
       return view2;
     });
-    return { status: "answered", answer: result.answer, citations, unanswered: result.unanswered, left_out: result.leftOut };
+    return { status: "answered", answer: result.answer, citations, ..."sentItems" in result && result.sentItems ? { sent_items: result.sentItems } : {}, unanswered: result.unanswered, left_out: result.leftOut };
   };
   const api2 = {
     start() {
@@ -109212,7 +109250,7 @@ function createLocalPrivateAnswers(options) {
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
           if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.())
             break;
-          if (q.path === "anonymous" || q.hasResult || q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
+          if (q.path === "anonymous" || q.path === "venice" || q.hasResult || q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
             continue;
           if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q)))
             continue;
@@ -109222,7 +109260,7 @@ function createLocalPrivateAnswers(options) {
           if (result.status === "answered" && await eligible(result.read) === "eligible" || result.status === "not_found") {
             if (!current2(q))
               continue;
-            const saved = result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
+            const saved = result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), ...result.sentItems ? { sentItems: result.sentItems } : {}, unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
             if (!currentStore.saveAnswer?.(refOf(q), saved))
               currentStore.retry?.(refOf(q));
           } else
@@ -109256,12 +109294,16 @@ function createLocalPrivateAnswers(options) {
           askedAt: q.askedAt,
           unchecked: q.state === "unchecked",
           unread: !q.seen,
-          state: q.hasResult || q.result ? "answered" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering",
+          state: q.hasResult || q.result ? "answered" : q.path === "venice" && q.answeredAt ? "changed" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering",
           ...q.answeredAt ? { answeredAt: q.answeredAt } : {}
         })), olderRemoved: listed.olderRemoved };
       } catch {
         return;
       }
+    },
+    destinations() {
+      const states = options.destinations?.() ?? { computer: "ready", venice: "not_set_up" };
+      return running ? { ...states, [runningDestination]: "busy" } : states;
     },
     waitingCount() {
       return api2.waiting()?.questions.filter((q) => q.unread && q.state === "answered").length ?? 0;
@@ -109269,24 +109311,28 @@ function createLocalPrivateAnswers(options) {
     async handle(body, session) {
       const action = body.action;
       if (action === "list")
-        return { status: 200, body: { ok: true, ...api2.waiting() } };
+        return { status: 200, body: { ok: true, ...api2.waiting(), destinations: api2.destinations() } };
       if (action === "ask_anonymous") {
         if (!options.anonymousAsk)
           return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp);
         const result = await options.anonymousAsk({ question: typeof body.question === "string" ? body.question : "" });
         return result.ok ? { status: 200, body: { ok: true, status: "answered", answer: result.reply, sent: result.sent, citations: [] } } : refused(400, result.code, result.message);
       }
-      if (action === "ask") {
+      if (action === "ask" || action === "ask_venice") {
+        const venice = action === "ask_venice";
+        if (running)
+          return refused(429, "busy", DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy);
+        if (venice && (!options.veniceAnswer || api2.destinations().venice !== "ready"))
+          return refused(403, "venice_not_allowed", api2.destinations().venice === "not_set_up" ? DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp : DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed);
         const question = typeof body.question === "string" ? body.question.trim() : "";
         if (!question || question.length > MAX_QUESTION_CHARS)
-          return refused(400, "invalid_params", "Type a question first.");
-        if (running)
-          return refused(429, "busy", "Olympus is answering another question. Try again in a moment.");
+          return refused(400, "invalid_params", DASHBOARD_PRIVATE_ANSWERS_COPY.emptyQuestion);
         running = true;
+        runningDestination = venice ? "venice" : "computer";
         try {
           const currentStore = store();
           const ticket = options.localConnectionId && currentStore?.ticket?.(options.localConnectionId);
-          const ref = ticket && currentStore?.record?.(ticket, { question, surface: "remote", state: "waiting", retainEachAsk: true, detail: body.detail === "full" ? "full" : "summary" });
+          const ref = ticket && currentStore?.record?.(ticket, { question, ...venice ? { path: "venice" } : {}, surface: "remote", state: "waiting", retainEachAsk: true, detail: body.detail === "full" ? "full" : "summary" });
           if (options.localConnectionId && !ref) {
             if (ref)
               currentStore?.acknowledge(ref);
@@ -109294,16 +109340,24 @@ function createLocalPrivateAnswers(options) {
           }
           let retained = false;
           try {
-            const result = await answerFor({ question, detail: body.detail === "full" ? "full" : "summary" });
+            const request = { question, stillAuthorized: () => !closed && (!ref || !!currentStore?.get(ref.id) && currentStore.get(ref.id)?.generation === ref.generation), detail: body.detail === "full" ? "full" : "summary" };
+            let result;
+            try {
+              result = venice ? await options.veniceAnswer(request) : await answerFor(request);
+            } catch {
+              result = { status: "failed" };
+            }
             if (result.status === "answered") {
               const check = await eligible(result.read);
               if (check !== "eligible")
                 return { status: 200, body: { ok: true, status: check === "unknown" ? "check_unavailable" : "changed" } };
             }
             if (ref && (result.status === "answered" || result.status === "not_found")) {
-              retained = currentStore?.saveAnswer?.(ref, result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
+              retained = currentStore?.saveAnswer?.(ref, result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), ...result.sentItems ? { sentItems: result.sentItems } : {}, unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
             }
-            return { status: 200, body: { ok: true, ...answerBody(result, session) } };
+            if (ref && !retained && (result.status === "answered" || result.status === "not_found"))
+              return refused(410, "gone", DASHBOARD_PRIVATE_ANSWERS_COPY.deleted);
+            return { status: 200, body: { ok: true, ...answerBody(result, session, ref ? currentStore?.get(ref.id) : undefined) } };
           } finally {
             if (ref && !retained)
               currentStore?.acknowledge(ref);
@@ -109317,13 +109371,13 @@ function createLocalPrivateAnswers(options) {
         if (!q || !current2(q))
           return refused(410, "gone", "That answer was deleted");
         if (!q.result)
-          return { status: 200, body: { ok: true, status: q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering" } };
+          return { status: 200, body: { ok: true, status: q.path === "venice" && q.answeredAt ? "changed" : q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering" } };
         const check = await eligible(q.result.read);
         if (check === "unknown")
           return { status: 200, body: { ok: true, status: "check_unavailable" } };
         if (check === "ineligible" || !current2(q)) {
           invalidate(q);
-          return { status: 200, body: { ok: true, status: "answering" } };
+          return { status: 200, body: { ok: true, status: q.path === "venice" ? "changed" : "answering" } };
         }
         return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q), ...q.path === "anonymous" ? { sent: q.question } : {} } };
       }
@@ -128509,7 +128563,9 @@ function renderDashboardKeysPage(view2, options) {
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view2.model_setup),
-    renderModelSetup(view2.model_setup),
+    `<div${view2.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view2.model_setup)}</div>`,
+    view2.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySetting)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySettingHelp)}</p></section>`,
     `<section id="anonymous"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
     sources.length === 0 ? "" : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0 ? "" : `<div class="srows">${sources.map((source) => renderSetupRow(source, view2, blocked)).join(`
@@ -128958,16 +129014,35 @@ function renderPrivateAnswersBody(options) {
   } else if (options?.privateAnswers?.available !== true) {
     parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
-    parts.push(`<div class="paasks">${renderAsk(false, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
+    parts.push(renderDestinations(options, true));
     parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date));
     script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
   if (!localSession || options?.privateAnswers?.available !== true)
-    parts.push(`<div class="paasks">${renderAsk(true, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
+    parts.push(renderDestinations(options, false));
   return `<div class="privacy pa" data-private-answers>${parts.join("")}</div>${script2}`;
 }
-function renderAsk(disabled2 = false, basePath) {
-  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privateIntro)}</p><form class="paask" data-pa-ask>` + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000"${disabled2 ? " disabled" : ""} placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled2 ? " disabled" : ""}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form><p class="pnote"><a href="${escapeHtml2(dashboardLocalPageHref("keys", readToken(basePath)))}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels)}</a></p></section>`;
+function renderDestinations(options, enabled) {
+  const models = dashboardLocalPageHref("keys", readToken(options?.basePath));
+  const states = options?.privateAnswers?.destinations ?? { computer: "not_set_up", venice: "not_set_up" };
+  const zk = options?.outsideHelp;
+  const zkState = zk && summaryOf(zk).state;
+  const destinations = [
+    { id: "computer", name: DASHBOARD_PRIVATE_ANSWERS_COPY.computerName, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.computerLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.computerKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askComputer, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpComputer, state: states.computer, reason: states.computerReason ?? DASHBOARD_PRIVATE_ANSWERS_COPY.noModel, href: models, action: "ask" },
+    { id: "venice", name: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askVenice, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice, state: states.venice, reason: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp, href: models + "#venice-setup", action: "ask_venice" },
+    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiName, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askZkapi, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState ? DASHBOARD_OUTSIDE_HELP_COPY.row[zkState] : DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp, href: models + "#anonymous", action: "ask_anonymous" }
+  ];
+  return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</label>` + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="paasks">${destinations.map((d) => {
+    const actions = {
+      ready: `<button type="submit" class="btn primary" data-pa-destination="${d.id}" data-pa-action="${d.action}">${escapeHtml2(d.ask)}</button><span class="pareason" role="status"></span>`,
+      not_set_up: `<a class="btn" href="${escapeHtml2(d.href)}">${escapeHtml2(d.setup)}</a><span class="pareason" role="status">${escapeHtml2(d.reason)}</span>`,
+      not_allowed: `<a class="btn" href="${escapeHtml2(models + "#private-routing")}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
+      busy: `<button type="button" class="btn" disabled>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answering)}</button><span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
+    };
+    const state = d.state;
+    const action = enabled ? actions[state] : `<a class="btn" href="${escapeHtml2(models)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a><span class="pareason">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)}</span>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+  }).join("")}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
 }
 function renderWaiting(waiting, now) {
   const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
@@ -128981,21 +129056,15 @@ function renderWaiting(waiting, now) {
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
-    const status = state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
-    const from = [question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
-    return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+    const status = state === "changed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.changed : state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
+    const from = [question.path === "venice" ? DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName : question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
+    return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
   parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button></div>`);
   parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join("") + "</section>";
-}
-function renderAnonymous(options, csrfToken) {
-  const status = options?.outsideHelp;
-  const ready = status && summaryOf(status).state === "on" && csrfToken !== undefined && options?.outsideHelpLocalSession === true;
-  const models = `${dashboardLocalPageHref("keys", readToken(options?.basePath))}#anonymous`;
-  return `<section class="pasection" id="anonymous" data-pa-anonymous aria-labelledby="anonymous-heading"><h3 class="sect" id="anonymous-heading">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousAsk)}</h3>` + `<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousIntro)}</p><form class="paask" data-pa-ask data-pa-path="anonymous">` + `<textarea aria-labelledby="anonymous-heading" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPlaceholder)}"${ready ? "" : " disabled"}></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary"${ready ? "" : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form>` + `<p class="pnote">${ready ? "" : escapeHtml2(status ? DASHBOARD_OUTSIDE_HELP_COPY.row[summaryOf(status).state] : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp) + " "}<a href="${escapeHtml2(models)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels)}</a></p></section>`;
 }
 function privateAnswersClientScript(input) {
   const config2 = {
@@ -129007,6 +129076,9 @@ function privateAnswersClientScript(input) {
     copy: {
       answering: DASHBOARD_PRIVATE_ANSWERS_COPY.answering,
       sources: DASHBOARD_PRIVATE_ANSWERS_COPY.sources,
+      sentItems: DASHBOARD_PRIVATE_ANSWERS_COPY.sentItems,
+      venicePath: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName,
+      destinationBusy: DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy,
       sent: DASHBOARD_PRIVATE_ANSWERS_COPY.sent,
       privatePath: DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath,
       anonymousPath: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath,
@@ -129124,6 +129196,12 @@ function privateAnswersClientScript(input) {
       card.appendChild(box);
       if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
+      if (Array.isArray(result.sent_items)) {
+        meta.appendChild(el('div', 'palabel', config.copy.sentItems));
+        var sentList = el('ul', 'pasrc');
+        result.sent_items.forEach(function (item) { sentList.appendChild(el('li', '', [item.title, item.source, item.date].filter(Boolean).join(' · '))); });
+        meta.appendChild(sentList);
+      }
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
         meta.appendChild(el('div', 'palabel', config.copy.sources));
@@ -129167,13 +129245,17 @@ function privateAnswersClientScript(input) {
       event.preventDefault();
       var field = ask.querySelector('textarea[name="question"]');
       var out = ask.querySelector('[data-pa-out]');
-      var button = ask.querySelector('button[type="submit"]');
+      var button = event.submitter || ask.querySelector('button[type="submit"]');
+      if (!button || button.disabled || !button.getAttribute('data-pa-action')) return;
+      var reason = button.parentElement.querySelector('.pareason');
       var question = field ? String(field.value || '').trim() : '';
       if (!question || !out) return;
-      if (button) button.disabled = true;
+      if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+      if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: ask.getAttribute('data-pa-path') === 'anonymous' ? 'ask_anonymous' : 'ask', question: question });
-      if (button) button.disabled = false;
+      var outcome = await send({ action: button.getAttribute('data-pa-action'), question: question });
+      if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
+      if (reason) reason.textContent = '';
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
       render(out, outcome.result, question);
       await poll();
@@ -129257,6 +129339,7 @@ function privateAnswersClientScript(input) {
   }
   openFragment();
   window.addEventListener('hashchange', openFragment);
+  var relative = ${dashboardRelativeFromMs.toString()};
   async function poll() {
     if (document.hidden) return;
     var outcome = await send({ action: 'list' });
@@ -129265,6 +129348,15 @@ function privateAnswersClientScript(input) {
       if (openRow) await read(openRow, true);
       return;
     }
+    if (outcome.result.destinations) root.querySelectorAll('[data-pa-card]').forEach(function (card) {
+      var key = card.getAttribute('data-pa-card');
+      var state = outcome.result.destinations[key];
+      if (!state || state === card.getAttribute('data-pa-state') || card.querySelector('[aria-busy="true"]')) return;
+      var template = card.querySelector('[data-pa-template="' + state + '"]');
+      if (!template) return;
+      var action = card.querySelector('.paaction');
+      action.textContent = ''; action.appendChild(template.content.cloneNode(true)); card.setAttribute('data-pa-state', state);
+    });
     var questions = outcome.result.questions.slice().sort(function (a, b) { return Date.parse(b.askedAt) - Date.parse(a.askedAt); });
     rows().forEach(function (row) {
       if (!questions.some(function (q) { return q.id === row.getAttribute('data-pa-question'); })) {
@@ -129284,11 +129376,12 @@ function privateAnswersClientScript(input) {
       row.classList.toggle('unread', q.unread === true);
       row.querySelector('.paq').textContent = q.question;
       if (selected === q.id && q.state !== 'answered') {
-        message(row.querySelector('[data-pa-out]'), q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
+        message(row.querySelector('[data-pa-out]'), q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
       }
-      var state = q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var state = q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
-      row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
+      row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'venice' ? config.copy.venicePath : q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : relative(Date.now() - date.getTime()), state].filter(Boolean).join(' · ');
+      row.querySelector('.pafrom').title = q.askedAt;
       list.appendChild(row);
     });
     empty();
@@ -129343,13 +129436,18 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa .paasks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 0 32px; }
-.pa .paasks .pasection { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; }
-.pa .paasks .pnote { margin: 0 0 12px; }
-.pa .paasks .pasection > .pnote:last-child { margin: 8px 0 0; }
-.pa .paasks .paask { margin: auto 0 0; }
-.pa .paasks .paout { flex-basis: 100%; }
-@media (max-width: 640px) { .pa .paasks { grid-template-columns: minmax(0, 1fr); } }
+.pa .paasks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: 48px minmax(150px, auto) minmax(65px, auto) minmax(90px, auto); gap: 0 16px; margin: 16px 0 32px; }
+.pa .padestination { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: grid; grid-template-rows: 48px 150px 65px 90px; grid-row: span 4; }
+.pa .padestination .sect, .pa .padestination .pnote { margin: 0; }
+.pa .padestination .paaction { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.pa .padestination .btn { white-space: normal; }
+.pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); }
+@supports (grid-template-rows: subgrid) { .pa .padestination { grid-template-rows: subgrid; } }
+@media (max-width: 640px) {
+  .pa .paasks { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; gap: 12px; }
+  .pa .padestination { grid-row: auto; grid-template-rows: auto auto auto auto; gap: 10px; }
+}
+
 `;
 var init_private_answers = __esm(() => {
   init_components();
@@ -131317,6 +131415,7 @@ function createEmailSourceWorker(options = {}) {
                 outsideHelpLocalSession: localSession,
                 privateAnswers: {
                   available: sourceDashboard?.privateAnswers !== undefined,
+                  ...controlSessionCsrfToken !== undefined && localSession ? { destinations: sourceDashboard?.privateAnswers?.destinations() } : {},
                   ...waiting ? { waiting } : {}
                 }
               }
@@ -155460,6 +155559,65 @@ var init_private_question_jobs = __esm(() => {
   CLEANUPS2 = ["as_written", "light_cleanup", "custom"];
 });
 
+// src/workers/email-source/venice-inbox-answer.ts
+var exports_venice_inbox_answer = {};
+__export(exports_venice_inbox_answer, {
+  privateVeniceMembers: () => privateVeniceMembers,
+  createVeniceInboxAnswer: () => createVeniceInboxAnswer
+});
+function privateVeniceMembers(engine) {
+  if (engine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap")
+    return [];
+  try {
+    return engine.resolveAnalystPool({ trustDomain: "secure_local", requestedProvider: "venice" }).members.filter((member) => member.profile.provider === "venice" && member.profile.trust === "encrypted_cloud");
+  } catch {
+    return [];
+  }
+}
+function createVeniceInboxAnswer(options) {
+  return async (input) => {
+    if (options.state() !== "ready" || input.stillAuthorized?.() === false)
+      throw new Error(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed);
+    const read = [];
+    const sentItems = [];
+    const corpusIds = options.corpusIds();
+    if (!corpusIds.length)
+      return { status: "not_found", leftOut: [] };
+    const request = { ...localAnswerRequest(input.question, input.selectors), corpus_ids: corpusIds, retrieval_mode: "keyword", analyst_provider: "venice" };
+    const result = await options.handler.answer(request, {
+      beforeVeniceDispatch(pack, corpusIds2) {
+        if (options.state() !== "ready" || input.stillAuthorized?.() === false)
+          throw new Error(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed);
+        pack.candidates.forEach((candidate, i) => {
+          const item = { ...candidate, corpusId: corpusIds2[i] ?? "" };
+          read.push(inboxEvidenceIdentity(item));
+          const citation = candidate.provenance.citation ?? {};
+          sentItems.push({ ...citation.title ? { title: citation.title } : {}, source: candidate.provenance.sourceItem.provider, ...citation.authoredAt ? { date: citation.authoredAt } : {} });
+        });
+      }
+    });
+    if (result.audit.answer_synthesis.analyst_backend !== "venice")
+      return { status: "failed" };
+    const allowed = await options.eligible(read);
+    if (allowed.length !== read.length || allowed.some((value2) => !value2))
+      return { status: "changed" };
+    return {
+      status: "answered",
+      answer: result.answer,
+      read,
+      sentItems,
+      citations: result.evidence.map((item) => ({ ...item.title ? { title: item.title } : {}, source: item.provider, ...item.authored_at ? { date: item.authored_at } : {}, ...item.uri?.startsWith("https://") ? { url: item.uri } : {} })),
+      unanswered: [],
+      leftOut: [...new Set(result.audit.skipped_corpora.filter((item) => !["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"].includes(item.reason)).map((item) => options.sourceName?.(item.corpus_id) ?? DASHBOARD_PRIVATE_ANSWERS_COPY.oneSource))]
+    };
+  };
+}
+var init_venice_inbox_answer = __esm(() => {
+  init_vocabulary();
+  init_local_answer();
+  init_local_private_answers();
+});
+
 // src/core/remote-private-part.ts
 var exports_remote_private_part = {};
 __export(exports_remote_private_part, {
@@ -159407,9 +159565,9 @@ async function main() {
     });
   })() : undefined;
   const sourceAnswer = analystSourceAnswer ? {
-    async answer(request) {
+    async answer(request, local) {
       const kind = request.caller?.surface === "remote" && isBackgroundConnection(request.caller.connection_id) ? "background" : "owner";
-      return answerActivity.run(() => analystSourceAnswer.answer(request), kind);
+      return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
     }
   } : undefined;
   const sourceWatchStore = new LocalSourceWatchStore;
@@ -160167,6 +160325,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         },
         ...sourceAnswerLanes ? {
           privateAnswers: {
+            destinations: () => localPrivateAnswers?.destinations() ?? { computer: "not_set_up", venice: "not_set_up" },
             waiting: () => localPrivateAnswers?.waiting(),
             waitingCount: () => localPrivateAnswers?.waitingCount() ?? 0,
             handle: (body, session) => localPrivateAnswers ? localPrivateAnswers.handle(body, session) : Promise.resolve({ status: 503, body: { ok: false, error: { code: "unavailable", message: "Olympus is still starting. Try again in a moment." } } })
@@ -160409,6 +160568,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const remoteReleaseCheck = createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow");
   if (sourceAnswerLanes) {
     const { createLocalAnswerPath: createLocalAnswerPath2, createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
+    const { privateVeniceMembers: privateVeniceMembers2, createVeniceInboxAnswer: createVeniceInboxAnswer2 } = await Promise.resolve().then(() => (init_venice_inbox_answer(), exports_venice_inbox_answer));
     const { DASHBOARD_SUPPORTED_SOURCES: DASHBOARD_SUPPORTED_SOURCES2 } = await Promise.resolve().then(() => (init_source_dashboard(), exports_source_dashboard));
     const sourceName = (corpusId) => {
       const sourceId = sourceCorpusRegistry2.list().find((corpus) => corpus.corpusId === corpusId)?.sourceId;
@@ -160432,7 +160592,33 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       },
       sourceName
     });
+    const destinations = () => {
+      let venice = "not_allowed";
+      try {
+        const members = privateVeniceMembers2(loadSourceWorkerSovereignty(olympusConfig, process.env));
+        const bootMembers = privateVeniceMembers2(sovereigntyEngine);
+        if (members.length) {
+          venice = members.length === bootMembers.length && members.every((member) => bootMembers.some((boot) => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === "ready") && sourceAnswer ? "ready" : "not_set_up";
+        } else {
+          const storedEnv = { ...process.env, ...readWorkerSetupEnv() ?? {} };
+          venice = safeModelCredential({ provider: "venice", trust: "encrypted_cloud", model: "unused", secretRef: "store:venice.api_key" }, storedEnv) ? "not_allowed" : "not_set_up";
+        }
+      } catch {
+        venice = "not_allowed";
+      }
+      const modelState = answerBuiltInModel?.status().state;
+      return { computer: workerBuiltInModel?.available() ? "ready" : "not_set_up", venice, ...["downloading", "verifying", "loading"].includes(modelState ?? "") ? { computerReason: DASHBOARD_PRIVATE_ANSWERS_COPY.downloading } : {} };
+    };
+    const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer2({
+      state: () => destinations().venice,
+      handler: sourceAnswer,
+      sourceName,
+      corpusIds: () => sourceAnswerLanes({ question: "scope", retrieval_mode: "keyword" }).registry.list().filter((corpus) => corpus.trustDomain === "internal" || corpus.trustDomain === "secure_local").map((corpus) => corpus.corpusId),
+      eligible: local.eligible
+    }) : undefined;
     localPrivateAnswers = createLocalPrivateAnswers2({
+      destinations,
+      ...veniceAnswer ? { veniceAnswer } : {},
       localConnectionId: "@local:You",
       anonymousAsk: localAnonymousAsk,
       answer: (input) => answerActivity.run(() => local.answer(input)),
@@ -160457,6 +160643,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   } else {
     const { createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
     localPrivateAnswers = createLocalPrivateAnswers2({
+      destinations: () => ({ computer: "not_set_up", venice: "not_set_up" }),
       store: waitingQuestionStore,
       isActive: connectionActive,
       connectionName: (id) => id.startsWith("@local:") ? id.slice(7) : remoteConnections()?.list().find((c) => c.id === id)?.displayName,

@@ -31,7 +31,7 @@ import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } 
 import { closeSqliteStore } from './sqlite-store.ts';
 
 export const WAITING_PRIVATE_QUESTIONS_STORE_ID = 'waiting-private-questions';
-export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 4;
+export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 5;
 export const WAITING_PRIVATE_QUESTIONS_FILE_NAME = 'waiting-private-questions.sqlite';
 
 export const WAITING_QUESTION_LIMITS = Object.freeze({
@@ -108,6 +108,7 @@ export interface StoredPrivateAnswer {
   status: 'answered' | 'not_found';
   answer?: string;
   citations: Array<{ title?: string; source?: string; date?: string; url?: string; localPath?: string }>;
+  sentItems?: Array<{ title?: string; source?: string; date?: string }>;
   unanswered: string[];
   leftOut: string[];
   read: readonly Readonly<Record<string, unknown>>[];
@@ -116,7 +117,7 @@ export interface StoredPrivateAnswer {
 export const CHATGPT_INBOX_GRACE_MS = 30_000;
 
 export interface WaitingQuestion {
-  path?: 'private' | 'anonymous';
+  path?: 'private' | 'anonymous' | 'venice';
   id: string;
   connectionId: string;
   surface: WaitingQuestionSurface;
@@ -152,7 +153,7 @@ export interface WaitingQuestionRef {
 export interface WaitingQuestionInput {
   /** Explicit local asks retain each reply; agent Private matches keep their dedupe. */
   retainEachAsk?: boolean;
-  path?: 'private' | 'anonymous';
+  path?: 'private' | 'anonymous' | 'venice';
   question: string;
   surface: WaitingQuestionSurface;
   state: WaitingQuestionState;
@@ -202,6 +203,7 @@ export interface WaitingQuestionStore {
 
 interface QuestionRow {
   answer_path: string;
+  destination: string | null;
   id: string;
   dedupe_key: string;
   connection_id: string;
@@ -444,9 +446,9 @@ export function openWaitingPrivateQuestionStore(
           const id = randomBytes(16).toString('base64url');
           db.query(`
             INSERT INTO waiting_questions
-              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
-          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === 'anonymous' ? 'anonymous' : 'private');
+              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path, destination)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
+          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === 'anonymous' ? 'anonymous' : 'private', input.path === 'venice' ? 'venice' : null);
           ref = { id, generation: 1, connectionId: ticket.connectionId };
         }
         enforceBounds(ticket.connectionId, at);
@@ -463,7 +465,7 @@ export function openWaitingPrivateQuestionStore(
       if (db.query('SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1')
         .get(at - WAITING_QUESTION_LIMITS.ttlMs)) expire(at);
       const columns = options?.includeResults === false
-        ? 'id, connection_id, surface, answer_path, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result'
+        ? 'id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result'
         : '*';
       const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`)
         .all(now() - WAITING_QUESTION_LIMITS.ttlMs) as QuestionRow[];
@@ -668,7 +670,7 @@ function toQuestion(row: QuestionRow): WaitingQuestion {
   }
   return {
     id: row.id,
-    path: row.answer_path === 'anonymous' ? 'anonymous' : 'private',
+    path: row.destination === 'venice' ? 'venice' : row.answer_path === 'anonymous' ? 'anonymous' : 'private',
     connectionId: row.connection_id,
     surface: row.surface === 'chatgpt' ? 'chatgpt' : 'remote',
     question: row.question,
@@ -735,6 +737,10 @@ function migrations(): SqliteMigration[] {
     version: 4,
     name: 'anonymous_answers_inbox',
     up(db) { db.exec("ALTER TABLE waiting_questions ADD COLUMN answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private', 'anonymous'))"); },
+  }, {
+    version: 5,
+    name: 'ask_destination',
+    up(db) { db.exec("ALTER TABLE waiting_questions ADD COLUMN destination TEXT CHECK(destination IS NULL OR destination = 'venice')"); },
   }];
 }
 

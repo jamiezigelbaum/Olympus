@@ -14,6 +14,10 @@ duplication. Design: [background agents, A](design/background-agents.md).
 Done when automatic answering, current source eligibility, local-only access,
 delete/export/revoke, remote broad checks, rebuilt dist and light/dark
 390/1280 renders pass; independent privacy review is required before landing.
+Owner destination direction is implemented on `claude/inbox-anonymous`: one question,
+This computer / Venice / zkAPI, guarded existing Venice route, and destination
+labels in Inbox. Copy/layout remain provisional until the separate design probes
+are reviewed. Commit only; independent review follows, before landing.
 No live systems in this branch. Parallel tier purge/Private embeddings remain
 owned by their respective builders.
 

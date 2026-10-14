@@ -1,15 +1,6 @@
-/**
- * Private answers: the computer's own page for questions answered only here
- * (design docs/design/background-agents.md, sections A and B, and
- * "Dashboard changes" 1 and 2). It replaced the Anonymous answers page in the
- * local nav. Private and anonymous asks have parallel panels; setup is in Models.
- *
- * Two ask panels, then the local inbox (path · connection · when).
- *
- * Everything that reads or answers is held to a local control session: the
- * worker renders the waiting list only for one, and its one POST route
- * (/dashboard/private-answers) refuses every other grade at the HTTP
- * boundary. Neither ChatGPT nor the OpenClaw Control UI tab opens this page.
+/** One owner question, three destinations, then the local Inbox.
+ * Copy is in vocabulary.ts and layout in PRIVATE_ANSWERS_CSS.
+ * Waiting text and every action require a locally minted control session.
  */
 import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } from '../components.ts';
 import { chatgptMarkdownRender, CHATGPT_MARKDOWN_CSS } from '../chatgpt/markdown.ts';
@@ -21,6 +12,7 @@ import {
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
   dashboardRelativeFromMs,
 } from '../vocabulary.ts';
+import type { AskDestinationStates } from '../../email-source/venice-inbox-answer.ts';
 import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
@@ -65,13 +57,18 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa .paasks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 0 32px; }
-.pa .paasks .pasection { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; }
-.pa .paasks .pnote { margin: 0 0 12px; }
-.pa .paasks .pasection > .pnote:last-child { margin: 8px 0 0; }
-.pa .paasks .paask { margin: auto 0 0; }
-.pa .paasks .paout { flex-basis: 100%; }
-@media (max-width: 640px) { .pa .paasks { grid-template-columns: minmax(0, 1fr); } }
+.pa .paasks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: 48px minmax(150px, auto) minmax(65px, auto) minmax(90px, auto); gap: 0 16px; margin: 16px 0 32px; }
+.pa .padestination { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: grid; grid-template-rows: 48px 150px 65px 90px; grid-row: span 4; }
+.pa .padestination .sect, .pa .padestination .pnote { margin: 0; }
+.pa .padestination .paaction { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.pa .padestination .btn { white-space: normal; }
+.pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); }
+@supports (grid-template-rows: subgrid) { .pa .padestination { grid-template-rows: subgrid; } }
+@media (max-width: 640px) {
+  .pa .paasks { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; gap: 12px; }
+  .pa .padestination { grid-row: auto; grid-template-rows: auto auto auto auto; gap: 10px; }
+}
+
 `;
 
 export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions): string {
@@ -114,19 +111,37 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
   } else if (options?.privateAnswers?.available !== true) {
     parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
-    parts.push(`<div class="paasks">${renderAsk(false, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
+    parts.push(renderDestinations(options, true));
     parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date()));
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
-  if (!localSession || options?.privateAnswers?.available !== true) parts.push(`<div class="paasks">${renderAsk(true, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
+  if (!localSession || options?.privateAnswers?.available !== true) parts.push(renderDestinations(options, false));
   return `<div class="privacy pa" data-private-answers>${parts.join('')}</div>${script}`;
 }
 
-function renderAsk(disabled = false, basePath?: string): string {
-  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml(W.askLabel)}</h3><p class="pnote">${escapeHtml(W.privateIntro)}</p><form class="paask" data-pa-ask>`
-    + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000"${disabled ? ' disabled' : ''} placeholder="${escapeHtml(W.askPlaceholder)}"></textarea>`
-    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled ? ' disabled' : ''}>${escapeHtml(W.ask)}</button></div>`
-    + `<div class="paout" data-pa-out aria-live="polite"></div></form><p class="pnote"><a href="${escapeHtml(dashboardLocalPageHref('keys', readToken(basePath)))}">${escapeHtml(W.goToModels)}</a></p></section>`;
+function renderDestinations(options: DashboardPageOptions | undefined, enabled: boolean): string {
+  const models = dashboardLocalPageHref('keys', readToken(options?.basePath));
+  const states: AskDestinationStates = options?.privateAnswers?.destinations ?? { computer: 'not_set_up', venice: 'not_set_up' };
+  const zk = options?.outsideHelp;
+  const zkState = zk && summaryOf(zk).state;
+  const destinations = [
+    { id: 'computer', name: W.computerName, leaves: W.computerLeaves, knows: W.computerKnows, ask: W.askComputer, setup: W.setUpComputer, state: states.computer, reason: states.computerReason ?? W.noModel, href: models, action: 'ask' },
+    { id: 'venice', name: W.veniceName, leaves: W.veniceLeaves, knows: W.veniceKnows, ask: W.askVenice, setup: W.setUpVenice, state: states.venice, reason: W.veniceNotSetUp, href: models + '#venice-setup', action: 'ask_venice' },
+    { id: 'anonymous', name: W.zkapiName, leaves: W.zkapiLeaves, knows: W.zkapiKnows, ask: W.askZkapi, setup: W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState ? OH.row[zkState] : W.zkapiNotSetUp, href: models + '#anonymous', action: 'ask_anonymous' },
+  ];
+  return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml(W.askLabel)}</label>`
+    + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"${enabled ? '' : ' disabled'}></textarea>`
+    + `<div class="paasks">${destinations.map(d => {
+      const actions = {
+        ready: `<button type="submit" class="btn primary" data-pa-destination="${d.id}" data-pa-action="${d.action}">${escapeHtml(d.ask)}</button><span class="pareason" role="status"></span>`,
+        not_set_up: `<a class="btn" href="${escapeHtml(d.href)}">${escapeHtml(d.setup)}</a><span class="pareason" role="status">${escapeHtml(d.reason)}</span>`,
+        not_allowed: `<a class="btn" href="${escapeHtml(models + '#private-routing')}">${escapeHtml(W.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml(W.veniceNotAllowed)}</span>`,
+        busy: `<button type="button" class="btn" disabled>${escapeHtml(W.answering)}</button><span class="pareason" role="status">${escapeHtml(W.destinationBusy)}</span>`,
+      };
+      const state = d.state as keyof typeof actions;
+      const action = enabled ? actions[state] : `<a class="btn" href="${escapeHtml(models)}">${escapeHtml(W.openControls)}</a><span class="pareason">${escapeHtml(W.locked)}</span>`;
+      return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><h3 class="sect">${escapeHtml(d.name)}</h3><p class="pnote paleaves">${escapeHtml(d.leaves)}</p><p class="pnote paknows">${escapeHtml(d.knows)}</p><div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
+    }).join('')}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
 }
 
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
@@ -141,10 +156,10 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
     const state = question.state ?? (question.unchecked ? 'unchecked' : 'answering');
-    const status = state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
-    const from = [question.path === 'anonymous' ? W.anonymousPath : W.privatePath, question.from, when, status].filter(Boolean).join(' · ');
+    const status = state === 'changed' ? W.changed : state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
+    const from = [question.path === 'venice' ? W.veniceName : question.path === 'anonymous' ? W.anonymousPath : W.privatePath, question.from, when, status].filter(Boolean).join(' · ');
     return `<li class="srow nodot${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
-      + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom"> · ${escapeHtml(from)}</span></button></div>`
+      + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button></div>`
       + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(W.delete)}</button></div>`
       + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
@@ -153,19 +168,6 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
   parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? '' : ' hidden'}>${escapeHtml(W.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join('') + '</section>';
-}
-
-/** The same ask structure; setup remains in Models even when outside help is off. */
-function renderAnonymous(options: DashboardPageOptions | undefined, csrfToken: string | undefined): string {
-  const status = options?.outsideHelp;
-  const ready = status && summaryOf(status).state === 'on' && csrfToken !== undefined && options?.outsideHelpLocalSession === true;
-  const models = `${dashboardLocalPageHref('keys', readToken(options?.basePath))}#anonymous`;
-  return `<section class="pasection" id="anonymous" data-pa-anonymous aria-labelledby="anonymous-heading"><h3 class="sect" id="anonymous-heading">${escapeHtml(W.anonymousAsk)}</h3>`
-    + `<p class="pnote">${escapeHtml(W.anonymousIntro)}</p><form class="paask" data-pa-ask data-pa-path="anonymous">`
-    + `<textarea aria-labelledby="anonymous-heading" name="question" maxlength="2000" placeholder="${escapeHtml(W.anonymousPlaceholder)}"${ready ? '' : ' disabled'}></textarea>`
-    + `<div class="pbuttons"><button type="submit" class="btn primary"${ready ? '' : ' disabled'}>${escapeHtml(W.ask)}</button></div>`
-    + `<div class="paout" data-pa-out aria-live="polite"></div></form>`
-    + `<p class="pnote">${ready ? '' : escapeHtml(status ? OH.row[summaryOf(status).state] : W.anonymousNotSetUp) + ' ' }<a href="${escapeHtml(models)}">${escapeHtml(W.goToModels)}</a></p></section>`;
 }
 
 /**
@@ -183,6 +185,9 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     copy: {
       answering: W.answering,
       sources: W.sources,
+      sentItems: W.sentItems,
+      venicePath: W.veniceName,
+      destinationBusy: W.destinationBusy,
       sent: W.sent,
       privatePath: W.privatePath,
       anonymousPath: W.anonymousPath,
@@ -300,6 +305,12 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       card.appendChild(box);
       if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
+      if (Array.isArray(result.sent_items)) {
+        meta.appendChild(el('div', 'palabel', config.copy.sentItems));
+        var sentList = el('ul', 'pasrc');
+        result.sent_items.forEach(function (item) { sentList.appendChild(el('li', '', [item.title, item.source, item.date].filter(Boolean).join(' · '))); });
+        meta.appendChild(sentList);
+      }
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
         meta.appendChild(el('div', 'palabel', config.copy.sources));
@@ -343,13 +354,17 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       event.preventDefault();
       var field = ask.querySelector('textarea[name="question"]');
       var out = ask.querySelector('[data-pa-out]');
-      var button = ask.querySelector('button[type="submit"]');
+      var button = event.submitter || ask.querySelector('button[type="submit"]');
+      if (!button || button.disabled || !button.getAttribute('data-pa-action')) return;
+      var reason = button.parentElement.querySelector('.pareason');
       var question = field ? String(field.value || '').trim() : '';
       if (!question || !out) return;
-      if (button) button.disabled = true;
+      if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+      if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: ask.getAttribute('data-pa-path') === 'anonymous' ? 'ask_anonymous' : 'ask', question: question });
-      if (button) button.disabled = false;
+      var outcome = await send({ action: button.getAttribute('data-pa-action'), question: question });
+      if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
+      if (reason) reason.textContent = '';
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
       render(out, outcome.result, question);
       await poll();
@@ -433,6 +448,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
   }
   openFragment();
   window.addEventListener('hashchange', openFragment);
+  var relative = ${dashboardRelativeFromMs.toString()};
   async function poll() {
     if (document.hidden) return;
     var outcome = await send({ action: 'list' });
@@ -441,6 +457,15 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (openRow) await read(openRow, true);
       return;
     }
+    if (outcome.result.destinations) root.querySelectorAll('[data-pa-card]').forEach(function (card) {
+      var key = card.getAttribute('data-pa-card');
+      var state = outcome.result.destinations[key];
+      if (!state || state === card.getAttribute('data-pa-state') || card.querySelector('[aria-busy="true"]')) return;
+      var template = card.querySelector('[data-pa-template="' + state + '"]');
+      if (!template) return;
+      var action = card.querySelector('.paaction');
+      action.textContent = ''; action.appendChild(template.content.cloneNode(true)); card.setAttribute('data-pa-state', state);
+    });
     var questions = outcome.result.questions.slice().sort(function (a, b) { return Date.parse(b.askedAt) - Date.parse(a.askedAt); });
     rows().forEach(function (row) {
       if (!questions.some(function (q) { return q.id === row.getAttribute('data-pa-question'); })) {
@@ -460,11 +485,12 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       row.classList.toggle('unread', q.unread === true);
       row.querySelector('.paq').textContent = q.question;
       if (selected === q.id && q.state !== 'answered') {
-        message(row.querySelector('[data-pa-out]'), q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
+        message(row.querySelector('[data-pa-out]'), q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
       }
-      var state = q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var state = q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
-      row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
+      row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'venice' ? config.copy.venicePath : q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : relative(Date.now() - date.getTime()), state].filter(Boolean).join(' · ');
+      row.querySelector('.pafrom').title = q.askedAt;
       list.appendChild(row);
     });
     empty();

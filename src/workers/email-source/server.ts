@@ -3467,12 +3467,12 @@ export async function main(): Promise<void> {
     : undefined;
   const sourceAnswer = analystSourceAnswer
     ? {
-        async answer(request: Parameters<typeof analystSourceAnswer.answer>[0]) {
+        async answer(request: Parameters<typeof analystSourceAnswer.answer>[0], local?: Parameters<typeof analystSourceAnswer.answer>[1]) {
           // The sniffer shares the private pool: an answer takes it at once.
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return answerActivity.run(() => analystSourceAnswer.answer(request), kind);
+          return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
         },
       }
     : undefined;
@@ -4541,6 +4541,7 @@ export async function main(): Promise<void> {
             ...(sourceAnswerLanes
               ? {
                   privateAnswers: {
+                    destinations: () => localPrivateAnswers?.destinations() ?? { computer: 'not_set_up', venice: 'not_set_up' },
                     waiting: () => localPrivateAnswers?.waiting(),
                     waitingCount: () => localPrivateAnswers?.waitingCount() ?? 0,
                     handle: (body, session) => (localPrivateAnswers
@@ -4885,6 +4886,7 @@ export async function main(): Promise<void> {
   // cloud route, and never zkAPI.
   if (sourceAnswerLanes) {
     const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('./local-private-answers.ts');
+    const { privateVeniceMembers, createVeniceInboxAnswer } = await import('./venice-inbox-answer.ts');
     const { DASHBOARD_SUPPORTED_SOURCES } = await import('../source-dashboard.ts');
     // "Left out: Gmail": a corpus named by the dashboard card it belongs to.
     const sourceName = (corpusId: string): string | undefined => {
@@ -4907,7 +4909,29 @@ export async function main(): Promise<void> {
       },
       sourceName,
     });
+    const destinations = (): import('./venice-inbox-answer.ts').AskDestinationStates => {
+      let venice: import('./venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
+      try {
+        const members = privateVeniceMembers(loadSourceWorkerSovereignty(olympusConfig, process.env));
+        const bootMembers = privateVeniceMembers(sovereigntyEngine);
+        if (members.length) {
+          venice = members.length === bootMembers.length && members.every(member => bootMembers.some(boot => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === 'ready') && sourceAnswer ? 'ready' : 'not_set_up';
+        } else {
+          // A saved key does not grant permission for Private: policy stays explicit.
+          const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+          venice = safeModelCredential({ provider: 'venice', trust: 'encrypted_cloud', model: 'unused', secretRef: 'store:venice.api_key' }, storedEnv) ? 'not_allowed' : 'not_set_up';
+        }
+      } catch { venice = 'not_allowed'; }
+      const modelState = answerBuiltInModel?.status().state;
+      return { computer: workerBuiltInModel?.available() ? 'ready' : 'not_set_up', venice, ...(['downloading', 'verifying', 'loading'].includes(modelState ?? '') ? { computerReason: PRIVATE_ANSWERS_COPY.downloading } : {}) };
+    };
+    const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer({
+      state: () => destinations().venice, handler: sourceAnswer, sourceName,
+      corpusIds: () => sourceAnswerLanes!({ question: 'scope', retrieval_mode: 'keyword' }).registry.list().filter(corpus => corpus.trustDomain === 'internal' || corpus.trustDomain === 'secure_local').map(corpus => corpus.corpusId),
+      eligible: local.eligible,
+    }) : undefined;
     localPrivateAnswers = createLocalPrivateAnswers({
+      destinations, ...(veniceAnswer ? { veniceAnswer } : {}),
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.
@@ -4932,6 +4956,7 @@ export async function main(): Promise<void> {
   } else {
     const { createLocalPrivateAnswers } = await import('./local-private-answers.ts');
     localPrivateAnswers = createLocalPrivateAnswers({
+      destinations: () => ({ computer: 'not_set_up', venice: 'not_set_up' }),
       store: waitingQuestionStore, isActive: connectionActive,
       connectionName: (id) => id.startsWith('@local:') ? id.slice(7) : remoteConnections()?.list().find(c => c.id === id)?.displayName,
       answer: async () => ({ status: 'no_model' }),
