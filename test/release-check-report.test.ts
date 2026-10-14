@@ -13,7 +13,9 @@ import {
   type ReleaseReportInput,
 } from '../scripts/release-check/report.ts';
 
-function machine(checks: CheckResult[], agentChecks: CheckResult[] = []): MachineReport {
+const ASKED: CheckResult = { id: 'q1.facts', title: 'Answer states the facts', status: 'pass' };
+
+function machine(checks: CheckResult[], agentChecks: CheckResult[] = [ASKED]): MachineReport {
   return {
     id: 'm1',
     label: 'Linux VM',
@@ -47,7 +49,7 @@ describe('release-check report verdict', () => {
   test('passes when nothing failed, and a skipped agent does not fail the run', () => {
     const report = buildReport(input());
     expect(report.verdict).toBe('pass');
-    expect(report.counts).toEqual({ pass: 1, fail: 0, warn: 0, skip: 0 });
+    expect(report.counts).toEqual({ pass: 2, fail: 0, warn: 0, skip: 0 });
   });
 
   test('a skipped check is counted but never fails the run; a warning does not either', () => {
@@ -57,12 +59,34 @@ describe('release-check report verdict', () => {
       { id: 'c3', title: 'Quality', status: 'warn' },
     ])] }));
     expect(report.verdict).toBe('pass');
-    expect(report.counts).toEqual({ pass: 1, fail: 0, warn: 1, skip: 1 });
+    expect(report.counts).toEqual({ pass: 2, fail: 0, warn: 1, skip: 1 });
   });
 
   test('one failed check in a machine or an agent fails the run', () => {
     expect(buildReport(input({ machines: [machine([{ id: 'c1', title: 'x', status: 'fail' }])] })).verdict).toBe('fail');
     expect(buildReport(input({ machines: [machine([], [{ id: 'q.no-leak', title: 'x', status: 'fail' }])] })).verdict).toBe('fail');
+  });
+
+  test('a run in which every agent was skipped fails: nothing was asked of the product', () => {
+    const skipped = machine([{ id: 'c1', title: 'Install', status: 'pass' }]);
+    skipped.agents = skipped.agents.map((agent) => ({ ...agent, ran: false, skipReason: 'key missing', checks: [] }));
+    const report = buildReport(input({ machines: [skipped] }));
+    expect(report.verdict).toBe('fail');
+    expect(report.errors.join(' ')).toContain('every agent was skipped');
+    expect(renderHtml(report)).toContain('no agent asked a question');
+    // Rebuilding from the finished report records the problem once.
+    expect(buildReport({ ...report, machines: [skipped] }).errors).toEqual(report.errors);
+  });
+
+  test('a machine with no agents configured, or whose agents ran without producing a check, also fails', () => {
+    const none = machine([{ id: 'c1', title: 'Install', status: 'pass' }]);
+    none.agents = [];
+    expect(buildReport(input({ machines: [none] })).verdict).toBe('fail');
+    expect(buildReport(input({ machines: [machine([{ id: 'c1', title: 'Install', status: 'pass' }], [])] })).verdict).toBe('fail');
+  });
+
+  test('one agent that asked is enough when the others were skipped', () => {
+    expect(buildReport(input()).verdict).toBe('pass');
   });
 
   test('a run problem (for example a failed teardown) or no machine at all fails the run', () => {
