@@ -15,6 +15,7 @@
 // - The Needs you count reaches only the computer's control session, never
 //   the Gateway bearer or ChatGPT, and ChatGPT's dashboard text is unchanged.
 
+import { searchPrivateEvidence, probePrivateMatch } from '../src/workers/source-index/analyst-answer.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import http from 'node:http';
@@ -376,6 +377,61 @@ describe('answers on this computer, with every outbound request denied', () => {
     } finally { network.restore(); }
   });
 
+  test('one extra word finds Private content on Ask, the sealed panel and the metadata-only probe', async () => {
+    const local = await localFixture({ specs: [oweSpec], privateIds: ['owe'], keywordOnly: true, answer: oweAnswer });
+    const question = 'owe zephyr';
+    const strict = local.lanes({ question, retrieval_mode: 'keyword' });
+    expect((await routeSourceIndexSearch({ registry: strict.registry, adapters: strict.adapters,
+      request: { query: question, maxResults: 12, context: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false } } })).hits).toEqual([]);
+    const network = denyNetwork();
+    try {
+      expect((await local.answer({ question })).status).toBe('answered');
+      const panel = await searchPrivateEvidence({ lanes: local.lanes, question });
+      expect(panel.candidates.map(c => c.provenance.sourceItem?.localItemId)).toEqual(['personal:owe']);
+      const db = (local.fixture.stores.secure_local as unknown as { db: { query: (sql: string) => unknown } }).db;
+      const query = db.query.bind(db);
+      const statements: string[] = [];
+      db.query = sql => { statements.push(sql); return query(sql); };
+      expect(await probePrivateMatch({ lanes: local.lanes, request: { question, retrieval_mode: 'keyword' }, timeoutMs: 5000 })).toBe('match');
+      expect(statements.some(sql => sql.includes('bounded_text'))).toBe(false);
+      expect(network.attempts).toEqual([]);
+    } finally { network.restore(); }
+    const withheld = (...args: Parameters<typeof local.lanes>) => ({ ...local.lanes(...args), visibilityGate: () => [] });
+    expect(await searchPrivateEvidence({ lanes: withheld, question })).toEqual({ matched: 0, candidates: [] });
+    expect(await probePrivateMatch({ lanes: withheld, request: { question, corpus_ids: [local.fixture.stores.secure_local!.corpusId] }, timeoutMs: 5000 })).toBe('no_match');
+    await moveTieredItem({ set: local.fixture.set, identity: identityOf('owe'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+    expect(await searchPrivateEvidence({ lanes: local.lanes, question })).toEqual({ matched: 0, candidates: [] });
+    expect(await probePrivateMatch({ lanes: local.lanes, request: { question, corpus_ids: [local.fixture.stores.secure_local!.corpusId] }, timeoutMs: 5000 })).toBe('no_match');
+    expect((await local.answer({ question })).status).toBe('not_found');
+  });
+
+  test('the retry never matches on request scaffolding the strict search ignores', async () => {
+    const filesSpec: FixtureSpec = { ...oweSpec, id: 'files', name: 'Saved files.txt', text: 'SENTINEL_FILES: show and find the saved files and documents here.' };
+    const local = await localFixture({ specs: [filesSpec], privateIds: ['files'], keywordOnly: true, answer: oweAnswer });
+    const question = 'show me files about zephyr';
+    expect(await searchPrivateEvidence({ lanes: local.lanes, question })).toEqual({ matched: 0, candidates: [] });
+    expect(await probePrivateMatch({ lanes: local.lanes, request: { question, corpus_ids: [local.fixture.stores.secure_local!.corpusId] }, timeoutMs: 5000 })).toBe('no_match');
+    expect(local.fixture.stores.secure_local!.searchItemsDetailed('show me saved documents', 50, undefined, undefined, { relaxed: true }).rows).toEqual([]);
+  });
+
+  test('relaxed search keeps readable content ahead of more than fifty title-only matches', async () => {
+    const titles: FixtureSpec[] = Array.from({ length: 60 }, (_, i) => ({ id: `title-${i}`, name: `owe owe owe ${i}.txt`, legacyDomain: 'secure_local' }));
+    const specs = [...titles, oweSpec];
+    const local = await localFixture({ specs, privateIds: ['owe'], keywordOnly: true, answer: oweAnswer });
+    const question = 'owe zephyr';
+    const raw = local.fixture.stores.secure_local!.searchItemsDetailed(question, 50, undefined, undefined, { relaxed: true });
+    expect(raw.rows).toHaveLength(50);
+    expect(raw.rows.map(row => row.sourceItem.localItemId)).not.toContain('personal:owe');
+    expect((await local.answer({ question })).status).toBe('answered');
+    expect(JSON.stringify(local.stub.requests)).toContain('SENTINEL_OWE');
+    const panel = await searchPrivateEvidence({ lanes: local.lanes, question, maxResults: 1 });
+    expect(panel.candidates[0]?.provenance.sourceItem?.localItemId).toBe('personal:owe');
+    const scoped = local.lanes({ question, retrieval_mode: 'keyword' }, 'private_search');
+    const routed = await routeSourceIndexSearch({ registry: scoped.registry, adapters: scoped.adapters,
+      request: { query: question, maxResults: 1, context: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false, metadataOnly: true } } });
+    expect(routed.hits[0]?.sourceItem.localItemId).toBe('personal:owe');
+  });
+
   test('keyword-only local retry prefers strict hits and never adds partial matches when strict hits exist', async () => {
     const strictSpec = { ...oweSpec, id: 'strict', text: 'SENTINEL_STRICT: I owe anyone who lent money.' };
     const local = await localFixture({ specs: [oweSpec, strictSpec], privateIds: ['owe', 'strict'], keywordOnly: true, answer: oweAnswer });
@@ -413,6 +469,8 @@ describe('answers on this computer, with every outbound request denied', () => {
     const ranked = await search('do I owe anyone money?');
     expect(ranked.hits.map(hit => hit.sourceItem.localItemId)).toEqual(['personal:rich', 'personal:owe']);
     expect(ranked.hits[0]!.score!).toBeGreaterThan(ranked.hits[1]!.score!);
+    const panel = await searchPrivateEvidence({ lanes: local.lanes, question: 'owe money galaxy quasar nebula' });
+    expect(panel.candidates.filter(c => !c.neighbour).map(c => c.provenance.sourceItem?.localItemId)).toEqual(['personal:rich', 'personal:owe']);
     const bounded = await search('alpha beta gamma delta epsilon zeta theta kappa zephyr');
     expect(bounded.hits).toEqual([]);
     const short = await search('do I xx ox owe anyone anything?');
