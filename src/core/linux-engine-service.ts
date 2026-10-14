@@ -1,3 +1,4 @@
+import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
 import { spawnSync } from 'node:child_process';
@@ -543,6 +544,20 @@ function priorEngineUsesLegacySettings(layout: LinuxEngineLayout, receiptState =
  // An installed receipt with no generation marker cannot prove modern readers.
  return receiptState==='installed';
 }
+/** Refuse path overrides before stopping: never silently strand an owner's policy. */
+function assertLegacySettingOverrides(layout: LinuxEngineLayout, env: Record<string,string|undefined>): void {
+ const files=legacyLinuxSettings(layout);
+ if(!files.length)return;
+ const effective=environmentWithWorkerSetupEnv({env,workerEnvPath:layout.workerEnvPath});
+ for(const [key,value] of Object.entries(effective)){
+  if(!/^OLYMPUS_.*(?:_PATH|_DIR|_CONFIG)$/.test(key)||!value?.trim())continue;
+  const selected=resolve(value.trim());
+  const moved=files.find(name=>{const source=join(layout.home,'.olympus',name);return selected===source||source.startsWith(selected+sep);});
+  if(!moved)continue;
+  const destination=join(layout.configDir,relative(join(layout.home,'.olympus'),selected));
+  throw new Error(`Set ${key} to ${destination} in ${layout.workerEnvPath} and in any launch environment that sets it, then retry the upgrade. Nothing was changed.`);
+ }
+}
 function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
  const files=legacyLinuxSettings(layout);
  if(priorEngineUsesLegacySettings(layout)){
@@ -762,6 +777,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   for (const path of unitLinkCandidates(l)) assertLinuxManagedPath(dirname(path),process.getuid!(),'directory');
   assertNoInterruptedInstall(l);
   assertLegacySettingDestinations(l);
+  assertLegacySettingOverrides(l,options.env??process.env);
   const before=inspectSystemdEngine(l,exec); assertKnown(before);
   if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':'would_seed',path:l.sovereigntyPath},action:'dry_run'};
   requireLinuxApprovalTransport(source);

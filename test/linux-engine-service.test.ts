@@ -329,3 +329,15 @@ test('rollback refuses a previous generation that cannot read receipt-owned priv
  expect(readFileSync(l.unitPath,'utf8')).toBe('unit');
  expect(()=>installEngine({...options,exec,uid:process.getuid!(),fromCheckout:old,bunBin:runtimeAt(l.home)})).toThrow('cannot read receipt-owned settings');
 });
+
+for (const [key,name] of [['OLYMPUS_TIER_RULES_PATH','tier-rules.json'],['OLYMPUS_PRIVACY_PROFILE_PATH','privacy.json'],['OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH','sources/ingestion-exclusions.json'],['OLYMPUS_CONSULT_VOCABULARY_DIR','consult/vocabulary']] as const) test(`migration refuses an effective ${key} before stopping`,()=>{
+ const l=layout();publishLinuxEngineReceipt(l);const legacy=join(l.home,'.olympus');
+ const file=name==='consult/vocabulary'?join(name,'manifest.json'):name;
+ mkdirSync(dirname(join(legacy,file)),{recursive:true,mode:0o700});writeFileSync(join(legacy,file),'{}',{mode:0o600});
+ writeFileSync(l.workerEnvPath,`${key}='${join(legacy,name)}'\n`,{mode:0o600});
+ const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);return command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):good('LoadState=not-found');};
+ expect(()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)})).toThrow(`Set ${key} to ${join(l.configDir,name)}`);
+ expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);
+ expect(existsSync(join(legacy,file))).toBe(true);
+ expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
+},15_000);
