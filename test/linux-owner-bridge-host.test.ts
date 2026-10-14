@@ -25,7 +25,9 @@ for (const release of ['stop', 'SIGKILL', 'logout', 'server-mode']) {
     const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
     const port = reservation.port!; await reservation.stop(true);
     const entry = `http://127.0.0.1:${port}`;
-    writeFileSync(paths.configPath, JSON.stringify({ email: { baseUrl: entry + '/v1' }, remote: { enabled: false } }));
+    // The configured host name varies; the bridge's canonical origin does not.
+    const configured = { stop: '127.0.0.1', SIGKILL: '[::1]', logout: 'localhost', 'server-mode': '127.0.0.1' }[release]!;
+    writeFileSync(paths.configPath, JSON.stringify({ email: { baseUrl: `http://${configured}:${port}/v1` }, remote: { enabled: false }, worker: { service: { enabled: true } } }));
     writeFileSync(join(root, 'desktop'), 'ready');
     const children: ChildProcess[] = [];
     const launch = async (mode: string, extra = {}) => {
@@ -132,3 +134,28 @@ test('a hung worker health probe cannot postpone logout or resurrect a closed ho
     await expect(fetch(`http://127.0.0.1:${port}`, { redirect: 'manual' })).rejects.toThrow();
   } finally { host.close(); releaseHealth(false); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('a worker-disabled engine starts no desktop bridge and leaves the port free', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-host-off-'));
+  const runtime = join(root, 'runtime'); mkdirSync(runtime, { mode: 0o700 });
+  const env = { ...process.env, HOME: root, XDG_RUNTIME_DIR: runtime, OLYMPUS_WORKER_AUTH_TOKEN: 'fixture', OLYMPUS_SERVER_MODE: 'auto' };
+  const paths = engineServicePaths({ homeDir: root, env, platform: 'linux' });
+  mkdirSync(join(paths.configPath, '..'), { recursive: true, mode: 0o700 });
+  const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+  const port = reservation.port!; await reservation.stop(true);
+  writeFileSync(paths.configPath, JSON.stringify({ email: { baseUrl: `http://127.0.0.1:${port}/v1` }, remote: { enabled: false }, worker: { service: { enabled: false } } }));
+  writeFileSync(join(root, 'desktop'), 'ready');
+  const child = spawn(process.execPath, [join(import.meta.dir, 'helpers/linux-owner-bridge-process.ts'), 'host'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; child.stdout!.on('data', data => { output += data; }); child.stderr!.on('data', data => { output += data; });
+  try {
+    await waitFor(() => { if (child.exitCode !== null) throw new Error(output); return output.includes('host-started'); });
+    await Bun.sleep(300);
+    // The port stays free for anything else, and no owner-host control socket exists.
+    const probe = Bun.serve({ hostname: '127.0.0.1', port, fetch: () => new Response() }); await probe.stop(true);
+    let entries: string[] = []; try { entries = readdirSync(join(runtime, 'olympus')); } catch {}
+    expect(entries.some(name => /^owner-host-.*\.sock$/.test(name))).toBe(false);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) { const done = once(child, 'exit'); child.kill('SIGKILL'); await done; }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 20_000);

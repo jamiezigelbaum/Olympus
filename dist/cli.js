@@ -88669,12 +88669,12 @@ async function startEngineHost(options) {
     process.once("SIGTERM", onSignal);
     process.once("SIGINT", onSignal);
   }
-  if (paths.linux && !stopping) {
+  if (paths.linux && !stopping && pluginConfig && enabled["olympus-worker"] !== false) {
     const transport = { platform: "linux", env: dataEnv };
     const socketPath = prepareWorkerSocket(transport);
     const config = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
-    const base = new URL(config.email.baseUrl).origin;
-    const port = Number(new URL(base).port || 80);
+    const port = Number(new URL(config.email.baseUrl).port || 80);
+    const base = `http://127.0.0.1:${port}`;
     const fetchSocket = createWorkerFetch(transport);
     const authToken = () => workerAuthTokenFromConfig(configFromPluginConfig(readEngineConfig(paths.configPath), { requireResolvedWorkerSecrets: false }), { env: dataEnv, workerEnvPath: paths.workerEnvPath });
     desktopBridge = startLinuxOwnerBridgeHost({

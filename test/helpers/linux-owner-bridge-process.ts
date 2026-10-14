@@ -25,6 +25,11 @@ if (mode === 'host') {
     const server = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch(request) {
       const path = new URL(request.url).pathname;
       if (path === '/health') return Response.json({ status: 'ok' });
+      // Like the worker: a dashboard session is bound to the origin it was minted for,
+      // and the bridge forwards browser requests as 127.0.0.1.
+      if (path === '/dashboard/control/session') {
+        return request.headers.get('origin')?.startsWith('http://127.0.0.1:') ? new Response(null, { status: 204 }) : new Response('origin_mismatch', { status: 403 });
+      }
       if (path === '/reload') { reload(); return new Response('saving'); }
       return new Response('PRIVATE OWNER DATA');
     } }));

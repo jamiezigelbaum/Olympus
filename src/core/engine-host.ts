@@ -250,12 +250,17 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     process.once('SIGTERM', onSignal);
     process.once('SIGINT', onSignal);
   }
-  if (paths.linux && !stopping) {
+  // No worker, no bridge: a worker-disabled engine reserves no port and never
+  // touches the worker socket.
+  if (paths.linux && !stopping && pluginConfig && enabled['olympus-worker'] !== false) {
     const transport = { platform: 'linux', env: dataEnv };
     const socketPath = prepareWorkerSocket(transport)!;
     const config = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
-    const base = new URL(config.email.baseUrl).origin;
-    const port = Number(new URL(base).port || 80);
+    const port = Number(new URL(config.email.baseUrl).port || 80);
+    // The bridge forwards every browser request as this origin
+    // (LinuxOwnerBridge.entryOrigin), so the dashboard session is minted for
+    // it too, whatever host name email.baseUrl uses (localhost, [::1]).
+    const base = `http://127.0.0.1:${port}`;
     const fetchSocket = createWorkerFetch(transport);
     const authToken = () => workerAuthTokenFromConfig(configFromPluginConfig(readEngineConfig(paths.configPath), { requireResolvedWorkerSecrets: false }), { env: dataEnv, workerEnvPath: paths.workerEnvPath });
     desktopBridge = startLinuxOwnerBridgeHost({ port, socketPath, transport, ...(options.desktop?.openFile ? { openFile: options.desktop.openFile } : {}), onChange: writeStatus,
