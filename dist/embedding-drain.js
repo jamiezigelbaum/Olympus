@@ -32051,7 +32051,7 @@ var init_source_failure = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -32283,6 +32283,7 @@ var init_vocabulary = __esm(() => {
     stalledReasons: {
       waiting_for_credentials: "Paused: Olympus needs you to sign in to {source} again",
       scope_pending: "Paused until you choose folders",
+      scope_root_missing: DASHBOARD_MISSING_FOLDER,
       provider_unavailable: "Paused: {source} isn't responding; Olympus will retry",
       model_downloading: "Waiting for the search model to finish downloading"
     },
@@ -33938,6 +33939,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!progress.stalled || !progress.stalledReason)
       return "";
     const words2 = P.stalledReasons[progress.stalledReason];
+    if (progress.stalledReason === "scope_root_missing" && onComputer()) {
+      const missing = state.computerMeta?.missingFolders;
+      const paths = Array.isArray(missing) ? missing.find((entry) => entry.sourceId === source.id)?.paths : undefined;
+      if (Array.isArray(paths) && paths.length)
+        return String(words2) + ": " + paths.filter((path) => typeof path === "string").join(", ");
+    }
     return typeof words2 === "string" ? fill2(words2, { source: String(source.label || "") }) : "";
   }
   function sourceProgressLabel(progress) {
@@ -40041,6 +40048,7 @@ init_config();
 init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
+init_provider_client();
 import { createHash as createHash23 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
@@ -40671,6 +40679,7 @@ ${request.taskId}`);
     return {
       id: state.task.id,
       kind: state.task.kind,
+      ...state.lastErrorKind === "scope_root_missing" && state.task.scopePath ? { missing_scope_path: state.task.scopePath } : {},
       interval_seconds: Math.round(configuredIntervalMs / 1000),
       effective_interval_seconds: Math.round(effectiveIntervalMs / 1000),
       freshness_threshold_seconds: Math.round(freshnessThresholdMs / 1000),
@@ -40853,6 +40862,7 @@ function hash(value) {
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
   "config_missing_folder_argument",
+  "scope_root_missing",
   "credential_missing",
   "credential_reauth_required",
   "credential_refresh_busy",

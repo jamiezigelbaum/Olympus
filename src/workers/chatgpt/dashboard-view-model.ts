@@ -219,7 +219,7 @@ export function buildChatGptDashboardViewModel(
     // A credential problem (a provider refusal, a degraded or expired sign-in)
     // is Needs you whatever the progress or indexing state: its fix is the
     // owner's, never the engine's.
-    let status: DashboardStatus = connecting || credentials ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
+    let status: DashboardStatus = connecting || credentials || missingScope(scrubbed) ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
     // A source working normally (a stage unfinished, nothing stalled) offers
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
@@ -411,7 +411,7 @@ function sourceEntry(
         : googleFull
           ? helpLinkFix(CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, 'connect'))
           : connectFix(definition))
-      : scopePending(card)
+      : scopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
         : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu: DashboardFix[] = [];
@@ -419,7 +419,7 @@ function sourceEntry(
   // sync; on a late or unresponsive source it is the row's button instead
   // (owner, 2026-10-09), and the panel keeps the menu free of the row's fix.
   if (sync) menu.push(sync);
-  if (status !== 'Off' && card.scope_selection && !scopePending(card)) {
+  if (status !== 'Off' && card.scope_selection && !scopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);
   }
@@ -504,7 +504,7 @@ function attentionItem(
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   // A late or unresponsive source's fix is Sync now where this worker can
   // sync it: Check again only re-read the page (owner, 2026-10-09).
-  const fix = scopePending(card)
+  const fix = scopePending(card) || missingScope(card)
     ? scopeFix(definition, card) ?? checkAgainFix()
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
@@ -526,7 +526,7 @@ function syncFix(
   progress: SourceProgress | undefined,
 ): DashboardFix | undefined {
   if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card)) return undefined;
-  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
+  if (scopePending(card) || missingScope(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
   return { label: CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id as ChatGptSyncSourceId } };
 }
 
@@ -656,6 +656,9 @@ function measuredSourceProgress(
   // no line at all).
   const credentialsMissing = signIn;
   const found = count(scrubbed.coverage.indexed_items);
+  if (missingScope(scrubbed)) {
+    return { progress: { stage: 'listing', unit, done: found, total: 0, percent: 0, stalled: true, stalledReason: 'scope_root_missing' }, counts: { found } };
+  }
   if (scopePending(scrubbed)) {
     return {
       progress: { stage: 'listing', unit, done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_pending' },
@@ -877,6 +880,10 @@ function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFi
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
     : helpLinkFix(CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, 'connect'));
+}
+
+function missingScope(card: DashboardSourceCard): boolean {
+  return card.schedule?.degraded_reason === 'scope_root_missing' || (card.schedule?.missing_folders?.length ?? 0) > 0;
 }
 
 function scopePending(card: DashboardSourceCard): boolean {
@@ -1151,7 +1158,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
             consecutive_failures: count(card.schedule.consecutive_failures),
             // Only a marker vocabulary.ts recognizes changes a sentence; the
             // marker itself is never printed.
-            ...(typeof card.schedule.degraded_reason === 'string' ? { degraded_reason: card.schedule.degraded_reason } : {}),
+            ...(missingScope(card) ? { degraded_reason: 'scope_root_missing' } : typeof card.schedule.degraded_reason === 'string' ? { degraded_reason: card.schedule.degraded_reason } : {}),
           },
         }
       : {}),

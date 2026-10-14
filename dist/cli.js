@@ -16862,6 +16862,15 @@ class DropboxApiMetadataClient {
 }
 function dropboxMetadataError(response, detail) {
   const tag = dropboxErrorTag(detail);
+  if (response.status === 409 && tag === "path") {
+    let parsed;
+    try {
+      parsed = JSON.parse(detail);
+    } catch {}
+    if (parsed?.error?.[".tag"] === "path" && parsed.error.path?.[".tag"] === "not_found") {
+      return new DropboxPathNotFoundError;
+    }
+  }
   if (tag === "reset" && response.status >= 400 && response.status < 500) {
     return new DropboxCursorResetError(response.status);
   }
@@ -17112,7 +17121,7 @@ function required(value, label) {
     throw new Error(`${label} is required.`);
   return normalized;
 }
-var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60000, DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS, DropboxApiError, DropboxCursorResetError, DropboxRateLimitError, DropboxContentTooLargeError;
+var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60000, DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS, DropboxApiError, DropboxPathNotFoundError, DropboxCursorResetError, DropboxRateLimitError, DropboxContentTooLargeError;
 var init_provider_client = __esm(() => {
   init_http_timeout();
   DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
@@ -17124,6 +17133,13 @@ var init_provider_client = __esm(() => {
       this.name = "DropboxApiError";
       this.status = status;
       this.tag = tag;
+    }
+  };
+  DropboxPathNotFoundError = class DropboxPathNotFoundError extends DropboxApiError {
+    kind = "dropbox_path_not_found";
+    constructor() {
+      super("Dropbox metadata path was not found (409/path/not_found).", 409, "path");
+      this.name = "DropboxPathNotFoundError";
     }
   };
   DropboxCursorResetError = class DropboxCursorResetError extends DropboxApiError {
@@ -69955,6 +69971,8 @@ function dashboardAttentionLine(source, options) {
     default:
       break;
   }
+  if (source.schedule?.degraded_reason === "scope_root_missing" || (source.schedule?.missing_folders?.length ?? 0) > 0)
+    return DASHBOARD_MISSING_FOLDER;
   if (source.answer_readiness.state === "needs_attention") {
     return dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source);
   }
@@ -70275,7 +70293,7 @@ function degradedInput(degraded) {
 function unknownStatus(value2) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value2 };
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -70548,6 +70566,7 @@ var init_vocabulary = __esm(() => {
     stalledReasons: {
       waiting_for_credentials: "Paused: Olympus needs you to sign in to {source} again",
       scope_pending: "Paused until you choose folders",
+      scope_root_missing: DASHBOARD_MISSING_FOLDER,
       provider_unavailable: "Paused: {source} isn't responding; Olympus will retry",
       model_downloading: "Waiting for the search model to finish downloading"
     },
@@ -72150,6 +72169,8 @@ function dashboardSchedulerTaskFailing(task) {
   if (task.consecutive_failures <= 0)
     return false;
   const kind = task.last_error_kind;
+  if (kind === "scope_root_missing")
+    return true;
   if (kind?.startsWith("credential_") && !DASHBOARD_CREDENTIAL_CONTENTION_KINDS.has(kind))
     return true;
   return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
@@ -72901,6 +72922,7 @@ function scheduleFromSchedulers(schedulers) {
   if (tasks.length === 0)
     return;
   const failing = tasks.filter((task) => task.consecutive_failures > 0).sort((left, right) => (Date.parse(right.last_attempt_at ?? "") || 0) - (Date.parse(left.last_attempt_at ?? "") || 0));
+  const missingFolders = tasks.flatMap((task) => task.last_error_kind === "scope_root_missing" && task.missing_scope_path ? [task.missing_scope_path] : []);
   const lastErrorKind = failing.find((task) => task.last_error_kind)?.last_error_kind;
   const lastErrorHash = failing.find((task) => task.last_error_hash)?.last_error_hash;
   const degradedReason = tasks.find((task) => task.degraded_reason)?.degraded_reason;
@@ -72913,6 +72935,7 @@ function scheduleFromSchedulers(schedulers) {
     ...lastSuccessAt ? { last_success_at: lastSuccessAt } : {},
     ...lastAttemptAt ? { last_attempt_at: lastAttemptAt } : {},
     ...nextRunAt ? { next_run_at: nextRunAt } : {},
+    ...missingFolders.length ? { missing_folders: [...new Set(missingFolders)] } : {},
     ...lastErrorKind ? { last_error_kind: lastErrorKind } : {},
     ...lastErrorHash ? { last_error_hash: lastErrorHash } : {},
     ...degradedReason ? { degraded_reason: degradedReason } : {}
@@ -120638,6 +120661,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!progress.stalled || !progress.stalledReason)
       return "";
     const words2 = P.stalledReasons[progress.stalledReason];
+    if (progress.stalledReason === "scope_root_missing" && onComputer()) {
+      const missing = state.computerMeta?.missingFolders;
+      const paths = Array.isArray(missing) ? missing.find((entry) => entry.sourceId === source.id)?.paths : undefined;
+      if (Array.isArray(paths) && paths.length)
+        return String(words2) + ": " + paths.filter((path) => typeof path === "string").join(", ");
+    }
     return typeof words2 === "string" ? fill2(words2, { source: String(source.label || "") }) : "";
   }
   function sourceProgressLabel(progress) {
@@ -132313,6 +132342,7 @@ ${request.taskId}`);
     return {
       id: state.task.id,
       kind: state.task.kind,
+      ...state.lastErrorKind === "scope_root_missing" && state.task.scopePath ? { missing_scope_path: state.task.scopePath } : {},
       interval_seconds: Math.round(configuredIntervalMs / 1000),
       effective_interval_seconds: Math.round(effectiveIntervalMs / 1000),
       freshness_threshold_seconds: Math.round(freshnessThresholdMs / 1000),
@@ -132355,14 +132385,30 @@ function createCanonicalDropboxSchedulerSource(input) {
     const scopeHash = schedulerScopeHash(approvedScopeKey);
     tasks.push({
       id: `dropbox.files_store_pull.${scopeHash}`,
+      scopePath: input.policy.roots.find((root) => root.approved_scope_key === approvedScopeKey)?.path,
       kind: "sync",
       writer: true,
       run: async (context2) => {
-        const outcome = await input.providerSync.pull({
-          approved_scope_key: approvedScopeKey,
-          max_items: input.policy.sync.max_entries_per_pass,
-          ...context2?.checkpoint ? { checkpoint: context2.checkpoint } : {}
-        });
+        let outcome;
+        try {
+          outcome = await input.providerSync.pull({
+            approved_scope_key: approvedScopeKey,
+            max_items: input.policy.sync.max_entries_per_pass,
+            ...context2?.checkpoint ? { checkpoint: context2.checkpoint } : {}
+          });
+        } catch (error2) {
+          if (!(error2 instanceof DropboxPathNotFoundError))
+            throw error2;
+          const interval = 24 * 60 * 60 * 1000;
+          throw new SourceSchedulerTaskFailure("A chosen folder is missing.", {
+            errorKind: "scope_root_missing",
+            retryAt: {
+              at: new Date(Date.parse(context2?.attemptedAt ?? new Date().toISOString()) + interval).toISOString(),
+              effectiveIntervalMs: interval,
+              degradedReason: "scope_root_missing"
+            }
+          });
+        }
         return {
           status: outcome.receipt.status,
           counts: outcome.receipt.counts,
@@ -133312,6 +133358,7 @@ var init_source_scheduler = __esm(() => {
   init_operation_error();
   init_source_ingestion_policy();
   init_dropbox_files();
+  init_provider_client();
   init_drive_extraction_source();
   init_connector_store();
   init_google_connectors();
@@ -133360,6 +133407,7 @@ var init_source_scheduler = __esm(() => {
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
     "api_request_guard",
     "config_missing_folder_argument",
+    "scope_root_missing",
     "credential_missing",
     "credential_reauth_required",
     "credential_refresh_busy",
@@ -136132,7 +136180,7 @@ function buildChatGptDashboardViewModel(view2, options = {}) {
     const credentials = dashboardCredentialProblem(scrubbed, degraded);
     const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
     const progress2 = measured?.progress;
-    let status = connecting || credentials ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
+    let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
     if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress2).fix)) {
       status = "Working";
     }
@@ -136234,11 +136282,11 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : googleFull ? helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, "connect")) : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : googleFull ? helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, "connect")) : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu = [];
   if (sync)
     menu.push(sync);
-  if (status !== "Off" && card.scope_selection && !scopePending(card)) {
+  if (status !== "Off" && card.scope_selection && !scopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
     if (fix)
       menu.push(fix);
@@ -136294,13 +136342,13 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   }
   const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : sync ?? checkAgainFix();
+  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function syncFix(definition, card, status, actionKind, degraded, progress) {
   if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card))
     return;
-  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress))
+  if (scopePending(card) || missingScope(card) || wantsReconnect(card, status, actionKind, degraded, progress))
     return;
   return { label: DASHBOARD_CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id } };
 }
@@ -136337,6 +136385,9 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
   const unit = unitFor(scrubbed);
   const credentialsMissing = signIn;
   const found = count(scrubbed.coverage.indexed_items);
+  if (missingScope(scrubbed)) {
+    return { progress: { stage: "listing", unit, done: found, total: 0, percent: 0, stalled: true, stalledReason: "scope_root_missing" }, counts: { found } };
+  }
   if (scopePending(scrubbed)) {
     return {
       progress: { stage: "listing", unit, done: 0, total: 0, percent: 0, stalled: true, stalledReason: "scope_pending" },
@@ -136490,6 +136541,9 @@ function oauthSource(definition) {
 function connectFix(definition) {
   const source = oauthSource(definition);
   return source ? { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, "connect"));
+}
+function missingScope(card) {
+  return card.schedule?.degraded_reason === "scope_root_missing" || (card.schedule?.missing_folders?.length ?? 0) > 0;
 }
 function scopePending(card) {
   return card.scope_selection?.connected === true && card.scope_selection.status === "scope_pending";
@@ -136695,7 +136749,7 @@ function scrubCard(definition, card) {
       schedule: {
         running: card.schedule.running === true,
         consecutive_failures: count(card.schedule.consecutive_failures),
-        ...typeof card.schedule.degraded_reason === "string" ? { degraded_reason: card.schedule.degraded_reason } : {}
+        ...missingScope(card) ? { degraded_reason: "scope_root_missing" } : typeof card.schedule.degraded_reason === "string" ? { degraded_reason: card.schedule.degraded_reason } : {}
       }
     } : {},
     ...card.embedding_backlog ? {
@@ -140509,7 +140563,7 @@ var init_response_builder = __esm(() => {
   LOAD_FAILED_REASONS = new Set(["not_installed", "stopped_while_starting", "too_slow", "port_taken", "unknown"]);
   MANUAL_SYNC_OUTCOMES2 = new Set(["checking", "checked", "failed", "busy"]);
   SOURCE_STAGES = new Set(["listing", "reading", "indexing", "done"]);
-  STALLED_REASONS = new Set(["waiting_for_credentials", "scope_pending", "provider_unavailable", "model_downloading"]);
+  STALLED_REASONS = new Set(["waiting_for_credentials", "scope_pending", "scope_root_missing", "provider_unavailable", "model_downloading"]);
   STALL_CAUSES = new Set(["failing", "paused", "switched_off", "no_movement"]);
   STALL_STAGES = new Set(["listing", "reading", "indexing"]);
   PENDING_TEXT = "Olympus is still preparing this answer on the computer. Call source_answer_result with this job_id " + "(repeat while it says working). Do not ask the question again.";
@@ -154963,10 +155017,12 @@ function createDashboardPanelTools(options) {
       });
       const unpair = computerUnpairEntries(view2);
       const unreadable = computerUnreadableEntries(view2, options.unreadableFiles?.(), context2.opener);
+      const missingFolders = (view2?.sources ?? []).flatMap((source) => source.schedule?.missing_folders?.length ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
       const waiting = context2.localSession === true ? waitingCount(options) : 0;
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0)
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0)
         return result;
       const meta2 = {
+        ...missingFolders.length ? { missingFolders } : {},
         ...on !== undefined ? { indexFaster: { on } } : {},
         ...unpair.length > 0 ? { unpair } : {},
         ...unreadable.length > 0 ? { unreadable } : {},
