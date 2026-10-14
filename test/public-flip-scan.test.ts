@@ -97,15 +97,21 @@ describe('public flip owner-identifier scan', () => {
 
   test('the LICENSE exemption covers only its exact copyright line', () => {
     const { root, paths } = fixtureTree({
-      LICENSE: 'MIT License\n\nCopyright (c) 2026 Jamie Zigelbaum\n\nPermission is hereby granted...\n',
+      LICENSE: 'MIT License\n\nCopyright (c) 2026 Open Coordination Unlimited, Inc.\n\nPermission is hereby granted...\n',
     });
     expect(scanTree(root, paths).blockers).toHaveLength(0);
 
     const second = fixtureTree({
-      LICENSE: 'MIT License\n\nCopyright (c) 2026 Jamie Zigelbaum\n\nContact jamie@example.test.\n',
+      LICENSE: 'MIT License\n\nCopyright (c) 2026 Open Coordination Unlimited, Inc.\n\nContact jamie@example.test.\n',
     });
     const report = scanTree(second.root, second.paths);
     expect(report.blockers.map((hit) => hit.match)).toContain('jamie@example.test');
+
+    // The holder is the company; the owner's name in LICENSE is no longer exempt.
+    const stale = fixtureTree({
+      LICENSE: 'MIT License\n\nCopyright (c) 2026 Jamie Zigelbaum\n\nPermission is hereby granted...\n',
+    });
+    expect(scanTree(stale.root, stale.paths).blockers.length).toBeGreaterThan(0);
   });
 
   test('only the exact public installation URLs are exempt in the install documents', () => {
@@ -148,12 +154,16 @@ describe('public flip owner-identifier scan', () => {
     }
   });
 
-  test('only the exact quoted zkAPI release URLs are exempt, and only in the installer and its bundles', () => {
-    const url = 'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz';
+  test.each(['darwin_arm64', 'darwin_amd64', 'linux_amd64', 'linux_arm64'])('only the exact quoted zkAPI release URLs are exempt, and only in the installer and its bundles (%s)', (platform) => {
+    const url = `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_${platform}.tar.gz`;
     for (const path of ['src/core/managed-tools.ts', 'dist/cli.js', 'dist/index.js']) {
       const clean = fixtureTree({ [path]: `const a = '${url}';\nconst b = "${url}";\n` });
       expect(scanTree(clean.root, clean.paths).blockers).toHaveLength(0);
-      for (const invalid of [`'${url}/private'`, `'${url}.sig'`, `'${url.replace('/zkapi/', '/other/')}'`, `// ${url}`, `\`${url}/\${name}\``]) {
+      for (const invalid of [
+        `'${url}/private'`, `'${url}.sig'`, `'${url}?account=private'`, `'${url}#private'`,
+        `'${url.replace('/zkapi/', '/other/')}'`, `// ${url}`, `\`${url}/\${name}\``,
+        ...['olympus2', 'olympus3', 'olympus5'].map((version) => `'${url.replaceAll('olympus4', version)}'`),
+      ]) {
         const tree = fixtureTree({ [path]: invalid });
         expect(scanTree(tree.root, tree.paths).blockers.map((hit) => hit.match)).toContain('jamiezigelbaum');
       }

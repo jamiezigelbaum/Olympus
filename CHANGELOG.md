@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.0.0 - 2026-10-13
+
+- **Stuck privacy checks recover automatically.** Missing questions are restored from stored text when possible; otherwise items settle as Private. Deleted items stop waiting. While privacy checks hold search indexing, the dashboard says Waiting to be checked.
+
+- Linux upgrades preserve privacy preferences and keep settings inside the installation so purge removes them.
+- **Missing Dropbox folders.** Names a missing chosen folder and offers Choose folders. Other folders keep syncing; missing folders are checked once a day.
+- **Olympus 1.0.** The first full release, for Mac and for Omarchy Linux.
+- **Olympus on Linux.** A standalone engine that runs as your user (Omarchy
+  first): an installer and uninstaller, an Omarchy launcher and status
+  widget, keys in the desktop keyring, and the same dashboard as on a Mac.
+  On Omarchy the dashboard opens in its own app window, and the app launcher shows the Olympus mountain icon.
+  Anonymous answers (zkAPI) work on supported Linux x64 computers after the
+  network isolation checks pass, using zkAPI 0.1.6-olympus4 or a later
+  reviewed build. Older Linux builds show the existing update guidance.
+  Other Linux hosts stay unavailable.
+- **Anonymous answer startup failures name the wallet companion** when zkAPI reports that it stopped, without saving its output or wallet details.
+- **Linux full removal cleans up empty cache and state folders** when the
+  installer recorded creating them. Pre-existing folders and other files stay.
+- **Linux install rollback removes the service link it created**, including
+  when the home folder contains spaces and configuration uses a custom folder.
+- **Better sorting for new items.** An item with nothing that marks it as
+  your own record goes to Personal at once, and the local model checks it in
+  the background, moving it up if it is Private. Your privacy settings
+  decide the tiers. Secret detection is stricter about real credentials
+  (including encoded links) and no longer flags ordinary example links.
+  New priority checks no longer wait behind a blocked sorting backlog.
+- **Google sign-in happens on your computer**, directly with Google. Google
+  connections made with a release candidate need Reconnect Google.
+  On a headless Linux server, `olympus connect finish '<address>'` reaches
+  the running engine to finish sign-in when the browser cannot reach it.
+- **An item that becomes Secret keeps only a record of where it is** in
+  Olympus's index (its location, a screened title and the kinds of secret
+  found), so you can still find it. If you mark it not Secret, what
+  Olympus hid comes back, including unchanged files whose reading stopped
+  because it found a Secret.
+- **Remote document reading rechecks privacy after local OCR and model preparation.**
+  An item that becomes Secret during that work is withheld from the model.
+- **Model downloads use bounded memory.** The private and search models
+  download in pieces and retry a dropped connection; the private model
+  resumes where it stopped when the server supports it, or safely restarts
+  from zero when it does not.
+- **No Public tier on any new install.** Every privacy posture now sets up
+  Personal, Private and Secret only, on OpenClaw as on ChatGPT: anything
+  that would have been Public is Personal. Installs made before 1.0 keep
+  their Public tier unchanged; Olympus does not rewrite an existing privacy
+  policy, and the operator drift check no longer counts that kept tier as
+  drift.
+
 ## 1.0.0-rc.6 - 2026-10-12
 
 - **Claude and Grok connect through the Olympus relay.** Claude custom
@@ -53,7 +101,7 @@
   under 10 normal, from 10 warn, from 40 critical). Without either file it
   still refuses. macOS is unchanged.
 - **Anonymous answers work on a fresh install again.** The one-click install
-  of Tor and zkAPI now fetches zkAPI 0.1.6-olympus2, the Olympus build the
+  of Tor and zkAPI now fetches zkAPI 0.1.6-olympus4, the Olympus build the
   anonymous route requires, from its published, checksummed and attested
   release, instead of upstream 0.1.6, which the route refuses. An existing
   Olympus install of 0.1.6 shows **Update zkAPI** on the dashboard (or run

@@ -120,6 +120,8 @@ export interface DashboardAgentsView {
 }
 
 export interface DashboardAgentConnectionsBackend {
+  /** Linux relay keys bind to the engine's current outbound registration. */
+  relayInstallId?: () => string | undefined;
   /** The worker's connection store. `create` opens (and creates) the database. */
   store(options?: { create?: boolean }): RemoteConnectionStore | undefined;
   remoteAccess(): DashboardRemoteAccess;
@@ -268,7 +270,8 @@ export async function handleDashboardAgentRequest(
     }
     const store = openStore(backend);
     if (!store) return storeUnavailable();
-    const created = store.create(name, provider ? { provider } : {});
+    const installId = backend.relayInstallId?.();
+    const created = store.create(name, { ...(provider ? { provider } : {}), ...(installId ? { installId } : {}) });
     const remoteAccess = backend.remoteAccess();
     return secretResponse({
       ok: true,

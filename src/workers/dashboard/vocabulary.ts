@@ -19,6 +19,8 @@ import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
+export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
+
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
 
 /** Section order on the home page: attention first, dormant last. */
@@ -414,6 +416,7 @@ export function dashboardAttentionLine(
     default:
       break;
   }
+  if (source.schedule?.degraded_reason === 'scope_root_missing' || (source.schedule?.missing_folders?.length ?? 0) > 0) return DASHBOARD_MISSING_FOLDER;
   // "Paused" is said only of a real pause — Olympus parked the lane on a budget
   // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
   // a failing task is stated as itself.
@@ -1368,6 +1371,18 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
   fixOnMac: 'Open Olympus on your computer to fix this.',
   privateMatches: 'Some matching items are private and stay on your computer.',
   changeModelsOnMac: 'Change models in Olympus on your computer.',
+  /**
+   * A working Google connection made before sign-in moved onto the computer
+   * (2026-10-13). Optional: the row's Reconnect Google switches it.
+   */
+  googleSigninMoved: 'Google sign-in now happens on your computer. Reconnect once to switch.',
+  reconnectGoogle: 'Reconnect Google',
+  /**
+   * A Google sign-in in progress while Olympus runs on a server: Google
+   * returns to the server's loopback, which a browser elsewhere reaches only
+   * through the SSH tunnel; otherwise the address is pasted on the server.
+   */
+  googleConnectingOnServer: 'Waiting for you to finish signing in… If Google ends on a page that does not load, copy its address and run olympus connect finish \'<address>\' on the server.',
 } as const;
 
 /**
@@ -1574,6 +1589,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   stalledReasons: {
     waiting_for_credentials: 'Paused: Olympus needs you to sign in to {source} again',
     scope_pending: 'Paused until you choose folders',
+    scope_root_missing: DASHBOARD_MISSING_FOLDER,
     provider_unavailable: 'Paused: {source} isn\'t responding; Olympus will retry',
     model_downloading: 'Waiting for the search model to finish downloading',
   },
@@ -1740,6 +1756,7 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   connectReopen: 'Open sign-in again',
   connectTimeout: 'Olympus has not heard back from {source} yet. If you finished signing in, check again.',
   connectFailed: 'Olympus could not start signing in to {source}. Try again.',
+  goToModels: 'Go to Models',
   connected: '{source} is connected.',
   foldersTitle: 'Choose folders',
   foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',
@@ -2334,6 +2351,12 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
  * configuration. "Daemon" is the program's own name for itself; the card
  * says "the zkapi-clientd program".
  */
+/**
+ * The one line the card shows where zkAPI cannot run: no network confinement
+ * on this platform (owner ruling 2026-10-12: no weaker mode).
+ */
+const OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = 'Anonymous answers aren\'t available on this computer because its network isolation check hasn\'t passed. Nothing is sent without it.';
+
 export const DASHBOARD_OUTSIDE_HELP_COPY = {
   crumb: 'Anonymous answers',
   title: 'Anonymous answers',
@@ -2347,6 +2370,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     fence_held: 'Anonymous answers: paused · unfinished payment',
     needs_acceptance: 'Anonymous answers: paused · accept the updated statements',
     blocked: 'Anonymous answers: paused · needs a fix',
+    unavailable: 'Anonymous answers: not available on this computer',
   },
   /** The route claim belongs to a verified, completed session, never the platform alone. */
   experimental: 'Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.',
@@ -2429,7 +2453,10 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     fence_held: 'Paused: an earlier question has not finished paying yet.',
     needs_acceptance: 'Paused until you accept the updated statements below.',
     blocked: 'Paused: fix the problem below.',
+    unavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE,
   },
+  /** Where zkAPI cannot run (the card's whole body, and the worker's refusal). */
+  confinementUnavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE,
   /** Said only when a saved change needs a restart this worker could not do itself. */
   restartPending: 'Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.',
   /** Said under the status line when Tor is off, in plain words (Details names Tor). */
@@ -2524,18 +2551,20 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     spend_cap_reached: 'Another question would pass today\'s spending limit.',
     state_unavailable: 'Olympus could not read its record of questions on this computer.',
     key_reuse_on: 'The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off (the last step).',
+    confinement_unavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE,
   },
   blockerOther: 'Not ready yet ({code}).',
   stepsTitle: 'Set up zkAPI',
   stepsIntro: 'Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.',
+  /** `{daemon}` is the zkAPI program as Terminal needs it named (outside-help-tools.ts outsideHelpDaemonCommand); `{secretRef}` the route's key reference. */
   steps: [
     'Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). On macOS, the confined route requires the Olympus zkapi-clientd fork 0.1.6-olympus2; the upstream 0.1.5/0.1.6 build cannot confirm it.',
-    'Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.',
+    'Run: {daemon} config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.',
     'Wait until the tool prints "Private inference balance activated".',
-    'Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050',
-    'Run: zkapi-clientd config --require-api-key',
-    'Run: zkapi-clientd config --api-key <key>. Store the same key where the route\'s key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.',
-    'Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.',
+    'Run: {daemon} config --relay-url socks5://127.0.0.1:19050',
+    'Run: {daemon} config --require-api-key',
+    'Run: {daemon} config --api-key. Pipe its output directly into an owner-only file; never paste it into chat or logs. Store that key where the route\'s key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.',
+    'Run: {daemon} config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.',
   ],
   costTitle: 'Cost and risk',
   costIntro: 'Nothing is sent until you accept these. If the wording changes, you are asked again.',

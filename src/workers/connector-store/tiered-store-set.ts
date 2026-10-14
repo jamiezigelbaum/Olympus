@@ -14,8 +14,8 @@
 //   nothing stored before P1b moves, is re-embedded or is deleted.
 // - A new item is routed only from a decision made on text the set actually
 //   read. Unread content stays where the lane places it today.
-// - Pending (a sniffer question is open) is treated as Private: the whole
-//   item goes to the secure_local store and is held back from embedding.
+// - A names question holds the whole item. A content question holds only
+//   own-record content; Personal-first questions leave content usable.
 // - Otherwise the metadata row goes to the metadata tier's store and the
 //   content to the content tier's store (the two-tier invariant). A lane that
 //   keeps an item whole (a chat message) declares `splitLayers: false`, and
@@ -56,12 +56,16 @@ import { detectSecretFindingKinds } from '../classification/engine.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   maxTier,
+  hasCredentialUrl,
+  PERSONAL_FIRST_REASON,
   type OwnerTierRule,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
 } from '../classification/tier-classifier.ts';
 import {
+  copyServingLayer,
+  placementIsRaise,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   trustDomainRank,
@@ -70,6 +74,7 @@ import {
   type TierCopyPlan,
   TierLedger as TierLedgerClass,
   type TierLedger,
+  type TierLedgerIdentity,
   type TierPlacementPlan,
 } from '../classification/tier-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -93,7 +98,7 @@ import {
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
-import { secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
@@ -331,9 +336,9 @@ export class TieredStoreSet {
    * In a lane whose content arrives later (`contentArrivesLater`), an item
    * whose text has not been read yet gets only its metadata copy, in the
    * metadata tier's store; its content copy is placed when the text lands.
-   * There, only an open NAME question (the sniffer) makes the whole item
-   * pending (Private); an open CONTENT question holds just the content copy
-   * in the Private store, held back from embedding.
+   * In every lane, only an open NAME question holds the whole item. An
+   * own-record CONTENT question holds its content copy in Private while
+   * cleared names remain discoverable; Personal-first content stays usable.
    *
    * `contentArrivesLater` says whether this item's text arrives after listing
    * (`contentArrivesLaterFor`); a caller that knows the item says so. Omitted,
@@ -341,7 +346,7 @@ export class TieredStoreSet {
    */
   placementFor(
     decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'state' | 'metadataPending' | 'contentPending'>
-      & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule'>>,
+      & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule' | 'reasons'>>,
     options: { contentArrivesLater?: boolean } = {},
   ): TierPlacementPlan {
     if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
@@ -350,9 +355,7 @@ export class TieredStoreSet {
     const deferred = this.contentArrivesLater
       || (this.contentArrivesLaterFor !== undefined
         && (options.contentArrivesLater ?? decision.contentRead !== true));
-    const wholePending = deferred
-      ? decision.metadataPending
-      : decision.state === 'pending' || decision.metadataPending || decision.contentPending;
+    const wholePending = decision.metadataPending;
     if (wholePending) {
       const domain = this.domainAtLeast('secure_local');
       return {
@@ -370,7 +373,7 @@ export class TieredStoreSet {
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
       };
     }
-    const contentHeld = deferred && decision.contentPending;
+    const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
     const contentDomain = contentHeld
       ? this.domainAtLeast('secure_local')
       : this.domainAtLeast(atLeastDomain(
@@ -632,17 +635,33 @@ export class TieredStoreSet {
 
   /**
    * @internal Whether a routed item's current copies have all vanished from
-   * their stores (a lane evicted them on its own). Only then may a new
-   * placement replace the ledger rows without a move.
+   * their stores (a lane evicted them on its own), or it has no copy rows at
+   * all and no store serves it (a Secret whose copies were tombstoned, now
+   * restored by the owner; a deleted item that reappears). Only then may a
+   * new placement replace the ledger rows without a move: there is nothing
+   * visible to move.
    */
-  routedCopiesGone(identity: SourceItemIdentity): boolean {
-    const current = this.ledger.copies(identity).filter((copy) => copy.state === 'current');
+  routedCopiesGone(identity: TierLedgerIdentity): boolean {
+    const copies = this.ledger.copies(identity);
+    // A previously routed Secret or provider-deleted item has no source to
+    // move. A fresh placement is safe; staged/hidden move copies are not.
+    if (copies.length === 0) return this.routedWithoutAnyCopy(identity);
+    const current = copies.filter((copy) => copy.state === 'current');
     if (current.length === 0) return false;
     return current.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);
       const store = domain ? this.store(domain) : undefined;
       return store !== undefined && !store.itemPresence(identity).active;
     });
+  }
+
+  /**
+   * @internal A routed item with no copy rows at all that no store serves (a
+   * Secret whose copies were tombstoned): nothing visible, nothing to move.
+   */
+  routedWithoutAnyCopy(identity: TierLedgerIdentity): boolean {
+    if (this.ledger.copies(identity).length > 0) return false;
+    return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
   }
 
   /** @internal Whether any store of the set has ever held a row for this item. */
@@ -1172,7 +1191,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const classification = this.classification;
     // Names-only by the owner's choice: the text never arrives, so the names
     // are the whole decision and the item never waits on it.
-    let decision = decideItemTiers(connector, item, text, classification, ledger, { namesOnly: deferred && input.metadataOnly });
+    let decision = decideItemTiers(connector, item, text, classification, ledger, {
+      namesOnly: deferred && input.metadataOnly,
+      ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
+    });
     // With the owner's rules file or map unusable, the decision (made with
     // the last good ones) may not place anything below Private: hold it
     // pending (secure_local, embedding held) until the file is fixed.
@@ -1203,21 +1225,45 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       decision = withRecordedContent(decision, ledger.getCurrent(identity));
     }
 
-    const placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
+    let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
+    const currentCopies = ledger.copies(identity).filter(copy => copy.state === 'current');
+    const fromContent = copyServingLayer(currentCopies, 'content');
+    const toContent = copyServingLayer(placement.copies, 'content');
+    // Personal-first is for new content, not permission to declassify an
+    // existing Private copy before its background verdict. Keep the new body
+    // in its current, more private store while that question is answered.
+    if (contentRead && decision.contentPending && fromContent && toContent
+      && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain)
+      && !placementIsRaise(currentCopies, placement.copies)) {
+      placement = { copies: currentCopies, embedHold: true };
+    }
     const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
       ...(deferred ? { stagedLandingAllowed: true } : {}),
     });
+    // Left Secrets in this write (the owner's restore): its extraction jobs
+    // keep their names again from this listing's enqueue on.
+    if (recorded.outcome !== 'secrets') retireSecretRedactions(ledger, { identity });
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;
         // The ledger write above hid every copy. The one Secrets policy
         // (secrets-disposition.ts) decides whether they are tombstoned now or
-        // kept, hidden, for an owner-approved purge.
+        // kept, hidden, for an owner-approved purge. Either way the side
+        // stores forget the item's names and excerpt now.
+        forgetSecretInSideStores({ ledger, identity });
         if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets' };
         this.copyRemovals.set(identityKey(identity), identity);
         return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };
       case 'queued_move':
+        this.counts.movesQueued += 1;
+        if (contentRead && !recorded.raise) {
+          // Retain the body that produced this lowering verdict in the
+          // existing stores. Until this write lands the move's digest check
+          // refuses the old body; a crash therefore cannot release it.
+          return this.storedPlan(currentCopies);
+        }
+        return { kind: 'hold', reason: 'move_queued' };
       case 'held_moving':
         this.counts.movesQueued += 1;
         return { kind: 'hold', reason: 'move_queued' };
@@ -1240,6 +1286,16 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         return { kind: 'routed', copies, sensitivity };
       }
     }
+  }
+
+  private storedPlan(copies: readonly TierCopyPlan[]): Plan {
+    return {
+      kind: 'routed',
+      copies: new Map(copies.map(copy => [copy.corpusId, copy.layers])),
+      sensitivity: new Map(copies.map(copy => [copy.corpusId, buildSourceSensitivity({
+        trustTier: this.set.restingTierFor(copy.trustDomain), trustDomain: copy.trustDomain,
+      })])),
+    };
   }
 
   /**
@@ -1291,6 +1347,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       ...(text ? detectSecretFindingKinds(text) : []),
       ...(title ? detectSecretFindingKinds(title) : []),
       ...(locator ? detectSecretFindingKinds(locator) : []),
+      ...decision.reasons.flatMap(reason => {
+        const match = /^(?:metadata|content):secret:([a-z_]+)$/.exec(reason);
+        return match ? [match[1]!] : [];
+      }),
     ])];
     let folderKeys: readonly string[] = input.sourceScope?.folderKeys ?? [];
     if (folderKeys.length === 0) {
@@ -1305,7 +1365,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const namesReleasable = decision.metadataTier === 'public' || decision.metadataTier === 'private';
     index.record({
       identity: item.identity,
-      ...(locator ? { locator } : {}),
+      ...(locator && !hasCredentialUrl(locator) ? { locator } : {}),
       ...(title && namesReleasable ? { title } : {}),
       namesReleasable,
       folderKeys,

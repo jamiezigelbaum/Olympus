@@ -219,7 +219,7 @@ export function buildChatGptDashboardViewModel(
     // A credential problem (a provider refusal, a degraded or expired sign-in)
     // is Needs you whatever the progress or indexing state: its fix is the
     // owner's, never the engine's.
-    let status: DashboardStatus = connecting || credentials ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
+    let status: DashboardStatus = connecting || credentials || missingScope(scrubbed) ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
     // A source working normally (a stage unfinished, nothing stalled) offers
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
@@ -244,7 +244,7 @@ export function buildChatGptDashboardViewModel(
   // connected sources, then the ones not connected yet; roster order within.
   const sources: DashboardSource[] = rows
     .map(({ definition, card, status, actionKind, connecting, progress, sync, googleFull }, index) => ({
-      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, googleFull),
+      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, googleFull, options.remote !== undefined),
       index,
     }))
     .sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index)
@@ -373,10 +373,15 @@ function sourceEntry(
   now: Date,
   sync?: DashboardFix,
   googleFull = false,
+  onServer = false,
 ): DashboardSource {
   const inFlight = progress && progress.stage !== 'done' && status !== 'Needs you' && status !== 'Failing';
+  // Google returns to the engine on loopback. On a server, a browser on
+  // another computer without the tunnel lands on a page that does not load;
+  // the row says how to finish from there (docs/ops/OAUTH_RELAY.md).
+  const googleSource = definition.provider === 'gmail' || definition.provider === 'google_drive';
   const ownDetail = connecting
-    ? CONNECTING_DETAIL
+    ? (onServer && googleSource ? DASHBOARD_CHATGPT_VOCABULARY.googleConnectingOnServer : CONNECTING_DETAIL)
     : inFlight
       ? STAGE_DETAIL[progress.stage as Exclude<SourceProgress['stage'], 'done'>]
       : dashboardSubLine(card, { surface: 'chatgpt', now, ...(degraded ? { degradedCredentials: degraded } : {}) });
@@ -384,9 +389,15 @@ function sourceEntry(
   // "Checking Dropbox…", then what it found. The engine's own words, so the
   // computer's row reads the same (a fresh row's line already says it).
   const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
+  // A Google connection still on the legacy exchange, offered the move to
+  // sign-in on the computer (owner, 2026-10-13): only on a quiet row, where
+  // nothing more pressing holds the button or the line.
+  const signinMoved = card.connection.google_signin_moved === true && status === 'Fresh' && !connecting && !inFlight;
   const detail = googleFull
     ? GOOGLE_SIGNIN_FULL_SENTENCE
-    : manualLine && !(ownDetail ?? '').startsWith(manualLine) ? manualLine : ownDetail;
+    : manualLine && !(ownDetail ?? '').startsWith(manualLine)
+      ? manualLine
+      : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
@@ -400,13 +411,15 @@ function sourceEntry(
         : googleFull
           ? helpLinkFix(CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, 'connect'))
           : connectFix(definition))
-      : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
+      : scopePending(card) || missingScope(card)
+        ? scopeFix(definition, card)
+        : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu: DashboardFix[] = [];
   // Sync now sits first in the ⋯ menu of every connected source that can
   // sync; on a late or unresponsive source it is the row's button instead
   // (owner, 2026-10-09), and the panel keeps the menu free of the row's fix.
   if (sync) menu.push(sync);
-  if (status !== 'Off' && card.scope_selection && !scopePending(card)) {
+  if (status !== 'Off' && card.scope_selection && !scopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);
   }
@@ -491,7 +504,7 @@ function attentionItem(
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   // A late or unresponsive source's fix is Sync now where this worker can
   // sync it: Check again only re-read the page (owner, 2026-10-09).
-  const fix = scopePending(card)
+  const fix = scopePending(card) || missingScope(card)
     ? scopeFix(definition, card) ?? checkAgainFix()
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
@@ -513,7 +526,7 @@ function syncFix(
   progress: SourceProgress | undefined,
 ): DashboardFix | undefined {
   if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card)) return undefined;
-  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
+  if (scopePending(card) || missingScope(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
   return { label: CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id as ChatGptSyncSourceId } };
 }
 
@@ -573,6 +586,14 @@ function reconnectFix(definition: DashboardSupportedSourceDefinition, card: Dash
   return source
     ? { label: (source === 'gmail' || source === 'google-drive') && card.connection.label === 'Reconnect Google to continue syncing' ? 'Reconnect Google' : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
     : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, 'reconnect'));
+}
+
+/** Reconnect Google on a connection still on the legacy exchange: the ordinary connect, which now runs on the computer. */
+function googleSigninMovedFix(definition: DashboardSupportedSourceDefinition): DashboardFix | undefined {
+  const source = oauthSource(definition);
+  return source === 'gmail' || source === 'google-drive'
+    ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnectGoogle, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
+    : undefined;
 }
 
 /** A control that opens a help page section (`openHref`); the tool is only the contract's fallback. */
@@ -635,6 +656,9 @@ function measuredSourceProgress(
   // no line at all).
   const credentialsMissing = signIn;
   const found = count(scrubbed.coverage.indexed_items);
+  if (missingScope(scrubbed)) {
+    return { progress: { stage: 'listing', unit, done: found, total: 0, percent: 0, stalled: true, stalledReason: 'scope_root_missing' }, counts: { found } };
+  }
   if (scopePending(scrubbed)) {
     return {
       progress: { stage: 'listing', unit, done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_pending' },
@@ -856,6 +880,10 @@ function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFi
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
     : helpLinkFix(CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, 'connect'));
+}
+
+function missingScope(card: DashboardSourceCard): boolean {
+  return card.schedule?.degraded_reason === 'scope_root_missing' || (card.schedule?.missing_folders?.length ?? 0) > 0;
 }
 
 function scopePending(card: DashboardSourceCard): boolean {
@@ -1112,6 +1140,8 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ...(refusal
         ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal.code) ? refusal.code : '', reason: '' } }
         : {}),
+      // A flag only: Reconnect Google is offered (sourceEntry).
+      ...(card.connection.google_signin_moved === true ? { google_signin_moved: true as const } : {}),
     },
     ...(card.progress && finite(card.progress.indexed_items_per_hour)
       ? {
@@ -1128,7 +1158,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
             consecutive_failures: count(card.schedule.consecutive_failures),
             // Only a marker vocabulary.ts recognizes changes a sentence; the
             // marker itself is never printed.
-            ...(typeof card.schedule.degraded_reason === 'string' ? { degraded_reason: card.schedule.degraded_reason } : {}),
+            ...(missingScope(card) ? { degraded_reason: 'scope_root_missing' } : typeof card.schedule.degraded_reason === 'string' ? { degraded_reason: card.schedule.degraded_reason } : {}),
           },
         }
       : {}),

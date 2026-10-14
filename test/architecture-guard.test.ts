@@ -211,6 +211,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/venice-client.ts',
   'src/workers/file-extraction/extractors/vlm.ts',
   'src/workers/file-extraction/http-types.ts',
+  'src/workers/file-extraction/job-names.ts',
   'src/workers/file-extraction/job-store.ts',
   // The readiness counts the source status surface publishes. It maps the
   // queue's own vocabulary onto the dashboard's count keys, which is exactly
@@ -353,11 +354,9 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
   ['src/workers/file-extraction/extractors/document-formats.ts', new Set([
     'parseDelimitedRows',
     'normalizeTableCell',
-    'extractPdfTextStreams',
-    'decodePdfStream',
-    'extractPdfTextOperators',
-    'extractPdfTextRuns',
-    'decodePdfHexString',
+    'pdfStreamHoldsNoText',
+    'pdfStreamUsesFlate',
+    'pdfStreamHasFilter',
     'decodePdfLiteralString',
     'pdfAppearsImageOnly',
     'isWordHeaderPart',

@@ -65,10 +65,11 @@ const dgram = require('node:dgram');
 const { spawn } = require('node:child_process');
 const dir = process.env.ZKAPI_CLIENTD_CONFIG_DIR;
 const planPath = dir + '/plan.json';
-const plan = fs.existsSync(planPath) ? JSON.parse(fs.readFileSync(planPath, 'utf8')) : { version: '0.1.6' };
+const plan = fs.existsSync(planPath) ? JSON.parse(fs.readFileSync(planPath, 'utf8')) : { version: '0.1.6-olympus4' };
 if (process.argv[2] === '--version') { console.log('zkapi-clientd ' + plan.version); process.exit(0); }
 if (process.argv[2] === 'serve' && process.argv[3] === '--help') { console.log(plan.noSupervisor ? 'Usage: serve' : '--relay-url --companion-proxy-listen --wallet-api-listen --require-managed-companion --require-companion-custody'); process.exit(0); }
 if (process.argv[2] !== 'serve') process.exit(2);
+if (plan.startupError) { console.error(plan.startupError); process.exit(1); }
 const flagValue = (flag) => { const i = process.argv.indexOf(flag); return i < 0 ? undefined : process.argv[i + 1]; };
 const proxyListen = flagValue('--companion-proxy-listen');
 const walletListen = flagValue('--wallet-api-listen');
@@ -203,6 +204,7 @@ export interface Plan {
   torNeverBootstraps?: boolean;
   torDiesAfterMs?: number;
   startDelayMs?: number;
+  startupError?: string;
   policyNeverLoads?: boolean;
   modelMissing?: boolean;
   allowance?: number;
@@ -222,6 +224,18 @@ export const filteredConfinement: ZkapiConfinement = {
   wrap: (argv) => [...argv],
   selfTest: async () => true,
 };
+/**
+ * The default stand-in: confinement that exists and passes its self-test but
+ * does not filter loopback ports, so a session runs without the managed
+ * companion flags. Level 'none' is never run (the session refuses it).
+ */
+export const unfilteredConfinement: ZkapiConfinement = {
+  level: 'non_loopback_blocked',
+  limit: 'test confinement (loopback not port-filtered)',
+  wrap: (argv) => [...argv],
+  selfTest: async () => true,
+};
+/** A platform with no network confinement: every session refuses it. */
 export const noConfinement: ZkapiConfinement = {
   level: 'none',
   limit: 'no network confinement is implemented on this platform',
@@ -287,7 +301,7 @@ export function transport(overrides: Partial<ZkapiConsultTransportOptions> = {})
     settings: settings(),
     statePath,
     env: { HOME: root, PATH: '/usr/bin:/bin', ZKAPI_CLIENTD_CONFIG_DIR: configDir },
-    confinement: noConfinement,
+    confinement: unfilteredConfinement,
     now: () => NOW,
     ...overrides,
   };
@@ -305,14 +319,14 @@ export async function portFree(port: number): Promise<boolean> {
 
 export const TRANSPORT_MODULE = join(import.meta.dir, '..', '..', 'src', 'core', 'consult-transport-zkapi.ts');
 
-/** Runs one consult in a separate Bun process over the same ledger, without confinement. */
+/** Runs one consult in a separate Bun process over the same ledger, with the unfiltered stand-in confinement. */
 export function startConsultInChildProcess(options: ZkapiConsultTransportOptions) {
   const { now: _now, confinement: _confinement, ...plain } = options;
   const script = `
     const { sendZkapiConsult } = await import(${JSON.stringify(TRANSPORT_MODULE)});
     const options = JSON.parse(process.argv[1]);
     options.now = () => new Date(${JSON.stringify(NOW.toISOString())});
-    options.confinement = { level: 'none', limit: 'none', wrap: (argv) => [...argv], selfTest: async () => false };
+    options.confinement = { level: 'non_loopback_blocked', limit: 'test', wrap: (argv) => [...argv], selfTest: async () => true };
     const result = await sendZkapiConsult(${JSON.stringify(QUESTION)}, options);
     console.log(JSON.stringify(result.ok ? { ok: true } : { ok: false, code: result.error.code }));
     process.exit(0);
@@ -337,7 +351,7 @@ export function alive(pid: number): boolean {
   }
 }
 
-export const NO_CONFINEMENT_LABEL = 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; no network confinement';
+export const UNFILTERED_LABEL = 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session\'s sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered';
 
 /** What each mocked operation advances virtual time by; distinct so a misplaced one shows. */
 export const OP = { selfTest: 1, now: 2, healthz: 3, inspect: 5, unauthenticatedProbe: 7, adminStatus: 11, models: 13, dispatch: 17, body: 19 } as const;
@@ -407,7 +421,7 @@ export function timedTransport(time: ReturnType<typeof virtualTime>, overrides: 
       time.advance(OP.now);
       return NOW;
     },
-    confinement: { ...noConfinement, selfTest: async () => { time.advance(OP.selfTest); return false; } },
+    confinement: { ...unfilteredConfinement, selfTest: async () => { time.advance(OP.selfTest); return true; } },
     fetchImpl,
     ...overrides,
     inspectListener: async (port) => {
@@ -470,6 +484,22 @@ export function settledFlag<T>(promise: Promise<T>): () => boolean {
 
 export function baseConfig(): Record<string, any> {
   return JSON.parse(JSON.stringify(loadSovereigntyPreset('local-first')));
+}
+
+/**
+ * Adds the Public tier a policy written before 1.0 keeps (no shipped preset
+ * defines one since 2026-10-13), shaped as the presets then shipped it.
+ */
+export function withOlderPublicTier(config: Record<string, any>): Record<string, any> {
+  config.routes.public_safe = { pool: { members: ['cloud-openclaw-infer', 'local-source-answer'], order: ['cloud-openclaw-infer', 'local-source-answer'] } };
+  config.retrieval.trustDomains.public_safe = {
+    minimumExecutionTrust: 'standard_cloud',
+    allowedEmbeddingTrust: ['local', 'standard_cloud'],
+    embeddingProfile: 'built-in-embedding',
+    allowCloudQuery: true,
+    activationMode: 'hybrid_shadow',
+  };
+  return config;
 }
 
 export function zkapiProfile(overrides: Record<string, unknown> = {}): Record<string, any> {
@@ -545,6 +575,7 @@ export function doctorDeps(profile: Record<string, unknown> = {}, env: Record<st
     ingestionHealthStatePath: join(root, 'ingestion.json'),
     workerEnvPath: join(root, 'worker.env'),
     zkapiStatePath: statePath,
+    zkapiConfinement: unfilteredConfinement,
     now: () => NOW,
   };
 }
@@ -577,7 +608,7 @@ export function useZkapiHarness(): void {
     mkdirSync(configDir);
     statePath = join(root, 'zkapi-consult-state.json');
     [daemonPort, torPort] = freePorts(2) as [number, number];
-    plan = { port: daemonPort, relayPort: torPort, apiKey: API_KEY, version: '0.1.6', requireKey: true, reuse: 0, statePath };
+    plan = { port: daemonPort, relayPort: torPort, apiKey: API_KEY, version: '0.1.6-olympus4', requireKey: true, reuse: 0, statePath };
     writePlan();
   });
   afterEach(() => {

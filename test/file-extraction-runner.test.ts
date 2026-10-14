@@ -18,7 +18,7 @@
 //     unwired, every scanned PDF the OCR command refuses stays terminal for
 //     ever, and nothing in the type system would have noticed.
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +44,7 @@ import {
   OCR_EXTRACTOR_KIND,
 } from '../src/workers/file-extraction/extractors/ocr.ts';
 import { REMOTE_VLM_EXTRACTOR_KINDS } from '../src/workers/file-extraction/extractors/remote-vlm.ts';
+import { VeniceVlmClient } from '../src/workers/file-extraction/extractors/venice-client.ts';
 import { VLM_PDF_EXTRACTOR_KIND } from '../src/workers/file-extraction/extractors/vlm.ts';
 import {
   buildExtractorRegistry,
@@ -933,6 +934,14 @@ describe('extraction egress gate: the boundary, as a pure decision', () => {
     })).toEqual({ allowed: true });
   });
 
+  test('a Secrets item is refused as Secrets, so restoring it reads it again', () => {
+    expect(evaluateExtractionEgress({
+      ...REMOTE_ALLOWED,
+      trustTier: 'S5',
+      policy: { maxTrustTierForRemote: 'S4', allowDefaultDeferred: false },
+    })).toEqual({ allowed: false, errorKind: 'store_item_secrets' });
+  });
+
   test('a tier above the corpus ceiling is refused', () => {
     expect(evaluateExtractionEgress({ ...REMOTE_ALLOWED, trustTier: 'S4' }))
       .toEqual({ allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_TRUST_TIER });
@@ -1051,6 +1060,146 @@ describe('extraction egress gate: unreachable, not merely unconfigured', () => {
     }
   });
 
+  for (const change of ['Secrets', 'Private above ceiling', 'unreadable tier', 'revoked scope', 'revoked policy'] as const) {
+    test(`remote authorization changed during OCR: ${change} prevents dispatch`, async () => {
+      const jobs = jobStore();
+      let tier: SourceTrustTier | undefined = 'S2';
+      let currentScope = true;
+      const corpus: ExtractionRunnerCorpus = {
+        corpusId: CORPUS_ID,
+        trustDomain: 'secure_local',
+        source: fakeSource({ fetch: async () => ({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/png' }) }),
+        sink: recordingSink(),
+        egressPolicy: { maxTrustTierForRemote: 'S3', allowDefaultDeferred: false },
+        trustTiers: { itemTrustTier: () => tier },
+        authorization: { assertCurrent: () => { if (!currentScope) throw new Error('revoked'); } },
+      };
+      let remoteCalls = 0;
+      const registry = createDefaultExtractorRegistry({ remote: {
+        client: { describe: async () => { remoteCalls++; return { text: 'ordinary image' }; } },
+        localReader: { extract: async () => {
+          if (change === 'Secrets') tier = 'S5';
+          if (change === 'Private above ceiling') tier = 'S4';
+          if (change === 'unreadable tier') tier = undefined;
+          if (change === 'revoked scope') currentScope = false;
+          if (change === 'revoked policy') delete corpus.egressPolicy;
+          return { status: 'metadata_only' };
+        } },
+      } });
+      const kind = REMOTE_VLM_EXTRACTOR_KINDS[0];
+      try {
+        const queued = jobs.enqueue({ refs: [ref(1, { mimeType: 'image/png' })], extractorKind: kind,
+          extractorVersion: registry.get(kind)!.version, policyDecision: 'index_allowed' });
+        const runner = createFileExtractionRunner({ jobs, registry, corpora: [corpus] });
+        await runner.run({ ...LANE });
+        expect(remoteCalls).toBe(0);
+        expect(jobs.get(queued.jobRefs[0]!.jobId)).toMatchObject({ status: change === 'unreadable tier' ? 'failed_retryable' : 'blocked_policy', lastErrorKind:
+          change === 'unreadable tier' ? 'egress_trust_tier_unknown'
+            : change === 'revoked scope' ? 'source_scope_superseded'
+              : change === 'revoked policy' ? 'egress_remote_not_permitted'
+                : change === 'Secrets' ? 'store_item_secrets' : 'egress_policy_trust_tier' });
+      } finally { jobs.close(); }
+    });
+  }
+
+  test('local extraction does not depend on remote live reads', async () => {
+    const jobs = jobStore();
+    const sink = recordingSink();
+    const extractor = fakeExtractor();
+    const id = jobs.enqueue({ refs: [ref(1)], extractorKind: extractor.kind,
+      extractorVersion: extractor.version, policyDecision: 'blocked_sensitive' }).jobRefs[0]!.jobId;
+    const unreadable = spyOn(jobs, 'get').mockImplementation(() => { throw new Error('remote policy read unavailable'); });
+    try {
+      const runner = createFileExtractionRunner({ jobs, registry: buildExtractorRegistry([extractor]), corpora: [{
+        corpusId: CORPUS_ID, trustDomain: 'internal', source: fakeSource(), sink,
+        trustTiers: { itemTrustTier: () => { throw new Error('remote tier read unavailable'); } },
+      }] });
+      await runner.run(LANE);
+      expect(unreadable).not.toHaveBeenCalled();
+      unreadable.mockRestore();
+      expect(jobs.get(id)?.status).toBe('indexed');
+      expect(sink.accepted).toHaveLength(1);
+    } finally { unreadable.mockRestore(); jobs.close(); }
+  });
+
+  for (const decision of ['blocked_sensitive', 'metadata_only', 'index_redacted', 'index_allowed', 'unreadable'] as const) {
+    test(`job policy restamped during OCR: ${decision}`, async () => {
+      const jobs = jobStore();
+      let calls = 0;
+      let readFailure: ReturnType<typeof spyOn> | undefined;
+      const kind = REMOTE_VLM_EXTRACTOR_KINDS[0];
+      const request = { refs: [ref(1, { mimeType: 'image/png' })], extractorKind: kind,
+        extractorVersion: 'venice-v1', policyDecision: 'index_allowed' as const };
+      const registry = createDefaultExtractorRegistry({ remote: {
+        client: { describe: async () => { calls++; return { text: 'ordinary image' }; } },
+        localReader: { extract: async () => {
+          if (decision === 'unreadable') readFailure = spyOn(jobs, 'get').mockImplementation(() => { throw new Error('database unavailable'); });
+          else jobs.enqueue({ ...request, policyDecision: decision });
+          return { status: 'metadata_only' };
+        } },
+      } });
+      request.extractorVersion = registry.get(kind)!.version;
+      try {
+        const id = jobs.enqueue(request).jobRefs[0]!.jobId;
+        const runner = createFileExtractionRunner({ jobs, registry, corpora: [{
+          corpusId: CORPUS_ID, trustDomain: 'internal', sink: recordingSink(),
+          source: fakeSource({ fetch: async () => ({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/png' }) }),
+          egressPolicy: { maxTrustTierForRemote: 'S3', allowDefaultDeferred: false },
+          trustTiers: { itemTrustTier: () => 'S3' },
+        }] });
+        await runner.run(LANE);
+        readFailure?.mockRestore();
+        expect(calls).toBe(decision === 'index_allowed' ? 1 : 0);
+        expect(jobs.get(id)?.status).toBe(decision === 'index_allowed' ? 'indexed'
+          : decision === 'unreadable' ? 'failed_retryable' : 'blocked_policy');
+      } finally { readFailure?.mockRestore(); jobs.close(); }
+    });
+  }
+
+  for (const markSecret of [true, false]) {
+    test(`remote authorization after model catalog: Secret=${markSecret}`, async () => {
+      const jobs = jobStore();
+      let tier: SourceTrustTier = 'S2';
+      let catalogCalls = 0;
+      let remoteCalls = 0;
+      const client = new VeniceVlmClient({
+        apiKey: 'synthetic-test-key',
+        model: 'kimi-k3',
+        catalog: {
+          cachePath: join(mkdtempSync(join(tmpdir(), 'extraction-catalog-')), 'models.json'),
+          fetchImpl: async () => {
+            catalogCalls++;
+            if (markSecret) tier = 'S5';
+            return Response.json({ data: [{ id: 'kimi-k3', model_spec: { privacy: 'private' } }] });
+          },
+        },
+        fetchImpl: (async () => {
+          remoteCalls++;
+          return Response.json({ choices: [{ message: { content: 'ordinary image' } }] });
+        }) as unknown as typeof fetch,
+      });
+      const registry = createDefaultExtractorRegistry({ remote: {
+        client, localReader: { extract: async () => ({ status: 'metadata_only' }) },
+      } });
+      const kind = REMOTE_VLM_EXTRACTOR_KINDS[0];
+      try {
+        const queued = jobs.enqueue({ refs: [ref(1, { mimeType: 'image/png' })], extractorKind: kind,
+          extractorVersion: registry.get(kind)!.version, policyDecision: 'index_allowed' });
+        const runner = createFileExtractionRunner({ jobs, registry, corpora: [{
+          corpusId: CORPUS_ID, trustDomain: 'secure_local', sink: recordingSink(),
+          source: fakeSource({ fetch: async () => ({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/png' }) }),
+          egressPolicy: { maxTrustTierForRemote: 'S3', allowDefaultDeferred: false },
+          trustTiers: { itemTrustTier: () => tier },
+        }] });
+        await runner.run({ ...LANE });
+        expect(catalogCalls).toBe(1);
+        expect(remoteCalls).toBe(markSecret ? 0 : 1);
+        expect(jobs.get(queued.jobRefs[0]!.jobId)).toMatchObject(markSecret
+          ? { status: 'blocked_policy', lastErrorKind: 'store_item_secrets' } : { status: 'indexed' });
+      } finally { jobs.close(); }
+    });
+  }
+
   test('a fully approved corpus does reach the remote lane', async () => {
     // Without this the refusals above could be passing because the remote lane
     // is broken rather than because the gate is doing its job.
@@ -1066,6 +1215,8 @@ describe('extraction egress gate: unreachable, not merely unconfigured', () => {
               return { text: 'described image' };
             },
           },
+          // The pre-send Secrets check read the payload and found no text.
+          localReader: { extract: async () => ({ status: 'metadata_only' }) },
         },
       });
       jobs.enqueue({

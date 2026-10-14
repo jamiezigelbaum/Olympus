@@ -13,6 +13,7 @@ import {
   isPublicTierRetired,
   loadSovereigntyEngine,
   loadSovereigntyPreset,
+  presetKeepingPublicTier,
   sovereigntyRoutingSnapshot,
   writeSovereigntyConfigFile,
   type SovereigntyConfig,
@@ -69,8 +70,8 @@ function decoyHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-decoy-home-'));
   const decoy = buildEnvBridgeSovereigntyConfig({ OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'decoy-key' });
   for (const profile of Object.values(decoy.modelProfiles)) (profile as { provider: string }).provider = 'decoy-unknown-provider';
-  mkdirSync(join(home, '.olympus'), { recursive: true });
-  writeFileSync(join(home, '.olympus', 'sovereignty.json'), JSON.stringify(decoy));
+  mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true });
+  writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json'), JSON.stringify(decoy));
   return home;
 }
 
@@ -887,15 +888,15 @@ describe('sovereignty config engine', () => {
     for (const preset of SOVEREIGNTY_PRESETS) {
       const config = loadSovereigntyPreset(preset);
       const engine = createSovereigntyEngine(config);
-      // A preset without a Public tier (the fresh-install preset) has no public_safe route.
-      const domains = isPublicTierRetired(config) ? ['internal'] as const : ['internal', 'public_safe'] as const;
-      for (const domain of domains) {
-        const route = engine.resolveAnalystRoute({ trustDomain: domain });
-        expect(route[0]).toMatchObject({
-          id: 'cloud-openclaw-infer',
-          profile: { provider: 'openclaw-infer', trust: 'standard_cloud' },
-        });
-      }
+      // No preset has a Public tier (owner ruling 2026-10-13): Personal is the only ordinary cloud route.
+      expect(isPublicTierRetired(config)).toBe(true);
+      expect(config.routes.public_safe).toBeUndefined();
+      expect(config.retrieval.trustDomains.public_safe).toBeUndefined();
+      const route = engine.resolveAnalystRoute({ trustDomain: 'internal' });
+      expect(route[0]).toMatchObject({
+        id: 'cloud-openclaw-infer',
+        profile: { provider: 'openclaw-infer', trust: 'standard_cloud' },
+      });
     }
   });
 
@@ -996,6 +997,7 @@ describe('sovereignty config engine', () => {
         kind: 'sovereignty_config_drift',
         config_source: 'file',
         drift: true,
+        keeps_public_tier: false,
         preset: 'local-first',
         profile_names: {
           present_only_in_live: ['host-extra-profile'],
@@ -1019,6 +1021,77 @@ describe('sovereignty config engine', () => {
       });
       expect(JSON.stringify(report)).not.toContain('secretRef');
       expect(readFileSync(path, 'utf8')).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a policy written before 1.0 keeps its Public tier without counting as drift, but its fields are compared', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-drift-public-'));
+    const path = join(dir, 'sovereignty.json');
+    try {
+      const config = structuredClone(loadSovereigntyPreset('local-first'));
+      config.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+      config.retrieval.trustDomains.public_safe = {
+        minimumExecutionTrust: 'standard_cloud',
+        allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding',
+        allowCloudQuery: true,
+        activationMode: 'hybrid_shadow',
+      };
+      writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+
+      const report = inspectSovereigntyConfigDrift(path);
+
+      expect(report).toMatchObject({ drift: false, keeps_public_tier: true, preset: 'local-first', distance: 0 });
+      expect(report.trust_domains.public_safe).toBeUndefined();
+
+      // A kept Public tier whose fields changed is still drift.
+      config.retrieval.trustDomains.public_safe.activationMode = 'lexical_only';
+      writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+      expect(inspectSovereigntyConfigDrift(path)).toMatchObject({
+        drift: true,
+        keeps_public_tier: true,
+        preset: 'local-first',
+        trust_domains: { public_safe: { activationMode: { live: 'lexical_only', preset: 'hybrid_shadow' } } },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a forced replacement keeps a whole Public tier and refuses a half or unreadable one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-keep-public-'));
+    const path = join(dir, 'sovereignty.json');
+    const older = () => {
+      const config = structuredClone(loadSovereigntyPreset('local-first')) as Record<string, any>;
+      config.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+      config.retrieval.trustDomains.public_safe = { ...config.retrieval.trustDomains.internal };
+      return config;
+    };
+    try {
+      const preset = loadSovereigntyPreset('local-only');
+      expect(presetKeepingPublicTier(preset, path)).toBe(preset);
+      writeFileSync(path, JSON.stringify(loadSovereigntyPreset('local-first')));
+      expect(presetKeepingPublicTier(preset, path)).toBe(preset);
+
+      writeFileSync(path, JSON.stringify(older()));
+      const kept = presetKeepingPublicTier(preset, path);
+      expect(kept.routes.public_safe).toEqual(preset.routes.internal);
+      expect(kept.retrieval.trustDomains.public_safe).toEqual(preset.retrieval.trustDomains.internal);
+      expect(() => createSovereigntyEngine(kept)).not.toThrow();
+
+      for (const halve of [
+        (config: Record<string, any>) => { delete config.routes.public_safe; },
+        (config: Record<string, any>) => { delete config.retrieval.trustDomains.public_safe; },
+      ]) {
+        const half = older();
+        halve(half);
+        writeFileSync(path, JSON.stringify(half));
+        expect(() => presetKeepingPublicTier(preset, path)).toThrow(/only half of a Public tier/);
+      }
+      writeFileSync(path, '{"schemaVersion":1,"routes":');
+      expect(() => presetKeepingPublicTier(preset, path)).toThrow(/cannot be read/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

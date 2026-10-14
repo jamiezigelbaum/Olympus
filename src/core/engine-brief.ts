@@ -17,8 +17,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import type { DashboardViewModelV1 } from '../workers/chatgpt/dashboard-contract.ts';
 import { configFromPluginConfig, defaultConfig, type OlympusConfig } from './config.ts';
-import { enginePaths, inspectEngine, readEngineConfig, type EngineExec } from './engine-service.ts';
-import { withWorkerAuthHeader, workerAuthTokenFromConfig } from './worker-auth.ts';
+import { engineServicePaths, inspectEngine, readEngineConfig, type EngineExec } from './engine-service.ts';
+import {
+  reachableLoopbackWorkerOrigin,
+  readRemoteAccessStatus,
+  remoteAccessDirForCli,
+  resolveRemoteAccessUrls,
+} from './remote-access.ts';
+import { workerFetch } from './worker-transport.ts';
+import { environmentWithWorkerSetupEnv, withWorkerAuthHeader, workerAuthTokenFromConfig } from './worker-auth.ts';
 
 export const ENGINE_BRIEF_SCHEMA = 'olympus.engine.brief.v1';
 /** The worker route (under the /v1 API base), behind the worker bearer like every non-health route. */
@@ -132,7 +139,7 @@ export interface EngineBriefDeps {
   uid?: number;
   platform?: string;
   env?: Record<string, string | undefined>;
-  /** The worker transport; the Linux branch passes its Unix-socket fetch here. */
+  /** Optional transport override; defaults to the platform's worker transport. */
   fetchImpl?: typeof fetch;
   now?: () => number;
   healthTimeoutMs?: number;
@@ -160,7 +167,7 @@ function none(state: EngineBriefState, detail: string): EngineBriefReport {
 
 type BriefFetch = { kind: 'ok'; brief: EngineBrief } | { kind: 'failed'; detail: string };
 
-/** Cheap by design: one launchctl read, one health probe and one brief request, the last two at once. */
+/** Cheap by design: one service-manager read, one health probe and one brief request, the last two at once. */
 export async function engineBriefReport(deps: EngineBriefDeps = {}): Promise<EngineBriefReport> {
   try {
     return await readEngineBrief(deps);
@@ -173,9 +180,9 @@ export async function engineBriefReport(deps: EngineBriefDeps = {}): Promise<Eng
 async function readEngineBrief(deps: EngineBriefDeps): Promise<EngineBriefReport> {
   const homeDir = deps.homeDir ?? homedir();
   const env = { ...(deps.env ?? process.env), HOME: homeDir };
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...deps, homeDir });
   const agent = inspectEngine({
-    homeDir,
+    homeDir, env,
     ...(deps.exec ? { exec: deps.exec } : {}),
     ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
     ...(deps.platform ? { platform: deps.platform } : {}),
@@ -191,11 +198,20 @@ async function readEngineBrief(deps: EngineBriefDeps): Promise<EngineBriefReport
   } catch {
     // An unreadable config leaves the defaults; the worker still answers health.
   }
-  const baseUrl = config.email.baseUrl || DEFAULT_BASE_URL;
-  // The bearer is read here, inside the owner's own process, and only ever sent to the worker.
-  const token = workerAuthTokenFromConfig(config, { env, homeDir });
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const root = baseUrl.replace(/\/$/, '');
+  // Where the worker listens: worker.env's OLYMPUS_EMAIL_SOURCE_HOST/PORT
+  // outrank engine.json, resolved as `olympus connect finish` does
+  // (remote-access.ts). The bearer is read here, inside the owner's own
+  // process, and only ever sent to that worker on this computer's loopback.
+  const local = resolveRemoteAccessUrls({
+    layeredEnv: environmentWithWorkerSetupEnv({ env, homeDir }),
+    env,
+    status: readRemoteAccessStatus(remoteAccessDirForCli(env)),
+    configuredWorkerBaseUrl: config.email.baseUrl || DEFAULT_BASE_URL,
+  }).local_url;
+  const loopback = reachableLoopbackWorkerOrigin(local);
+  const token = loopback ? workerAuthTokenFromConfig(config, { env, homeDir }) : undefined;
+  const fetchImpl = deps.fetchImpl ?? workerFetch;
+  const root = `${loopback ?? local}/v1`;
   const [reachable, brief] = await Promise.all([
     probeHealth(fetchImpl, `${root}/health`, deps.healthTimeoutMs ?? 1_000),
     token

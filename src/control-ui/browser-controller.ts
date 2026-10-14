@@ -60,6 +60,9 @@ export interface OlympusBrowserController {
 export const LANDED_HIGHLIGHT_MS = 4000;
 
 export function mountDashboardController(options: OlympusBrowserControllerOptions): OlympusBrowserController {
+  // The page serializes this function, so module constants are not in scope
+  // there: keep this equal to the exported highlight constant above.
+  const landedHighlightMs = 4000;
   let canWrite = options.canWrite;
   let csrfToken = options.csrfToken || '';
   let signature = options.signature || '';
@@ -964,7 +967,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     const landed = focus;
     landed.classList.add('landed');
-    view.setTimeout(() => landed.classList.remove('landed'), LANDED_HIGHLIGHT_MS);
+    view.setTimeout(() => landed.classList.remove('landed'), landedHighlightMs);
     if (typeof focus.scrollIntoView === 'function') focus.scrollIntoView({ block: 'center' });
     focus.focus();
   }

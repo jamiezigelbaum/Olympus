@@ -1,6 +1,7 @@
 # Standalone Olympus engine on Linux (W5)
 
-Status: lifecycle design, 2026-10-12. Not implemented or host-qualified.
+Status: W5 tracks integrated locally, 2026-10-12. Integration proof and
+Omarchy acceptance are recorded below. Not published or host-qualified.
 Code baseline: `12ccfcae62a695d0a3db8021e6c79b409cb52c77`. All repository
 `file:line` references below refer to that revision. Statements under
 “Current contract” describe inspected code; subsequent sections specify work
@@ -30,10 +31,43 @@ never selects a weaker mode. No speed floor is added to the owner's W2
 choice. Apple Messages remains outside Linux scope.
 
 The demo stays frozen at `de0b32e2`. Listing claims, public copy and demo
-configuration remain untouched until OpenAI review closes. This document
-and its documentation inventory registration are the only changes in this
-work order; implementation, release publication and live installation are
-separate work.
+configuration remain untouched until OpenAI review closes. The original
+design-only work order is complete; the owner subsequently authorized the
+five-track integration and a local acceptance artifact. Publication and live
+installation remain separate work.
+
+## Desktop launcher (local branch, 2026-10-13)
+
+Install and upgrade register **Olympus** in the user's XDG applications
+folder. The entry runs the absolute `~/.local/bin/olympus` shim with
+`dashboard`; the shim preserves the installation's XDG layout. The icon is
+`assets/icon.png` (512×512), installed in the user hicolor theme. Both files
+are included in install recovery and receipt-based removal. No desktop or
+icon files are written to system directories. Optional desktop/icon cache
+refresh tools are best effort.
+
+Olympus replaces an existing desktop entry only when its Desktop Entry group
+has `X-Olympus-Managed=true`. Remove that key to take ownership; installation
+then refuses and leaves the file in place. A changed icon is also retained.
+The shell uninstaller retains changed artifacts and reports incomplete removal;
+move those files aside before retrying. Unchanged owned files are removed in
+both keep-data and purge modes. `engine verify` reports `desktop_entry.present`
+and its path separately from engine health.
+
+The dashboard still uses the default browser through the existing private
+owner-ticket opener. A Chromium `--app=file://…` launch could carry only the
+filename, but retaining the app window through the redirect to the per-session
+localhost origin has not been browser-qualified. No browser command selection,
+owner proof, origin check, or secret handling changes in this slice.
+
+Omarchy acceptance remains a real-laptop check: install, press Super+Space,
+find Olympus with its icon, and open it. Compare with `olympus dashboard`;
+confirm the owner dashboard loads and no secret appears in process arguments.
+Repeat after upgrade and rollback. Check `engine verify`, then confirm the
+entry/icon disappear after keep-data uninstall; use a disposable install for
+purge. A custom XDG data directory and an unmarked user-edited entry should
+also be checked. Container tests do not establish launcher discovery or browser
+behavior on Hyprland.
 
 ## Current contract, verified against code
 
@@ -78,8 +112,8 @@ needed to address it. A marked launcher carries that layout, not secrets.
 | Unit | `$XDG_CONFIG_HOME/systemd/user/olympus-engine.service` |
 | Config, sovereignty, worker environment, backend selection, install receipt | `$XDG_CONFIG_HOME/olympus/` |
 | Encrypted secrets and local wrapping key | `$XDG_CONFIG_HOME/olympus/secrets.enc` and `secrets.key` |
-| Package generations and pinned runtime generations | `$XDG_DATA_HOME/olympus/engine/` |
-| Existing indexes, model files, remote registration and child/status records | `$XDG_DATA_HOME/openclaw/olympus/` (compatibility namespace, no OpenClaw dependency) |
+| Package generations and pinned runtime generations | Fresh: `$XDG_DATA_HOME/olympus-engine/`; existing receipts keep `$XDG_DATA_HOME/olympus/engine/` |
+| Indexes, model files, remote registration and child/status records | Fresh standalone: `$XDG_DATA_HOME/olympus/`; existing standalone receipts keep their recorded legacy data root |
 | Install transactions, rollback receipts, engine/install logs | `$XDG_STATE_HOME/olympus/engine/` |
 | Disposable downloads | `$XDG_CACHE_HOME/olympus/engine/` |
 | Lifecycle lock and private worker socket (owner decision 2026-10-12) | `$XDG_RUNTIME_DIR/olympus/` |
@@ -421,6 +455,33 @@ provisioned unlock mechanism; a locked store is visibly unavailable after
 boot. No passphrase in unit text, argv, journal or persistent plaintext env
 file, and no unattended-readiness claim without proving unlock.
 
+### PR 2 implementation seam (2026-10-12)
+
+The SECRETS implementation persists `{ "version": 1, "backend": "file" }`
+in `$XDG_CONFIG_HOME/olympus/secret-backend.json` before the Linux default
+factory returns a credential consumer. Explicit `libsecret` selection is
+persisted in the same file; conflicting ambient selections refuse. Existing
+ciphertext/key files without that record require recovery or a fresh layout,
+never migration. `secrets.enc` and `secrets.key` use the table's config root.
+
+PR 1a integration point: replace `resolveLinuxSecretPaths` in
+`src/core/linux-secret-backend.ts` with the shared receipt-bound resolver.
+Until then it resolves and validates absolute HOME/XDG paths, and callers can
+supply `encryptedFilePath`, `keyFilePath`, and `backendFilePath`. The installer
+must resolve selection before starting consumers; CLI and service must receive
+the same receipt-bound paths. This local resolver does not discover receipts.
+
+The optional Secret Service backend requires `/usr/bin/python3` with
+PyGObject/Gio (`python-gobject` on Arch; `python3-gi` on Debian/Ubuntu) and an
+already provisioned, unlocked user Secret Service. It uses D-Bus directly:
+`secret-tool`'s password helpers may unlock during access, so they cannot
+preserve the no-interactive-unlock rule across a lock race. Every helper has
+a five-second SIGKILL deadline; neither Unlock nor Prompt is invoked. Missing
+dependencies refuse as unavailable. Its explicit `probe()` exercises disposable
+write/read/delete and reports failed cleanup, but proves no reboot unlock.
+CI exercises a private fake Secret Service; real Omarchy logout/reboot,
+unattended file access, and desktop keyring behavior remain host acceptance.
+
 ## Desktop source opening and headless approval
 
 Share target validation with the Mac; platform adapters change dispatch only.
@@ -508,8 +569,59 @@ to the second computer, so that computer must also be trusted against other
 local users (or use the owner-code factor there too). Same-UID processes and
 root remain trusted; socket permissions cannot separate them. PR 4 must adapt
 worker health, relay/CLI clients and direct-transport validation for the socket,
-without treating a forged HTTP header as proof of socket origin. A browser on
-the engine host also needs the approved socket-to-browser route or code factor.
+without treating a forged HTTP header as proof of socket origin. A desktop browser uses the owner-proven session-origin bridge below. Headless
+browsers continue to use the authenticated socket forward.
+
+**Desktop amendment, approved by the owner on 2026-10-12:** a graphical
+session may additionally expose an owner-proven browser bridge. The private
+socket remains the backend. Each engine instance and each desktop listener
+epoch uses a fresh 128-bit base32 label under `.localhost`, on the configured
+port. The fixed loopback entry serves only a bodyless 303 to that current
+origin, preserving path/query and browser fragment inheritance. It never sets
+cookies or runs scripts. Old session Hosts and every Host mismatch refuse.
+
+`olympus dashboard` asks the private socket to open an owner ticket: exclusive
+0600 HTML inside the validated 0700 runtime directory. The trusted desktop
+opener receives only the absolute filename in its separate systemd scope;
+no secret enters argv. The file probes the current session origin in the
+actual browser before navigating to `/owner-proof#<single-use-ticket>`.
+Resolution failure stays on a clear refusal with the SSH fallback, never the
+fixed origin. Proof consumption is atomic, expires after 60 seconds and
+removes the file. Ticket opening is limited to once per ten seconds globally.
+Only one pending ticket and at most sixteen 12-hour owner sessions are held.
+
+An HttpOnly, SameSite=Lax, host-only cookie is bound to this bridge instance.
+**Cookies alone are insufficient:** cookies cross ports, so every content
+read and privileged socket dispatch also requires an independent random proof
+in this origin's localStorage. A navigation without both proofs receives only
+a constant confirmation shell. The shell fetches the actual document with
+the storage proof; native consent forms attach that proof separately and
+retain the worker's CSRF, Origin and navigation checks. The bridge validates
+external Host and Origin before rewriting the proven request for the socket.
+It never adds a worker bearer to browser requests. After private-ticket proof, the socket also establishes the existing dashboard
+control session so an OAuth-first owner can subsequently open the dashboard.
+Dashboard launch tickets and control-session CSRF remain the existing worker
+mechanism. No browser request gains an injected bearer.
+
+Browser and socket fetches never follow redirects with the storage proof.
+A browser fetch receives an inert destination and performs ordinary navigation;
+form responses use 303. Upstream document CSP is enforced in the reconstructed
+document, with only the bridge bootstrap additionally authorized; all pages
+set `worker-src 'none'`, and every `Service-Worker` request is rejected.
+`Clear-Site-Data` clears entry cache/storage and proof-response cache; it is
+not treated as a way to revoke a hostile running tab. Fresh origin isolation
+provides that boundary. All bridge content is no-store.
+
+Live graphical readiness and the current server-mode setting gate startup,
+every request, and post-await publication. A coalesced asynchronous two-second
+observer performs bounded desktop probes (up to three seconds per command);
+HTTP requests only read its snapshot, never spawn subprocesses. When the
+observer detects logout or server-mode enable it closes the listener and
+revokes proofs; requests immediately refuse the unavailable snapshot. Relogin creates a new
+origin. A port collision leaves the owner socket running, opens no replacement
+listener and reports `desktop_bridge.state=port_in_use` plus its remedy through
+socket health, engine status and doctor. Headless hosts open no TCP listener.
+Mac browser, socket-free transport, and page output are unchanged.
 
 Rejected alternative (kept for the record): retain loopback but require a short-lived, single-use code
 issued only by the owner's CLI, bound to the pending install/client/redirect/
@@ -582,7 +694,7 @@ checks belong to Omarchy acceptance, not claimed unit coverage.
 | 3a. Runtime pins and publisher | Verified Linux architecture pins, archive/executable checks and publisher filling; no install transaction. | Missing pin, tampered archive and tampered cached executable refuse before execution; publisher fixture cannot emit an unfilled template or overwrite prior assets. | Each architecture needs real CPU/glibc/loadability proof before publication; x64 does not qualify arm64. |
 | 3b. Install/upgrade transaction | Depends on 1a–1c, 2 and 3a; Linux installer, util-linux flock supervisor, durable recovery and lifecycle doctor. | Fault injection at every durable boundary recovers twice; same-release repair retains previous; failed upgrade versus failed rollback health are distinct; missing tools/bus/linger refuses before active mutation. | CI subprocess contention for install/rollback and cancellation keeps the lock through mutation; PID-1 container proves real activation/recovery. Shell syntax/ShellCheck; reboot/power-loss acceptance on Omarchy. |
 | 3c. Uninstall and purge | Depends on 3b; receipt-bounded shell removal without Bun/app; optional explicit data purge. | Receipt fixtures preserve unrelated files/replacements, retain data by default, remove only enumerated owned artifacts with consent, and refuse deletion on unknown custody; repeat interrupted removal safely. | PID-1 container: uninstall without Bun/app, install/rollback/uninstall lock contention, cgroup/listener release and purge inventory. Omarchy: final runtime-directory teardown and explicit linger restoration. |
-| 4. Desktop opener and headless handoff | Depends on 1a/1b; live graphical readiness, separate viewer scope and bounded tunnel reuse. Approval transport is the owner-only Unix socket. Public capabilities wait for 5. | Shared private/unreadable dispatch rejects symlink swaps/traversal/argv injection/revoked eligibility. HTML/script disguised as `.pdf` and unknown MIME open only the folder. Inactive graphical target/stale display refuses; manager environment can prove desktop readiness when engine env lacks DISPLAY. **Owner-only socket:** other local user cannot approve, including forged headers/replay. | PID-1 container: viewer fixture in its own scope survives engine restart; socket permission boundary tested with a second UID. Omarchy: actual Hyprland viewer, login/logout readiness and second-computer OAuth/tool call. |
+| 4. Desktop opener and headless handoff | Depends on 1a/1b; live graphical readiness, separate viewer scope and bounded tunnel reuse. Approval backend is the owner-only Unix socket; the approved desktop bridge adds per-session browser origin and owner proof. Public capabilities wait for 5. | Shared private/unreadable dispatch rejects symlink swaps/traversal/argv injection/revoked eligibility. HTML/script disguised as `.pdf` and unknown MIME open only the folder. Inactive graphical target/stale display refuses; manager environment can prove desktop readiness when engine env lacks DISPLAY. **Owner-only socket:** other local user cannot approve, including forged headers/replay. | PID-1 container: viewer fixture in its own scope survives engine restart; socket permission boundary tested with a second UID. Omarchy: actual Hyprland viewer, login/logout readiness and second-computer OAuth/tool call. |
 | 5. Consumer integration and qualification | Depends on all prior parts and relevant W1–W4 proof; **after OpenAI review closes**. Host-neutral payload/decoder, copy inventory and supported entrypoints. | Old/new payload compatibility, Linux never says “opened on Mac,” unsupported architecture/optional lanes remain unavailable, frozen demo/listing fixtures unchanged until authorized publication. | Omarchy acceptance below; independent review and required exact-head/exact-main CI remain required for each critical implementation PR. |
 
 PRs 1a–4 can land internally without altering the reviewed listing or serving
@@ -590,6 +702,112 @@ changed plugin bundles; the owner-only approval route stays disabled
 until proven. Publication is a separate explicitly authorized
 action after review closure. Runtime pin qualification and schema compatibility
 are engineering proof tasks; finding 1 was decided by the owner on 2026-10-12.
+
+### SVC implementation handoff (2026-10-12)
+
+Rows 1a, 1b and 1c have separate local commits. The focused remote run passed
+136 tests across nine files, followed by `bun run build` and
+`bunx tsc --noEmit -p .`. Failing-first runs preceded the layout, service and
+admission implementations. A checked-in pre-change Mac plist fixture preserves
+its exact bytes; the retained Mac lifecycle tests pass. Fresh independent
+static review found no remaining P1/P2 findings after custody and alternate-root
+repairs. This is unit/subprocess proof, not service-manager qualification.
+
+Integration seams for the neighbouring tracks:
+
+- `src/core/linux-engine-layout.ts` exports `resolveLinuxEngineLayout(env)`,
+  `linuxEngineEnvironment(layout)`, `preflightLinuxEngineLayout(layout)` and
+  `publishLinuxEngineReceipt(layout)`. Consumers discover the receipt from the
+  default and explicitly selected config roots. `workerSocketPath` is the
+  owner-only socket location; `configDir`, `secretsPath`, `secretsKeyPath` and
+  `workerEnvPath` are the secret/backend track's path seam. Runtime is required
+  and validated at mutation preflight; read-only resolution does not invent it.
+- PR 4 must provide the socket transport at that path, including native worker
+  readiness and relay/CLI clients. Only its proven package may declare
+  `package.json` → `olympus.linuxApprovalTransport = "owner-unix-socket-v1"`.
+  The service installer refuses activation without that declaration; this
+  branch does not declare it. Health requests already use the Unix socket.
+  This declaration is a package integration seam, not a user override or a
+  replacement for PR 4's second-UID proof.
+- `lifecycleLockPath` identifies the lifecycle lease target. Core commands use
+  the process-instance-aware `file-lease.ts` protocol with no live-owner age
+  takeover. PR 3b owns the kernel-flock installer supervisor and must coordinate
+  that outer transaction with this lease; flock and the lease are not equivalent
+  merely because they name the same path. `service-current.json` and
+  `service-previous.json` in `stateDir` retain the program, unit, prior config,
+  build identity and matching Bun digest for service rollback. Durable package
+  generation exchange and interrupted-install recovery remain PR 3b's scope.
+- `src/core/engine-maintenance.ts` exports sync and async maintenance fences,
+  plus worker and session admission. Both use the consult state path; worker
+  preparation may nest session admission. Lifecycle holds the fence before
+  drain through service mutation (and through rollback health/restoration).
+  Forced process death preserves the existing durable settlement record;
+  recovery replay is covered twice without a duplicate recovery dispatch.
+
+The PID-1 systemd/logind CI harness is deferred: the available isolated test
+runner does not supply its own delegated systemd user manager and linger.
+No command mock is claimed as that proof. Before rc.7 host qualification,
+run the Omarchy acceptance below, especially alternate XDG roots, actual
+FragmentPath/enablement, linger/logout/reboot, detached child-cgroup cleanup,
+copytruncate under the manager's open descriptors, and shutdown/recovery during
+settlement. Ubuntu and arm64 are not qualified by these tests. Linux zkAPI,
+listing/demo changes and publication remain outside this activation proof.
+### PR 4 implementation handoff (OPENER, 2026-10-12)
+
+The backend implementation is in `src/core/worker-transport.ts` and
+`src/core/linux-desktop-opener.ts`. Qualification is still pending; this does
+not enable or publish Linux source-open controls under the legacy `kind: mac`
+payload. PR 5 must adapt that payload/decoder before wiring
+`openLinuxDesktopPath({ path, roots, revalidateEligibility })` into the private
+and unreadable controls. Its result distinguishes file from folder opening.
+Both existing capability owners now supply an eligibility callback that the
+adapter must call after its awaited probes, immediately before dispatch.
+
+The worker binds only the Unix socket on Linux. The CLI, health, relay and
+legacy worker readiness probe use that transport; the browser's HTTP origin
+stays unchanged for cookies and CSRF. The relay preserves manual redirects
+without following them. `workerSocketPath`/`validateWorkerSocket` are the
+lifecycle seam: pass the resolved `XDG_RUNTIME_DIR` to every engine child and
+CLI invocation. They refuse missing/unsafe runtime directories and occupied
+socket paths; they never remove an old socket or start a TCP alternative.
+Crash recovery of a retained socket requires custody proof from the lifecycle
+track before removal. The standalone clients use Bun's Unix fetch support;
+a non-Bun Linux caller refuses rather than falling back to TCP.
+
+The remote model adds optional `socketPath`; existing Mac payloads and command
+text keep their old form. CLI and panel print the validated equivalent of:
+
+```text
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:<socket> <target>
+```
+
+The frontend transport addition is required to prevent the old instructions
+from forwarding to an unrelated Linux TCP process. It changes no listing,
+demo configuration or public deployment. Linux private-source controls stay
+disabled until the PR 5 host-neutral capability lands. A browser on the Linux
+engine host uses the owner-proven desktop bridge when graphical readiness
+is confirmed; otherwise it needs the authenticated SSH socket forward.
+
+Real-host qualification remains: second-UID denial (the isolated build runner
+cannot change UID), PID-1/cgroup viewer survival across engine restart,
+Hyprland login/logout and MIME resolver behavior, and OAuth plus a real tool
+call from a second computer. The second-UID regression is executable in a
+privileged disposable Linux test environment and skips explicitly otherwise.
+Mac regressions here exercise preserved transport/argv contracts in fixtures;
+this is not native Mac GUI qualification. zkAPI activation is outside OPENER
+and remains disabled for Linux launch.
+
+Focused OPENER validation: remote build and TypeScript check passed, followed
+by 158 tests passing with one explicit second-UID skip across
+`worker-transport`, `linux-desktop-opener`, `remote-open`,
+`chatgpt-private-open`, `unreadable-files`, `local-private-answers`,
+`architecture-guard`, `public-surface-guard` and `private-ops-disposition`.
+The independent critical review found no remaining actionable P1/P2 after
+manual-redirect preservation, browser socket handoff and viewer stdio fixes.
+Required hosted CI and real-host qualification remain unrun in this local-only
+handoff. The existing Mac open argv and remote handoff fixtures passed. Additional
+CLI and native-worker/native-relay regressions exercise Linux socket health
+and handoff end to end while retaining explicit TCP lifecycle fixtures.
 
 ### Deferred copy inventory (PR 5 only)
 
@@ -686,3 +904,719 @@ it runs Ubuntu jobs without the proposed PID-1/linger harness. The new tests
 and harness are implementation obligations, not results claimed by this doc.
 The missing-host hint citation is corrected to `src/core/doctor.ts:495`;
 `:481` only appends the installed engine to the host list.
+
+## W5 PINS implementation handoff (2026-10-12)
+
+Scope: PR 3a runtime/publisher; PR 3b and 3c **drafts**, for rc.7.
+No listing, Mac download route, live deployment or Linux qualification is changed.
+
+### Runtime evidence
+
+The Mac bootstrap (`scripts/install-macos.sh`) pins only Bun 1.3.14.
+The Linux bootstrap uses that version's **x64 baseline** build. On 2026-10-12:
+
+- [GitHub release API](https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.3.14)
+  reports `bun-linux-x64-baseline.zip`, 35,595,658 bytes, SHA-256
+  `a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7`.
+- [Bun SHASUMS256.txt](https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/SHASUMS256.txt)
+  agrees. An independently downloaded archive matched both size and digest.
+- Its sole program, `bun-linux-x64-baseline/bun`, is 91,802,480 bytes, SHA-256
+  `a8f9ebd1770ddc8e55dab7a68d4ec1ec1eebf374bb97cc65cf2c3cb373fc6791`.
+- [Versioned upstream requirements](https://github.com/oven-sh/bun/blob/bun-v1.3.14/docs/installation.mdx)
+  specify glibc >=2.17 and Nehalem/SSE4.2 for this baseline. These are upstream
+  floors, not a claim that we tested a physical Nehalem or glibc 2.17 host.
+
+A remote-build isolated Linux x86_64 container independently fetched those
+bytes, verified both digests, then ran `bun --version` (1.3.14), JavaScript and
+an in-memory SQLite query successfully on glibc 2.36. This is actual execution,
+not physical-host or minimum-floor qualification.
+
+`config/linux-runtime-pins.json` is the pin authority. It deliberately records
+`pending-omarchy`; asset publication refuses until qualification is recorded.
+arm64 is absent and refused. No Linux Tor/zkAPI capability is enabled here.
+Existing model runtime authorities are unchanged: llama.cpp b11320 in
+`src/workers/source-index/built-in-reasoning/manifest.ts`, LiteRT-LM 0.18.0
+in `src/workers/source-index/built-in-embedding/manifest.ts`. They are not
+additional runtimes downloaded or pinned by the Mac bootstrap.
+
+### SVC seams: drafts, not an implemented transaction protocol
+
+The shell does preflight and verified private staging only. It does not swap
+active packages, write service units, select a secret backend or implement
+another recovery journal. SVC must implement these dependencies before the
+drafts become a qualified installer:
+
+1. **Install:** verified scratch Bun invokes
+   `engine install --from-checkout <verified-package> --bun <verified-bun> --restart`.
+   The same command with `--dry-run` (instead of `--restart`) runs first under
+   custody and must reject unsupported capabilities, unsafe/existing data and
+   paths without mutation, before linger changes. These flag spellings already exist in `src/core/engine-cli.ts`. On Linux the
+   implementation must copy both inputs into durable immutable generations
+   before returning; scratch is removed on exit. It must validate package build,
+   layout, receipt, existing-data refusal, file-secret selection, zkAPI-off and
+   owner-only worker socket. Durable prepare/switch/commit/recovery, exact-build
+   health, same-release repair, rollback and cleanup belong to SVC, not these
+   shell drafts. Nonzero means failure, including failed health or recovery.
+2. **Lock:** `${XDG_RUNTIME_DIR}/olympus/lifecycle.lock`, same owner, mode 0600.
+   Installer runs `flock --nonblock --close <lock> /bin/sh <private-helper> ...`;
+   the helper runs read-only admission, linger, install and status while locked.
+   Uninstaller runs the verified Bun command directly under that supervisor.
+   CLI lifecycle operations must recognize actual util-linux supervisor custody
+   (verified ancestry/identity, not an environment flag) and avoid reacquiring.
+   Direct CLI install/rollback/uninstall must acquire that same lock. Check
+   paths and receipt again under custody. Ordinary HUP/INT/TERM is ignored
+   until the mutation returns so cleanup cannot overtake it; no claim is made
+   that killing the supervisor with SIGKILL is safe. CLI/service descendants
+   must not inherit the descriptor. Never unlink the lock.
+3. **Linger:** under the same lifecycle lock, bootstrap probes and enables only the current account without
+   a password agent, then re-reads the state. `OLYMPUS_LINGER_BEFORE=yes|no`
+   conveys the observation for a fresh receipt; an existing receipt's original
+   state wins on repair. SVC must persist it before active mutation. Failures
+   disclose it; neither draft disables account-wide linger automatically.
+4. **Status:** `engine status` emits JSON with a boolean `ok`. The draft checks
+   that value; a zero exit by itself is insufficient (current Mac status can
+   return `ok:false` with exit zero). Install owns exact-build health proof;
+   status adds diagnostics, not a replacement for that proof.
+5. **Removal receipt:** SVC atomically writes a 0600, owner-owned non-executable
+   projection at `$XDG_CONFIG_HOME/olympus/uninstall-receipt.tsv`. Exactly eleven
+   tab-separated key/value lines, unique keys, no control characters:
+
+   ```text
+   schema          olympus.linux-uninstall.v1
+   uid             <decimal owner uid>
+   bun             <absolute immutable engine runtime executable>
+   bun_sha256      <executable SHA-256>
+   cli             <absolute immutable engine generation>/dist/cli.js
+   cli_sha256      <bundled CLI SHA-256>
+   config_root     <resolved XDG config root>
+   data_root       <resolved XDG data root>
+   state_root      <resolved XDG state root>
+   cache_root      <resolved XDG cache root>
+   linger_before   yes|no
+   ```
+
+   The illustration uses spaces for readability; the actual delimiter is one
+   tab. This projection is a proposed seam, not the canonical receipt schema.
+   The shell validates it, ancestry and executable hashes, then calls
+   `engine uninstall` under the same lock. SVC must revalidate its canonical
+   receipt, require maintenance/cgroup/listener release, remove only enumerated
+   owned machinery, preserve replacements and all personal data by default,
+   keep recovery evidence until finished, and return nonzero for incomplete
+   removal. The draft does no guessed recursive deletion.
+
+### Explicit remaining work
+
+PR 3b is deferred beyond the tested shell draft: no claim of durable
+transaction/recovery proof, fault injection at SVC's durable boundaries,
+backoff directive verification, direct-CLI lock interoperability, or PID-1
+activation proof. The bootstrap disk check covers scratch only; SVC must
+check destination generation headroom before mutation.
+
+PR 3c is deferred beyond the tested receipt/CLI draft: **missing or corrupt
+Bun/app refuses and preserves everything**. The design requires system-tools-only
+removal in that situation; that implementation, explicit purge inventory and
+consent, profile/MIME/link cleanup, resumable removal and optional linger
+restoration still need SVC's final receipt/custody contract. The current draft
+rejects purge flags instead of claiming full removal. Its fake-CLI tests prove
+argument/custody/verification boundaries, not the deletion algorithm.
+
+Before Linux publication, run on the owner's Omarchy laptop: pinned CPU/glibc
+loadability; systemd PID-1/user-manager activation; missing-tool and denied-linger
+refusal; logout/reboot/unattended startup; real socket ownership; install/rollback/
+uninstall contention and SIGKILL/power-loss recovery; same-release repair; exact
+build health; Bun-free removal/purge/replacements; runtime-directory teardown
+and explicit linger restoration. Ubuntu is not qualified by the container run;
+its unsupported capabilities must refuse. Mac scripts remain byte-for-byte
+identical; real native Mac regression remains separate from Linux shell mocks.
+
+### PINS validation receipt
+
+The PINS working snapshot passed 89 tests across
+`install-linux-script`, `publish-release-to-site`, `architecture-guard`,
+`public-surface-guard` and `private-ops-disposition` via remote-build.
+One existing rsync deployment simulation was skipped because the isolated
+image lacks rsync; publisher asset-preservation fixtures ran and passed.
+Both `/bin/sh` and dash ran the new scripts. ShellCheck 0.10.0 checked both
+scripts and the generated activation helper. Tests exercise actual util-linux
+flock contention across install/uninstall and process-group SIGTERM; lifecycle
+commands remain fakes, so they do not qualify SVC or real systemd behavior.
+Mac bootstrap/uninstaller SHA-256 fixtures match the original bytes.
+
+`bun run build && bunx tsc --noEmit -p .` passed through remote-build.
+No built-in-reasoning installer tests were run. Independent static review
+found and closed two P2s before this proof: linger observed outside lifecycle
+custody, and the Mac publisher overwriting an archive already pinned by Linux.
+The final reviewed implementation had no remaining P1/P2 findings; that is
+not a substitute for the deferred host qualification above.
+
+## W5 integration handoff
+
+The local integration retains the SVC, SECRETS, PINS and OPENER handoffs above;
+the AGENTS audit and Mac copy fixtures are in `docs/design/linux-agents.md`.
+Historical handoff deferrals describe those track revisions, not the completed
+integration seams:
+
+- Secrets and worker transport consume `resolveLinuxEngineLayout`; installed
+  receipt roots take precedence over shell drift. The service selects the durable
+  secret backend before launching consumers. Linux zkAPI remains unavailable.
+- The Linux worker backend runs over the private Unix socket. The approved
+  desktop bridge is a separate loopback listener requiring the session-origin
+  owner proofs above; headless mode retains only the socket.
+  The outbound relay child uses that socket for forwarded requests. OAuth grants
+  for ChatGPT, Claude, Grok, Grok Bot and Cursor retain their existing pins.
+- Linux Grok API keys use the existing routable access-credential envelope,
+  store only a digest in the bearer connection table, and stay revocable. They
+  are accepted only on the default remote surface for the current install ID,
+  never as a ChatGPT directory grant. Existing Mac key generation is unchanged.
+- The live agent page receives the opener's resolved SSH socket handoff. A Linux
+  desktop uses the approved owner-proven session-origin bridge; the engine never opens an
+  unauthenticated TCP approval listener. Missing SSH configuration is shown as
+  not ready. The trusted browser computer's loopback port must be free.
+- Install, upgrade, rollback and removal use the same runtime kernel lock.
+  The installation receipt inventories machine artifacts for removal without
+  executing an installed Bun or package. Data retention is the default.
+- `--linux-local` in `scripts/publish-release-to-site.ts` prepares a local bundle
+  from the ordinary release artifact and the real Linux installer template.
+  It does not publish to the site or mark pending runtime pins qualified.
+
+The release version is read from the repository manifests. This integration
+is intended for rc.7; constructing a local candidate does not bump the release,
+publish it, or imply that the current version has passed laptop acceptance.
+
+## Omarchy acceptance runbook
+
+Use a dedicated ordinary account on an x86_64 Omarchy laptop with a real
+systemd user session. Never run Olympus as root. These commands assume the
+standard XDG roots; a separate fresh account can repeat them with absolute, non-overlapping
+nondefault `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and
+`XDG_CACHE_HOME`. Keep the same config selector when addressing that install.
+Ubuntu is not qualified by this run: capability checks must succeed or refuse
+before activation. No distro packages are installed automatically.
+
+### Prepare and transfer the local candidate
+
+From the source worktree, after committing the rebuilt `dist`, use the build
+runner to create the normal public artifact and local bundle. The output
+directory must not already exist. Substitute the source worktree path locally;
+no remote host name is part of this procedure.
+
+```sh
+~/.local/bin/remote-build run --cwd "$PWD" --artifact release-artifacts -- sh -c '
+  bun run release:artifact &&
+  VERSION=$(bun -p "require(\"./package.json\").version") &&
+  bun scripts/publish-release-to-site.ts --linux-local \
+    --artifact "release-artifacts/olympus-$VERSION.tgz" \
+    --output release-artifacts/omarchy-acceptance
+'
+```
+
+Copy the complete `release-artifacts/omarchy-acceptance` directory to the
+laptop using your normal file transfer. It includes the exact tarball,
+`install-linux.sh`, `uninstall-linux.sh`, and `SHA256SUMS`. The delivered acceptance bundle also contains the verified
+`bun-linux-x64-baseline.zip`. Add
+`--bun-archive "$BUNDLE/bun-linux-x64-baseline.zip"` to use it offline;
+archive size/hash and executable hash are still enforced. A bundle prepared
+with the command above alone downloads that exact pinned runtime over HTTPS
+unless you supply its verified archive yourself.
+
+### Fresh installation and engine proof
+
+In a terminal inside the copied bundle:
+
+```sh
+BUNDLE=$PWD
+sha256sum -c SHA256SUMS
+set -- olympus-*.tgz
+test "$#" -eq 1
+sh ./install-linux.sh --tarball "$BUNDLE/$1"
+export PATH="$HOME/.local/bin:$PATH"
+olympus engine status
+olympus engine verify
+systemctl --user show olympus-engine.service \
+  --property=FragmentPath,ActiveState,UnitFileState,MainPID,ControlGroup,Result,ExecMainStatus
+loginctl show-user "$(id -u)" --property=Linger --value
+stat -c '%a %u %n' "$XDG_RUNTIME_DIR/olympus" "$XDG_RUNTIME_DIR/olympus/worker.sock"
+ss -xl
+ss -ltn
+olympus doctor
+```
+
+Expect a private directory/socket (0700/0600, this UID), a healthy exact build,
+an enabled unit, verified linger, and an owner Unix worker socket. A live
+desktop additionally reports the owner bridge; headless mode has no TCP listener. Relay online is a separate status fact. Model download/warm-up is not
+engine health; wait for the model readiness the panel reports before testing
+Private answers. The installer refuses missing tools, old systemd, no user
+bus, unsupported CPU/glibc or denied linger with a remedy; do not work around
+those refusals by inventing an XDG runtime directory or running as root.
+
+### Owner approval and agent access
+
+On the Omarchy desktop, first run:
+
+```sh
+olympus server-mode auto
+olympus engine status
+olympus dashboard
+```
+
+Expect `desktop_bridge.state` to be `listening`. The command opens a private
+file and then a fresh random `.localhost` origin in Chromium (Omarchy's default)
+or Firefox. The URL printed by the command contains no ticket. Confirm the
+private dashboard loads; connect one client with its original OAuth query,
+then choose Connect on the consent page. Confirm a fresh browser tab can
+reuse the owner session. From a second ordinary account, fixed-entry requests
+may redirect, but dashboard reads and consent must refuse without both proofs.
+Verify copied/previous-instance cookies and forged browser headers do not help.
+
+Repeat with a benign squatter serving the fixed entry while the engine is
+stopped: leave its tab and service worker alive, then stop the squatter and
+start Olympus. Open the owner's ticket using `olympus dashboard`. The old tab
+must not read owner pages or storage or obtain the new cookie. Restart the
+engine and repeat with the old random origin. Confirm `/sw.js` requests with
+`Service-Worker: script` refuse and browser registration is blocked by CSP.
+Log out and inspect from another owner SSH session: only the Unix socket
+remains after the bounded reconciliation interval. Log back in and verify a
+new origin. Explicit server mode must likewise remove the listener. Hold the
+port with another process and confirm doctor/status report the collision.
+
+If browser name resolution fails, the private file must show a refusal with
+SSH instructions, never navigate to the fixed origin. For headless/remote
+use, configure an SSH alias authenticating as the Olympus owner. The browser
+computer must be trusted and have the configured port free. A browser on the
+same laptop needs server mode enabled first to release the bridge port. SSH
+service setup, if needed, is an explicit owner host-administration action:
+
+```sh
+sudo pacman -S --needed openssh
+sudo systemctl enable --now sshd
+```
+
+Verify normal owner SSH key authentication before continuing.
+
+On the laptop:
+
+```sh
+printf 'SSH target as reached from the browser computer: '
+IFS= read -r OLYMPUS_ACCEPTANCE_SSH_TARGET
+olympus server-mode on --ssh-target "$OLYMPUS_ACCEPTANCE_SSH_TARGET"
+olympus dashboard --no-open
+```
+
+Run the printed `ssh -N -o ExitOnForwardFailure=yes -L ...` command on the
+browser computer and keep it running. Open the printed one-time dashboard
+link there. In **Agents**, connect ChatGPT, Claude, Grok, Grok Bot and Cursor
+one at a time. Keep the original OAuth query intact; choose Connect only in
+the page opened through the forward. Denied consent and a replay of a used
+approval must fail. Complete one authenticated tool call from each client.
+Create a Grok API key in Agents, configure its shown MCP URL and bearer key
+in the API client, and complete a tool call; revoke that key and verify a
+subsequent call fails. Never paste keys into the shell runbook or logs.
+
+From a separate ordinary Linux account, try reaching the recorded socket
+using `curl --unix-socket "$SOCKET" http://localhost/health` after setting
+`SOCKET` to the path printed above. Expect permission denied, including when
+browser-like headers are supplied. Do not relax directory/socket permissions.
+Complete one Personal and one Private question; Private content stays in the
+private panel. Source-open UI under the legacy Mac payload remains deferred
+to the post-review consumer work; do not treat absent controls as a failed
+install or claim that Linux source opening is fully qualified.
+
+### Restart, logout, reboot and upgrade
+
+```sh
+olympus engine restart
+olympus engine verify
+olympus engine stop
+systemctl --user is-enabled olympus-engine.service
+olympus engine start
+olympus engine verify
+```
+
+After stop, `is-enabled` must report disabled (nonzero is expected). Confirm
+the stopped worker cannot be reached. Log out fully and reconnect through the
+owner SSH account: the running engine must survive logout with linger. Reboot
+normally, then repeat `engine status`, `engine verify` and an authenticated
+agent call. Confirm credentials remain usable without a desktop keyring unlock.
+Hyprland login/logout and a viewer surviving engine restart require real-host
+observation; unit fixtures are not this evidence.
+
+Re-run the same installer/tarball for same-release repair:
+
+```sh
+cd "$BUNDLE"
+set -- olympus-*.tgz
+sh ./install-linux.sh --tarball "$BUNDLE/$1"
+olympus engine verify
+```
+
+For a real upgrade, prepare a second bundle from a different build with the
+same release-artifact procedure; reusing identical bytes tests repair only.
+On the laptop select that bundle and install it, then roll back:
+
+```sh
+printf 'Absolute path to the second candidate bundle: '
+IFS= read -r UPGRADE_BUNDLE
+cd "$UPGRADE_BUNDLE"
+sha256sum -c SHA256SUMS
+set -- olympus-*.tgz
+test "$#" -eq 1
+sh ./install-linux.sh --tarball "$UPGRADE_BUNDLE/$1"
+olympus engine verify
+olympus engine rollback
+olympus engine verify
+```
+
+Check the reported build returns to the prior candidate and its matching Bun.
+A failed upgrade must return nonzero and explicitly distinguish a healthy
+restoration from a failed restoration. Do not call a successful file exchange
+a successful rollback.
+
+### Interrupted installation and contention
+
+In the dedicated test account, start the second-candidate installer. In a
+second terminal, inspect the owner-only transaction record under
+`${XDG_STATE_HOME:-$HOME/.local/state}/olympus/engine/`. At a recorded prepare
+or activation stage, terminate the actual installer CLI process with SIGKILL
+(select its exact PID using `ps -u "$(id -u)" -o pid,ppid,args`; never kill by
+name). Re-run the same pinned installer twice and verify the result each time.
+Repeat at each durable boundary exercised by the automated fault fixtures.
+Also interrupt with a normal reboot and retry after login; actual storage
+power-loss durability remains a separate test, not implied by SIGKILL.
+
+While an install is in progress, try `olympus engine rollback` and the
+uninstaller in a second terminal. They must refuse the busy lock without
+mutating active references. Killing the calling shell must not release the
+lock while a mutation child survives. Never delete the lock file to retry.
+
+### Uninstall, retained data and full removal
+
+Copy the bundle outside the managed installation so its uninstaller remains
+available even if Bun or the app has disappeared. First prove normal removal:
+
+```sh
+cd "$BUNDLE"
+sh ./uninstall-linux.sh
+systemctl --user show olympus-engine.service --property=LoadState,ActiveState
+command -v olympus || true
+ss -xl
+```
+
+Expect no engine service, worker listener, owned launcher or package/runtime
+generation, with settings, credentials, indexes, models and logs retained.
+A user-requested desktop viewer is not an engine child and may remain. Repeat
+the uninstaller: interrupted cleanup must safely resume or report a concrete
+retained replacement. In another fresh acceptance cycle, remove only the
+recorded installed Bun/app generation as a deliberate corruption test, then
+run this same bundle uninstaller; it must not execute either missing artifact.
+
+For the explicit full-removal case in this dedicated account:
+
+```sh
+sh ./uninstall-linux.sh --purge --yes
+```
+
+If the receipt says Olympus enabled linger, and this account has no other
+user services that need it, choose its account-wide restoration explicitly:
+
+```sh
+sh ./uninstall-linux.sh --purge --yes --restore-linger
+```
+
+Choose the restoration command instead of the preceding purge-only command
+when that is the intended acceptance case. The final receipt is removed only
+when requested cleanup completes. Locked/unavailable explicitly selected
+Secret Service items must be reported as incomplete, never silently retained
+under a full-removal success. Original provider files/mail are never removed.
+Disconnect Olympus separately in each agent account; local deletion does not
+revoke a cloud account connection. OS audit metadata can remain. The held
+kernel-lock inode is left until the real runtime directory is torn down at
+final logout/reboot; check again after that teardown for full-removal proof.
+
+
+### Integration proof and remaining qualification
+
+Local remote-build proof: **820 passed, 0 failed, 4 skipped across 37 focused
+files**, including architecture, public-surface and private-ops guards. The
+canonical documentation inventory is 48 files. Build and
+`bunx tsc --noEmit -p .` passed; a subsequent `--artifact dist` rebuild returned
+the generated bundles. The four skips are the native Mac zombie-group case,
+the native Mac applet case, live Keychain write, and actual second-UID socket
+access. Mac plist, rendered agent copy, secret fixture and shell-script bytes
+remain covered; no native Mac execution is claimed by the Linux runner.
+Built-in-reasoning installer tests were excluded as directed.
+
+The crash matrix kills real subprocesses at **16 install and 10 rollback
+boundaries**, then repeats recovery twice. Its service manager is a fixture;
+this proves persistent-file transaction behavior, not systemd-as-PID-1 or
+physical power-loss behavior. The manager harness remains deferred; laptop
+cgroup, linger/logout/reboot, second-UID, desktop and real-vendor checks above
+are still required. Independent scoped reviews and their repair rechecks have
+no remaining P1/P2 findings. No GitHub CI, publication or live rollout was run.
+
+Implementation details that supersede the earlier track seams:
+
+- Direct CLI operations use Linux kernel `flock` through Bun FFI; the shell
+  uses util-linux `flock` on the same inode. Nested CLI mutation proves and
+  retains the inherited open-file-description lock, marks it close-on-exec,
+  and never trusts an environment marker. The bootstrap must not use
+  `flock --close`, which would remove the child's independent lock custody.
+- The locked CLI durably records original linger before enabling it. Shell
+  bootstrap no longer mutates logind or supplies ambient linger provenance.
+- Failed first installs preserve a zero-machinery `recovery_pending` receipt
+  for retry/removal. Explicit keep-data uninstall instead writes
+  `data_retained`; fresh installation refuses that state until the owner
+  purges or backs up and moves the retained data. Overlapping managed roots
+  refuse before mutation so purge cannot consume its own recovery receipt.
+- Journals carry paths, hashes, modes and custody identities. Config backup
+  bytes live in separate private files; worker bearer material is not put in
+  transaction JSON. Terminal receipt commits precede irreversible cleanup.
+- Generation-directory identity and a private marker permit Bun-free removal
+  of missing/corrupt runtime or app constituents while replaced roots and
+  markers refuse. Unknown remaining machinery or an unfinished install
+  transaction produces incomplete removal, with the receipt retained.
+- Explicit libsecret full purge refuses when item ownership cannot be proved;
+  it never deletes a whole keyring or claims those secrets were removed.
+- CLI/local-agent configuration discovery and desktop launching follow the
+  receipt. The desktop entry invokes the managed launcher, which exports the
+  recorded roots and enters the trusted package directory. Environment-only
+  setup preflight does not initialize an unused credential backend.
+
+
+The generated relay dashboard resource and its tool resource URI were rebuilt
+with the socket handoff branch (the Mac/TCP branch is unchanged). An additional
+71 panel/relay-contract tests passed. These files are local repository build
+outputs; no hosted relay assets, listing, demo or service were published.
+
+
+### Local acceptance artifact receipt
+
+The verified archive is `release-artifacts/olympus-omarchy-acceptance.tar.gz`.
+It contains `omarchy-baseline`, `omarchy-acceptance`, the verified pinned Bun
+archive, `OMARCHY-RUNBOOK.md`, `UPGRADE-REHEARSAL.md`, and
+`ACCEPTANCE-BUILDS.json`. The two local builds have different engine identities
+so the laptop can exercise an actual generation upgrade and rollback. Both
+retain the current rc.6 manifest version; this is acceptance material for the
+rc.7 work, not a published release.
+
+Archive SHA-256:
+
+```text
+6c963b51f864181a6b399372692454f454d8327087e6b0827d5662bd0315b73d
+```
+
+The ordinary release-artifact checks passed, including dist consistency and
+public-package checks. The extracted public CLI ran with the exact verified
+Linux Bun (`--version` and Linux `engine --help`); that Bun also passed a
+JavaScript/SQLite smoke. Local returned archive and constituent checksums match.
+No service was installed on a live host by this work.
+
+
+### First Omarchy install: standalone models and doctor (2026-10-12)
+
+The owner's first laptop run proved passwordless per-user installation,
+verified linger, an active/enabled unit, the private 0700/0600 worker socket,
+second-UID refusal, online relay, and `desktop_session` with remote false.
+The quoted `WorkingDirectory` defect was already fixed at `aa488298`.
+The missing desktop browser route is a separate approval-transport defect;
+it does not invalidate those observed socket/service results.
+
+Fresh standalone Linux uses the same `no-sensitive` preset and built-in model
+capability gates as Mac. EmbeddingGemma 2 warms at worker boot. The private
+Qwen model is enabled by W2 wherever the pinned runtime and memory permit it;
+its first download starts when private work/classification needs it.
+Transcription starts its download only when audio is selected and requires
+`ffmpeg` on Linux. No credentials or paid model service are required for these
+built-ins. The source privacy policy remains separate: `no-sensitive` does
+not silently make metadata-only Private sources answerable.
+
+Pinned Linux x86_64 downloads (decimal bytes, model/runtime manifests; these
+are expected payloads, not a claim that this work downloaded model weights):
+
+| Component | Bytes | Start condition |
+|---|---:|---|
+| EmbeddingGemma 2 | 484,622,336 | First worker boot |
+| LiteRT-LM runtime wheel | 47,051,760 | Embedding installation |
+| Qwen3.5 4B Q4_K_M, 16 GiB+ memory | 2,740,937,888 | Private model first use |
+| Qwen3.5 2B, smaller supported memory | 1,280,835,840 | Alternative memory-selected private model |
+| Qwen3-ASR 0.6B plus projector | 1,019,141,728 | Audio first use |
+| Shared llama.cpp runtime | 17,544,875 | First reasoning/transcription install, downloaded once |
+
+With the 4B choice, all model files plus these runtime archives total
+4,309,298,587 bytes (4.31 GB); with 2B, 2,849,196,539 bytes (2.85 GB).
+Unpacked runtimes, caches and working memory need additional space. The
+managed Bun/runtime and Olympus archive are separate installer payloads.
+Linux arm64 has model pins but is not qualified by the x86_64 laptop bundle.
+
+`engine status` includes content-free model readiness from the worker health
+response. The Linux computer dashboard adds a local built-in-model summary,
+including insufficient memory and the missing-ffmpeg remedy, outside the
+frozen ChatGPT panel. Its normal model cards retain their existing live
+progress. Status reads never start a download. Doctor accepts the running
+Bun interpreter when the managed pinned runtime is absent from PATH, names
+the owner socket, and avoids the incorrect Linux claim that no private model
+runs. The frozen listing and plugin skill bundle are unchanged.
+
+W2 seam: this track consumes its existing model enablement, sizing and status
+functions, without replacing policy or model selection. W2's planned
+cgroup-aware memory sizing remains with that track; present selection uses
+host total memory. Verify native model loading, actual disk use and CPU
+latency on the laptop. Do not treat a healthy engine as a ready model.
+
+
+### Desktop bridge security disposition (2026-10-12)
+
+**Historical fixed-origin rejection; superseded by the approved desktop amendment above.** The real laptop
+proved that `olympus dashboard` printed a non-listening TCP URL on a desktop.
+The fixed-origin bridge prototype was withheld from the acceptance candidate;
+the shipping path remains the existing Unix socket and SSH handoff.
+
+Independent review and a real isolated Chromium reproduction found:
+
+1. A cookie for `127.0.0.1` is shared across ports. A malicious local OAuth
+   callback can receive it before consent, including on an OAuth error redirect.
+2. An additional origin-bound credential blocks cookie-only replay, but a
+   same-port squatter can plant a persistent service worker during downtime.
+3. A private file can clear that service worker before navigation, but clearing
+   storage does not terminate an already-running hostile same-origin tab.
+   The tab retains authority over new browser storage. Chromium reproduced
+   that surviving execution context; `Clear-Site-Data: executionContexts` did
+   not terminate it. Per-process cookie rotation alone does not fix this.
+
+The owner approved fresh random session origins on 2026-10-12. The bridge
+implementation keeps the cookie-independent origin-storage proof, isolates
+old execution contexts with origin rotation, and retains the Unix socket and
+SSH headless path. Disposition: **fix** the browser-origin boundary; no new
+release gate or fixed-origin fallback.
+
+
+### Doctor/model acceptance candidate proof
+
+The shipped follow-up passed **218 focused tests, zero failures**, across
+`doctor`, `linux-model-readiness`, `dashboard-computer-host`, `engine-service`,
+`architecture-guard`, `public-surface-guard` and `private-ops-disposition`.
+Build and `bunx tsc --noEmit -p .` passed, followed by a returned `dist` rebuild.
+Three Mac host-page cases (locked, control session, read-only token) were
+rendered against the original HEAD and compared byte-for-byte. Existing Mac
+engine fixtures also passed. The ChatGPT plugin directory and hosted relay
+assets have no changes. All builds and tests ran in the isolated remote lane;
+no native Mac, live systemd, model-weight download or laptop proof is implied.
+The built-in-reasoning installer tests were not run.
+
+The follow-up local bundle is prepared at
+`release-artifacts/omarchy-doctor-models-20261012`. It deliberately retains the
+socket/SSH-only approval path and the rc.6 manifest version while rc.7 work
+continues. Re-run the installer, `olympus doctor` and `olympus engine status`;
+use the existing owner SSH socket forward to inspect the new local model
+summary. Compare the reported model states with actual first-use downloads,
+install `ffmpeg` when prompted, and confirm native model loading on the laptop.
+Those earlier tests and that historical bundle did not qualify the desktop bridge.
+The current owner-bridge acceptance bundle is `release-artifacts/omarchy-acceptance`.
+Its desktop implementation and browser proof are separate from real Hyprland,
+login/logout, default-opener and second-UID acceptance on the laptop.
+
+
+### Desktop owner bridge acceptance proof (2026-10-12)
+
+Disposition: **fix**. The approved origin decision is implemented in
+`src/core/linux-owner-bridge.ts`, integrated only into the Linux socket worker.
+The direct implementation tests cover exact Host admission, cookie plus storage
+proof, previous-instance refusal, forged headers, CSRF preservation, single-use
+and expired tickets, opener argv, service-worker denial, collisions, listener
+rotation and post-await revocation. Mac agent/consent fixtures remain exact.
+
+Real headless Chromium and Firefox through Playwright 1.64.0 both resolved fresh
+random `.localhost` names to the loopback listener with no resolver override.
+Both completed the private-file launch, dashboard fetch, fresh-tab reuse,
+native consent POST, callback redirect and PKCE token exchange. A pre-existing
+entry-origin service worker and hostile tab remained alive and could not read
+owner content, storage or cookies. Old session Hosts refused after rotation;
+service-worker registration on the session origin failed. These are isolated
+browser proofs, not Omarchy/Hyprland qualification.
+
+For reproduction, `test/linux-owner-bridge.browser.test.ts` accepts
+`OLYMPUS_TEST_PLAYWRIGHT` naming an installed Playwright ESM entry. Run it only
+through remote-build. The browser package and missing Firefox system libraries
+were installed/extracted under disposable container paths; no repository
+dependency, host package, hosts file or resolver setting changed.
+
+Re-run the owner approval section above on the actual laptop for xdg-open,
+Hyprland/systemd login/logout and scope survival, port-collision diagnostics,
+second-UID behavior and real client tool calls. The bundle remains rc.6-labeled
+acceptance material for the rc.7 integration; this track does not change the
+frozen directory listing, hosted assets or release version.
+
+
+Final focused validation: 198 tests across the six changed behavior suites and
+three required guards passed, then 49 bridge/guard checks passed after the
+terminal-close regression fix (48 repeat checks, one additional case). The
+Chromium and Firefox cases passed again, including opening a dashboard from
+owner proof without a dashboard launch fragment. Build and TypeScript passed;
+`dist` was rebuilt and returned by remote-build. The built-in-reasoning
+installer suite was excluded as instructed. Independent review identified the
+inherited consent form policy, synchronous request-triggered readiness probes,
+and the pending-probe shutdown race; all three were fixed, with the final
+lifecycle re-review passing. No Mac runtime/page implementation was changed;
+Mac consent/agent fixtures passed byte-for-byte, and the CLI regression cases
+passed. Proven owner operations retain the worker's unbounded response idle
+timeout; unauthenticated TCP traffic keeps Bun's default idle deadline and
+request bodies have an independent five-second bound.
+
+
+### Linux PR preparation (2026-10-13)
+
+Standalone Linux data now uses `$XDG_DATA_HOME/olympus` (default
+`~/.local/share/olympus`). Shared store/model/ledger defaults follow the
+standalone install receipt, including when a shell changes its XDG variables.
+Mac and OpenClaw-hosted data defaults keep their historical layout.
+
+Existing receipts remain authoritative, including after keep-data uninstall
+or partial purge. Without a receipt, nonempty legacy data is selected in place
+when XDG has no user data; fresh-install preflight still refuses an unowned or
+competing installation. There is no automatic migration: avoiding database
+moves and duplicate copies avoids crash/recovery data loss. Fresh executable
+generations use sibling `olympus-engine`, keeping machinery removal separate
+from personal data. Legacy receipts keep both their data and package paths.
+
+The merged branch uses “on your computer” in relay approval and disconnected
+copy, and updates the deploy reviewer check accordingly. **Do not deploy the
+relay from this branch while OpenAI app review is open without the anchor's go.**
+The submitted directory assets and golden fixture remain unchanged; the current
+relay test explicitly accounts for only the platform wording changes.
+
+The design guard's implementation digest tracks the merged source. Its owner
+approval hashes remain unchanged. The panel and both computer-host wrappers
+need re-approval because the Linux remote-help command forwards to the owner
+Unix socket and includes `ExitOnForwardFailure=yes`. Mac Agents still matches
+its approved render. Exact HTML and candidate hashes are in the owner's
+`olympus-wt/tier-review-evidence/design-states/` handoff; the anchor owns approval
+and the rendered-state receipt update. This preparation does not authorize
+pushing, publishing Linux installers, relay deployment, or a live upgrade.
+
+### 1.0.0 lifecycle follow-up (2026-10-13)
+
+Full purge removes empty state/cache `olympus` parents only when the installer
+recorded creating them and the private directory's device/inode still matches.
+Older receipts and pre-existing parents confer no cleanup authority. Nonempty
+parents and replacements stay. Failed-install recovery preserves this ownership.
+
+Kept-data adoption remains deferred: existing `data_retained` receipts have no
+retained inventory, so a deleted optional store or privacy file cannot be told
+apart from one never created. Removing the refusal would seed missing settings;
+the recovery journal also does not accept that prior receipt state. Retain the
+refusal until a completeness contract and migration/recovery proof exist. This
+is the builder brief's P0 skip-and-flag disposition, not an adoption implementation.
+
+Systemd registration uses the known default user unit-link location, not the
+localized `systemctl link` diagnostic. The install journal records which link
+paths were absent before the command. Failed activation removes only those
+new links whose owner and target still match, including when the command
+creates a link then fails; previous links are journaled and restored after disable, followed by a manager
+reload. A changed target
+refuses recovery and retains the journal. This also covers HOME paths with
+spaces and a custom XDG_CONFIG_HOME.
+
+Validation boundary: directory identity checking and `rmdir` are not one atomic
+operation against another process running as the same UID. A concurrent swap
+can lose an empty replacement directory, but `rmdir` cannot remove its contents
+or follow a final-component symlink. No rename/quarantine step is used, avoiding
+new data-orphaning risk. This metadata-only residual is disclosed for anchor review.

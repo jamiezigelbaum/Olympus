@@ -18,6 +18,15 @@ broadcasting, no control surface (no sockets, no HTTP, no IPC). If WhatsApp
 logs the device out, the daemon exits and waits to be re-paired; it never
 retries in a way that looks like automation.
 
+## Licensing — build from source only
+
+whatsmeow is MPL-2.0 and pulls in `go.mau.fi/libsignal`, which is GPL-3.0.
+Olympus ships this bridge as source and builds it on the user's computer
+(`buildWhatsAppBridge` in `src/core/messaging-pairing.ts`), which keeps the
+rest of Olympus under MIT. Never publish or host a prebuilt bridge binary: a
+binary that links libsignal is a GPL-3.0 work that needs the GPL text and a
+source offer.
+
 ## Build
 
 Requires Go ≥ 1.26 and a C compiler (the session store uses
@@ -103,6 +112,24 @@ The older direct-daemon flow below is for advanced manual deployments:
 If pairing times out before a scan, the daemon exits; just start it again.
 If the phone ever removes the linked device, the daemon exits with a
 "logged out" message — delete nothing, restart it, and pair again.
+
+## Command-line modes
+
+- No flags: the historic daemon. It pairs by QR when the session store is
+  empty, then captures every chat.
+- `--pair-only`: what `olympus connect whatsapp --pair` runs. It pairs (or
+  verifies the existing link), prints JSON events on stdout (`qr` with the
+  private PNG path, then `ready` with the authentication proof), records a
+  content-free result in `pairing-status.json`, and exits without capturing.
+  It ignores the native-capture switch and creates no spool. A failure exits
+  non-zero with `olympus-whatsapp-bridge: <code>` on stderr.
+  `OLYMPUS_WHATSAPP_PAIR_TTY_QR=false` keeps the QR out of the terminal.
+- `--capture-approved`: captures only the chats listed in
+  `OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS` (comma-separated chat JIDs, or `*` for
+  the whole linked account). A missing or malformed list exits before any state
+  is touched. Messages, reactions and voice notes from other chats are dropped
+  before any download or spool write. It combines with native capture.
+- `--pair-only --capture-approved` is refused (`incompatible_modes`).
 
 ## Native capture mode (managed service)
 

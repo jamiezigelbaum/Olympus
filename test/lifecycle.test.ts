@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
+  installManagedWorkerFiles,
   lifecycleRecoveryPlan,
   runWorkerLifecycle,
 } from '../src/core/lifecycle.ts';
@@ -26,6 +27,51 @@ import {
 } from '../src/core/worker-service.ts';
 
 describe('versioned Olympus worker lifecycle', () => {
+  test.each(['activating', 'deactivating', 'reloading'])('first install in %s rolls back, retries and uninstalls', (transient) => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-crash-loop-'));
+    let state = 'inactive', crash = true;
+    const calls: string[] = [];
+    const exec: WorkerServiceExec = (cmd, args) => {
+      calls.push([cmd, ...args].join(' '));
+      if (args.includes('is-active')) return { status: state === 'active' ? 0 : 3, stdout: state, stderr: '' };
+      if (args.includes('enable')) state = crash ? transient : 'active';
+      if (args.includes('stop')) state = 'failed';
+      if (args.includes('reset-failed') || args.includes('disable')) state = 'inactive';
+      return {status:0,stdout:'',stderr:''};
+    };
+    const options = { platform:'linux' as const, homeDir:home, workingDirectory:process.cwd(), bunBin:process.execPath,
+      authToken:'test-token', exec, activationSettleMs:0, actionSettleTimeoutMs:0 };
+    try {
+      expect(()=>runWorkerLifecycle('install', options)).toThrow();
+      expect(calls).toContain('systemctl --user stop olympus-worker.service');
+      expect(calls).toContain('systemctl --user reset-failed olympus-worker.service');
+      expect(existsSync(transactionPath(home))).toBe(false);
+      crash=false; runWorkerLifecycle('install', options);
+      state=transient; runWorkerLifecycle('uninstall', options);
+      expect(existsSync(workerServicePaths('linux',home).unitPath)).toBe(false);
+    } finally { makeTreeWritable(home); rmSync(home,{recursive:true,force:true}); }
+  });
+
+  for (const action of ['install', 'upgrade', 'setup'] as const) {
+    test.each(['activating', 'deactivating', 'reloading'])(`${action} explicitly restarts an existing %s worker into new bytes`, (initial) => {
+      const home = mkdtempSync(join(tmpdir(), 'olympus-transition-upgrade-'));
+      const manager = linuxManager('active'); let first = true;
+      const exec: WorkerServiceExec = (command, args) => {
+        if (first && args.includes('is-active')) { first=false; return {status:3,stdout:initial,stderr:''}; }
+        return manager.exec(command,args);
+      };
+      const options = {platform:'linux' as const,homeDir:home,workingDirectory:process.cwd(),bunBin:process.execPath,
+        authToken:'new-token',exec,activationSettleMs:0,actionSettleTimeoutMs:0,readinessProbe:()=>true};
+      try {
+        installWorkerService({...options,workingDirectory:'/old',authToken:'old-token'});
+        if(action==='setup') installManagedWorkerFiles(options);
+        else runWorkerLifecycle(action,{...options,...(action==='upgrade'?{artifactPath:createUpgradeArtifact(home,'0.4.9').path}:{})});
+        expect(manager.calls).toContain('systemctl --user restart olympus-worker.service');
+        expect(existsSync(transactionPath(home))).toBe(false);
+      } finally {makeTreeWritable(home);rmSync(home,{recursive:true,force:true});}
+    });
+  }
+
   test('Linux install is idempotent and reports the observed active state', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-linux-'));
     const manager = linuxManager('inactive');
@@ -635,18 +681,18 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
-  test('rollback clears a latched systemd failure instead of wedging the lifecycle', () => {
+  test.each(['failed', 'activating', 'deactivating', 'reloading'] as const)('rollback clears systemd %s instead of wedging the lifecycle', (attemptedState) => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-latched-failure-'));
     const paths = workerServicePaths('linux', home);
     const calls: string[] = [];
     let statusCalls = 0;
-    let state: 'active' | 'inactive' | 'failed' = 'active';
+    let state: string = 'active';
     const exec: WorkerServiceExec = (command, args) => {
       const call = [command, ...args].join(' ');
       calls.push(call);
       if (call === 'systemctl --user is-active olympus-worker.service') {
         statusCalls += 1;
-        if (statusCalls === 3) state = 'failed';
+        if (statusCalls === 3) state = attemptedState;
         return state === 'active'
           ? { status: 0, stdout: 'active\n', stderr: '' }
           : { status: 3, stdout: `${state}\n`, stderr: '' };
@@ -659,7 +705,7 @@ describe('versioned Olympus worker lifecycle', () => {
       if (call === 'systemctl --user stop olympus-worker.service') {
         // Real systemd keeps a failed unit failed: stop returns success without
         // clearing the latched result, so only reset-failed can prove it is down.
-        if (state !== 'failed') state = 'inactive';
+        state = 'failed';
         return { status: 0, stdout: '', stderr: '' };
       }
       if (call === 'systemctl --user reset-failed olympus-worker.service') {
@@ -860,9 +906,11 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
-  test('upgrade commits only after the real loopback health endpoint answers', async () => {
+  test('upgrade commits only after the real platform worker transport answers', async () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-upgrade-real-readiness-'));
-    const server = await startReadinessServer();
+    const priorRuntime = process.env.XDG_RUNTIME_DIR;
+    if (process.platform === 'linux') process.env.XDG_RUNTIME_DIR = home;
+    const server = await startReadinessServer(home);
     const manager = linuxManager('active');
     try {
       const artifact = createUpgradeArtifact(home, '0.4.4');
@@ -893,6 +941,7 @@ describe('versioned Olympus worker lifecycle', () => {
     } finally {
       server.process.kill();
       await server.process.exited;
+      if (priorRuntime === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = priorRuntime;
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
     }
@@ -1392,21 +1441,23 @@ function createUnsafeUpgradeArtifact(home: string): string {
   }
 }
 
-async function startReadinessServer(): Promise<{
+async function startReadinessServer(home: string): Promise<{
   port: number;
   process: ReturnType<typeof Bun.spawn>;
 }> {
+  const socket = process.platform === 'linux' ? join(home, 'olympus', 'worker.sock') : undefined;
+  if (socket) mkdirSync(dirname(socket), { mode: 0o700 });
   const script = [
+    "process.umask(0o177);",
     "const server = Bun.serve({",
-    "  hostname: '127.0.0.1',",
-    "  port: 0,",
+    socket ? `unix: ${JSON.stringify(socket)},` : "hostname: '127.0.0.1', port: 0,",
     "  fetch(request) {",
     "    const url = new URL(request.url);",
     "    if (url.pathname !== '/v1/health') return new Response('not found', { status: 404 });",
     "    return Response.json({ reachable: true, status: 'ok' });",
     "  },",
     "});",
-    "console.log(server.port);",
+    "console.log(server.port || 8010);",
   ].join('\n');
   const child = Bun.spawn([process.execPath, '-e', script], {
     stdout: 'pipe',

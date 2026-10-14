@@ -11,7 +11,7 @@ import {
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   formatCliFatalError,
   runDashboardCommand,
@@ -267,6 +267,12 @@ describe('CLI tool surface', () => {
     expect(sovereigntyHelp.stdout).toContain('olympus sovereignty init');
   }, 30_000);
 
+  test('engine group help names the current platform service manager', async () => {
+    const result = await runBin(['engine', '--help']);
+    expect(result.stdout).toContain(process.platform === 'linux' ? 'per-user systemd service' : 'per-user LaunchAgent');
+    if (process.platform === 'linux') expect(result.stdout).not.toContain('this Mac');
+  }, 30_000);
+
   test('the public CLI catalog rejects repository-only commands before dispatch', async () => {
     expect(isV04PublicCliInvocation(['source', 'answer', 'question'])).toBe(true);
     expect(isV04PublicCliInvocation([])).toBe(true);
@@ -304,14 +310,50 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
-  test('every declared public leaf command has non-executing help', async () => {
-    for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
+  test('connect finish is on the public surface and checks the pasted address before calling the engine', async () => {
+    const result = await runBinExit(['connect', 'finish', 'https://evil.example/oauth/callback/gmail?code=c&state=s']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).not.toContain('Unknown command:');
+    expect(`${result.stdout}${result.stderr}`).toContain('not an Olympus sign-in address');
+  }, 30_000);
+
+  test('connect finish sends the pasted callback to the port worker.env gives the engine', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-connect-finish-'));
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), 'OLYMPUS_EMAIL_SOURCE_PORT=1\n', { mode: 0o600 });
+      const result = await runBinExit(['connect', 'finish', 'http://127.0.0.1:8010/oauth/callback/gmail?code=c&state=s'], { HOME: home });
+      expect(result.code).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).toContain('Olympus did not answer at http://127.0.0.1:1');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('dashboard sends the worker token to the port worker.env gives the engine', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-port-'));
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), 'OLYMPUS_EMAIL_SOURCE_PORT=1\nOLYMPUS_WORKER_AUTH_TOKEN=port-test-token\n', { mode: 0o600 });
+      const result = await runBinExit(['dashboard', '--no-open'], { HOME: home, OLYMPUS_CONFIG: join(home, 'missing-config.json') });
+      expect(result.code).toBe(1);
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).toContain('127.0.0.1:1');
+      expect(output).not.toContain('127.0.0.1:8010');
+      expect(output).not.toContain('port-test-token');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
+    test(`public leaf ${command} has non-executing help`, async () => {
       const result = await runBinExit([...command.split(' '), '--help']);
       expect(result.code).toBe(0);
       expect(result.stdout).toContain(`Usage: olympus ${command}`);
       expect(result.stderr).toBe('');
-    }
-  }, 30_000);
+    }, 30_000);
+  }
 
   test('every command group answers a bare --help with its usage', async () => {
     const groups = new Set(V0_4_PUBLIC_CLI_COMMANDS.filter((command) => command.includes(' ')).map((command) => command.split(' ')[0]!));
@@ -441,7 +483,7 @@ describe('CLI tool surface', () => {
       // deterministically `missing` on every platform.
       const shimDir = join(dir, 'bin');
       mkdirSync(shimDir, { recursive: true });
-      writeFileSync(join(shimDir, 'systemctl'), '#!/bin/sh\necho inactive\nexit 3\n', { mode: 0o755 });
+      writeFileSync(join(shimDir, 'systemctl'), '#!/bin/sh\ncase "$*" in *" show "*) echo LoadState=not-found; exit 0;; esac\necho inactive\nexit 3\n', { mode: 0o755 });
       writeFileSync(join(shimDir, 'launchctl'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
 
       const result = await runSourceCliExit([
@@ -658,7 +700,7 @@ describe('CLI tool surface', () => {
         home,
       ], {
         cwd: process.cwd(),
-        env: { PATH: `${binDir}:${process.env.PATH ?? ''}` },
+        env: { HOME: home, PATH: `${binDir}:${process.env.PATH ?? ''}` },
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -848,11 +890,14 @@ describe('CLI tool surface', () => {
         '',
       ].join('\n'));
       chmodSync(join(binDir, 'systemctl'), 0o755);
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const linux = process.platform === 'linux';
+      const socket = join(dir, 'olympus', 'worker.sock');
+      if (linux) mkdirSync(join(dir, 'olympus'), { mode: 0o700 });
+      await new Promise<void>((resolve) => linux ? server.listen(socket, resolve) : server.listen(0, '127.0.0.1', resolve));
+      if (linux) chmodSync(socket, 0o600);
       serverOpen = true;
       const address = server.address();
-      if (!address || typeof address === 'string') throw new Error('Missing test server address');
-      const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+      const baseUrl = linux ? 'http://127.0.0.1:8010/v1' : `http://127.0.0.1:${(address as { port: number }).port}/v1`;
 
       const online = await runSourceCli([
         'worker',
@@ -862,6 +907,7 @@ describe('CLI tool surface', () => {
         '--home',
         home,
       ], {
+        XDG_RUNTIME_DIR: dir,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
         OLYMPUS_EMAIL_BASE_URL: baseUrl,
@@ -903,6 +949,7 @@ describe('CLI tool surface', () => {
         '--home',
         home,
       ], {
+        XDG_RUNTIME_DIR: dir,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
         OLYMPUS_EMAIL_BASE_URL: baseUrl,
@@ -937,6 +984,7 @@ describe('CLI tool surface', () => {
       });
       try {
         const result = await runDashboardCommand({
+          platform: 'darwin',
           fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
           openImpl: () => true,
         });
@@ -965,6 +1013,57 @@ describe('CLI tool surface', () => {
         env.restore();
       }
     } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('the opening link is minted at the worker.env port, and never off this computer', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-worker-env-origin-'));
+    const sent: Array<{ url: string; init: RequestInit }> = [];
+    const workerEnv = writeWorkerEnv(home, 'worker-env-port-token');
+    const env = withTemporaryEnv({
+      HOME: home,
+      OLYMPUS_CONFIG: join(home, 'missing-config.json'),
+      OLYMPUS_EMAIL_BASE_URL: undefined,
+      OLYMPUS_WORKER_AUTH_TOKEN: undefined,
+    });
+    try {
+      for (const [lines, origin] of [
+        ['OLYMPUS_EMAIL_SOURCE_PORT=8123\n', 'http://127.0.0.1:8123'],
+        ['OLYMPUS_EMAIL_SOURCE_HOST=0.0.0.0\nOLYMPUS_EMAIL_SOURCE_PORT=8124\n', 'http://127.0.0.1:8124'],
+        // The worker's canonical bind host outranks the legacy one, as the worker itself reads them.
+        ['OLYMPUS_WORKER_BIND_HOST=::1\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\nOLYMPUS_EMAIL_SOURCE_PORT=8125\n', 'http://[::1]:8125'],
+      ] as const) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${lines}`);
+        const result = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        });
+        expect(sent.map((request) => request.url)).toEqual([`${origin}/dashboard/control/launch`]);
+        expect(new Headers(sent[0]?.init.headers).get('Authorization')).toBe('Bearer worker-env-port-token');
+        expect(new URL(result.url).origin).toBe(origin);
+      }
+
+      for (const hosts of [
+        'OLYMPUS_EMAIL_SOURCE_HOST=192.0.2.10\n',
+        'OLYMPUS_WORKER_BIND_HOST=192.0.2.10\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\n',
+      ]) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${hosts}OLYMPUS_EMAIL_SOURCE_PORT=8123\n`);
+        const error = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        }).catch((failure: unknown) => failure);
+        expect(error).toBeInstanceOf(OperationError);
+        expect((error as OperationError).code).toBe('config_error');
+        expect((error as Error).message).toContain('not a local address');
+        expect(sent).toHaveLength(0);
+      }
+    } finally {
+      env.restore();
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
@@ -1006,6 +1105,7 @@ describe('CLI tool surface', () => {
         });
         try {
           const error = await runDashboardCommand({
+          platform: 'darwin',
             fetchImpl: fetcher,
             openImpl: () => true,
           }).catch((failure: unknown) => failure);
@@ -1036,6 +1136,7 @@ describe('CLI tool surface', () => {
     try {
       let requestSignal: AbortSignal | null | undefined;
       const error = await runDashboardCommand({
+          platform: 'darwin',
         fetchImpl: (async (_input, init) => {
           requestSignal = init?.signal;
           throw new Error(rawError);
@@ -1075,6 +1176,7 @@ describe('CLI tool surface', () => {
     let openerCalls = 0;
     try {
       const result = await runDashboardCommand({
+          platform: 'darwin',
         fetchImpl,
         noOpen: true,
         openImpl: () => { openerCalls += 1; return true; },
@@ -1115,7 +1217,7 @@ describe('CLI tool surface', () => {
         origin: request.headers.origin,
       });
       response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ ok: true, ticket, expires_in_seconds: 900 }));
+      response.end(JSON.stringify(request.url === '/desktop-owner/open' ? { state: 'headless' } : { ok: true, ticket, expires_in_seconds: 900 }));
     });
     let serverOpen = false;
     try {
@@ -1125,12 +1227,16 @@ describe('CLI tool surface', () => {
         writeFileSync(join(binDir, opener), openerScript);
         chmodSync(join(binDir, opener), 0o755);
       }
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const linux = process.platform === 'linux';
+      const socket = join(dir, 'olympus', 'worker.sock');
+      if (linux) mkdirSync(join(dir, 'olympus'), { mode: 0o700 });
+      await new Promise<void>((resolve) => linux ? server.listen(socket, resolve) : server.listen(0, '127.0.0.1', resolve));
+      if (linux) chmodSync(socket, 0o600);
       serverOpen = true;
       const address = server.address();
-      if (!address || typeof address === 'string') throw new Error('Missing test server address');
-      const workerOrigin = `http://127.0.0.1:${address.port}`;
+      const workerOrigin = linux ? 'http://127.0.0.1:8010' : `http://127.0.0.1:${(address as { port: number }).port}`;
       const cliEnv = {
+        XDG_RUNTIME_DIR: dir,
         HOME: dir,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
@@ -1141,28 +1247,34 @@ describe('CLI tool surface', () => {
 
       const output = JSON.parse(stdout) as { url: string; opened: boolean; hint: string };
       const expectedUrl = `${workerOrigin}/dashboard/launch#olympus_launch_ticket=${ticket}`;
-      expect(requests).toEqual([{
+      expect(requests).toEqual([...(linux ? [{ method: 'POST', url: '/desktop-owner/open', authorization: `Bearer ${workerToken}`, origin: undefined }] : []), {
         method: 'POST',
         url: '/dashboard/control/launch',
         authorization: `Bearer ${workerToken}`,
         origin: workerOrigin,
       }]);
-      expect(output).toMatchObject({ url: expectedUrl, opened: true });
-      expect(output.hint).toContain('single-use 15-minute ticket');
-      expect(output.hint).toContain('dashboard --read-only');
-      expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      expect(output).toMatchObject({ url: expectedUrl, opened: !linux });
+      if (linux) {
+        expect(output.hint).toContain('No desktop session is available');
+        expect(output.hint).toContain(`ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:${socket}`);
+        expect(existsSync(openerLog)).toBe(false);
+      } else {
+        expect(output.hint).toContain('single-use 15-minute ticket');
+        expect(output.hint).toContain('dashboard --read-only');
+        expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      }
       expect(new URL(output.url).search).toBe('');
       expect(output.url).not.toContain('dash_');
-      for (const surfaced of [stdout, stderr, readFileSync(openerLog, 'utf8')]) {
+      for (const surfaced of [stdout, stderr, ...(linux ? [] : [readFileSync(openerLog, 'utf8')])]) {
         expect(surfaced).not.toContain(workerToken);
       }
 
       const handoff = await runSourceCli(['dashboard', '--no-open'], cliEnv);
       const handoffOutput = JSON.parse(handoff.stdout) as { url: string; opened: boolean; hint: string };
       expect(handoffOutput).toMatchObject({ url: expectedUrl, opened: false });
-      expect(handoffOutput.hint).toContain('not opened locally');
-      expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
-      expect(requests).toHaveLength(2);
+      expect(handoffOutput.hint).toContain(linux ? 'ssh -N -o ExitOnForwardFailure=yes' : 'not opened locally');
+      if (!linux) expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      expect(requests).toHaveLength(linux ? 3 : 2);
 
       const help = await runSourceCli(['dashboard', '--help']);
       expect(help.stdout).toContain('Usage: olympus dashboard [--read-only] [--no-open]');
@@ -1180,6 +1292,7 @@ describe('CLI tool surface', () => {
     const targetRequests: string[] = [];
     let responseMode: 'failed' | 'redirect' = 'failed';
     const server = createServer((request, response) => {
+      if (request.url === '/desktop-owner/open') { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ state: 'headless' })); return; }
       if (request.url === '/redirect-target') targetRequests.push(request.url);
       if (request.url !== '/dashboard/control/launch') {
         response.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1209,6 +1322,7 @@ describe('CLI tool surface', () => {
       try {
         // The mint request was never answered at all.
         const unreachable = await runDashboardCommand({
+          platform: 'darwin',
           fetchImpl: async () => { throw new TypeError('fetch failed'); },
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
@@ -1219,6 +1333,8 @@ describe('CLI tool surface', () => {
         // A real worker endpoint that refuses the bearer. The body can carry
         // arbitrary server prose, so only the status is safe to surface.
         const refused = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: fetch,
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
         expect(refused).toBeInstanceOf(OperationError);
@@ -1231,6 +1347,8 @@ describe('CLI tool surface', () => {
         // never contacted and the browser is never opened.
         responseMode = 'redirect';
         const redirected = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: fetch,
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
         expect(redirected).toBeInstanceOf(OperationError);
@@ -1241,6 +1359,7 @@ describe('CLI tool surface', () => {
         // A worker that predates the handoff answers 200 with no ticket; that is
         // a refusal with its own remedy, not a URL to open.
         const legacyWorker = await runDashboardCommand({
+          platform: 'darwin',
           fetchImpl: async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
@@ -1281,6 +1400,7 @@ describe('CLI tool surface', () => {
       });
       try {
         const { stdout } = await runSourceCli(['dashboard', '--read-only', '--no-open'], {
+          XDG_RUNTIME_DIR: dir,
           PATH: `${binDir}:${process.env.PATH ?? ''}`,
           OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
           OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
@@ -1290,8 +1410,8 @@ describe('CLI tool surface', () => {
         const expectedToken = dashboardQueryTokenFromWorkerAuthToken('read-only-view-worker-token');
         expect(output.url).toBe(`http://127.0.0.1:8010/dashboard?token=${encodeURIComponent(expectedToken!)}`);
         expect(output.opened).toBe(false);
-        expect(output.hint).toContain('read-only view link');
-        expect(output.hint).toContain('not opened locally');
+        expect(output.hint).toContain(process.platform === 'linux' ? 'ssh -N -o ExitOnForwardFailure=yes' : 'read-only view link');
+        if (process.platform !== 'linux') expect(output.hint).toContain('not opened locally');
         expect(existsSync(openerLog)).toBe(false);
         expect(output.url).not.toContain('read-only-view-worker-token');
       } finally {
@@ -1342,7 +1462,7 @@ describe('CLI tool surface', () => {
         path,
       ], {
         cwd: process.cwd(),
-        env: { PATH: process.env.PATH ?? '' },
+        env: isolatedCliEnv(),
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -1356,6 +1476,44 @@ describe('CLI tool surface', () => {
       expect(existsSync(path)).toBe(true);
       expect(JSON.parse(stdout)).toMatchObject({ ok: true, preset: 'no-sensitive', schemaVersion: 1 });
       expect(JSON.parse(readFileSync(path, 'utf8')).routes.secure_local.mode).toBe('disabled');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('sovereignty init --force keeps the Public tier of a policy written before 1.0', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-sovereignty-public-'));
+    const path = join(dir, 'sovereignty.json');
+    try {
+      const older = JSON.parse(readFileSync(join(process.cwd(), 'config/sovereignty/presets/local-first.json'), 'utf8'));
+      older.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+      older.retrieval.trustDomains.public_safe = {
+        minimumExecutionTrust: 'standard_cloud',
+        allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding',
+        allowCloudQuery: true,
+        activationMode: 'hybrid_shadow',
+      };
+      writeFileSync(path, JSON.stringify(older));
+      const proc = Bun.spawn([
+        process.execPath, 'src/cli.ts', 'sovereignty', 'init', '--preset', 'local-only', '--path', path, '--force',
+      ], {
+        cwd: process.cwd(),
+        env: isolatedCliEnv(),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (code !== 0) throw new Error(stderr || stdout);
+
+      const written = JSON.parse(readFileSync(path, 'utf8'));
+      expect(written.routes.secure_local.pool.members).toEqual(['local-source-answer']);
+      expect(written.routes.public_safe).toEqual(written.routes.internal);
+      expect(written.retrieval.trustDomains.public_safe).toEqual(written.retrieval.trustDomains.internal);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1421,6 +1579,7 @@ describe('CLI tool surface', () => {
       ], {
         cwd: process.cwd(),
         env: {
+          HOME: dir,
           PATH: process.env.PATH ?? '',
           OLYMPUS_CONNECT_VENICE_MODELS_URL: modelsUrl,
         },
@@ -1474,7 +1633,7 @@ describe('CLI tool surface', () => {
         join(dir, 'secrets.key'),
       ], {
         cwd: process.cwd(),
-        env: { PATH: process.env.PATH ?? '' },
+        env: isolatedCliEnv(),
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -1508,6 +1667,7 @@ async function runToolsJson(config: Record<string, unknown>): Promise<Array<{ na
     const proc = Bun.spawn([process.execPath, 'src/cli.ts', '--tools-json'], {
       cwd: process.cwd(),
       env: {
+        HOME: dir,
         PATH: process.env.PATH ?? '',
         OLYMPUS_CONFIG: configPath,
       },
@@ -1528,13 +1688,27 @@ async function runToolsJson(config: Record<string, unknown>): Promise<Array<{ na
   }
 }
 
+// No child may fall back to the runner's passwd home (which need not exist).
+const cliHomes: string[] = [];
+afterEach(() => {
+  for (const home of cliHomes.splice(0)) rmSync(home, { recursive: true, force: true });
+});
+function isolatedCliEnv(env: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  let home = env.HOME;
+  if (!home) {
+    home = mkdtempSync(join(tmpdir(), 'olympus-cli-child-'));
+    cliHomes.push(home);
+  }
+  return { PATH: process.env.PATH ?? '', ...env, HOME: home };
+}
+
 async function runBin(
   args: string[],
   env: Record<string, string | undefined> = {},
 ): Promise<{ stdout: string; stderr: string }> {
   const proc = Bun.spawn(['bin/olympus', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -1555,7 +1729,7 @@ async function runBinExit(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   const proc = Bun.spawn(['bin/olympus', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -1573,7 +1747,7 @@ async function runSourceCli(
 ): Promise<{ stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, 'src/cli.ts', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -1594,7 +1768,7 @@ async function runSourceCliExit(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   const proc = Bun.spawn([process.execPath, 'src/cli.ts', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -1725,6 +1899,7 @@ function recordingFetch(
 
 /** Set process.env entries and hand back the exact restore for a `finally`. */
 function withTemporaryEnv(values: Record<string, string | undefined>): { restore: () => void } {
+  if (values.HOME && !Object.hasOwn(values, 'XDG_CONFIG_HOME')) values = { ...values, XDG_CONFIG_HOME: join(values.HOME, '.config') };
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(values)) {
     previous.set(key, process.env[key]);
@@ -1763,4 +1938,19 @@ describe('how a hint names the Olympus command', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+test('Linux desktop dashboard asks the socket to open a private file, and refuses bridge failures', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'owner-desktop-cli-'));
+  const env = withTemporaryEnv({ HOME: home, OLYMPUS_CONFIG: join(home, 'missing.json'), OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1', OLYMPUS_WORKER_AUTH_TOKEN: 'fixture-worker-token' });
+  try {
+    let sent = '';
+    const result = await runDashboardCommand({ platform: 'linux', openImpl: () => { throw new Error('CLI must never open secret URL'); },
+      fetchImpl: async (input, init) => {
+        sent = String(input); expect(init?.method).toBe('POST'); expect(init?.redirect).toBe('error');
+        return Response.json({ state: 'listening', opened: true, url: 'http://session.localhost:8010/dashboard', hint: 'Private owner ticket opened.' });
+      } });
+    expect(sent).toBe('http://127.0.0.1:8010/desktop-owner/open'); expect(result.opened).toBe(true); expect(result.url).not.toContain('#');
+    await expect(runDashboardCommand({ platform: 'linux', fetchImpl: async () => Response.json({ state: 'port_in_use', remedy: 'Free the port or use SSH socket forward.' }, { status: 503 }) })).rejects.toThrow('Free the port');
+  } finally { env.restore(); rmSync(home, { recursive: true, force: true }); }
 });

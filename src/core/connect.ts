@@ -1,3 +1,5 @@
+import { linuxOwnerConfigPath } from './owner-config-read.ts';
+import { readLinuxEngineReceipt, resolveLinuxEngineLayout, isLegacyLinuxSetting } from './linux-engine-layout.ts';
 import { isRetiredGoogleHandle } from './google-handle-compatibility.ts';
 import { modelEndpointFetch } from './model-transport.ts';
 import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
@@ -18,7 +20,7 @@ import {
   isBoundedResponseTooLargeError,
 } from './http-timeout.ts';
 import { googlePublisherExchangeUrl } from './oauth-relay.ts';
-import { isGooglePublisherWebClientId } from './publisher-oauth-client.ts';
+import { googleDesktopClientSecret, isGooglePublisherWebClientId } from './publisher-oauth-client.ts';
 import {
   assertOneConnectedAccountPerProvider,
   defaultHandleRegistryPath,
@@ -619,7 +621,16 @@ async function completeOAuthSourceConnection(
   // under this source's key and referenced from the handle registry, giving a
   // publisher credential a `clientSecretSecretRef` to a stranger's secret.
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
-  const clientSecret = usesGooglePublisherExchange ? undefined : await resolveOAuthClientSecret(prepared);
+  // Olympus's own Desktop client exchanges directly with Google using the
+  // secret that ships in source (`core/publisher-oauth-client.ts`), and only
+  // that one: a stored secret from another registration would not pair with
+  // it. It is never stored per credential either; refresh looks it up again.
+  const shippedDesktopSecret = isGoogleOAuthSource(prepared.options.source)
+    ? googleDesktopClientSecret(prepared.clientId)
+    : undefined;
+  const clientSecret = usesGooglePublisherExchange
+    ? undefined
+    : shippedDesktopSecret ?? await resolveOAuthClientSecret(prepared);
   const token = await exchangeAuthorizationCode({
     source: prepared.options.source,
     tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
@@ -804,7 +815,7 @@ async function completeOAuthSourceConnection(
       // condition restates it so the invariant is readable here rather than
       // sixty lines up, and so a future edit to the resolver cannot quietly
       // reintroduce a stored secret for a credential that has none.
-      if (!usesGooglePublisherExchange && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
+      if (!usesGooglePublisherExchange && !shippedDesktopSecret && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
         const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
         secretWrites.push([clientSecretKey, clientSecret]);
         clientSecretRef = `store:${clientSecretKey}`;
@@ -1956,13 +1967,14 @@ async function exchangeAuthorizationCode(options: {
    * path. */
   state?: string;
 }): Promise<{ accessToken: string; refreshToken?: string; expiresInSeconds?: number; scopes: string[]; providerAccountId?: string }> {
-  // Google's publisher **Web** client is a confidential client whose token
-  // endpoint requires `client_secret`, which Olympus — public source — cannot
-  // ship. That leg is delegated to a small publisher-run Cloudflare Worker
-  // that holds the secret instead and is never sent one itself
-  // (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`). Every other path — the packaged
-  // Google Desktop pilot client, a bring-your-own Google client, Dropbox, X —
-  // is unaffected and still exchanges directly with the provider below.
+  // Legacy: Google's publisher **Web** client is a confidential client whose
+  // token endpoint requires `client_secret`, which Olympus — public source —
+  // cannot ship. That leg went to a small publisher-run Cloudflare Worker
+  // that holds the secret (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`); only a
+  // flow still started with that client reaches it. Every other path —
+  // Olympus's Desktop client (new sign-ins since 2026-10-13), the older pilot
+  // Desktop client, a bring-your-own Google client, Dropbox, X — exchanges
+  // directly with the provider below.
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(options.source, options.clientId);
   const url = usesGooglePublisherExchange ? googlePublisherExchangeUrl() : options.tokenUrl;
   const init: RequestInit = usesGooglePublisherExchange
@@ -2306,11 +2318,15 @@ function oauthErrorCodeFromBody(text: string): string | undefined {
   }
 }
 
-export function defaultDetachedOAuthStateDir(): string {
+export function defaultDetachedOAuthStateDir(env: Record<string, string | undefined> = process.env): string {
+  const linuxPath = linuxOwnerConfigPath('pending-oauth', env);
+  if (linuxPath) return linuxPath;
   return join(homedir(), '.olympus', 'pending-oauth');
 }
 
-export function defaultDetachedOAuthLogDir(): string {
+export function defaultDetachedOAuthLogDir(env: Record<string, string | undefined> = process.env): string {
+  const linuxPath = linuxOwnerConfigPath('logs', env);
+  if (linuxPath) return linuxPath;
   return join(homedir(), '.olympus', 'logs');
 }
 
@@ -2332,7 +2348,16 @@ export function writeDetachedOAuthState(path: string, state: DetachedOAuthState)
 
 export function readDetachedOAuthState(path: string): DetachedOAuthState | undefined {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync(path, 'utf8')) as DetachedOAuthState);
+    const state=sanitizeDetachedOAuthState(JSON.parse(readFileSync(path, 'utf8')) as DetachedOAuthState);
+    if(process.platform==='linux'&&state.logPath){
+      const layout=resolveLinuxEngineLayout();
+      const legacyLogs=join(layout.home,'.olympus/logs')+'/';
+      if(readLinuxEngineReceipt(layout.receiptPath)&&dirname(path)===join(layout.configDir,'pending-oauth')&&state.logPath.startsWith(legacyLogs)){
+        const name=state.logPath.slice(legacyLogs.length);
+        if(isLegacyLinuxSetting(`logs/${name}`))state.logPath=join(layout.configDir,'logs',name);
+      }
+    }
+    return state;
   } catch {
     return undefined;
   }

@@ -79,6 +79,7 @@ import {
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
   EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
 } from './store-sink.ts';
 import type {
@@ -135,6 +136,7 @@ export const EXTRACTION_EGRESS_REFUSED_DECISION = 'egress_policy_decision_forbid
 export const EXTRACTION_EGRESS_REFUSED_DEFERRED = 'egress_policy_default_deferred';
 export const EXTRACTION_EGRESS_REFUSED_TRUST_TIER = 'egress_policy_trust_tier';
 export const EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = 'egress_trust_tier_unknown';
+export const EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = 'egress_job_policy_unreadable';
 
 export const EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = 'consecutive_retryable_failures';
 export const EXTRACTION_PAUSE_HEALTH_PROBE = 'extractor_health_probe_failed';
@@ -149,6 +151,9 @@ const ERROR_HASH_CHARS = 32;
 const SINK_SKIP_SETTLEMENTS: Readonly<Record<string, ExtractionTerminalStatus>> = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: 'failed_terminal',
   [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: 'failed_terminal',
+  // A job for a revision the item has moved past: the current revision's
+  // own job decides it, so this one is done.
+  [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: 'failed_terminal',
   [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: 'blocked_policy',
   [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: 'blocked_policy',
   // Decided by the item's tiers, not failures: a queued tier move waits for
@@ -219,9 +224,20 @@ export function evaluateExtractionEgress(input: {
   const itemRank = SOURCE_TRUST_TIERS.indexOf(input.trustTier);
   const maxRank = SOURCE_TRUST_TIERS.indexOf(input.policy.maxTrustTierForRemote);
   if (itemRank < 0 || maxRank < 0 || itemRank > maxRank) {
+    // A Secrets item settles as Secrets, the kind a restoration reads again.
+    if (input.trustTier === 'S5') return { allowed: false, errorKind: EXTRACTION_SINK_SKIPPED_SECRETS };
     return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_TRUST_TIER };
   }
   return { allowed: true };
+}
+
+/**
+ * A late live-policy refusal keeps the same disposition as the pre-fetch gate.
+ */
+class ExtractionEgressRefusedError extends Error {
+  constructor(readonly errorKind: string) {
+    super(errorKind);
+  }
 }
 
 // --- corpora ---------------------------------------------------------------
@@ -847,6 +863,7 @@ export function createFileExtractionRunner(
         // here is the defect that stopped a live migration mid-run.
         const outcome = await settleOneJob({
           job,
+          jobs,
           extractor,
           corpus,
           resolveSource: async () => {
@@ -940,6 +957,7 @@ interface JobOutcome {
 }
 
 interface SettleOneJobInput {
+  jobs: LocalFileExtractionJobStore;
   job: LeasedExtractionJob;
   extractor: Extractor | undefined;
   corpus: ExtractionRunnerCorpus;
@@ -989,20 +1007,34 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
   }
 
-  // The gate runs before the bytes are fetched. Doing it here rather than at
-  // the call site inside the extractor is what makes it a boundary: the remote
-  // extractor cannot be reached at all, so it cannot be reached by mistake.
-  const trustTier = extractor.egress === 'approved_remote'
-    ? await readTrustTier(corpus, job.ref)
-    : undefined;
-  const egress = evaluateExtractionEgress({
-    egress: extractor.egress,
-    ...(corpus.egressPolicy ? { policy: corpus.egressPolicy } : {}),
-    policyDecision: job.policyDecision,
-    ...(trustTier !== undefined ? { trustTier } : {}),
-  });
+  // Refuse before fetching, then use the same live gate after local reading
+  // and model preparation, when the remote lane is about to send the bytes.
+  const checkEgress = async (): Promise<ExtractionEgressDecision> => {
+    const trustTier = extractor.egress === 'approved_remote'
+      ? await readTrustTier(corpus, job.ref)
+      : undefined;
+    // enqueue() can restamp policy without revoking the active lease. Never
+    // authorize a send with the decision captured when that lease was taken.
+    let policyDecision = job.policyDecision;
+    if (extractor.egress === 'approved_remote') {
+      try {
+        const current = input.jobs.get(job.jobId);
+        if (!current) return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN };
+        policyDecision = current.policyDecision;
+      } catch {
+        return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN };
+      }
+    }
+    return evaluateExtractionEgress({
+      egress: extractor.egress,
+      ...(corpus.egressPolicy ? { policy: corpus.egressPolicy } : {}),
+      policyDecision,
+      ...(trustTier !== undefined ? { trustTier } : {}),
+    });
+  };
+  const egress = await checkEgress();
   if (!egress.allowed) {
-    return { status: 'blocked_policy', errorKind: egress.errorKind };
+    return egressRefusalOutcome(egress.errorKind);
   }
 
   let fetched: FetchedBytes | undefined;
@@ -1047,6 +1079,15 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   const resolvedSizeBytes = fetched?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput: ExtractorInput = {
     ref: job.ref,
+    ...(extractor.egress === 'approved_remote' ? {
+      assertRemoteEgressAllowed: async () => {
+        if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
+          throw new ExtractionEgressRefusedError(EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED);
+        }
+        const current = await checkEgress();
+        if (!current.allowed) throw new ExtractionEgressRefusedError(current.errorKind);
+      },
+    } : {}),
     job: {
       jobId: job.jobId,
       extractorKind: job.extractorKind,
@@ -1073,6 +1114,9 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     output = await extractor.extract(extractorInput);
     if (output.status === 'indexed' && output.media) staged.media = output.media;
   } catch (error) {
+    if (error instanceof ExtractionEgressRefusedError) {
+      return egressRefusalOutcome(error.errorKind);
+    }
     // A redirecting model endpoint is a configuration fault, not this file's:
     // it keeps its own kind so the lane can say so, and the job waits for its
     // ordinary backoff rather than being re-run at once.
@@ -1334,6 +1378,14 @@ function leaseHasExpired(leaseExpiresAt: string, at: Date): boolean {
   const expiry = Date.parse(leaseExpiresAt);
   if (!Number.isFinite(expiry)) return false;
   return at.getTime() > expiry;
+}
+
+function egressRefusalOutcome(errorKind: string): JobOutcome {
+  return {
+    status: errorKind === EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN || errorKind === EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN
+      ? 'failed_retryable' : 'blocked_policy',
+    errorKind,
+  };
 }
 
 async function readTrustTier(

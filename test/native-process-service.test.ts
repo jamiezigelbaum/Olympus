@@ -14,7 +14,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -23,6 +23,9 @@ import {
   type NativeProcessServiceContext,
   type NativeProcessServiceDefinition,
 } from '../src/core/native-process-service.ts';
+
+import { createNativeWorkerService } from '../src/core/native-worker-service.ts';
+import { workerSocketPath } from '../src/core/worker-transport.ts';
 
 const READY_ENV = 'OLYMPUS_RESTART_READY_PATH';
 const INSTANCE_ENV = 'OLYMPUS_RESTART_INSTANCE';
@@ -49,6 +52,7 @@ interface Harness {
   logs: string[];
   warnings: string[];
   spawned: ChildProcess[];
+  released: boolean[];
   context: NativeProcessServiceContext;
 }
 
@@ -62,6 +66,7 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
   const logs: string[] = [];
   const warnings: string[] = [];
   const spawned: ChildProcess[] = [];
+  const released: boolean[]=[];
   let launchIndex = 0;
   const service = createNativeProcessService({
     id: 'fixture',
@@ -77,7 +82,8 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
       spawned.push(child);
       return child;
     }) as unknown as typeof spawnProcess,
-    async prepareStart() {
+    async prepareStart(input) {
+      released.push(input.previousChildReleased);
       const launch = scriptForLaunch(launchIndex);
       launchIndex += 1;
       const instance = randomUUID();
@@ -104,7 +110,7 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
       clearFailure: () => { health.push('clear'); },
     },
   };
-  return { service, health, logs, warnings, spawned, context };
+  return { service, health, logs, warnings, spawned, released, context };
 }
 
 async function waitUntil(condition: () => boolean, label: string, timeoutMs = 8_000): Promise<void> {
@@ -153,6 +159,7 @@ for (const [name, script] of [
       await waitUntil(() => readyCount(run) === 2, 'the replacement child to become ready');
       expect(run.spawned).toHaveLength(2);
       expect(run.spawned[0]!.pid).not.toBe(run.spawned[1]!.pid);
+      expect(run.released).toEqual([false,true]);
       expect(run.health).toEqual([
         'Olympus fixture is starting.',
         'clear',
@@ -165,6 +172,69 @@ for (const [name, script] of [
       await run.service.stop();
     }
   }, 15_000);
+}
+
+for (const confirmed of [true, false]) {
+ test.skipIf(process.platform !== 'linux')(`config replacement ${confirmed ? 'binds the retained socket after confirmed release' : 'retains the socket after unconfirmed release'}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'worker-replace-'));
+  cleanups.push(() => rmSync(root, {recursive: true, force: true}));
+  const env = {HOME: root, XDG_RUNTIME_DIR: root, XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache')};
+  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  cleanups.push(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  const script = join(root, 'worker.mjs'), socket = workerSocketPath({env})!;
+  writeFileSync(script, `
+   import {existsSync, chmodSync} from 'node:fs';
+   import {spawnSync} from 'node:child_process';
+   import {bindWorkerSocket, prepareWorkerSocket} from ${JSON.stringify(join(import.meta.dir, '../src/core/worker-transport.ts'))};
+   const path = prepareWorkerSocket();
+   const server = bindWorkerSocket(path, () => Bun.serve({unix: path, fetch(request) {
+    return request.headers.get('authorization') === 'Bearer fixture-token'
+     ? Response.json({instance_id: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID})
+     : new Response('unauthorized', {status: 401});
+   }}));
+   process.once('SIGTERM', () => {
+    server.stop(true);
+    // Normalize Bun versions that unlink on stop to the retained-socket failure.
+    if (!existsSync(path)) {
+     const made = spawnSync('python3', ['-c', 'import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()', path]);
+     if (made.status !== 0) process.exit(9);
+     chmodSync(path, 0o600);
+    }
+    process.exit(0);
+   });
+  `);
+  const pids: number[] = [], retained: number[] = [], warnings: string[] = [];
+  setNativeProcessChildObserver({spawned: (_id, pid) => {pids.push(pid);}, stopped: () => {retained.push(lstatSync(socket).ino);}});
+  cleanups.push(() => setNativeProcessChildObserver(undefined));
+  const service = createNativeWorkerService({initialPluginConfig: {worker: {authToken: 'fixture-token', service: {enabled: true, runtimePath: process.execPath, executablePath: script}}},
+   moduleUrl: import.meta.url, workerEnvPath: join(root, 'absent.env'), startupTimeoutMs: 1_500, readinessPollMs: 10, stopGraceMs: 200});
+  const realKill = process.kill;
+  try {
+   const context = {logger: {warn: (message: string) => {warnings.push(message);}}};
+   await service.start(context);
+   expect(service.isReady()).toBe(true);
+   if (!confirmed) process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid === -pids[0]! && signal !== 'SIGTERM') throw Object.assign(new Error('synthetic EPERM'), {code: 'EPERM'});
+    return realKill(pid, signal);
+   }) as typeof process.kill;
+   const replacement = service.start(context);
+   if (confirmed) {
+    await replacement;
+    expect(service.isReady()).toBe(true);
+    expect(pids).toHaveLength(2);
+   } else {
+    await expect(replacement).rejects.toThrow('failed to become ready');
+    expect(lstatSync(socket).ino).toBe(retained[0]!);
+    expect(warnings.join(' ')).toContain('could not be confirmed stopped');
+    expect(service.isReady()).toBe(false);
+   }
+   expect(retained[0]).toBeGreaterThan(0);
+  } finally {
+   process.kill = realKill;
+   await service.stop();
+  }
+ }, 15_000);
 }
 
 test('a group kill that answers ESRCH counts as stopped: the observer is told and the child is replaced', async () => {

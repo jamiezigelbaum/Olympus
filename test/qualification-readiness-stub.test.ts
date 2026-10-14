@@ -48,7 +48,13 @@ describe('simulated clean-home readiness stub', () => {
 
   test('the pinned managed environment points the upgrade readiness probe at the stub', async () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-qualification-readiness-'));
-    const stub = await startSimulatedReadinessServer();
+    const savedRuntime = process.env.XDG_RUNTIME_DIR;
+    const socket = process.platform === 'linux' ? join(home, 'olympus/worker.sock') : undefined;
+    if (socket) {
+      mkdirSync(join(home, 'olympus'), { mode: 0o700 });
+      process.env.XDG_RUNTIME_DIR = home;
+    }
+    const stub = await startSimulatedReadinessServer(socket);
     try {
       installWorkerService({
         platform: 'linux',
@@ -80,6 +86,8 @@ describe('simulated clean-home readiness stub', () => {
       expect(readFileSync(envPath, 'utf8')).toContain(`OLYMPUS_EMAIL_SOURCE_PORT=${stub.port}`);
     } finally {
       await stub.stop();
+      if (savedRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = savedRuntime;
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
     }

@@ -31,11 +31,10 @@
 // provider item identity (tier-ledger.ts, `setOverride`).
 
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
+import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
 import { TIER_KEYS, type OwnerTierRule, type TierKey } from './tier-classifier.ts';
 
 export const TIER_RULES_SCHEMA_VERSION = 1;
@@ -66,13 +65,13 @@ export interface TierRulesValidationResult {
   permissionsTightened?: boolean;
 }
 
-export function defaultTierRulesPath(): string {
-  return join(homedir(), '.olympus', 'tier-rules.json');
+export function defaultTierRulesPath(env: Record<string, string | undefined> = process.env): string {
+  return defaultOwnerConfigPath('tier-rules.json', env);
 }
 
 export function resolveTierRulesPath(options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {}): string {
   const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath();
+  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
 }
 
 /**

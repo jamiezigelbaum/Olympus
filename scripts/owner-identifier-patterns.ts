@@ -164,7 +164,7 @@ export function pathCarriesOwnerIdentityToken(
  * each exception exact and confined to the files that need it; no private
  * identity, arbitrary GitHub URL, or surrounding text is exempt.
  */
-export const LICENSE_COPYRIGHT_LINE = 'Copyright (c) 2026 Jamie Zigelbaum';
+export const LICENSE_COPYRIGHT_LINE = 'Copyright (c) 2026 Open Coordination Unlimited, Inc.';
 
 const PUBLIC_INSTALL_URL_FILES = new Set([
   'README.md',
@@ -202,10 +202,10 @@ const PUBLIC_DOWNLOAD_URL_FILES = new Set([
   'dist/index.js',
 ]);
 const PUBLIC_DOWNLOAD_URLS = new Set([
-  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz',
-  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz',
-  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz',
-  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz',
 ]);
 
 export function scannableText(relativePath: string, text: string): string {

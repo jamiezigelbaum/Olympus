@@ -99,17 +99,39 @@ export function tieredExtractionView(
       return store && store.activeLocalItemRow(localItemId) ? [store] : [];
     });
 
+  // A routed item whose names sit in one store and whose text sits in another
+  // is listed through its names row, and its text row never is. When the text
+  // was read before the file was edited, that names row is the one to list
+  // again: the text is rewritten in place wherever it rests.
+  const staleContentElsewhere = (
+    corpusId: string,
+    copies: readonly TierCopy[],
+    localItemId: string,
+  ): boolean => {
+    const current = copies.filter((copy) => copy.state === 'current');
+    const mine = current.find((copy) => copy.corpusId === corpusId);
+    if (!mine || mine.layers === 'content') return false;
+    return current.some((copy) => {
+      if (copy.corpusId === corpusId || copy.layers !== 'content') return false;
+      const domain = set.domainForCorpus(copy.corpusId);
+      return domain !== undefined && set.store(domain)?.itemTextIsStale(localItemId) === true;
+    });
+  };
+
   const keep = (
     domain: SourceTrustDomain,
     store: LocalConnectorStore,
     candidates: readonly ConnectorStoreExtractionCandidate[],
+    includeStaleChunks: boolean,
   ): ConnectorStoreExtractionCandidate[] => {
     const copies = set.ledger.copiesForMany(candidates.map((candidate) => candidate.identity));
     const legacyLeg = set.legSpec(domain)?.legacy === true;
     return candidates.filter((candidate) => {
       const itemCopies = copies.get(tierLedgerIdentityKey(candidate.identity)) ?? [];
       if (itemCopies.length === 0) return legacyLeg && !set.ledger.isRouted(candidate.identity);
-      return routedCandidate(store.corpusId, itemCopies)
+      return (routedCandidate(store.corpusId, itemCopies)
+          || (includeStaleChunks
+            && staleContentElsewhere(store.corpusId, itemCopies, candidate.identity.localItemId)))
         && set.ledger.getCurrent(candidate.identity)?.state !== 'moving';
     });
   };
@@ -139,7 +161,7 @@ export function tieredExtractionView(
         }
         const { cursor: _ignored, ...rest } = options;
         const page = store.extractionCandidates({ ...rest, ...(cursor !== undefined ? { cursor } : {}) });
-        const candidates = keep(domain, store, page.candidates);
+        const candidates = keep(domain, store, page.candidates, options.includeStaleChunks === true);
         const last = index === domains.length - 1;
         if (!page.done) {
           return {
@@ -185,6 +207,20 @@ export function tieredExtractionView(
       for (const store of storesHoldingRow(localItemId)) {
         const located = store.activeLocalItemRow(localItemId);
         if (!located) continue;
+        // Stored copies can still carry their old tier after an owner ruling
+        // or a ledger flip. Read the authority even while those copies hide
+        // or wait to move; failures propagate to the runner's closed gate.
+        if (set.ledger.itemIsSecret(located.identity)) return 'S5';
+        const override = set.ledger.getOverride(located.identity);
+        const decision = set.ledger.getCurrent(located.identity);
+        const tiers = [decision?.metadataTier, decision?.contentTier,
+          decision?.targetMetadataTier, decision?.targetContentTier,
+          override?.kind === 'tier' ? override.tier : undefined];
+        // A Secrets ruling can commit between these reads and the check above.
+        if (tiers.includes('secrets')) return 'S5';
+        const decisionTier = tiers.includes('secure') ? 'S4'
+          : tiers.includes('private') ? 'S3' : undefined;
+        if (decisionTier && (tier === undefined || TRUST_TIER_RANK[decisionTier] > TRUST_TIER_RANK[tier])) tier = decisionTier;
         if (set.ledger.isRouted(located.identity)) routed = true;
         if (tier === undefined || TRUST_TIER_RANK[located.trustTier] > TRUST_TIER_RANK[tier]) tier = located.trustTier;
       }

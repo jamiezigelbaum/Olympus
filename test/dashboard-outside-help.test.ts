@@ -1,3 +1,4 @@
+import { linuxZkapiConfinement } from '../src/core/zkapi-confinement-linux.ts';
 /**
  * The Outside help card (src/workers/dashboard/outside-help.ts,
  * pages/private-answers.ts) and its worker side (email-source/dashboard-consult.ts,
@@ -16,7 +17,7 @@ import { Window } from 'happy-dom';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, consultChatgptModelUnavailableMessage, readConsultSettings } from '../src/core/consult-settings.ts';
-import type { ZkapiConsultReadiness, ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
+import type { ZkapiConfinement, ZkapiConsultReadiness, ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
 import { zkapiFenceScope } from '../src/core/consult-transport-zkapi.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
@@ -25,9 +26,11 @@ import { dashboardHtmlRoutePage } from '../src/workers/dashboard/index.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_PATHS,
   outsideHelpBlockerWords,
+  renderOutsideHelpCard,
   summaryOf,
   type DashboardOutsideHelpStatus,
 } from '../src/workers/dashboard/outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_TOOLS_COPY } from '../src/workers/dashboard/outside-help-tools.ts';
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/email-source/dashboard-consult.ts';
@@ -48,7 +51,7 @@ function tempHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'olympus-outside-help-'));
   cleanups.push(() => {
     try {
-      chmodSync(join(home, '.olympus'), 0o700);
+      chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o700);
     } catch {
       // not always present
     }
@@ -180,6 +183,67 @@ function runCardScript(html: string, answer: (url: string, body: unknown) => Car
   return { window, document, posts, settle };
 }
 
+describe('Set up zkAPI names the program Olympus installed', () => {
+  const MANAGED = '/Users/ada/Library/Application Support/Olympus/tools/zkapi-clientd/0.1.6-olympus2/bin/zkapi-clientd';
+  const withDaemon = (daemon: Partial<NonNullable<DashboardOutsideHelpStatus['tools']>['tools'][number]>): DashboardOutsideHelpStatus => ({
+    ...status(),
+    tools: {
+      tools: [{ tool: 'tor', label: 'Tor', source: 'olympus' }, { tool: 'zkapi-clientd', label: 'zkAPI', source: 'olympus', ...daemon }],
+      install: { state: 'idle' },
+    },
+  });
+  const stepsOf = (value: DashboardOutsideHelpStatus): string[] => {
+    const html = page(value);
+    const list = html.slice(html.indexOf('class="ohsteps"'), html.indexOf('</ol>', html.indexOf('class="ohsteps"')));
+    return [...list.matchAll(/<li>(.*?)<\/li>/g)].map((match) => visibleText(match[1]!));
+  };
+  const commands = (steps: string[]): string[] => steps.filter((step) => step.includes(' config ')).map((step) => step.slice(0, step.indexOf(' config ') + ' config '.length));
+
+  test('after the one-click install, every command carries the installed program\'s quoted path (a folder with a space)', () => {
+    const steps = stepsOf(withDaemon({ executable: MANAGED }));
+    expect(steps).toHaveLength(7);
+    // Five commands, each starting with the one quoted path; none is the bare name.
+    expect(commands(steps)).toEqual(Array(5).fill(`Run: '${MANAGED}' config `));
+    expect(steps.some((step) => step.startsWith('Run: zkapi-clientd '))).toBe(false);
+    // The wording after the command is unchanged.
+    expect(steps[1]).toBe(`Run: '${MANAGED}' config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.`);
+    expect(steps[3]).toBe(`Run: '${MANAGED}' config --relay-url socks5://127.0.0.1:19050`);
+    expect(steps[6]).toBe(`Run: '${MANAGED}' config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.`);
+    // The key reference still fills.
+    expect(steps[5]).toContain('(env:OLYMPUS_ZKAPI_API_KEY)');
+    expect(steps[5]).not.toContain('config --api-key <key>');
+    expect(steps[5]).toContain('Pipe');
+    expect(steps[5]).not.toContain('{');
+  });
+
+  test('a path with a single quote is closed, escaped and reopened; a plain path is typed as is', () => {
+    expect(commands(stepsOf(withDaemon({ executable: "/Users/o'brien/tools/zkapi-clientd" })))[0]).toBe("Run: '/Users/o'\\''brien/tools/zkapi-clientd' config ");
+    expect(commands(stepsOf(withDaemon({ executable: '/home/ada/.local/share/olympus/tools/zkapi-clientd/0.1.6-olympus2/bin/zkapi-clientd' })))[0])
+      .toBe('Run: /home/ada/.local/share/olympus/tools/zkapi-clientd/0.1.6-olympus2/bin/zkapi-clientd config ');
+  });
+
+  test('the bare name stays only when no program is known to be off PATH: on PATH, not installed yet, or no tools facts', () => {
+    const bare = Array(5).fill('Run: zkapi-clientd config ');
+    expect(commands(stepsOf(withDaemon({ source: 'system' })))).toEqual(bare);
+    expect(commands(stepsOf(withDaemon({ source: 'missing' })))).toEqual(bare);
+    expect(commands(stepsOf(withDaemon({ source: 'outdated', installedVersion: '0.1.6' })))).toEqual(bare);
+    expect(commands(stepsOf(status()))).toEqual(bare);
+  });
+
+  test('a copy found outside PATH and a path set in the route are named too', () => {
+    expect(commands(stepsOf(withDaemon({ source: 'system', executable: '/opt/homebrew/bin/zkapi-clientd' })))).toEqual(Array(5).fill('Run: /opt/homebrew/bin/zkapi-clientd config '));
+    expect(commands(stepsOf(withDaemon({ source: 'configured', path: '/opt/zk tools/zkapi-clientd' })))).toEqual(Array(5).fill("Run: '/opt/zk tools/zkapi-clientd' config "));
+    // A configured path that is not there cannot be run; the steps keep the bare name.
+    expect(commands(stepsOf(withDaemon({ source: 'configured_missing', path: '/nowhere/zkapi-clientd' })))).toEqual(Array(5).fill('Run: zkapi-clientd config '));
+  });
+
+  test('a path that looks like a template slot is not filled twice', () => {
+    const steps = stepsOf(withDaemon({ executable: '/tmp/{secretRef} dir/zkapi-clientd' }));
+    expect(steps[1]!.startsWith("Run: '/tmp/{secretRef} dir/zkapi-clientd' config --usd N.")).toBe(true);
+    expect(steps[5]).toContain('(env:OLYMPUS_ZKAPI_API_KEY)');
+  });
+});
+
 describe('the Outside help page: states and copy', () => {
   test('off, route ready, acknowledged: one status line, no problems, everything else one collapsed line with its value', () => {
     const html = page(status());
@@ -204,10 +268,10 @@ describe('the Outside help page: states and copy', () => {
     // The honesty label keeps "network route not verified".
     expect(visibleText(html)).toContain('network route not verified');
     for (const line of W.disclosure) expect(html).toContain(line.replace(/'/g, '&#39;'));
-    for (const step of W.steps) expect(visibleText(html)).toContain(step.replace('{secretRef}', 'env:OLYMPUS_ZKAPI_API_KEY').slice(0, 40));
+    for (const step of W.steps) expect(visibleText(html)).toContain(step.replace('{secretRef}', 'env:OLYMPUS_ZKAPI_API_KEY').replaceAll('{daemon}', 'zkapi-clientd').slice(0, 40));
     // The seven setup steps, in the order that worked live (§A.14): one send, activation, relay, require key, api key, key reuse 0.
     const text = visibleText(html);
-    const order = ['--usd N', 'Private inference balance activated', '--relay-url socks5://127.0.0.1:19050', '--require-api-key', '--api-key <key>', '--key-reuse-window-seconds 0'];
+    const order = ['--usd N', 'Private inference balance activated', '--relay-url socks5://127.0.0.1:19050', '--require-api-key', '--api-key', '--key-reuse-window-seconds 0'];
     const positions = order.map((needle) => text.indexOf(needle));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
@@ -772,13 +836,17 @@ function adapter(input: {
   profileOverrides?: Record<string, unknown>;
   secret?: string;
   readiness?: Partial<ZkapiConsultReadiness>;
+  probeConfinement?: boolean;
   recover?: ZkapiConsultResult;
   reload?: boolean;
   source?: string;
   writerCheck?: Parameters<typeof createDashboardConsultAdapter>[0]['writerCheck'];
   chatgptModelProblem?: Parameters<typeof createDashboardConsultAdapter>[0]['chatgptModelProblem'];
+  /** This computer's network confinement; default: a confined platform (never the host's). */
+  confinement?: ZkapiConfinement;
 }) {
-  const path = join(input.home, '.olympus', 'sovereignty.json');
+  const path = join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
+  mkdirSync(join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
   mkdirSync(join(input.home, '.olympus'), { recursive: true, mode: 0o700 });
   const config = policyWith(input.zkapi ?? true, input.profileOverrides);
   writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
@@ -792,15 +860,154 @@ function adapter(input: {
     secretPresent: (ref) => ref === 'env:OLYMPUS_ZKAPI_API_KEY' && env.OLYMPUS_ZKAPI_API_KEY !== undefined,
     requestReload: () => { reloads.push(1); return input.reload ?? true; },
     env,
-    statePath: join(input.home, '.olympus', 'zkapi-consult-state.json'),
+    statePath: join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'),
     now: () => new Date('2026-10-07T12:00:00.000Z'),
-    readiness: async (options) => { probes.push(options); return readiness(input.readiness); },
+    readiness: async (options) => { probes.push(options); if (input.probeConfinement) await options.confinement?.check?.(); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
     ...(input.writerCheck ? { writerCheck: input.writerCheck } : {}),
     ...(input.chatgptModelProblem ? { chatgptModelProblem: input.chatgptModelProblem } : {}),
+    confinement: input.confinement ?? CONFINED,
   });
   return { backend, reloads, probes, recoveries, path, env };
 }
+
+/** A platform with network confinement (the Mac), and one without (Linux, until its launcher lands). */
+const CONFINED: ZkapiConfinement = { level: 'loopback_filtered', limit: 'test confinement', wrap: (argv) => [...argv], selfTest: async () => true };
+const UNCONFINED: ZkapiConfinement = { level: 'none', limit: 'no network confinement is implemented on this platform', wrap: (argv) => [...argv], selfTest: async () => false };
+
+// Owner ruling 2026-10-12: no weaker mode. Where confinement cannot run, the
+// card says so in one line and offers nothing to set up; the worker refuses
+// the same actions itself.
+describe('the adapter: a computer without network confinement', () => {
+  test('one status render shares its confinement check with readiness', async () => {
+    let calls = 0;
+    const confinement = { ...CONFINED, check: async () => { calls++; return { ok: true, line: 'ready' }; } };
+    const { backend } = adapter({ home: tempHome(), confinement, probeConfinement: true });
+    await backend.status();
+    expect(calls).toBe(1);
+  });
+  test('two Linux status renders within the TTL run the launcher once', async () => {
+    const home = tempHome();
+    const path = join(home, 'launcher');
+    writeFileSync(path, 'synthetic launcher', { mode: 0o700 });
+    let calls = 0;
+    const confinement = linuxZkapiConfinement({ platform: 'linux', arch: 'x64', resolveLauncher: () => path, check: async () => {
+      calls++;
+      return { ok: true, landlockAbi: 4, layers: ['netns','pidns','ipv6-off','caps','nnp','launcher-undumpable','launcher-seccomp','landlock-net','seccomp'], stage0Layers: ['nnp','launcher-undumpable','launcher-seccomp'] };
+    } });
+    const { backend } = adapter({ home, confinement, probeConfinement: true });
+    expect((await backend.status()).unavailable).toBeUndefined();
+    expect((await backend.status()).unavailable).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
+  test('configured executables keep the real adapter launcher-download offer', async () => {
+    const home = tempHome();
+    const executable = join(home, 'configured-tool');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    const confinement: ZkapiConfinement = { ...UNCONFINED, check: async () => ({ ok: false, line: 'unavailable', installRequired: true }) };
+    const { backend } = adapter({ home, profileOverrides: { daemonExecutable: executable, torExecutable: executable }, confinement });
+    const value = await backend.status();
+    const daemon = value.tools!.tools.find(entry => entry.tool === 'zkapi-clientd');
+    expect(daemon?.source).toBe('configured');
+    expect(daemon?.offered).toBe(true);
+    const document = new Window().document;
+    document.body.innerHTML = renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true });
+    expect(document.querySelector('form[data-outside-tools-form] button')).not.toBeNull();
+  });
+
+  for (const source of ['missing', 'outdated', 'system', 'configured'] as const) test(`${source} Linux launcher retains installation controls but refuses enabling`, async () => {
+    const confinement: ZkapiConfinement = { ...UNCONFINED, check: async () => ({ ok: false, line: 'network confinement: unavailable', installRequired: true }) };
+    const { backend } = adapter({ home: tempHome(), zkapi: false, confinement });
+    const value = await backend.status();
+    expect(value.confinementInstallRequired).toBe(true);
+    const render = { ...value, tools: { tools: [{ tool: 'zkapi-clientd' as const, label: 'zkAPI', source, offered: true, installedVersion: '0.1.6-olympus3', version: '0.1.6-olympus4' }], install: { state: 'idle' as const } } };
+    const html = renderOutsideHelpCard(render, { csrfToken: 'csrf', localSession: true });
+    const document = new Window().document;
+    document.body.innerHTML = html;
+    expect(document.querySelector('form[data-outside-tools-form] button')).not.toBeNull();
+    expect(html).toContain('/dashboard/consult/tools/install');
+    expect(html).not.toContain('data-outside-form="add-route"');
+    expect(await backend.addRoute({ confirm: true })).toMatchObject({ ok: false, code: 'confinement_unavailable' });
+    const locked = renderOutsideHelpCard(render, { csrfToken: 'csrf', localSession: false });
+    expect(locked).toContain('data-outside-unlock');
+  });
+
+  test('the same dashboard reflects a newly available or refused Linux launcher', async () => {
+    let available = false;
+    const confinement: ZkapiConfinement = { ...CONFINED, get level() { return available ? 'loopback_filtered' : 'none'; }, check: async () => ({ ok: available, line: available ? 'network confinement: ready' : 'network confinement: unavailable' }) };
+    const { backend } = adapter({ home: tempHome(), zkapi: false, confinement });
+    expect((await backend.status()).unavailable).toBe('confinement_unavailable');
+    available = true;
+    const ready = await backend.status();
+    expect(ready.unavailable).toBeUndefined();
+    expect(visibleText(renderOutsideHelpCard(ready, { csrfToken: 'csrf', localSession: true }))).not.toContain('not available on Linux yet');
+    available = false;
+    expect((await backend.status()).unavailable).toBe('confinement_unavailable');
+    expect(W.confinementUnavailable).not.toContain('Linux yet');
+    expect(W.row.unavailable).toBe('Anonymous answers: not available on this computer');
+  });
+
+  const offered = (html: string): void => {
+    expect(visibleText(html)).toContain(W.confinementUnavailable);
+    expect(html).not.toContain(W.addRoute);
+    expect(html).not.toContain('data-outside-form="add-route"');
+    expect(html).not.toContain(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.install);
+    expect(html).not.toContain(W.stepsTitle);
+    expect(html).not.toContain('worker.env');
+    expect(html).not.toContain(W.turnOn);
+    expect(html).not.toContain('data-outside-blockers');
+  };
+
+  test('no route yet: one plain line, no Add zkAPI and no install steps; Add zkAPI is refused by the worker', async () => {
+    const home = tempHome();
+    const { backend, reloads, path } = adapter({ home, zkapi: false, confinement: UNCONFINED });
+    const value = await backend.status();
+    expect(value.unavailable).toBe('confinement_unavailable');
+    expect(summaryOf(value)).toEqual({ state: 'unavailable' });
+    const card = renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true });
+    offered(card);
+    offered(page(value));
+    expect(visibleText(page(value))).toContain(W.row.unavailable.replace(/^[^:]*:\s*/, ''));
+    const before = readFileSync(path, 'utf8');
+    expect(await backend.addRoute({ confirm: true })).toEqual({ ok: false, httpStatus: 409, code: 'confinement_unavailable', message: W.confinementUnavailable });
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(reloads).toEqual([]);
+  });
+
+  test('a route already added (the Linux laptop) reads the same; turning on is refused, turning off is not', async () => {
+    const home = tempHome();
+    const { backend } = adapter({ home, secret: 'zk-local-key', confinement: UNCONFINED, readiness: { blockers: ['confinement_unavailable', 'daemon_api_key_missing'] } });
+    const value = await backend.status();
+    expect(value.unavailable).toBe('confinement_unavailable');
+    expect(value.route.state).toBe('configured');
+    expect(summaryOf(value)).toEqual({ state: 'unavailable' });
+    offered(renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true }));
+    expect(renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true })).not.toContain(W.blockers.daemon_api_key_missing);
+    expect(await backend.setEnabled({ enabled: true, revision: 0 })).toEqual({ ok: false, httpStatus: 409, code: 'confinement_unavailable', message: W.confinementUnavailable });
+    expect(readConsultSettings({ env: { HOME: home } }).state).toBe('absent');
+    expect(await backend.setEnabled({ enabled: false, revision: 0 })).toMatchObject({ ok: true });
+  });
+
+  test('the readiness probe is asked about the same confinement the card judged by', async () => {
+    const home = tempHome();
+    const { backend, probes } = adapter({ home, secret: 'zk-local-key', confinement: UNCONFINED });
+    await backend.status();
+    expect((probes[0] as { confinement?: ZkapiConfinement }).confinement?.level).toBe('none');
+  });
+
+  test('a confined computer (the Mac) is unchanged: no unavailable state, Add zkAPI offered and done', async () => {
+    const home = tempHome();
+    const { backend } = adapter({ home, zkapi: false, confinement: CONFINED });
+    const value = await backend.status();
+    expect(value.unavailable).toBeUndefined();
+    expect(summaryOf(value)).toEqual({ state: 'route_not_configured' });
+    const card = renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true });
+    expect(card).toContain(W.addRoute);
+    expect(visibleText(card)).not.toContain(W.confinementUnavailable);
+    expect(await backend.addRoute({ confirm: true })).toMatchObject({ ok: true });
+  });
+});
 
 describe('the adapter: status', () => {
   test('the summary word and status reflect the file, the route and the fence; the probe never sees the key', async () => {
@@ -837,7 +1044,7 @@ describe('the adapter: status', () => {
     expect(summaryOf(await second.backend.status())).toEqual({ state: 'invalid' });
     const third = tempHome();
     const { backend, env } = adapter({ home: third });
-    writeFileSync(join(third, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/w' } } }), { mode: 0o600 });
+    writeFileSync(join(third, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/w' } } }), { mode: 0o600 });
     expect(summaryOf(await backend.status())).toEqual({ state: 'fence_held' });
     const value = await backend.status();
     expect(value.route.state === 'configured' && value.route.readiness?.fences).toEqual([{ scope: zkapiFenceScope({ env }), at: '2026-10-07T10:00:00.000Z', thisWallet: true }]);
@@ -845,8 +1052,8 @@ describe('the adapter: status', () => {
 
   test('a failing probe reads as readiness unavailable, never as ready', async () => {
     const home = tempHome();
-    mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
-    const path = join(home, '.olympus', 'sovereignty.json');
+    mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
+    const path = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
     const config = policyWith(true);
     writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
     const backend = createDashboardConsultAdapter({
@@ -1002,6 +1209,7 @@ describe('the adapter: turning outside help on and off', () => {
       statePath: join(tempHome(), 'state.json'),
       readiness: async () => readiness(),
       recoverSession: async () => { throw new Error('never'); },
+      confinement: CONFINED,
     });
     expect(await backend.setEnabled({ enabled: true, revision: 0 })).toMatchObject({ ok: false, httpStatus: 500, code: 'no_home' });
   });
@@ -1109,7 +1317,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     }
     expect(readFileSync(path, 'utf8')).toBe(before);
     expect(reloads).toEqual([]);
-    expect(readdirSync(join(home, '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
+    expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
     // Once the disk cooperates the same save goes through, atomically.
     expect((await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' })).ok).toBe(true);
     expect((JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig).modelProfiles['zkapi-consult']?.zkapi?.fundingDate).toBe('2026-10-05');
@@ -1153,7 +1361,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     const { backend, recoveries, env } = adapter({ home, secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'clear', settlement: 'confirmed' } as never, elapsedMs: 1 } });
     expect(await backend.recover({})).toMatchObject({ ok: false, code: 'confirmation_required' });
     expect(await backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 409, code: 'no_unresolved_session' });
-    const statePath = join(home, '.olympus', 'zkapi-consult-state.json');
+    const statePath = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json');
     const other = 'b'.repeat(32);
     writeFileSync(statePath, JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [other]: { at: '2026-10-06T09:00:00.000Z', configDir: '/other' } } }), { mode: 0o600 });
     expect(await backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 409, code: 'unresolved_session_other_wallet' });
@@ -1167,17 +1375,17 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     expect((recoveries[0] as { secretRef?: string }).secretRef).toBe('env:OLYMPUS_ZKAPI_API_KEY');
     // Settlement not confirmed: the fence is still held, and the message says so.
     const pending = adapter({ home: tempHome(), secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'held', settlement: 'pending' } as never, elapsedMs: 1 } });
-    writeFileSync(join(pending.env.HOME, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: pending.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
+    writeFileSync(join(pending.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: pending.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
     expect(await pending.backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 502, code: 'recovery_incomplete' });
     const failed = adapter({ home: tempHome(), secret: 'k' });
-    writeFileSync(join(failed.env.HOME, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: failed.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
+    writeFileSync(join(failed.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: failed.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
     expect(await failed.backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 502, code: 'transport_failed' });
   });
 
   test('abandon marks exactly the named fence abandoned, with confirmation, and keeps it as a record', async () => {
     const home = tempHome();
     const { backend } = adapter({ home });
-    const statePath = join(home, '.olympus', 'zkapi-consult-state.json');
+    const statePath = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json');
     const scope = 'c'.repeat(32);
     writeFileSync(statePath, JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [scope]: { at: '2026-10-06T09:00:00.000Z', configDir: '/other' } } }), { mode: 0o600 });
     expect(await backend.abandon({ scope })).toMatchObject({ ok: false, code: 'confirmation_required' });

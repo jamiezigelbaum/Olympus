@@ -33,7 +33,10 @@ and return addresses, never fetched; `src/workers/remote-oauth/pinned-clients.ts
 and the relay's registration, `connect-relay/server/client-registration.ts`)
 and get the remote tool set (`source_answer`, `source_answer_result`,
 `source_index_status`, `ask_anonymously`), never the ChatGPT surface, the
-private answer panel or `/openai/mcp`. Muse, Grok Bot and the Grok API key
+private answer panel or `/openai/mcp`. Grok Bot is in 1.0 too (owner
+decision 2026-10-13) and needs no connector of its own: once Olympus is
+connected on grok.com, Grok Bot uses that connection.
+Grok Bot's own sign-in (as Cursor's pinned client), Muse and the Grok API key
 path stay after 1.0.
 
 ### Delivered (branch `claude/chatgpt-plugin`)
@@ -123,8 +126,9 @@ waits for a calendar slot.
   the relay-v1 terms panel, which nothing triggers since relay v2
   (`needsTerms`, `LETS_ENCRYPT_REPOSITORY_URL` in
   `src/workers/agent-connections.ts`); delete it with the dashboard lane.
-- **Hosted agents beyond ChatGPT, Claude and Grok** (Muse, Grok Bot, the Grok API key
-  path) stay out of scope. Claude and Grok moved into 1.0 on 2026-10-12.
+- **Hosted agents beyond ChatGPT, Claude and Grok** (Muse, Grok Bot's own
+  sign-in, the Grok API key path) stay out of scope. Claude and Grok moved into
+  1.0 on 2026-10-12; Grok Bot uses the grok.com connection.
 - **Authenticating the Mac's key to the panel.** A compromised relay could
   swap keys (a residual risk stated in the design); accepted for 1.0.
 - **Outside help on the private answer panel** (frontier consult over
@@ -158,6 +162,71 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-13 — Grok Bot is in 1.0.** Owner decision, superseding the
+  Grok Bot part of the 2026-10-12 Claude and Grok decision below. Grok Bot
+  needs no connector of its own: once Olympus is connected on grok.com, it
+  uses that connection, with the same xAI account. Grok Bot's own sign-in (as
+  Cursor's pinned client), Muse and the Grok API key path stay after 1.0.
+
+- **2026-10-13 — Linux anonymous answers qualified and activated on the task branch.**
+  Published olympus4 downloads match all four pins. The owner's existing funded
+  wallet reached `ready` on Omarchy x64 with verified companion custody; the
+  synthetic paid answer returned 4 and settled, with a clear fence and a lost
+  route after Tor stopped. The full production-launcher matrix passed with zero
+  failures and no leaked launchers. Independent integrated review found no
+  P1/P2 issues. Linux selection now requires a passing launcher check; every
+  session retains its self-test and custody checks. Missing tools can be installed
+  without enabling the route; unsupported hosts stay unavailable. The changed
+  dashboard wording awaits owner acceptance. Mac behavior is unchanged; its pin
+  remains olympus4. This is branch work, not a deployment or merged release.
+  Evidence: `design/linux-zkapi-confinement.md`, “Funded qualification”.
+
+- **2026-10-13 — Linux W5 PR preparation (local only).** Merge current main,
+  retain existing standalone data in place, and use XDG for fresh installs.
+  Program generations and personal data have separate removal roots on new
+  installs. The anchor must obtain owner acceptance of the changed dashboard
+  renders before updating their approval receipt. This branch is held unpushed;
+  relay deployment remains blocked without the anchor's go while OpenAI review
+  is open. Details: `docs/design/linux-engine-service.md`, “Linux PR preparation”.
+
+- **2026-10-13 — The launch release is `1.0.0`.** Owner decision: the next
+  release from `main`, planned as rc.7, ships as `1.0.0`. It is the version
+  the site serves when the launch post, video and website go out. There is no
+  `1.0.0-rc.7`. The ChatGPT directory listing under review carries
+  `1.0.0-rc.3` (submitted 2026-10-11) and stays as it is, because uploading a
+  new listing version cancels the review and starts another. The listing is
+  the connection settings, skills and icon, not the engine; users install
+  whatever version the site serves. The listing takes the then-current version
+  with its next upload (the logo change after approval). Version numbers after
+  `1.0.0` follow
+  [Version numbers and releases](ENGINEERING_PROCESS.md#version-numbers-and-releases).
+  Supersedes the directory sentence in the 2026-10-01 entry below.
+- **2026-10-12 — First Omarchy install follow-up.** The owner proved per-user
+  install, linger, service and socket isolation, and relay operation. Local
+  follow-up fixes doctor runtime/socket wording and adds content-free Linux
+  model readiness to engine status and the local dashboard. The desktop
+  bridge origin decision is approved: a fresh random `.localhost` origin for
+  each engine/desktop session, with a redirect-only fixed entry and owner
+  cookie plus origin-storage proof. Implementation and the rebuilt local
+  acceptance bundle are scoped to W5 row 4; real Hyprland/login/logout and
+  second-UID qualification remain owner-run. See `docs/design/linux-engine-service.md`.
+  The listing and hosted plugin bundle remain frozen.
+
+
+- **2026-10-12 — W5 integration for rc.7.** The five local tracks are merged
+  in the integration worktree. Shared receipt paths, owner-only socket
+  transport, the outbound relay, Linux agent approval instructions and
+  Grok API key routing are integrated. Install recovery and Bun-free,
+  receipt-bound removal replace the track drafts. The local-tarball bundle
+  uses the real pinned installer; public Linux publication remains blocked
+  pending qualification. Local proof passed 820 focused tests, the three guards, build and typecheck,
+  with four platform/live skips and a rebuilt dist. The exact owner-run
+  laptop procedure and validation limits live in `docs/design/linux-engine-service.md`, under
+  “W5 integration handoff” and “Omarchy acceptance runbook”. Real systemd,
+  logout/reboot, second-UID isolation and Hyprland qualification remain
+  owner-run; no live install, publication or GitHub delivery is included.
+  Linux zkAPI stays off. The PID-1 CI harness remains deferred.
+
 - **2026-10-12 — Linux parity, Omarchy first.** Owner decision: Olympus
   itself runs on Linux with the Mac's capabilities (scan and image text,
   photo content, transcription, built-in private model, confined zkAPI lane,
@@ -181,7 +250,8 @@ testers have exercised the normal product journey without custom engineering.
   the relay answers the standard 401 (how these clients start signing in);
   `/openai/mcp` keeps its tokenless ChatGPT answers. Grok counts as xAI for
   anonymous answers, so its questions never go to an xAI model. Muse, Grok
-  Bot and the Grok API key path stay after 1.0.
+  Bot and the Grok API key path stay after 1.0 (Grok Bot superseded by the
+  2026-10-13 decision above).
 
 - **2026-10-08 — Ordinary photos are Personal; only sensitive photos are
   Private.** Owner decision, replacing the 2026-10-07 interim rule below.
@@ -246,7 +316,9 @@ testers have exercised the normal product journey without custom engineering.
   standalone engine, the ChatGPT plugin, the relay and the Personal / Private
   / Secret privacy model ship as Olympus 1.0, not as further 0.4 betas. The
   0.4 beta line ends at beta.11. Test builds are `1.0.0-rc.N`; `1.0.0` is
-  the version submitted to the ChatGPT plugin directory. This plan becomes the
+  the version submitted to the ChatGPT plugin directory (superseded
+  2026-10-13: the directory got `1.0.0-rc.3`; `1.0.0` is the launch release
+  on the site). This plan becomes the
   v1 plan (file rename and AGENTS.md pointer to follow with the integration
   merge).
 

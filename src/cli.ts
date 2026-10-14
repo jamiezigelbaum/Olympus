@@ -1,9 +1,13 @@
+import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
+import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
+import { PastedCallbackError, finishPastedOAuthCallback } from './core/oauth-callback-paste.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
 import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
+import { WHATSAPP_UNOFFICIAL_CLIENT_NOTICE } from './core/whatsapp-notice.ts';
 import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './core/messaging-capture.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
@@ -33,7 +37,7 @@ import type { Operation, OperationContext } from './core/operations.ts';
 import { VERSION } from './version.ts';
 import type { WorkerServicePlatform, WorkerServiceState } from './core/worker-service.ts';
 import { writeManagedWorkerEnvSecret } from './core/worker-service.ts';
-import { isValidSshTarget, parseServerModeSetting, resolveServerMode } from './core/remote-open.ts';
+import { isValidSshTarget, parseServerModeSetting, resolveServerMode, remoteOpenInstructions } from './core/remote-open.ts';
 import {
   runWorkerLifecycle,
   type LifecycleRecoverySignal,
@@ -68,6 +72,7 @@ import {
   SOVEREIGNTY_PRESETS,
   defaultSovereigntyConfigPath,
   loadSovereigntyPreset,
+  presetKeepingPublicTier,
   loadSovereigntyEngine,
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
@@ -126,6 +131,7 @@ import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
 import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
+  reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
   relayProcessRunning,
   remoteAccessDirForCli,
@@ -332,9 +338,10 @@ async function main(): Promise<void> {
       // `engine status --brief` is read by a program: one compact JSON line.
       const brief = args[1] === 'status' && args.includes('--brief');
       if (result !== undefined) console.log(brief ? JSON.stringify(result) : JSON.stringify(result, null, 2));
-      // install, verify and rollback report ok: false when the build did not prove healthy.
-      const verifying = ['install', 'verify', 'rollback'].includes(args[1] ?? '');
-      if (verifying && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
+      // Linux automation treats every unhealthy/unknown result as nonzero;
+      // retain the historical Mac exit contract for non-verifying commands.
+      const healthExit = process.platform === 'linux' || ['install', 'verify', 'rollback'].includes(args[1] ?? '');
+      if (healthExit && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -890,10 +897,21 @@ function validateRequired(operation: Operation, params: Record<string, unknown>)
 
 function makeContext(): OperationContext {
   const config = loadConfig();
+  let email: EmailClient;
+  try {
+    config.email.baseUrl = cliWorkerApiBase(config);
+    email = new EmailClient(config, createEmailTransport(config));
+  } catch (error) {
+    // Not every operation reaches the worker, so a worker that resolves off
+    // this computer refuses at the first worker request, and no path holds
+    // the bearer meanwhile.
+    config.worker.authTokenSecretRefUnresolved = true;
+    email = new EmailClient(config, { async requestJson() { throw error; } });
+  }
   return {
     config,
     delphi: new DelphiClient(config, createDelphiTransport(config)),
-    email: new EmailClient(config, createEmailTransport(config)),
+    email,
     caller: { surface: 'cli', displayName: 'Olympus CLI' },
   };
 }
@@ -1019,7 +1037,7 @@ export function parseTerminalContentRequalifyArgs(args: string[]): TerminalConte
 async function runTerminalContentRequalify(options: TerminalContentRequalifyCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
+  const response = await workerFetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1098,7 +1116,7 @@ export function parseQueuedContentRetargetArgs(args: string[]): QueuedContentRet
 async function runQueuedContentRetarget(options: QueuedContentRetargetCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
+  const response = await workerFetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1173,7 +1191,7 @@ export function parseEvalShardExportArgs(args: string[]): EvalShardExportCliOpti
 async function runEvalShardExport(options: EvalShardExportCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
+  const response = await workerFetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1249,7 +1267,7 @@ export function parseOwnerTierOverrideArgs(args: string[]): OwnerTierOverrideCli
 async function runOwnerTierOverride(options: OwnerTierOverrideCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
+  const response = await workerFetch(`${cliWorkerApiBase(config)}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1302,6 +1320,7 @@ function printHelp(): void {
   console.log('  olympus connect venice|readwise --api-key-prompt');
   console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
+  console.log('  olympus connect finish <address>');
   console.log('  olympus connections add <name>');
   console.log('  olympus connections pair');
   console.log('  olympus connections list');
@@ -1340,6 +1359,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect readwise': 'olympus connect readwise --api-key-prompt',
   'connect gemini': 'olympus connect gemini --api-key-prompt',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
+  'connect finish': 'olympus connect finish <address>',
   'connections add': 'olympus connections add <name>',
   'connections pair': 'olympus connections pair',
   'connections list': 'olympus connections list',
@@ -1414,7 +1434,9 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   ],
   engine: [
     'Usage: olympus engine <command>',
-    'Runs Olympus on this Mac without OpenClaw, as a per-user LaunchAgent.',
+    process.platform === 'linux'
+      ? 'Runs Olympus on this computer without OpenClaw, as a per-user systemd service.'
+      : 'Runs Olympus on this Mac without OpenClaw, as a per-user LaunchAgent.',
     'Commands:',
     ...Object.values(ENGINE_CLI_USAGE).map((usage) => `  ${usage}`),
   ],
@@ -1848,8 +1870,13 @@ export async function runWorkerForeground(options: {
 
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {
   const config = loadConfig();
-  const baseUrl = config.email.baseUrl;
-  const workerRoot = baseUrl.replace(/\/v1\/?$/, '');
+  let workerRoot: string;
+  try {
+    workerRoot = cliWorkerRoot(config);
+  } catch (error) {
+    return { reachable: false, base_url: config.email.baseUrl, error: cliErrorDetail(error) };
+  }
+  const baseUrl = `${workerRoot}/v1`;
   const authToken = workerAuthTokenFromConfig(config);
   try {
     const health = await fetchJson(`${baseUrl}/health`, { method: 'GET' });
@@ -1963,7 +1990,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(url, init);
+  const response = await workerFetch(url, init);
   if (!response.ok) {
     throw new Error(`${url} returned HTTP ${response.status}`);
   }
@@ -2220,9 +2247,10 @@ function runSovereigntyInit(args: string[]): {
       `Use one of: ${SOVEREIGNTY_PRESETS.join(', ')}.`,
     );
   }
+  const configPath = path ?? defaultSovereigntyConfigPath();
   const targetPath = writeSovereigntyConfigFile({
-    config: loadSovereigntyPreset(preset),
-    path: path ?? defaultSovereigntyConfigPath(),
+    config: presetKeepingPublicTier(loadSovereigntyPreset(preset), configPath),
+    path: configPath,
     force,
   });
   return {
@@ -2248,8 +2276,22 @@ async function runConnect(args: string[]): Promise<unknown> {
         'olympus connect venice|readwise --api-key-prompt',
         'olympus connect gemini --api-key-prompt',
         'olympus connect status [google|gmail|google-drive|dropbox]',
+        'olympus connect finish <address>',
       ],
     };
+  }
+  if (rawSource === 'finish') {
+    // Google sign-in on a server whose browser is on another computer: the
+    // page Google returned to did not load, and its address is pasted here.
+    const address = args[1] && !args[1].startsWith('--') ? args[1] : await readApiKeyFromStdin();
+    try {
+      // The callback route sits at the running worker's root (its port from
+      // worker.env or its status, whatever path its API base carries).
+      return await finishPastedOAuthCallback(address, { workerRoot: remoteAccessUrlsForCli(process.env).local_url });
+    } catch (error) {
+      if (error instanceof PastedCallbackError) throw new OperationError('invalid_params', error.message);
+      throw error;
+    }
   }
   if (rawSource === 'status') {
     const rawStatusSource = args[1] && !args[1]!.startsWith('--') ? args[1] : undefined;
@@ -2408,6 +2450,7 @@ async function runMessagingPairing(
   const tell = (text: string) => writeSync(terminal, text);
   try {
     tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.\n`);
+    if (source === 'whatsapp') tell(`${WHATSAPP_UNOFFICIAL_CLIENT_NOTICE}\n`);
     const paired = await pairMessagingSource({
       source,
       packageRoot: olympusPackageRoot(),
@@ -2553,7 +2596,7 @@ function observedWorkerServiceState(): { workerState: WorkerServiceState; engine
   // The standalone engine supervises its own worker. Loaded at all (running,
   // or between launchd's restarts), it holds the worker whatever the legacy
   // worker unit says.
-  if (process.platform === 'darwin') {
+  if (process.platform === 'darwin' || process.platform === 'linux') {
     const custody = engineDataCustody(inspectEngine());
     if (custody === 'loaded') return { workerState: 'active', engineLoaded: true };
     if (custody === 'unknown') return { workerState: 'unknown', engineLoaded: false };
@@ -2797,6 +2840,36 @@ function remoteAccessUrlsForCli(env: Record<string, string | undefined>): Remote
   });
 }
 
+/**
+ * This computer's worker root, for every CLI path that sends it the worker
+ * bearer. loadConfig() alone ignores worker.env, so an engine whose worker.env
+ * moves it off :8010 had `olympus dashboard` send its token to :8010
+ * (2026-10-13); this resolves the origin the way `connect finish` does
+ * (remoteAccessUrlsForCli: an explicit OLYMPUS_EMAIL_BASE_URL, the relay's
+ * reported local_url, worker.env's OLYMPUS_EMAIL_SOURCE_HOST/PORT, then
+ * email.baseUrl). An engine bound to every address is reached on its
+ * loopback; any other origin is refused, so the bearer stays on this computer.
+ */
+function cliWorkerRoot(config: OlympusConfig, env: Record<string, string | undefined> = process.env): string {
+  // The configured value is still checked (no embedded credentials, /v1 or root path).
+  workerRootBaseUrl(config.email.baseUrl);
+  const local = remoteAccessUrlsForCli(env).local_url;
+  const origin = reachableLoopbackWorkerOrigin(local);
+  if (!origin) {
+    throw new OperationError(
+      'config_error',
+      `The Olympus worker resolves to ${local}, which is not a local address on this computer, so the worker token was not sent.`,
+      'Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1 for the worker on this computer.',
+    );
+  }
+  return origin;
+}
+
+/** The worker's /v1 API base on this computer; see cliWorkerRoot. */
+function cliWorkerApiBase(config: OlympusConfig, env: Record<string, string | undefined> = process.env): string {
+  return `${cliWorkerRoot(config, env)}/v1`;
+}
+
 function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
   return {
     url: urls.mcp_url,
@@ -2850,6 +2923,8 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
 }
 
 export interface DashboardCommandDependencies {
+  /** Platform seam for preserving native Mac opening regression fixtures. */
+  platform?: string;
   /** The bearer-mint round trip. Injected by tests; production uses fetch. */
   fetchImpl?: DashboardFetch;
   /** The desktop opener. Injected by tests; production uses open/xdg-open. */
@@ -2883,11 +2958,27 @@ export async function runDashboardCommand(
   dependencies: DashboardCommandDependencies = {},
 ): Promise<{ url: string; opened: boolean; hint: string }> {
   const config = loadConfig();
-  const base = workerRootBaseUrl(config.email.baseUrl);
+  const base = cliWorkerRoot(config);
   const token = resolveWorkerAuthToken(process.env, config);
+  let desktopUnavailable = false;
+  if ((dependencies.platform ?? process.platform) === 'linux' && !dependencies.noOpen) {
+    if (!token) throw new OperationError('config_error', 'No worker auth token is configured. Run olympus setup first.');
+    let response: Response;
+    try { response = await (dependencies.fetchImpl ?? workerFetch)(`${base}${DESKTOP_OWNER_OPEN_PATH}${dependencies.target ? '?target=' + openTargetPath(dependencies.target) : ''}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token ?? ''}` }, redirect: 'error', signal: AbortSignal.timeout(10_000),
+    }); } catch { throw new OperationError('email_unreachable', 'The owner socket did not answer the desktop opening request. Check olympus worker status.'); }
+    let result: { state?: string; opened?: boolean; url?: string; hint?: string; error?: string; remedy?: string };
+    try { result = await response.json(); } catch { throw new OperationError('email_unreachable', 'The owner socket refused desktop opening. Check olympus worker status.'); }
+    if (!response.ok) throw new OperationError('email_unreachable', result.error ?? result.remedy ?? 'Desktop owner bridge unavailable; use the owner SSH socket forward.');
+    if (result.state === 'listening' && result.opened && result.url && result.hint) return { url: result.url, opened: true, hint: result.hint };
+    if (result.state !== 'headless') throw new OperationError('email_unreachable', 'Worker did not provide an owner-proven desktop route.');
+    desktopUnavailable = true;
+  }
   const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
+  const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
   let opened = false;
-  if (!dependencies.noOpen) {
+  if (!socketPath && !dependencies.noOpen) {
     try {
       opened = dependencies.openImpl
         ? dependencies.openImpl(openUrl)
@@ -2899,7 +2990,7 @@ export async function runDashboardCommand(
   return {
     url: openUrl,
     opened,
-    hint: dependencies.noOpen
+    hint: handoff ? `${desktopUnavailable ? 'No desktop session is available. ' : ''}On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
       ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
       : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
@@ -2945,7 +3036,7 @@ function runDashboardReadOnlyCommand(
   dependencies: Pick<DashboardCommandDependencies, 'noOpen' | 'openImpl'> = {},
 ): { url: string; opened: boolean; hint: string } {
   const config = loadConfig();
-  const base = workerRootBaseUrl(config.email.baseUrl);
+  const base = cliWorkerRoot(config);
   const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config));
   const openUrl = dashboardToken
     ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}`
@@ -2957,8 +3048,10 @@ function runDashboardReadOnlyCommand(
       `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
+  const socketPath = workerSocketPath();
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
   let opened = false;
-  if (!dependencies.noOpen) {
+  if (!socketPath && !dependencies.noOpen) {
     try {
       opened = dependencies.openImpl
         ? dependencies.openImpl(openUrl)
@@ -2970,7 +3063,7 @@ function runDashboardReadOnlyCommand(
   return {
     url: openUrl,
     opened,
-    hint: dependencies.noOpen
+    hint: handoff ? `On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
       ? 'This read-only view link was not opened locally, so it is ready to hand to the intended browser.'
       : 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
         + ` open ${olympusCommandHint()} dashboard (without --read-only) for a link that can.`,

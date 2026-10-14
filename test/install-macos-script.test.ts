@@ -340,6 +340,8 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(result.stdout).toContain('In ChatGPT desktop, add the Olympus plugin and ask: Connect Olympus');
     expect(result.stdout).toContain('olympus engine status');
     expect(result.stdout).toContain('curl -fsSL https://olympusplugin.ai/uninstall.sh | sh');
+    expect(result.stdout).toContain('By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)');
+    expect(result.stdout.indexOf('By installing Olympus you agree')).toBeLessThan(result.stdout.indexOf('Olympus is installed and running'));
     // The `olympus` command and the PATH line that finds it.
     const launcher = readFileSync(join(h.home, '.local', 'bin', 'olympus'), 'utf8');
     expect(launcher).toContain('Written by the Olympus installer');

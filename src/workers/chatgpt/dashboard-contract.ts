@@ -70,6 +70,8 @@ export type SourceStalledReason =
   | 'waiting_for_credentials'
   /** No folders or mail chosen yet: fix is `olympus_scope_list`. */
   | 'scope_pending'
+  /** A chosen root is gone; choose folders again. */
+  | 'scope_root_missing'
   /** The provider keeps failing or refusing reads; it retries on its own. */
   | 'provider_unavailable'
   /** Indexing waits for the built-in search model to finish downloading. */
@@ -327,6 +329,8 @@ export interface DashboardViewModelV1 {
 export interface DashboardRemoteMode {
   port: number;
   sshTarget?: string;
+  /** Linux worker transport only; absent retains the legacy Mac TCP handoff. */
+  socketPath?: string;
   agent: boolean;
 }
 
@@ -460,6 +464,8 @@ export interface OlympusHostContext {
 export const COMPUTER_META_KEY = 'olympus/computer';
 
 export interface ComputerDashboardMeta {
+  /** Chosen missing roots; this metadata is never sent through ChatGPT. */
+  missingFolders?: Array<{ sourceId: string; paths: string[] }>;
   /** Present while the overnight guard reports a known state; `on` is the operator override. */
   indexFaster?: { on: boolean };
   /**

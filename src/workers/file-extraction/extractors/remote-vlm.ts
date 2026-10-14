@@ -14,6 +14,11 @@
  * document bytes going somewhere they were never approved to go. They were
  * ported unchanged apart from dropping a source-family word from one message.
  *
+ * A third guard runs on every item, after those two and before any byte
+ * leaves: the exact payload (the image, or the rendered first page of a PDF)
+ * is read on this machine first, and a payload whose local text the Secrets
+ * floor recognizes is never sent. See `checkPayloadLocally`.
+ *
  * The provider may be named in this directory; the source family may not.
  *
  * Doc comments here are always multi-line blocks, and every regex lives inside
@@ -22,11 +27,13 @@
 
 import type {
   Extractor,
+  ExtractorIndexedOutput,
   ExtractorInput,
   ExtractorOutput,
   VlmClient,
 } from '../types.ts';
 import {
+  BOUNDED_TEXT_TRUNCATED_WARNING,
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   IMAGE_MIME_TYPES,
   PDF_MIME_TYPE,
@@ -48,10 +55,27 @@ import {
 } from './pdf-render.ts';
 import { missingBytesFailure } from './text.ts';
 import { assertNotZkapiDaemonEndpoint } from '../../../core/zkapi-consult-settings.ts';
+import { detectSecretFindingKinds } from '../../classification/engine.ts';
 
 export const REMOTE_VLM_EXTRACTOR_VERSION = 'venice-v1';
 export const APPROVED_REMOTE_EXTRACTION_HOST = 'api.venice.ai';
 export const DEFAULT_REMOTE_EXTRACTION_MODEL = 'kimi-k3';
+
+/**
+ * The payload's local reading found a secret, so it was not sent: the item
+ * carries the local text instead (which the sink then judges Secrets), with
+ * this warning on it.
+ */
+export const REMOTE_WITHHELD_SECRET_WARNING = 'remote_withheld_secret';
+/**
+ * No local reader was wired for the pre-send check. Nothing is sent.
+ */
+export const REMOTE_SECRET_CHECK_NOT_CONFIGURED = 'remote_secret_check_not_configured';
+/**
+ * The local reader could not read the payload (no engine, or it failed), so
+ * whether it holds a secret is unknown. Nothing is sent.
+ */
+export const REMOTE_SECRET_CHECK_FAILED = 'remote_secret_check_failed';
 
 /**
  * The three registered remote kinds. They differ only by the model behind the
@@ -82,6 +106,12 @@ export interface RemoteVlmExtractorOptions {
   pdfRenderCommand?: string;
   pdfRenderCommandRunner?: ExtractionCommandRunner;
   pdfRenderTimeoutMs?: number;
+  /**
+   * Reads the payload's text on this machine before it may leave (the
+   * registry wires the local OCR lane: Vision on a Mac, tesseract elsewhere).
+   * Required for egress: without one, nothing is sent.
+   */
+  localReader?: Pick<Extractor, 'extract'>;
 }
 
 export function createRemoteVlmExtractor(options: RemoteVlmExtractorOptions = {}): Extractor {
@@ -116,6 +146,9 @@ export function createRemoteVlmExtractor(options: RemoteVlmExtractorOptions = {}
       if (!mimeType || (!IMAGE_MIME_TYPES.has(mimeType) && mimeType !== PDF_MIME_TYPE)) {
         return { status: 'skipped_unsupported' };
       }
+      if (!options.localReader) {
+        return { status: 'failed_retryable', errorKind: REMOTE_SECRET_CHECK_NOT_CONFIGURED };
+      }
       const isImage = IMAGE_MIME_TYPES.has(mimeType);
       const renderedPdf = mimeType === PDF_MIME_TYPE
         ? await renderPdfFirstPageForVision({
@@ -125,9 +158,22 @@ export function createRemoteVlmExtractor(options: RemoteVlmExtractorOptions = {}
           timeoutMs: pdfRenderTimeoutMs,
         })
         : undefined;
-      const described = await client.describe({
+      const payload = {
         bytes: renderedPdf?.bytes ?? bytes,
         mimeType: renderedPdf?.mimeType ?? mimeType,
+      };
+      const checked = await checkPayloadLocally(options.localReader, input, payload);
+      if (checked.kind === 'unread') return checked.output;
+      if (checked.kind === 'secret') {
+        return renderedPdf
+          ? withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING, 'pdf_rendered_first_page'])
+          : withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING]);
+      }
+      await input.assertRemoteEgressAllowed?.();
+      const described = await client.describe({
+        ...(input.assertRemoteEgressAllowed ? { assertRemoteEgressAllowed: input.assertRemoteEgressAllowed } : {}),
+        bytes: payload.bytes,
+        mimeType: payload.mimeType,
         prompt,
         maxOutputChars: maxBoundedTextChars,
       });
@@ -170,6 +216,92 @@ export function createRemoteVlmExtractor(options: RemoteVlmExtractorOptions = {}
           : {}),
       };
     },
+  };
+}
+
+// --- the pre-send Secrets check ---------------------------------------------
+
+type PayloadCheck =
+  | { kind: 'clear' }
+  | { kind: 'secret'; output: ExtractorIndexedOutput }
+  | { kind: 'unread'; output: ExtractorOutput };
+
+/**
+ * Read the exact bytes that would leave, on this machine, and judge their
+ * text with the Secrets floor (the detector the tier classifier applies to
+ * every item's text) before any of them are sent.
+ *
+ * Three outcomes. Text with a secret in it: nothing is sent, and the local
+ * text becomes the item's text, so the sink judges it Secrets and keeps only
+ * where it is. No text at all (a photo, a blank page): nothing a local
+ * reading could recognize, so it may be sent. Not read (no engine on this
+ * host, or the engine failed): whether it holds a secret is unknown, and an
+ * unknown is not permission, the same rule as an unreadable trust tier in
+ * the runner's egress gate, so nothing is sent and the job settles with a
+ * bounded token (retryable when the reader's own failure was).
+ *
+ * The bytes checked are the payload, not the original file: for a PDF that
+ * is the rendered first page, which is all that would leave.
+ */
+async function checkPayloadLocally(
+  reader: Pick<Extractor, 'extract'>,
+  input: ExtractorInput,
+  payload: { bytes: Uint8Array; mimeType: string },
+): Promise<PayloadCheck> {
+  let local: ExtractorOutput;
+  try {
+    local = await reader.extract({
+      ...input,
+      bytes: payload.bytes,
+      mimeType: payload.mimeType,
+      sizeBytes: payload.bytes.byteLength,
+    });
+  } catch {
+    return { kind: 'unread', output: { status: 'failed_retryable', errorKind: REMOTE_SECRET_CHECK_FAILED } };
+  }
+  switch (local.status) {
+    case 'indexed':
+      // A reading cut short at the text bound was not read whole: a secret
+      // past the cut (or across it) would go unseen, so it counts as unread.
+      if (readingTruncated(local)) {
+        return { kind: 'unread', output: { status: 'failed_terminal', errorKind: REMOTE_SECRET_CHECK_FAILED } };
+      }
+      return detectSecretFindingKinds(local.text).length > 0
+        ? { kind: 'secret', output: local }
+        : { kind: 'clear' };
+    case 'empty_output':
+    case 'metadata_only':
+      return { kind: 'clear' };
+    case 'failed_retryable':
+      return { kind: 'unread', output: { status: 'failed_retryable', errorKind: REMOTE_SECRET_CHECK_FAILED } };
+    default:
+      return { kind: 'unread', output: { status: 'failed_terminal', errorKind: REMOTE_SECRET_CHECK_FAILED } };
+  }
+}
+
+function readingTruncated(output: ExtractorIndexedOutput): boolean {
+  return (output.warnings ?? []).includes(BOUNDED_TEXT_TRUNCATED_WARNING)
+    || (output.derivations ?? []).some((derivation) => (derivation.warnings ?? []).includes(BOUNDED_TEXT_TRUNCATED_WARNING));
+}
+
+function withWarnings(
+  output: ExtractorIndexedOutput,
+  warnings: readonly string[],
+): ExtractorIndexedOutput {
+  return {
+    ...output,
+    ...(output.derivations
+      ? {
+        derivations: output.derivations.map((derivation) => ({
+          ...derivation,
+          warnings: warnings.reduce(
+            (current, warning) => appendWarning(current, warning),
+            derivation.warnings ?? [],
+          ),
+        })),
+      }
+      : {}),
+    warnings: warnings.reduce((current, warning) => appendWarning(current, warning), output.warnings ?? []),
   };
 }
 

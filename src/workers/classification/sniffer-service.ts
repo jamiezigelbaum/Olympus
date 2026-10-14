@@ -1,9 +1,11 @@
 // The worker's background tick for the privacy-safe sniffer: a bounded
-// `runSnifferPass` over every connector store, on an interval, one pass at a
-// time. It yields to answers (it shares the private pool Argus answers from)
+// `runSnifferPass` over every connector store, continuously while work remains.
+// It yields only to actual inference using the same local model
 // and does nothing until the owner has approved the exact classifier model
 // and prompt version in the classification ledger.
 
+import { SecretLocationsIndex, secretLocationsPathForStore } from './secret-locations.ts';
+import { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../../core/analyst.ts';
 import {
   CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL,
@@ -12,25 +14,24 @@ import {
   isClassifierApproved,
   readClassificationLedger,
 } from '../classification-ledger.ts';
-import { moveTieredItem, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
-import type { ConnectorStoreItemCopy } from '../connector-store/local-index.ts';
+import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
+import { moveTieredItem, TierMoveContentChangedError, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
+import type { ConnectorStoreItemCopy, LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
-import { snifferPromptVersions } from './sniffer.ts';
+import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
-  defaultSnifferMaxCallsPerPass,
   SnifferCallBudget,
   runSnifferPass,
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync } from 'node:fs';
-import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
@@ -38,23 +39,28 @@ import {
   DEFAULT_TIER_REJUDGE_PER_PASS,
   emptyTierRejudgeReport,
   rejudgeRoutedItems,
+  rejudgeStoredContent,
+  settleRoutedSecrets,
+  settleLegacySecrets,
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverrides } from '../connector-store/tier-override-settle.ts';
+import { retireSecretRedactions, retrySecretSideStoreDebts } from '../connector-store/secrets-disposition.ts';
 import { sweepImageContentToPrivate } from '../connector-store/tier-image-content-sweep.ts';
 import { applyMediaJudgments } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
+  copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   type TierLedgerIdentity,
   type TierLedgerRecord,
 } from './tier-ledger.ts';
 
-export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
+export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1_000;
 
 /**
  * A connector store, by what the sniffer needs: its path, and the tiered
@@ -64,6 +70,9 @@ export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
 export interface TierSnifferServiceStore {
   readonly dbPath: string;
   tierSetBinding?(): { ledgerPath: string } | undefined;
+  tierLedgerPathInUse?: LocalConnectorStore['tierLedgerPathInUse'];
+  exportItemCopy?: LocalConnectorStore['exportItemCopy'];
+  tombstoneCopy?: LocalConnectorStore['tombstoneCopy'];
 }
 
 export interface TierSnifferServiceOptions {
@@ -100,6 +109,7 @@ export interface TierSnifferServiceOptions {
    */
   abandonAfterMs?: number;
   maxCallsPerPass?: number;
+  passTimeMs?: number;
   maxCallsPerDay?: number;
   /** Any other reason to yield the private pool (the pass also yields to `answersInFlight` and `breakerOpen`). */
   shouldYield?: () => boolean;
@@ -107,11 +117,7 @@ export interface TierSnifferServiceOptions {
   breakerOpen?: () => boolean;
   /** The model's install state when it is not available (content-free, e.g. `failed`), for the waiting reason. */
   modelState?: () => string | undefined;
-  /**
-   * True while answers are in flight. The pass's automatic tier moves
-   * (which re-embed items on this computer) wait for them as well, so an
-   * answer never shares the machine with background work it can avoid.
-   */
+  /** True only while foreground inference uses this same local model. Moves drain independently. */
   answersInFlight?: () => boolean;
   now?: () => Date;
   log?: (line: string) => void;
@@ -181,10 +187,13 @@ export interface TierAutoMoveReport {
 }
 
 export interface TierClassificationBacklog {
-  /** Items with an open sniffer question (held pending, Private). */
+  /** Union of pending ledger items and items with open questions, including re-judges. */
   checkingItems: number;
   /** Questions still to ask (an item can have a names and an excerpt question). */
   remainingQuestions: number;
+  pendingItems: number;
+  pendingWithoutQuestion: number;
+  oldestPendingAgeMs: number;
   summary: string;
   /** The sniffer is waiting for the owner to approve its model and prompt. */
   awaitingOwnerApproval: boolean;
@@ -225,6 +234,9 @@ export class TierSnifferService {
   private readonly options: TierSnifferServiceOptions;
   private readonly budget: SnifferCallBudget;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private continuation: ReturnType<typeof setTimeout> | undefined;
+  private readonly moveAbort = new AbortController();
+  private moving: Promise<TierAutoMoveReport> | undefined;
   private running = false;
   private runningSinceMs = 0;
   private overrunReported = false;
@@ -234,6 +246,7 @@ export class TierSnifferService {
   private passGeneration = 0;
   /** The last reported reason a tick asked nothing (or 'asking'). */
   private waitingReason: string | undefined;
+  private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
   private readonly moveFailures = new Map<string, number>();
@@ -255,13 +268,24 @@ export class TierSnifferService {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => { void this.runOnce(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
+    this.timer = setInterval(() => { void this.drainMoves(); void this.runOnce(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
+    this.wake();
+  }
+
+  /** Real local contention ended: resume immediately, including between idle polls. */
+  wake(): void {
+    if (this.stopped || this.continuation) return;
+    this.continuation = setTimeout(() => { this.continuation = undefined; void this.runOnce(); }, 0);
+    this.continuation.unref?.();
   }
 
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
     this.stopped = true;
+    this.moveAbort.abort();
+    if (this.continuation) clearTimeout(this.continuation);
+    this.continuation = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
@@ -286,29 +310,48 @@ export class TierSnifferService {
   backlog(): TierClassificationBacklog {
     let checkingItems = 0;
     let remainingQuestions = 0;
+    let pendingItems = 0;
+    let pendingWithoutQuestion = 0;
+    let oldestPendingAgeMs = 0;
     for (const ledgerPath of this.ledgerPaths()) {
-      // Read-only, and only where a sniffer queue exists: a status read never
-      // creates or migrates a sniffer file beside a ledger that has none.
-      const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ':memory:' || !existsSync(path)) continue;
-      let store: TierSnifferStore | undefined;
+      let db: Database | undefined;
       try {
-        store = new TierSnifferStore({ dbPath: path, readOnly: true });
-        const counts = store.counts();
-        checkingItems += counts.items;
-        remainingQuestions += counts.questions;
+        db = new Database(ledgerPath, { readonly: true, create: false });
+        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        const path = tierSnifferPathForLedger(ledgerPath);
+        const hasQueue = existsSync(path);
+        if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
+        const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
+          WHERE q.provider = t.provider AND q.account_scope = t.account_scope
+          AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : '0';
+        const pending = db.query(`SELECT COUNT(*) AS n,
+          SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing,
+          MIN(decided_at) AS oldest FROM tier_items t WHERE state = 'pending'`).get() as { n: number; missing: number | null; oldest: string | null };
+        pendingItems += pending.n;
+        pendingWithoutQuestion += pending.missing ?? 0;
+        checkingItems += pending.n;
+        if (pending.oldest) oldestPendingAgeMs = Math.max(oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
+        if (hasQueue) {
+          remainingQuestions += (db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+          checkingItems += (db.query(`SELECT COUNT(*) AS n FROM (
+            SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM queue.sniffer_questions q
+            WHERE NOT EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
+              AND t.provider = q.provider AND t.account_scope = q.account_scope
+              AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id))`).get() as { n: number }).n;
+        }
       } catch {
-        // An unreadable queue contributes nothing; its items stay pending.
-      } finally {
-        store?.close();
-      }
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { db?.close(); }
     }
     return {
       checkingItems,
       remainingQuestions,
+      pendingItems, pendingWithoutQuestion, oldestPendingAgeMs,
       summary: checkingItems === 0
         ? 'No items waiting for classification.'
         : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`
+          + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : '')
+          + (oldestPendingAgeMs >= 3_600_000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60_000)} minutes.` : '')
           + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ''),
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
       ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
@@ -375,7 +418,17 @@ export class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
+      this.lastBacklogLogMs = this.clockMs();
+      const backlog = this.backlog();
+      if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
+    }
     if (this.stopped) this.closeLedgers();
+    else if (this.timer && tick.state === 'ran' && !this.yieldNow()
+      && tick.report.stoppedBy !== 'daily_budget' && tick.report.stoppedBy !== 'transport_failures'
+      && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls
+        || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0
+        || tick.report.stoppedBy === 'preempted')) this.wake();
     return tick;
   }
 
@@ -518,6 +571,7 @@ export class TierSnifferService {
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
     this.settleStoredItems();
+    this.recoverMissingQuestions();
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
       // and held Private, until the model is there. A model whose download
@@ -527,6 +581,7 @@ export class TierSnifferService {
       } catch {
         // Starting is best effort; the next tick tries again.
       }
+      await this.drainMoves();
       return { state: 'model_unavailable', modelId: lane.modelId };
     }
     const ownerContext = this.options.ownerContext?.();
@@ -569,11 +624,13 @@ export class TierSnifferService {
         status: 'pending',
         entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
       });
+      await this.drainMoves();
       return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
+    this.recoverMissingQuestions(true);
     const rejudged = this.rejudge();
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
@@ -583,6 +640,92 @@ export class TierSnifferService {
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...(planner ? { placementFor: planner } : {}),
+        screenStoredQuestion: question => {
+          const row = ledger.getCurrent(question);
+          // Routed rows have the full-copy rejudge path. Unread names have
+          // no body yet; their eventual content pass will screen it.
+          if (!row || row.routed || !row.contentRead) return 'clean';
+          const set = tierSetForLedger(ledgerPath);
+          const stores = set?.openStores() ?? this.options.stores().filter(store =>
+            (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
+          try {
+            // A clean excerpt cannot carry the retry marker when settlement
+            // tombstoned the body and then failed writing the final ledger row.
+            const home = stores[0];
+            if (!home) return 'unreadable';
+            const shared = set?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
+            try {
+              if (locations.get(question)?.findingKinds.includes('sniffer_secret_refusal')) return 'secrets';
+            } finally { if (!shared) locations.close(); }
+            let foundBody = false;
+            for (const store of stores) {
+              if (!store.exportItemCopy) return 'unreadable';
+              const copy = store.exportItemCopy(question);
+              if (!copy) continue;
+              const body = copy.chunks.map(chunk => chunk.boundedText).join('');
+              if (!body.trim()) continue;
+              foundBody = true;
+              if (snifferMaterialCarriesSecret(body)) return 'secrets';
+            }
+            return foundBody ? 'clean' : 'unreadable';
+          } catch {
+            // No excerpt or cached model verdict can stand in for a failed
+            // full-copy read. Leave the question held for a later scan.
+            return 'unreadable';
+          }
+        },
+        settleSecrets: (question, decision) => {
+          const set = tierSetForLedger(ledgerPath);
+          if (!ledger.getCurrent(question)?.routed) {
+            const stores = set?.openStores() ?? this.options.stores().filter(
+              (store): store is TierSnifferServiceStore & Pick<LocalConnectorStore, 'exportItemCopy' | 'tombstoneCopy'> =>
+                (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath
+                && typeof store.exportItemCopy === 'function' && typeof store.tombstoneCopy === 'function',
+            );
+            const home = stores[0];
+            if (!home) return false;
+            const shared = set?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
+            try { return settleLegacySecrets({ ledger, stores, locations, identity: question, decision }); }
+            finally { if (!shared) locations.close(); }
+          }
+          if (!set) return false;
+          const row = ledger.getCurrent(question)!;
+          if (row.contentTier === 'secrets' && row.reasons.includes('metadata:secret:sniffer_refused')) {
+            // Settlement hides every copy before writing the location receipt
+            // or tombstoning. Either write may fail, so recover from any hidden
+            // copy, or from the receipt when all tombstones already landed.
+            const locations = set.secrets();
+            const copies = ledger.copies(question);
+            const stores = new Map(copies.map(copy => {
+              const domain = set.domainForCorpus(copy.corpusId);
+              return [copy.corpusId, domain ? set.store(domain) : undefined] as const;
+            }));
+            if ([...stores.values()].some(store => !store)) return false;
+            const remaining = [...stores.values()].map(store => store!.exportItemCopy(question)).find(Boolean);
+            if (!locations?.get(question)?.findingKinds.includes('sniffer_secret_refusal')) {
+              if (!locations || !remaining) return false;
+              // Reuse settlement's screened, location-only receipt builder;
+              // a repeated record failure leaves copies hidden for retry.
+              return settleRoutedSecrets(set, question, decision, remaining, { findingKinds: ['sniffer_secret_refusal'] });
+            }
+            if (remaining) {
+              settleSecretsCopies({ ledger, identity: remaining.identity, copies,
+                storeFor: corpusId => stores.get(corpusId), connectorId: 'tier-sniffer' });
+            } else {
+              // All tombstones landed before the interruption. Every store
+              // was opened and checked above, so only the copy rows remain.
+              ledger.removeCopies(question);
+            }
+            return true;
+          }
+          const current = set.ledger.copies(question).filter(copy => copy.state === 'current');
+          const serving = copyServingLayer(current, question.pass);
+          const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+          const exported = domain ? set.store(domain)?.exportItemCopy(question) : undefined;
+          return exported ? settleRoutedSecrets(set, question, decision, exported, { findingKinds: ['sniffer_secret_refusal'] }) : false;
+        },
       });
     }
     const report = await runSnifferPass({
@@ -592,7 +735,8 @@ export class TierSnifferService {
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
+      maxCallsPerPass: this.options.maxCallsPerPass,
+      passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal,
     });
@@ -600,16 +744,112 @@ export class TierSnifferService {
       this.options.log?.(
         `Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied `
         + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), `
-        + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}.`,
+        + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
+        + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`,
       );
     }
-    const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly()
-      ? await this.runAutoMoves(this.options.autoMoves, signal)
-      : undefined;
+    const autoMoves = await this.drainMoves();
     // A move that just landed may have carried an item whose owner override
     // came while it was queued: apply the override now, not a tick later.
     if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
     return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
+  }
+
+  /**
+   * The resolver drains the question queue, so it cannot see a lost enqueue,
+   * an unread item with no possible excerpt, or an orphaned ledger row.
+   * Reconcile a bounded, durable page before model availability/approval.
+   */
+  private recoverMissingQuestions(allowReask = false): void {
+    // Separate cursors keep model-independent recovery and approved re-asking
+    // from skipping alternating pages of a large ledger.
+    const cursorKey = allowReask ? 'sniffer_missing_question_reask_cursor_v1' : 'sniffer_missing_question_cursor_v1';
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const ledger = this.ledgerAt(ledgerPath);
+        if (this.options.installed.forLedger(ledgerPath).unavailableReason) continue;
+        const queue = this.options.installed.snifferStoreForLedger(ledgerPath);
+        const set = tierSetForLedger(ledgerPath);
+        const stores = set?.openStores() ?? this.options.stores().filter(store =>
+          ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath
+            || tierLedgerPathForStore(store.dbPath) === ledgerPath));
+        // An unavailable store is not evidence that its items were deleted.
+        if (stores.length === 0 || stores.some(store => !store.exportItemCopy)) continue;
+        const saved = ledger.readMeta(cursorKey);
+        const after = saved ? JSON.parse(saved) as TierLedgerIdentity : undefined;
+        const rows = ledger.listPending({ limit: 100, ...(after ? { after } : {}) });
+        let settled = 0;
+        let retired = 0;
+        for (const row of rows) {
+          const identity = recordIdentity(row);
+          const missingMetadata = row.metadataPending && !queue.questionFor(identity, 'metadata');
+          const missingContent = (row.contentPending || !row.metadataPending) && !queue.questionFor(identity, 'content');
+          // Existing questions include durable Secrets cleanup retries. Let the
+          // resolver finish them before reconciling any remaining missing pass.
+          if (queue.questionFor(identity, 'metadata') || queue.questionFor(identity, 'content')) continue;
+          try {
+            // Routed copy rows must all be backed by a readable configured store.
+            if (row.routed && ledger.copies(identity).some(copy =>
+              !set?.domainForCorpus(copy.corpusId) || !set.store(copy.trustDomain)?.exportItemCopy)) continue;
+            const copies = stores.map(store => store.exportItemCopy!(identity)).filter(copy => copy !== undefined);
+            if (copies.length === 0) {
+              // Routing records its plan before the page lands its store rows.
+              // Never retire a just-listed item in that transient interval.
+              if (this.clockMs() - Date.parse(row.decidedAt) < DEFAULT_TIER_SNIFFER_MAX_PASS_MS) continue;
+              if (ledger.retireAbsentPending(row)) {
+                queue.deleteQuestion(identity, 'metadata');
+                queue.deleteQuestion(identity, 'content');
+                retired++;
+              }
+              continue;
+            }
+            if (!missingMetadata && !missingContent) continue;
+            // Preserve the existing content-question repair where the stored
+            // body and configured classifier can reconstruct the question.
+            const classification = set?.classification();
+            if (set && row.contentRead && row.contentPending && !row.metadataPending
+              && (row.contentTier === 'private' || row.contentTier === 'public')
+              && classification?.sniffer && !classification.unavailableReason) {
+              // Cached verdicts and reconstructed questions use the approved
+              // pass; only conservative Private settlement precedes approval.
+              if (!allowReask) continue;
+              rejudgeStoredContent(set, row, { sniffer: classification.sniffer,
+                ...(classification.retirePublic ? { retirePublic: true } : {}),
+                report: emptyTierRejudgeReport(), autoMoves: this.autoMovesFor(set), hideRaises: true });
+              if (ledger.getCurrent(identity)?.state !== 'pending'
+                || queue.questionFor(identity, 'metadata') || queue.questionFor(identity, 'content')) continue;
+            }
+            const planner = tierSetPlannerForLedger(ledgerPath);
+            if (ledger.settleMissingQuestions(row, {
+              missingMetadata, missingContent,
+              snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
+              stillMissing: () => (!missingMetadata || !queue.questionFor(identity, 'metadata'))
+                && (!missingContent || !queue.questionFor(identity, 'content')),
+              ...(planner ? { placementFor: planner } : {}),
+            })) settled++;
+          } catch {
+            // Read/write failures keep the item held; the cursor wraps and retries.
+          }
+        }
+        const last = rows.at(-1);
+        ledger.writeMeta(cursorKey, rows.length === 100 && last ? JSON.stringify(recordIdentity(last)) : '');
+        if (settled || retired) this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
+      } catch {
+        // A queue/ledger that cannot be read remains held, retried next tick.
+      }
+    }
+  }
+
+  private async drainMoves(): Promise<TierAutoMoveReport | undefined> {
+    try {
+      if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
+      if (!this.moving) this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal)
+        .finally(() => { this.moving = undefined; });
+      return await this.moving;
+    } catch (error) {
+      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry.`);
+      return undefined;
+    }
   }
 
   private answering(): boolean {
@@ -684,7 +924,19 @@ export class TierSnifferService {
   private applyOwnerOverrides(): void {
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
-      if (!set) continue;
+      if (!set) {
+        // A store's own ledger (no set to apply overrides through): its
+        // Secrets whose side stores could not be cleared are retried here,
+        // and items that left Secrets get their job names back.
+        try {
+          const ledger = this.ledgerAt(ledgerPath);
+          retrySecretSideStoreDebts(ledger);
+          retireSecretRedactions(ledger);
+        } catch {
+          // Retried next tick.
+        }
+        continue;
+      }
       try {
         const report = applyOwnerOverrides({ set });
         if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {
@@ -771,7 +1023,7 @@ export class TierSnifferService {
         continue;
       }
       for (const record of queued) {
-        if (budget === 0 || signal.aborted || this.answering()) break;
+        if (budget === 0 || signal.aborted) break;
         budget -= 1;
         const identity = recordIdentity(record);
         const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
@@ -809,10 +1061,29 @@ export class TierSnifferService {
           });
           report.moved += 1;
           this.moveFailures.delete(failureKey);
-        } catch {
+        } catch (error) {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
+          if (error instanceof TierMoveContentChangedError) {
+            // A stale lowering was refused before import and taken out of
+            // moving. Re-read the actual stored body, even when this model
+            // already judged the discarded edit. Its old verdict cannot
+            // authorize the stored copy; a cache miss opens a new question.
+            const current = set.ledger.getCurrent(identity);
+            if (current && current.state !== 'moving') {
+              try {
+                const classification = set.classification();
+                if (!classification?.unavailableReason) {
+                  rejudgeStoredContent(set, current, {
+                    ...classification, report: emptyTierRejudgeReport(), autoMoves: true,
+                  });
+                }
+              } catch { /* A later sync can re-fetch; nothing was released. */ }
+            }
+            this.moveFailures.delete(failureKey);
+            continue;
+          }
           // To the back of the queue: a move that keeps failing never holds
           // the head of a page while moves behind it could land.
           try {
@@ -928,14 +1199,14 @@ function setEmbedsWithBuiltInOnly(set: TieredStoreSet): boolean {
 export function tierSnifferServiceEnv(env: Record<string, string | undefined>): {
   enabled: boolean;
   intervalMs: number;
-  /** Absent: the lane's default pace (10 a minute local, 30 on Venice). */
+  /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
   maxCallsPerDay: number;
 } {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
     enabled: !(enabledRaw === '0' || enabledRaw === 'false' || enabledRaw === 'no' || enabledRaw === 'off'),
-    intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 5_000),
+    intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim()
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }
       : {}),

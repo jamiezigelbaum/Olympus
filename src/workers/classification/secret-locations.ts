@@ -30,6 +30,7 @@ import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { detectSecretFindingKinds } from './engine.ts';
+import { hasCredentialUrl } from './tier-classifier.ts';
 
 import { SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsPathForStore } from './tier-ledger-path.ts';
 
@@ -38,6 +39,17 @@ export const SECRET_LOCATIONS_SCHEMA_VERSION = 1;
 
 export type SecretLocationIdentity = Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId'>
   & Partial<Pick<SourceItemIdentity, 'providerConversationId'>>;
+
+/**
+ * The locator a Secret keeps wherever Olympus keeps one: none when it carries
+ * a secret, otherwise trimmed and bounded. The connector store applies the
+ * same screen to the row of an item that becomes Secret after it was stored.
+ */
+export function screenedSecretLocator(locator: string | null | undefined): string | null {
+  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0
+    ? locator.trim().slice(0, 1_000)
+    : null;
+}
 
 export interface SecretLocationInput {
   identity: SecretLocationIdentity;
@@ -162,9 +174,7 @@ export class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0
       ? input.title.trim().slice(0, 300)
       : null;
-    const locator = input.locator?.trim() && detectSecretFindingKinds(input.locator).length === 0
-      ? input.locator.trim().slice(0, 1_000)
-      : null;
+    const locator = screenedSecretLocator(input.locator);
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
     const contentHash = input.text !== undefined
       ? createHash('sha256').update(input.text, 'utf8').digest('hex')

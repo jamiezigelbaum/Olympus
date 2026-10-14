@@ -14,6 +14,7 @@ import { Window } from 'happy-dom';
 import { dashboardTargetArg, runOpenCommand } from '../src/cli.ts';
 import { DASHBOARD_LAUNCH_PAGE_HTML } from '../src/core/dashboard-launch.ts';
 import { runEngineCommand } from '../src/core/engine-cli.ts';
+import { resolveLinuxEngineLayout, publishLinuxEngineReceipt } from '../src/core/linux-engine-layout.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../src/core/model-install-failure.ts';
 import {
   LSREGISTER_PATH,
@@ -141,6 +142,7 @@ describe('olympus open: no state change from a link', () => {
     chmodSync(envPath, 0o600);
     for (const [key, value] of Object.entries({
       HOME: home,
+      XDG_CONFIG_HOME: join(home, '.config'),
       OLYMPUS_CONFIG: join(home, 'missing-config.json'),
       OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
     })) {
@@ -163,6 +165,7 @@ describe('olympus open: no state change from a link', () => {
       sent,
       opened,
       deps: {
+        platform: 'darwin',
         fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
           sent.push({ url: String(input), method: init?.method ?? 'GET' });
           return new Response(JSON.stringify({ ok: true, ticket: TICKET }), { status: 200 });
@@ -275,7 +278,7 @@ describe('the dashboard opens the named panel and submits nothing', () => {
   let happy: Window;
   const previous = new Map<string, PropertyDescriptor | undefined>();
 
-  function mount(url: string, before = '', after = ''): { root: HTMLElement; calls: unknown[]; dispose: () => void } {
+  function mount(url: string, before = '', after = '', serialized = false): { root: HTMLElement; calls: unknown[]; dispose: () => void } {
     happy = new Window({ url });
     const values: Record<string, unknown> = {
       window: happy, document: happy.document, HTMLElement: happy.HTMLElement, HTMLFormElement: happy.HTMLFormElement,
@@ -297,7 +300,11 @@ describe('the dashboard opens the named panel and submits nothing', () => {
       + before + '<section aria-label="Models"><h2>Models</h2><p>body</p></section>' + after;
     happy.document.body.append(root as never);
     const calls: unknown[] = [];
-    const controller = mountDashboardController({
+    // As the page runs it: the function's own source, with no module scope.
+    const mountController: typeof mountDashboardController = serialized
+      ? new Function(`return (${mountDashboardController.toString()})`)()
+      : mountDashboardController;
+    const controller = mountController({
       root, transport: { control: async (params) => { calls.push(params); return { status: 200, body: { ok: true } }; } },
       navigate() {}, async refresh() { return undefined; },
       returnUrl: url, canWrite: true, csrfToken: 'csrf', signal: new AbortController().signal, pollIntervalMs: 0,
@@ -333,6 +340,21 @@ describe('the dashboard opens the named panel and submits nothing', () => {
     expect(happy.document.activeElement).toBe(section as never);
     expect(section.classList.contains('landed')).toBe(true);
     expect(models.root.querySelector('.sheet.on')).toBeNull();
+    models.dispose();
+  });
+
+  test('the serialized controller the page runs lands an open link too', () => {
+    // Bun's test transpiler inlines module constants, but the shipped bundle
+    // does not, so check the source: the serialized body must not use any.
+    const source = readFileSync(new URL('../src/control-ui/browser-controller.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('export function mountDashboardController(');
+    const moduleConsts = [...source.slice(0, start).matchAll(/^(?:export )?const ([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+    expect(moduleConsts).toContain('LANDED_HIGHLIGHT_MS');
+    expect(moduleConsts.filter((name) => new RegExp(`\\b${name}\\b`).test(source.slice(start)))).toEqual([]);
+    const models = mount('http://127.0.0.1:8010/dashboard?keys#olympus-open=fix.models', '', '', true);
+    const section = models.root.querySelector('section[aria-label="Models"]')!;
+    expect(section.classList.contains('landed')).toBe(true);
+    expect(happy.document.activeElement).toBe(section as never);
     models.dispose();
   });
 
@@ -519,6 +541,37 @@ describe('the Linux link handler', () => {
   afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
   const program = { runtimePath: '/home/a/.bun/bin/bun', entryPath: '/home/a/olympus/dist/cli.js' };
+
+  test('standalone desktop entry uses the receipt-bound launcher after XDG shell drift', () => {
+    const runtime = join(home, 'run'); mkdirSync(runtime, { mode: 0o700 });
+    const env = { HOME: home, XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: join(home, 'data') };
+    const layout = resolveLinuxEngineLayout(env);
+    publishLinuxEngineReceipt(layout);
+    const installed = installOpenHandler({ platform: 'linux', homeDir: home,
+      env: { ...env, XDG_DATA_HOME: join(home, 'wrong-data'), XDG_CONFIG_HOME: join(home, 'wrong-config') },
+      program, exec: () => ({ status: 0, stdout: '', stderr: '' }) });
+    expect(installed.ok).toBe(true);
+    expect(installed.path).toBe(layout.openHandlerPath);
+    expect(readFileSync(layout.openHandlerPath, 'utf8')).toContain(`Exec="${layout.launcherPath}" open %u`);
+    expect(existsSync(join(home, 'wrong-data'))).toBe(false);
+    expect(() => renderLinuxDesktopEntry(program, '/unsafe\nlauncher')).toThrow();
+  });
+
+  test('xdg-mime receives installed roots rather than the invoking shell roots', () => {
+    const runtime = join(home, 'run'); mkdirSync(runtime, { mode: 0o700 });
+    const layout = resolveLinuxEngineLayout({ HOME: home, XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: join(home, 'data') });
+    publishLinuxEngineReceipt(layout);
+    const shims = join(home, 'tools'); mkdirSync(shims);
+    writeFileSync(join(shims, 'xdg-mime'), '#!/bin/sh\nprintf "%s\\n" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" > "$HOME/mime-env"\n', { mode: 0o700 });
+    writeFileSync(join(shims, 'update-desktop-database'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    const path = process.env.PATH;
+    try {
+      process.env.PATH = `${shims}:${path}`;
+      expect(installOpenHandler({ platform: 'linux', homeDir: home, program,
+        env: { HOME: home, XDG_DATA_HOME: join(home, 'wrong-data'), XDG_CONFIG_HOME: join(home, 'wrong-config') } }).ok).toBe(true);
+      expect(readFileSync(join(home, 'mime-env'), 'utf8')).toBe(`${layout.configHome}\n${layout.dataHome}\n`);
+    } finally { if (path === undefined) delete process.env.PATH; else process.env.PATH = path; }
+  });
 
   test('the desktop entry passes the link as %u, hidden from menus', () => {
     const entry = renderLinuxDesktopEntry(program);

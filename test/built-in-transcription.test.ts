@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -520,7 +520,7 @@ describe('install: pinned files and the shared runtime', () => {
     }
   });
 
-  test('installs both files into its own directory and reuses the runtime the reasoning model installed', async () => {
+  test('resumes interrupted transcription files and reuses the runtime the reasoning model installed', async () => {
     const runtimeBytes = new Uint8Array([9, 8, 7, 6]);
     const reasoningBytes = new Uint8Array(Array.from({ length: 2_048 }, (_, i) => i % 7));
     const asrBytes = new Uint8Array(Array.from({ length: 1_024 }, (_, i) => i % 11));
@@ -537,16 +537,34 @@ describe('install: pinned files and the shared runtime', () => {
       'https://models.test/asr.gguf': asrBytes,
       'https://models.test/mmproj.gguf': projectorBytes,
     };
-    const fetchImpl = (async (input: RequestInfo | URL) => {
+    const asrRanges: Array<string | null> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
       fetched.push(String(input));
-      return new Response(bytesFor[String(input)]!);
+      const bytes = bytesFor[String(input)]!;
+      const range = new Headers(init?.headers).get('range');
+      const start = range ? Number(/bytes=(\d+)-/.exec(range)![1]) : 0;
+      const headers = { 'Content-Range': `bytes ${start}-${bytes.length - 1}/${bytes.length}` };
+      if (String(input).endsWith('/asr.gguf')) {
+        asrRanges.push(range);
+        if (asrRanges.length === 1) {
+          let sent = false;
+          return new Response(new ReadableStream({
+            pull(controller) {
+              if (sent) { controller.error(new Error('Out of memory')); return; }
+              sent = true;
+              controller.enqueue(bytes.slice(0, 100));
+            },
+          }), { status: 206, headers });
+        }
+      }
+      return new Response(bytes.slice(start), { status: 206, headers });
     }) as typeof fetch;
     const extractArchive = (_archive: string, target: string) => {
       mkdirSync(join(target, 'llama-b0'), { recursive: true });
       writeFileSync(join(target, 'llama-b0', 'llama-server'), '#!/bin/sh\n', { mode: 0o755 });
     };
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: tempDir(), OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR: tempDir() };
-    const common = { env, runtime, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined };
+    const common = { env, runtime, platform: 'darwin-arm64', fetchImpl, extractArchive, freeBytes: () => 10 * 1024 ** 3, log: () => undefined };
     const reasoning = await installBuiltInReasoning({
       ...common,
       model: { ...QWEN35_4B, modelId: 'test-reasoning', file: { name: 'r.gguf', url: 'https://models.test/reasoning.gguf', bytes: reasoningBytes.length, sha256: sha256(reasoningBytes) } },
@@ -563,6 +581,9 @@ describe('install: pinned files and the shared runtime', () => {
       },
     });
     expect(fetched.filter((url) => url.endsWith('llama.tar.gz')).length).toBe(1);
+    expect(asrRanges).toEqual(['bytes=0-1023', 'bytes=100-1023']);
+    expect(readFileSync(asr.modelPath)).toEqual(Buffer.from(asrBytes));
+    expect(readFileSync(asr.mmprojPath)).toEqual(Buffer.from(projectorBytes));
     expect(asr.serverPath).toBe(reasoning.serverPath);
     expect(asr.modelPath.startsWith(env.OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR)).toBe(true);
     expect(asr.mmprojPath.endsWith('mmproj.gguf')).toBe(true);

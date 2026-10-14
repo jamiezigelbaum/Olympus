@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.olympusplugin.engine</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/bun</string>
+    <string>--no-env-file</string>
+    <string>/opt/app/dist/cli.js</string>
+    <string>__engine-run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/app</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/example</string>
+    <key>PATH</key>
+    <string>/opt:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>OLYMPUS_ENGINE_HOST</key>
+    <string>1</string>
+    <key>OLYMPUS_ENGINE_BUILD</key>
+    <string>1+abc</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/example/Library/Logs/Olympus/engine.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/example/Library/Logs/Olympus/engine.err</string>
+</dict>
+</plist>

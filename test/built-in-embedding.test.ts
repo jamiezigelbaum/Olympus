@@ -21,7 +21,9 @@ import {
   readBuiltInEmbeddingVision,
   type BuiltInEmbeddingStatus,
 } from '../src/workers/source-index/built-in-embedding/assets.ts';
+import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
+import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
   ARCTIC_EMBED_M_V1_5,
   BUILT_IN_EMBEDDING_MODEL,
@@ -233,6 +235,36 @@ describe('built-in embedding installer', () => {
     // No partial files or lock left behind.
     expect(readdirSync(join(dir, served.model.modelId)).sort()).toEqual(['model.onnx', 'vocab.txt']);
     expect(existsSync(join(dir, 'install.lock'))).toBe(false);
+  });
+
+  test('a reader interruption automatically resumes the search model with a bounded Range', async () => {
+    const dir = temporaryDir();
+    const served = servedAssets();
+    const ranges: Array<string | null> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const original = await served.fetchImpl(input);
+      if (String(input) !== served.model.model.url) return original;
+      const body = new Uint8Array(await original.arrayBuffer());
+      const range = new Headers(init?.headers).get('range');
+      ranges.push(range);
+      const start = range ? Number(/bytes=(\d+)-/.exec(range)![1]) : 0;
+      if (ranges.length > 1) return new Response(body.slice(start), {
+        status: 206, headers: { 'Content-Range': `bytes ${start}-${body.length - 1}/${body.length}` },
+      });
+      let sent = false;
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (sent) { controller.error(new Error('Out of memory')); return; }
+          sent = true;
+          controller.enqueue(body.slice(0, 7));
+        },
+      }));
+    }) as typeof fetch;
+    const installed = await installBuiltInEmbedding({
+      env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir }, model: served.model, skipRuntime: true, fetchImpl,
+    });
+    expect(ranges).toEqual([`bytes=0-${served.model.model.bytes - 1}`, `bytes=7-${served.model.model.bytes - 1}`]);
+    expect(sha256(readFileSync(installed.modelPath))).toBe(served.model.model.sha256);
   });
 
   test('a checksum mismatch installs nothing and is reported as failed', async () => {
@@ -568,6 +600,176 @@ describe('built-in embedding as the new-install default', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A model that is not available (the install-time download failed)
+
+/** A provider whose download server is down while `state.down` is set, on a clock the test moves. */
+function flakyDownloadProvider() {
+  const state = { down: true, nowMs: 1_000_000 };
+  const served = servedAssets();
+  const batches: EmbeddingBatch[] = [];
+  const provider = new BuiltInSourceEmbeddingProvider({
+    env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() },
+    model: served.model,
+    runtime: () => stubRuntime(batches),
+    installerOptions: {
+      fetchImpl: ((input: string | URL | Request, init?: RequestInit) => (state.down
+        ? Promise.resolve(new Response('unavailable', { status: 503 }))
+        : served.fetchImpl(input, init))) as typeof fetch,
+      skipRuntime: true,
+    },
+    now: () => state.nowMs,
+  });
+  return { provider, state, served };
+}
+
+function textConnector(texts: Record<string, string>): SourceConnector {
+  const items: RawItem[] = Object.entries(texts).map(([id, text]) => ({
+    identity: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}`, sourceVersion: `${id}:v1` },
+    mimeType: 'text/plain',
+    content: { kind: 'text', text },
+    metadata: Object.freeze({ name: id }),
+    fetchedAt: '2026-10-13T00:00:00.000Z',
+  }));
+  return {
+    id: 'fixture',
+    family: 'file',
+    async authenticate() {},
+    listItems(): AsyncIterable<SourceConnectorListPage> {
+      return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+        yield { items, done: true };
+      })();
+    },
+    async fetchItem(localItemId: string): Promise<RawItem> {
+      const found = items.find((item) => item.identity.localItemId === localItemId);
+      if (!found) throw new Error(`missing fixture ${localItemId}`);
+      return found;
+    },
+    classificationSignals() {
+      return {};
+    },
+  };
+}
+
+describe('a built-in model that failed to download', () => {
+  test('a document embed says the model is not ready (transient) instead of throwing the install error', async () => {
+    const { provider, state, served } = flakyDownloadProvider();
+    const failed = await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' }).catch((caught: unknown) => caught);
+    expect(failed).toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    expect(failed).toBeInstanceOf(TransientSourceEmbeddingError);
+    expect((failed as BuiltInEmbeddingNotReadyError).status.state).toBe('failed');
+    // During the back-off every document embed answers at once, and the same way.
+    const requests = served.requests.length;
+    const again = await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' }).catch((caught: unknown) => caught);
+    expect(again).toBeInstanceOf(TransientSourceEmbeddingError);
+    expect(served.requests.length).toBe(requests);
+    // The owner's Retry downloads again at once; the next embed then works.
+    state.down = false;
+    await provider.retry();
+    await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' })).resolves.toHaveLength(1);
+  });
+
+  test('once the back-off has passed the next document embed tries the download again by itself', async () => {
+    const { provider, state } = flakyDownloadProvider();
+    await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toBeInstanceOf(TransientSourceEmbeddingError);
+    state.down = false;
+    state.nowMs += 3 * 60_000;
+    await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' })).resolves.toHaveLength(1);
+  });
+
+  test('a question while the files are installed but the model will not start is transient too, so the query lane falls back to keyword', async () => {
+    const { provider: installer, served, env } = stubProvider();
+    await installer.prepare();
+    // A later start: the status file says ready, so a question waits for the load, and the load fails.
+    const provider = new BuiltInSourceEmbeddingProvider({
+      env,
+      model: served.model,
+      runtime: () => ({ createSession: async () => { throw new Error('the runtime would not start'); } }),
+      installerOptions: { fetchImpl: served.fetchImpl, skipRuntime: true },
+    });
+    expect(provider.status().state).toBe('ready');
+    const error = await provider.embed([{ text: 'q' }], { taskType: 'RETRIEVAL_QUERY' }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    expect(error).toBeInstanceOf(TransientSourceEmbeddingError);
+  });
+
+  test('prepare, warm and retry still report the install error itself', async () => {
+    const { provider } = flakyDownloadProvider();
+    const error = await provider.prepare().catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(TransientSourceEmbeddingError);
+    expect((error as { code?: string }).code).toBe('source_index_error');
+  });
+
+  test('the embedding sweep defers instead of marking items failed, then embeds them once the model loads', async () => {
+    const { provider, state } = flakyDownloadProvider();
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:',
+      corpusId: 'internal.fixture.files',
+      family: 'file',
+      trustDomain: 'internal',
+      tierLedger: null,
+    });
+    try {
+      await store.syncFromConnector(textConnector({
+        a: 'garden tomatoes and basil',
+        b: 'garden peppers and beans',
+        c: 'a note about the flight to san francisco',
+      }), { fetchContent: true });
+      const ids = ['personal:a', 'personal:b', 'personal:c'];
+      store.queueEmbedding(ids, provider);
+
+      const [outage] = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 10 });
+      expect(outage).toMatchObject({ itemsFailed: 0, chunksEmbedded: 0, deferredReason: 'embedding_provider_unavailable:timeout' });
+      expect(store.embeddingFailedItemCount()).toBe(0);
+      expect(store.queuedEmbeddingItemIds().sort()).toEqual(ids);
+      expect(store.embeddingDeferredReason()).toBe('embedding_provider_unavailable:timeout');
+      // A second pass inside the back-off changes nothing.
+      const [stillDown] = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 10 });
+      expect(stillDown).toMatchObject({ itemsFailed: 0, deferredReason: 'embedding_provider_unavailable:timeout' });
+      expect(store.embeddingFailedItemCount()).toBe(0);
+
+      state.down = false;
+      state.nowMs += 3 * 60_000;
+      const [recovered] = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 10 });
+      expect(recovered).toMatchObject({ itemsFailed: 0, chunksEmbedded: 3 });
+      expect(recovered!.deferredReason).toBeUndefined();
+      expect(store.queuedEmbeddingItemIds()).toEqual([]);
+      expect(store.embeddingDeferredReason()).toBeUndefined();
+      expect(store.status().counts).toMatchObject({ items: 3, chunks: 3, embeddedChunks: 3 });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('an item the loaded model cannot embed is still skipped and counted, and the rest embed', async () => {
+    const { provider, state } = flakyDownloadProvider();
+    state.down = false;
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:',
+      corpusId: 'internal.fixture.files',
+      family: 'file',
+      trustDomain: 'internal',
+      tierLedger: null,
+    });
+    try {
+      await store.syncFromConnector(textConnector({ ok1: 'fine one', bad: 'POISON the model rejects', ok2: 'fine two' }), { fetchContent: true });
+      const original = provider.embed.bind(provider);
+      provider.embed = async (inputs, options) => {
+        if (inputs.some((input) => input.text.includes('POISON'))) {
+          throw Object.assign(new Error('rejected input'), { code: 'source_index_error' });
+        }
+        return original(inputs, options);
+      };
+      const [run] = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 10 });
+      expect(run).toMatchObject({ itemsFailed: 1, chunksEmbedded: 2 });
+      expect(run!.deferredReason).toBeUndefined();
+      expect(store.embeddingFailedItemCount()).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // LiteRT-LM (EmbeddingGemma 2)
 
 describe('ZIP reader', () => {
@@ -764,6 +966,21 @@ describe('built-in embedding with a LiteRT model', () => {
     expect(log.options[0]!.visionTokensPerImage).toBeUndefined();
     expect(log.images[0]).toEqual([undefined]);
     expect(await provider.imageSupport()).toBe(false);
+  });
+
+  test('a start that failed is transient for a document embed and for the picture check, never a plain error', async () => {
+    const served = servedLiteRt();
+    const provider = new BuiltInSourceEmbeddingProvider({
+      env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() },
+      model: { ...served.model, vision: { tokensPerImage: 140 } },
+      liteRt: async () => { throw new Error('the helper would not start'); },
+      installerOptions: { fetchImpl: served.fetchImpl, liteRtRuntime: served.pack },
+    });
+    await expect(provider.imageSupport()).rejects.toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    await expect(provider.embed([{ text: 'note' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toBeInstanceOf(TransientSourceEmbeddingError);
+    await expect(provider.embedWithImageVectors([{ text: 'note' }])).rejects.toBeInstanceOf(TransientSourceEmbeddingError);
+    await expect(provider.embedImageVectors([{ path: '/x', sha256: 'a'.repeat(64), mimeType: 'image/jpeg' }])).rejects.toBeInstanceOf(TransientSourceEmbeddingError);
+    await expect(provider.embedPromptTexts(['a description'])).rejects.toBeInstanceOf(TransientSourceEmbeddingError);
   });
 
   test('a helper whose image encoder did not start reports it, so photos are held', async () => {

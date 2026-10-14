@@ -76,13 +76,16 @@ import {
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { classifyContentTier, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
   resolveStoreTierClassification,
+  secretFencedSniffer,
   type ConnectorStorePlacement,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
+import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
@@ -468,6 +471,51 @@ function createConnectorStoreMediaJudgments(db: Database): void {
   // columns added since; every object above is idempotent, and so is this.
   addColumnIfMissing(db, 'media_judgments', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing(db, 'media_judgments', 'tier_checked_at', 'TEXT');
+}
+
+/**
+ * The source version an item's stored chunks were written for, kept only while
+ * the item row has moved past it.
+ *
+ * A metadata sync of an edited file advances `items.source_version` (and the
+ * content hash) and leaves the chunks it did not touch in place, so without
+ * this the store cannot tell text read from the current bytes from text read
+ * from bytes the file no longer has. The item's own `content_hash` cannot say:
+ * an extraction stores the hash of the TEXT there, and the next listing of the
+ * same unchanged file writes the provider's digest back over it.
+ *
+ * The record is written by a trigger the moment a version change leaves chunks
+ * behind (only when none stands yet, so the OLDEST version still standing is
+ * kept when an item is edited twice before it is read again; the trigger
+ * cannot say OR IGNORE, because the upsert that fires it overrides that). The
+ * chunk funnel (`indexItemText`) deletes it whenever text for the item's
+ * current version is written or confirmed. No row means the chunks are
+ * current: an item never edited has none, and neither does a store from before
+ * this table, which is why nothing is backfilled (the live Dropbox store is
+ * multi-gigabyte).
+ *
+ * Like the other tables added since v14, it is created idempotently at open
+ * without a schema-version bump, so a build that predates it can still open
+ * the file; its trigger only writes this table, which that build ignores.
+ */
+function createConnectorStoreItemTextVersions(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_text_versions (
+      item_pk INTEGER PRIMARY KEY,
+      source_version TEXT,
+      recorded_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_text_version_capture
+    AFTER UPDATE OF source_version ON items
+    WHEN OLD.source_version IS NOT NEW.source_version
+    BEGIN
+      INSERT INTO item_text_versions (item_pk, source_version, recorded_at)
+      SELECT OLD.item_pk, OLD.source_version, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE EXISTS (SELECT 1 FROM chunks WHERE item_pk = OLD.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
+    END;
+  `);
 }
 
 /**
@@ -1901,6 +1949,14 @@ export interface ConnectorStoreExtractionCandidateOptions {
   mimeTypes?: readonly string[];
   accountScope?: string;
   withoutChunksOnly?: boolean;
+  /**
+   * With `withoutChunksOnly`: also admit an item whose stored chunks were
+   * written for an older source version than the one the item row holds now,
+   * so a document edited after it was read is read again and its new text
+   * replaces the old (see `createConnectorStoreItemTextVersions`). An item
+   * that was never edited, or whose current version was read, stays out.
+   */
+  includeStaleChunks?: boolean;
   /** Trusted current-account/scope boundary, applied before pagination. */
   filters?: ConnectorStoreSearchFilters;
 }
@@ -1970,6 +2026,17 @@ export interface ConnectorStoreChunkMedia {
  * orders grants: within one authority, a write may not land on top of a newer
  * one for the same item and scope.
  */
+/** How a fenced Secrets tombstone of an extracted item went. */
+export type ConnectorStoreSecretsExtractionOutcome =
+  | 'tombstoned'
+  | 'missing'
+  | 'ambiguous'
+  | 'excluded'
+  | 'metadata_only'
+  | 'stale_version'
+  | 'owned_elsewhere'
+  | 'stale_claim';
+
 export interface ConnectorStoreItemWriteClaim {
   /** Which family of writes this grant orders. Data, chosen by the caller. */
   scope: string;
@@ -2409,6 +2476,8 @@ export class LocalConnectorStore {
   private chunkMediaColumnsPresent = false;
   /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
   private imageMediaReadsPresent = false;
+  /** Whether the `item_text_versions` table is here (a read-only open of an older store has none). */
+  private itemTextVersionsPresent = false;
   /** Whether the v14 `media_judgments` table is here (a read-only open of an older store has none). */
   private mediaJudgmentsPresent = false;
   /** This store's name in the media cache's reference markers. */
@@ -2492,12 +2561,16 @@ export class LocalConnectorStore {
         runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
         createConnectorStoreChunkMediaReleases(this.db);
         createConnectorStoreMediaJudgments(this.db);
+        createConnectorStoreItemTextVersions(this.db);
         validateConnectorStoreSchema(this.db);
       }
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
       this.imageMediaReadsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
+      ).get() !== null;
+      this.itemTextVersionsPresent = this.db.query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'",
       ).get() !== null;
       // A read-only open of a store from an earlier build of v14 (without
       // every column) reads no judgments: its pictures are unjudged, so Private.
@@ -2559,9 +2632,10 @@ export class LocalConnectorStore {
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
+      const read = ledger.classificationRead(item.identity);
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
-      const override = ledger.getOverride(item.identity);
+      const override = read.override;
       // The item's names travel with the text, as they do in the tiered
       // sink: the detectors' origin hint and the sniffer read them too.
       const metadataString = (keys: readonly string[]): string | undefined => {
@@ -2586,12 +2660,18 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: inputs.sniffer } : {}),
+          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
-      return ledger.recordContentDecision(item.identity, content) !== undefined;
+      const recorded = ledger.recordContentDecision(item.identity, content);
+      // Secrets as recorded (a newer Secrets decision is kept as the floor):
+      // the side stores forget its names and excerpt too.
+      if (recorded && (recorded.record.contentTier === 'secrets' || recorded.record.metadataTier === 'secrets')) {
+        forgetSecretInSideStores({ ledger, identity: item.identity });
+      }
+      return recorded !== undefined;
     } catch {
       return false;
     }
@@ -2982,6 +3062,102 @@ export class LocalConnectorStore {
     } finally {
       // The pictures its chunks carried (and their judgments) go when no
       // other chunk here carries them; inside a caller's transaction, after it.
+      if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  /**
+   * Tombstone an untracked copy whose freshly extracted text is Secrets (the
+   * plain extraction sink), fenced exactly as the representation restore that
+   * would otherwise have written that text: the owner skip and the write-claim
+   * generation are judged inside the same transaction as the tombstone, so a
+   * superseded worker can never remove the current holder's content and an
+   * item another owner claims is left alone. The copy keeps its location only.
+   */
+  tombstoneSecretsExtraction(
+    identity: SourceItemIdentity,
+    options: {
+      connectorId: string;
+      /** The extracted item's metadata, judged by the same exclusion gate as a restore. */
+      metadata: Readonly<Record<string, unknown>>;
+      skipOwner?: { connectorId: string; ownershipKind: ConnectorStoreOwnershipKind };
+      writeClaim?: ConnectorStoreItemWriteClaim;
+    },
+  ): ConnectorStoreSecretsExtractionOutcome {
+    const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
+    try {
+      return this.db.transaction((): ConnectorStoreSecretsExtractionOutcome => {
+        // The restore's own refusals, in its order: an excluded or
+        // metadata-only item takes no text, so there is no text to settle and
+        // its names stay exactly as policy keeps them.
+        const disposition = this.exclusions.evaluateMetadata(options.metadata);
+        if (disposition.excluded) return 'excluded';
+        if (disposition.disposition === 'metadata_only') return 'metadata_only';
+        const existing = this.db.query(`
+          SELECT
+            COUNT(*) AS matching_provider_id_rows,
+            SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
+            MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
+          FROM items
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        `).get(
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
+          identity.provider,
+          identity.accountScope,
+          identity.providerItemId,
+        ) as {
+          matching_provider_id_rows: number;
+          exact_identity_rows: number;
+          item_pk: number | null;
+          tombstoned: number | null;
+          source_version: string | null;
+        };
+        if (existing.matching_provider_id_rows > 1) return 'ambiguous';
+        if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1) return 'missing';
+        // The text judged Secret is one revision's. When the row has since
+        // moved to another, that revision's verdict says nothing about the
+        // current one, whose own extraction decides it.
+        if (identity.sourceVersion && existing.source_version !== null
+          && existing.source_version !== identity.sourceVersion) return 'stale_version';
+        if (options.skipOwner) {
+          const owned = this.db.query(`
+            SELECT 1 AS present FROM item_owners
+            WHERE item_pk = ? AND connector_id = ? AND ownership_kind = ?
+            LIMIT 1
+          `).get(existing.item_pk, options.skipOwner.connectorId, options.skipOwner.ownershipKind) as { present: number } | null;
+          if (owned?.present === 1) return 'owned_elsewhere';
+        }
+        if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim)) return 'stale_claim';
+        const syncRunId = `connector-secrets-extraction-${randomUUID()}`;
+        const startedAt = nowIso();
+        this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 1, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+        this.tombstoneItem(
+          {
+            identity,
+            mimeType: 'application/octet-stream',
+            content: { kind: 'metadata_only' },
+            metadata: {},
+            fetchedAt: startedAt,
+          },
+          options.connectorId,
+          'observed',
+          syncRunId,
+          'S5',
+          true,
+        );
+        return 'tombstoned';
+      })();
+    } finally {
       if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
     }
   }
@@ -3709,6 +3885,15 @@ export class LocalConnectorStore {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier,
       });
+      // A legacy item Secrets as recorded (a recorded Secrets content tier
+      // stays when this listing could not read the text): its side stores
+      // keep nothing of it either (the router's routed path does the same).
+      if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets' || ledger.itemIsSecret(item.identity)) {
+        forgetSecretInSideStores({ ledger, identity: item.identity });
+      } else {
+        // Left Secrets in this write: its job names come back.
+        retireSecretRedactions(ledger, { identity: item.identity });
+      }
     } catch {
       run.ledgerFailed = true;
       run.gaps.push('tier_ledger_unavailable: four-tier decisions were not recorded for the rest of this run; storage was unaffected.');
@@ -4018,7 +4203,7 @@ export class LocalConnectorStore {
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
-  itemPresence(identity: SourceItemIdentity): ConnectorStoreItemPresence {
+  itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
     const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned
       FROM items
@@ -4049,6 +4234,15 @@ export class LocalConnectorStore {
       cursorItemPk: state.cursorItemPk,
       indexedItems: Number(indexed.count),
     };
+  }
+
+  /**
+   * Whether the locator identity projection is fully built, so a locator
+   * lookup is authoritative. A cheap state read (no row count). A caller that
+   * must not act on an empty answer from a store still converging asks first.
+   */
+  locatorIdentityIndexReady(): boolean {
+    return this.locatorIdentityIndexState().completed;
   }
 
   /**
@@ -4261,6 +4455,129 @@ export class LocalConnectorStore {
     return this.activeIdentityForLocator(input);
   }
 
+  /**
+   * Every active item whose locator lies strictly UNDER a path-shaped locator
+   * (`/a/b` matches `/a/b/c` and `/a/b/c/d`, never `/a/b` itself and never the
+   * sibling `/a/bc`), compared case-insensitively exactly as
+   * {@link activeIdentityForLocator} compares, so one provider path always
+   * means the same rows.
+   *
+   * A provider that reports a deleted FOLDER as one entry has deleted the whole
+   * subtree, and the descendants' own paths are never listed. The source
+   * connector uses this read to expand that one event into the descendant
+   * identities before it emits their tombstones, so the descendants leave the
+   * index through the same deletion path a single-file event takes.
+   *
+   * Unlike the exact lookup there is no ambiguity to fail closed on: every row
+   * under a deleted folder is gone, so every match is returned. `limit` bounds
+   * the answer (a folder can hold far more files than one sync pass may emit);
+   * the next pass finds whatever is still active. Like
+   * {@link activeIdentityForLocatorIfIndexed}, an index that has not finished
+   * its bounded backfill answers with nothing instead of throwing, so a
+   * listing pass is never killed by a deletion it could not expand. Identity
+   * coordinates and the stored locator only — no title or text.
+   */
+  activeItemsUnderLocatorIfIndexed(input: {
+    provider: string;
+    accountScope: string;
+    locatorUri: string;
+    limit: number;
+    /** Test seam: how many narrowed rows the non-ASCII fallback may examine. */
+    maxFoldCandidates?: number;
+  }): Array<{ identity: SourceItemIdentity; locatorUri: string }> {
+    if (!this.locatorIdentityIndexState().completed) return [];
+    const folder = input.locatorUri.replace(/\/+$/, '');
+    // The root is never "a folder that was deleted": refusing it keeps a
+    // malformed event from reading as a request to empty the whole account.
+    if (folder === '' || !Number.isSafeInteger(input.limit) || input.limit <= 0) return [];
+    const toRow = (row: {
+      provider_item_id: string;
+      provider_file_id: string | null;
+      local_item_id: string;
+      source_version: string | null;
+      locator_uri: string | null;
+    }): Array<{ identity: SourceItemIdentity; locatorUri: string }> => row.locator_uri
+      ? [{
+          identity: {
+            family: this.family,
+            provider: input.provider,
+            accountScope: input.accountScope,
+            providerItemId: row.provider_item_id,
+            ...(row.provider_file_id ? { providerFileId: row.provider_file_id } : {}),
+            localItemId: row.local_item_id,
+            ...(row.source_version ? { sourceVersion: row.source_version } : {}),
+          },
+          locatorUri: row.locator_uri,
+        }]
+      : [];
+    type Row = Parameters<typeof toRow>[0];
+    // `/` sorts immediately before `0`, so [folder + '/', folder + '0') is
+    // exactly the set of strings that start with `folder + '/'`. A range on
+    // the projection's own index, not a LIKE scan, and no wildcard escaping.
+    // SQLite's LOWER() is ASCII-only, so for a path with non-ASCII characters
+    // this is an exact match on those characters: the common case, since the
+    // deletion carries the same display spelling the rows were stored under.
+    const exact = (this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit) as Row[]).flatMap(toRow);
+    if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder)) return exact;
+    // Nothing under that exact spelling, and the path has non-ASCII characters.
+    // A provider's path_lower folds every script and may compose accents
+    // differently from the stored display path, so match again with both sides
+    // NFC-normalized and lower-cased in full. The index can only narrow this
+    // by the ASCII text before the first non-ASCII character (identical under
+    // any folding or composition), so the narrowed rows are compared in JS,
+    // and at most `maxFoldCandidates` of them: a longer candidate list is
+    // answered with nothing (the folder's own deletion still applies) rather
+    // than stalling the process on a whole-account scan or deleting a part.
+    const folded = folder.normalize('NFC');
+    const cut = folded.search(/[^\u0000-\u007f]/);
+    const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+    const range = head === ''
+      ? { sql: '', params: [] as string[] }
+      : {
+          sql: 'AND locator.normalized_locator >= ? AND locator.normalized_locator < ?',
+          params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)],
+        };
+    const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+    const wanted = `${foldLocator(folder)}/`;
+    const matches: Array<{ identity: SourceItemIdentity; locatorUri: string }> = [];
+    const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+    `);
+    let examined = 0;
+    for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params) as Iterable<Row>) {
+      examined += 1;
+      if (examined > maxCandidates) return [];
+      if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted)) continue;
+      matches.push(...toRow(row));
+      if (matches.length >= input.limit) break;
+    }
+    return matches;
+  }
+
   activeItemForLocator(input: {
     provider: string;
     accountScope: string;
@@ -4428,6 +4745,15 @@ export class LocalConnectorStore {
     // exactly `limit` rows is enough. With a filter the scan has to be able to
     // run past non-matching rows, hence a wider window.
     const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
+    // An item read before it was edited: its chunks are for a version the row
+    // has moved past. Only meaningful beside `withoutChunksOnly`, which would
+    // otherwise drop every item that has any text.
+    const staleChunksSql = options.includeStaleChunks === true && this.itemTextVersionsPresent
+      ? `OR EXISTS (
+            SELECT 1 FROM item_text_versions v
+            WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version
+          )`
+      : '';
     const query = this.db.query(`
       SELECT
         i.item_pk, i.family, i.provider, i.account_scope, i.provider_item_id,
@@ -4441,6 +4767,7 @@ export class LocalConnectorStore {
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${staleChunksSql}
           ${imagesWithoutPicture ? `OR (
             ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
@@ -4504,6 +4831,27 @@ export class LocalConnectorStore {
       ...(skippedByDisposition > 0 ? { skippedByDisposition } : {}),
       ...(exhausted ? {} : { nextCursor: String(lastExaminedPk) }),
     };
+  }
+
+  /**
+   * Whether this item holds text that was written for an older source version
+   * than its row holds now: it was edited after it was read and has not been
+   * read again. False for an item with no text, one never edited, and a store
+   * from before the record existed.
+   */
+  itemTextIsStale(localItemId: string): boolean {
+    if (!this.itemTextVersionsPresent) return false;
+    const row = this.db.query(`
+      SELECT 1 AS stale
+      FROM items i
+      JOIN item_text_versions v ON v.item_pk = i.item_pk
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        AND v.source_version IS NOT i.source_version
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+      LIMIT 1
+    `).get(localItemId) as { stale: number } | null;
+    return row !== null;
   }
 
   /**
@@ -5038,6 +5386,8 @@ export class LocalConnectorStore {
             this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
               .run(existing.item_pk, this.now().toISOString());
           }
+          // Complete means the stored chunks already are this version's.
+          this.clearItemTextVersion(existing.item_pk);
           itemsUnchanged += 1;
           continue;
         }
@@ -7549,9 +7899,14 @@ export class LocalConnectorStore {
         `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(existing.item_pk);
         this.deleteFtsForItem(existing.item_pk);
+        if (tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
         this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, 'local_write');
         return true;
       }
+      // A row already tombstoned (a provider deletion, or a Secret tombstoned
+      // before rows were screened) is screened all the same; nothing else
+      // about it changes.
+      if (existing && tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
       if (activeOnly) return false;
 
       // A tombstone for an item this store never saw still gets a row so a
@@ -7590,6 +7945,28 @@ export class LocalConnectorStore {
       this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, 'local_write');
       return true;
     })();
+  }
+
+  /**
+   * An item that becomes Secret after it was stored keeps no more here than
+   * one detected at ingest: a Secret's name lives only in the secret-locations
+   * index, which decides from the item's metadata tier whether it may keep a
+   * scanned title (an owner-marked Secret keeps none). The store cannot see
+   * that tier, so its row keeps what the index keeps and no more: identity
+   * (provider ids and source version), scope facts, a content hash, and the
+   * locator only through the index's own screen. No title, search text,
+   * sender, reactions or dates. The row itself and its ownership history
+   * stay: they are what stop a later sync from resurrecting the item.
+   */
+  private keepSecretsLocationOnly(itemPk: number): void {
+    const row = this.db.query('SELECT locator_uri FROM items WHERE item_pk = ?')
+      .get(itemPk) as { locator_uri: string | null };
+    this.db.query(`
+      UPDATE items
+      SET title = NULL, search_text = NULL, locator_uri = ?, reactions_json = NULL,
+        sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, authored_at = NULL, updated_at = NULL
+      WHERE item_pk = ?
+    `).run(screenedSecretLocator(row.locator_uri), itemPk);
   }
 
   /**
@@ -7751,6 +8128,7 @@ export class LocalConnectorStore {
       // failures return above and deliberately preserve prior chunks.
       this.db.transaction(() => {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
+        this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
       })();
       return { chunksIndexed: 0, ftsContentChanged: true };
@@ -7821,6 +8199,9 @@ export class LocalConnectorStore {
         for (const chunk of desired) {
           update.run(chunk.embeddingHash, itemPk, chunk.index, chunk.embeddingHash);
         }
+        // The text for the item's current version was read and is what is
+        // stored, so an edit that left the words alone is settled too.
+        this.clearItemTextVersion(itemPk);
       })();
       return { chunksIndexed: 0, ftsContentChanged: false };
     }
@@ -7854,9 +8235,20 @@ export class LocalConnectorStore {
           insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
         }
       }
+      this.clearItemTextVersion(itemPk);
       this.refreshFtsForItem(itemPk);
     })();
     return { chunksIndexed: chunks.length, ftsContentChanged: true };
+  }
+
+  /**
+   * The item's chunks now match the source version its row holds, so any
+   * record of an older version is forgotten (`item_text_versions`). Called from
+   * the places that write or confirm text; a no-op when nothing is recorded.
+   */
+  private clearItemTextVersion(itemPk: number): void {
+    if (!this.itemTextVersionsPresent) return;
+    this.db.query('DELETE FROM item_text_versions WHERE item_pk = ?').run(itemPk);
   }
 
   /**
@@ -13565,6 +13957,8 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'image_media_reads',
   'media_judgments',
   'idx_connector_store_media_judgments_unapplied',
+  'item_text_versions',
+  'connector_store_item_text_version_capture',
 ] as const;
 
 const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
@@ -13693,6 +14087,8 @@ function validateConnectorStoreSchema(db: Database): void {
   assertTriggerExists(db, 'connector_store_chunk_media_release', 'v13');
   assertExactTableColumns(db, 'media_judgments', [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, 'v14');
   assertIndexColumns(db, 'idx_connector_store_media_judgments_unapplied', ['media_sha256'], 'v14');
+  assertExactTableColumns(db, 'item_text_versions', ['item_pk', 'source_version', 'recorded_at'], false, 'v14');
+  assertTriggerExists(db, 'connector_store_item_text_version_capture', 'v14');
 }
 
 const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [
@@ -14109,6 +14505,14 @@ function createConnectorStoreLocatorIdentityIndex(db: Database): void {
       WHERE NEW.tombstoned = 0 AND NEW.locator_uri IS NOT NULL;
     END;
   `);
+}
+
+/** The most rows one non-ASCII folder lookup compares in JS before it gives up and answers with nothing. */
+const LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50_000;
+
+/** A locator as the provider's own folding sees it: composed, and lower-cased in every script. */
+function foldLocator(locator: string): string {
+  return locator.normalize('NFC').toLowerCase();
 }
 
 function toFtsQuery(query: string, options: { prefix?: boolean } = {}): string {

@@ -1,3 +1,5 @@
+import { downloadPinnedFile, writeDownloadChunk } from '../pinned-download.ts';
+import { standaloneLinuxDataDir } from '../../../core/linux-engine-layout.ts';
 // Fetches, verifies and installs the built-in private reasoning model and the
 // llama.cpp server that runs it into the Olympus data directory, once. Every
 // file is checked against the pinned manifest before it is used; a file that
@@ -210,7 +212,7 @@ function builtInReasoningRoot(env: Record<string, string | undefined>): string {
 /** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models`. */
 export function olympusModelsDir(env: Record<string, string | undefined> = process.env): string {
   const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  return join(dataRoot, 'openclaw', 'olympus', 'models');
+  return join(standaloneLinuxDataDir(env) ?? join(dataRoot, 'openclaw', 'olympus'), 'models');
 }
 
 /**
@@ -365,7 +367,7 @@ export async function installPinnedModel(options: PinnedModelInstallerOptions): 
       headroomBytes: options.spaceHeadroomBytes ?? BUILT_IN_REASONING_SPACE_HEADROOM_BYTES,
       backoffMs: options.spaceBackoffMs ?? SPACE_BACKOFF_MS,
       now: () => (options.now ?? (() => new Date()))(),
-      write: options.writeChunk ?? ((fd: number, chunk: Uint8Array) => { writeSync(fd, chunk); }),
+      write: options.writeChunk ?? writeDownloadChunk,
     };
     await stage('install', () => withInstallLock(paths.lockPath, lockWaitMs, lockRefreshMs, noun, async () => {
       if (filesPresent() && runtimeInstalled(paths.runtimeDir, archive)) return;
@@ -656,140 +658,18 @@ async function downloadVerified(
   stallMs: number,
   space: SpacePolicy,
 ): Promise<void> {
-  // One writer holds the install lock, so a fixed partial name is safe and lets
-  // a multi-gigabyte download resume after a restart instead of starting over.
-  const partial = `${target}.partial`;
-  const hash = createHash('sha256');
-  let received = 0;
-  if (existsSync(partial)) {
-    const size = statSync(partial).size;
-    if (size > 0 && size < expectedBytes) {
-      await hashInto(partial, hash, VERIFY_TIMEOUT_MS);
-      received = size;
-      reporter.advance(size, label);
-    } else {
-      rmSync(partial, { force: true });
-    }
-  }
-  let response: Response;
-  // One controller covers the request and every read: any wait longer than
-  // `stallMs` for the next byte abandons the attempt (the partial file stays
-  // and the next attempt resumes from it) instead of leaving the status on
-  // "downloading" with nothing moving.
-  const controller = new AbortController();
-  let stallTimer: ReturnType<typeof setTimeout> | undefined;
-  const armStall = (): void => {
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
-  };
-  const disarmStall = (): void => {
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = undefined;
-  };
-  armStall();
-  try {
-    response = await fetchImpl(url, {
-      redirect: 'follow',
-      signal: controller.signal,
-      ...(received > 0 ? { headers: { Range: `bytes=${received}-` } } : {}),
-    });
-  } catch (error) {
-    disarmStall();
-    throw new BuiltInReasoningInstallError(
-      'download_failed',
-      `Could not reach the download server for the ${space.noun} (${error instanceof Error ? error.message : String(error)}).`,
-    );
-  }
-  if (received > 0 && response.status !== 206) {
-    // The server ignored the range: start over from byte zero.
-    disarmStall();
-    rmSync(partial, { force: true });
-    await response.body?.cancel().catch(() => undefined);
-    reporter.advance(-received, label);
-    return downloadVerified(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs, space);
-  }
-  if (!response.ok || !response.body) {
-    disarmStall();
-    await response.body?.cancel().catch(() => undefined);
-    throw new BuiltInReasoningInstallError(
-      'download_failed',
-      `The ${space.noun} download failed (HTTP ${response.status}).`,
-    );
-  }
-  reporter.set('downloading', label);
-  let fd: number;
-  try {
-    fd = openSync(partial, received > 0 ? 'a' : 'w', 0o644);
-  } catch (error) {
-    disarmStall();
-    await response.body.cancel().catch(() => undefined);
-    if (isNoSpaceError(error)) {
-      rmSync(partial, { force: true });
-      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname(target)) ?? 0, 'the disk is full');
-    }
-    throw new BuiltInReasoningInstallError('disk_write_failed', `Could not write ${partial}: ${String(error)}`);
-  }
-  try {
-    const reader = response.body.getReader();
-    const aborted = new Promise<never>((_resolve, reject) => {
-      controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
-    });
-    aborted.catch(() => undefined);
-    for (;;) {
-      armStall();
-      const { done, value } = await Promise.race([reader.read(), aborted]);
-      if (done) break;
-      received += value.byteLength;
-      if (received > expectedBytes) {
-        await reader.cancel().catch(() => undefined);
-        closeSync(fd);
-        rmSync(partial, { force: true });
-        throw new BuiltInReasoningInstallError('checksum_mismatch', `${url} is larger than its pinned size.`);
-      }
-      hash.update(value);
-      try {
-        space.write(fd, value);
-      } catch (error) {
-        await reader.cancel().catch(() => undefined);
-        if (isNoSpaceError(error)) {
-          // A partial that filled the disk is not worth resuming: delete it
-          // so the disk has its space back, and wait out the backoff.
-          try {
-            closeSync(fd);
-          } catch {
-            // closed below
-          }
-          rmSync(partial, { force: true });
-          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname(target)) ?? 0, 'the disk filled up during the download');
-        }
-        throw new BuiltInReasoningInstallError('disk_write_failed', `Could not write the download: ${String(error)}`);
-      }
-      reporter.advance(value.byteLength, label);
-    }
-  } catch (error) {
-    disarmStall();
-    try {
-      closeSync(fd);
-    } catch {
-      // already closed
-    }
-    if (error instanceof BuiltInReasoningInstallError) throw error;
-    // Keep the partial file: the next attempt resumes from it.
-    throw new BuiltInReasoningInstallError(
-      'download_failed',
-      `The ${space.noun} download was interrupted (${error instanceof Error ? error.message : String(error)}).`,
-    );
-  }
-  disarmStall();
-  closeSync(fd);
-  if (received !== expectedBytes || hash.digest('hex') !== expectedSha256) {
-    rmSync(partial, { force: true });
-    throw new BuiltInReasoningInstallError(
-      'checksum_mismatch',
-      `${url} did not match its pinned checksum; nothing was installed.`,
-    );
-  }
-  renameSync(partial, target);
+  await downloadPinnedFile({
+    fetchImpl, url, target, partial: `${target}.partial`, expectedBytes,
+    algorithm: 'sha256', digest: expectedSha256, encoding: 'hex',
+    noun: space.noun, stallMs, verifyTimeoutMs: VERIFY_TIMEOUT_MS, keepPartial: true,
+    error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
+    diskError: (error) => isNoSpaceError(error)
+      ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname(target)) ?? 0, 'the disk filled up during the download')
+      : new BuiltInReasoningInstallError('disk_write_failed', `Could not write the download: ${String(error)}`),
+    write: space.write,
+    onStart: () => reporter.set('downloading', label),
+    onProgress: (bytes) => reporter.advance(bytes, label),
+  });
 }
 
 /**

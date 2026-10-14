@@ -93,6 +93,7 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
 }
 
 export interface ComputerHostPageInput {
+  modelReadiness?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   /** The panel HTML, exactly as ChatGPT loads it (dashboard-resource.ts dashboardResourceHtml). */
   panelHtml: string;
   /** This browser's request origin, e.g. http://127.0.0.1:8787. */
@@ -255,6 +256,24 @@ function hostProgram(input: {
     frame,
     callTool,
     openUrl(url: string) {
+      // On the computer the dashboard is already the whole app: its own pages
+      // open in place (an Omarchy app window would otherwise hand them to a
+      // browser tab). Only pages elsewhere open in the browser (owner
+      // decision, 2026-10-13). The links name the worker's address; behind
+      // the Linux desktop bridge the page runs on another, so a page is
+      // matched by the list it came from and opened by its path.
+      const own = Object.keys(input.bridge.links).map((key) => input.bridge.links[key])
+        .concat(Object.keys(input.bridge.openTargets).map((key) => input.bridge.openTargets[key]));
+      let parsed: URL | undefined;
+      try {
+        parsed = new URL(url, window.location.href);
+      } catch {
+        parsed = undefined;
+      }
+      if (parsed && (own.indexOf(url) >= 0 || parsed.origin === window.location.origin)) {
+        window.location.assign(parsed.pathname + parsed.search + parsed.hash);
+        return;
+      }
       window.open(url, '_blank', 'noopener');
     },
   });
@@ -356,6 +375,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     '</head>',
     `<body data-olympus-host="computer" data-locked="${locked ? 'true' : 'false'}">`,
     lockedGate(!locked),
+    ...(input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map(model => `<p><strong>${text(model.name)} — ${text(model.state)}</strong>: ${text(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p>`).join('')}</details>`] : []),
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,

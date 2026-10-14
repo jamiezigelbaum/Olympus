@@ -34,6 +34,7 @@ import {
   type TieredStoreSetRun,
 } from '../connector-store/tiered-store-set.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import { LabelPageRejectedError, sweepLabelRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import {
   isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
@@ -42,9 +43,11 @@ import { accountFromGoogleHandle } from './classification.ts';
 import {
   GMAIL_PROVIDER,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+  GmailPageTokenRejectedError,
   GoogleGmailSourceConnector,
   gmailConnectorStoreClassification,
   gmailCursorIsMidTraversal,
+  gmailLabelledMessageSource,
   isGmailConnectorCursor,
   type GmailSourceConnectorTraversalStatus,
   type GoogleGmailSourceConnectorOptions,
@@ -60,6 +63,8 @@ export const GMAIL_STORE_RECONCILE_RECEIPT_KIND = 'gmail_connector_store_reconci
 export const GMAIL_RESUME_REJECTED_WARNING = 'gmail_store_resume_cursor_rejected';
 export const GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = 'gmail_attachments_not_ingested';
 export const GMAIL_INGEST_FILTERED_WARNING = 'gmail_ingest_filtered_items';
+/** An always-Private label has not yet been applied to every message already stored; the next run retries. */
+export const GMAIL_LABEL_RULES_PENDING_WARNING = 'gmail_label_rules_pending';
 
 const CHECKPOINT_PREFIX = 'gmp1:';
 const MAX_CHECKPOINT_CHARS = 16_384;
@@ -274,6 +279,42 @@ export function createGmailConnectorStoreSyncHandler(
     ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
   });
 
+  // An owner's "always Private" (or Secrets) label saved after mail was stored:
+  // Gmail never lists a held message again, so its labels are asked of Gmail by
+  // label and the stored messages carrying it are raised (hidden first). The
+  // rule counts as applied only once Gmail has answered every page; any failure
+  // leaves it pending and the next run retries. `recheck` also re-walks the
+  // rules already applied (a label can be put on stored mail later). Never
+  // throws; returns the warning a run carries while a rule is still pending.
+  const sweepLabelRules = async (connector: GoogleGmailSourceConnector, recheck = false): Promise<string[]> => {
+    try {
+      const labelled = gmailLabelledMessageSource(() => connector.apiClientForTooling());
+      const report = await sweepLabelRuleRaises({
+        set: tierSet,
+        provider: GMAIL_PROVIDER,
+        accountScope: account,
+        ...(recheck ? { recheck: true } : {}),
+        source: {
+          async listLabelled(label, page) {
+            let answer: Awaited<ReturnType<typeof labelled.listLabelled>>;
+            try {
+              answer = await labelled.listLabelled(label, page);
+            } catch (error) {
+              throw error instanceof GmailPageTokenRejectedError ? new LabelPageRejectedError() : error;
+            }
+            // A reconnect that landed mid-sweep must not apply another
+            // mailbox's labels to this account's stored mail.
+            options.assertScopeCurrent?.();
+            return answer;
+          },
+        },
+      });
+      return report.pending > 0 ? [GMAIL_LABEL_RULES_PENDING_WARNING] : [];
+    } catch {
+      return [GMAIL_LABEL_RULES_PENDING_WARNING];
+    }
+  };
+
   const runBothStores = async (input: {
     connector: SourceConnector;
     maxItems?: number;
@@ -314,11 +355,13 @@ export function createGmailConnectorStoreSyncHandler(
   return {
     async sync(request: GmailConnectorStoreSyncRequest = {}): Promise<GmailConnectorStoreSyncResult> {
       const maxMessages = request.max_messages ?? options.maxMessages;
+      const connector = buildConnector({
+        ...(maxMessages !== undefined ? { maxMessages } : {}),
+        ...(request.query ? { query: request.query } : {}),
+      });
+      await sweepLabelRules(connector);
       const run = await runBothStores({
-        connector: buildConnector({
-          ...(maxMessages !== undefined ? { maxMessages } : {}),
-          ...(request.query ? { query: request.query } : {}),
-        }),
+        connector,
         ...(maxMessages !== undefined ? { maxItems: maxMessages } : {}),
       });
       return {
@@ -343,6 +386,7 @@ export function createGmailConnectorStoreSyncHandler(
       if (resume.headRejected) warnings.push(GMAIL_RESUME_REJECTED_WARNING);
       const provenance = sourceInvocationProvenance(request.provenance);
       let connector = buildConnector({ maxMessages: maxItems, provenance });
+      warnings.push(...await sweepLabelRules(connector));
       let head: GmailStoreRun;
       try {
         head = await runBothStores({
@@ -392,6 +436,7 @@ export function createGmailConnectorStoreSyncHandler(
         maxMessages: MAX_RECONCILE_MESSAGES,
         provenance: sourceInvocationProvenance(request.provenance),
       });
+      const warnings = await sweepLabelRules(connector, true);
       const head = await runBothStores({ connector, reconcile: true });
       return taskOutcome({
         kind: GMAIL_STORE_RECONCILE_RECEIPT_KIND,
@@ -400,7 +445,7 @@ export function createGmailConnectorStoreSyncHandler(
         usage: connector.requestBudgetStatus(),
         resumed: false,
         checkpoint: null,
-        warnings: [],
+        warnings,
       });
     },
 

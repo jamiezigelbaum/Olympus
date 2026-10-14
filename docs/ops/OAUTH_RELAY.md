@@ -10,6 +10,16 @@ publisher-owned OAuth apps for Google and Dropbox (X stays bring-your-own) with
 which bounces the browser back to whatever dashboard origin the flow's own
 `state` names.
 
+Owner decision (2026-10-13), superseding the 2026-09-03 rule **for Google
+only**: Google sign-in happens on the computer where Olympus runs. Olympus
+ships a Google **Desktop app** client; Google returns to the engine on
+loopback, and the engine exchanges and refreshes tokens with Google itself, so
+no Olympus server sees a Google code or token. The legal review (finding H4)
+named the publisher token-exchange Worker the riskiest service Olympus runs;
+this also takes that Worker's uptime out of Gmail and Drive sync. Dropbox keeps
+the relay; X stays bring-your-own. See
+["Google sign-in on the computer"](#google-sign-in-on-the-computer).
+
 This document is the contract. The relay page is
 [`relay/oauth/callback/index.html`](../../relay/oauth/callback/index.html); the
 worker side lives in [`src/core/oauth-relay.ts`](../../src/core/oauth-relay.ts)
@@ -22,7 +32,8 @@ and the routes in `src/workers/email-source/index.ts`. It satisfies
 
 | Source | Dashboard origin | Client | `redirect_uri` | `state` |
 |---|---|---|---|---|
-| `gmail`, `google-drive` | any, including HTTP/HTTPS `localhost`, `127.0.0.1`, and `[::1]` | publisher Google **Web** client | the relay URL | signed |
+| `gmail`, `google-drive` | any | publisher Google **Desktop** client | `http://127.0.0.1:<port>/oauth/callback/<source>` (this engine) | random |
+| `gmail`, `google-drive` (legacy: no Desktop client configured) | any | publisher Google **Web** client | the relay URL | signed |
 | `dropbox` | any | publisher Dropbox app key | the relay URL | signed |
 | `x` | any | bring-your-own | the dashboard's own callback | random |
 
@@ -48,12 +59,14 @@ Two rules decide this, and both are enforced in `dashboardPublisherOAuthFlow`:
   the moment it needed reauthentication, sending the dashboard-origin
   callback where Dropbox had only ever registered the relay (Codex round 3 on
   e75598f7).
-- **Publisher Google always uses the Web client, relay, and publisher
-  exchange.** This includes HTTP and HTTPS loopback dashboards on `localhost`,
-  `127.0.0.1`, and `[::1]`. The Desktop pilot identity is not the publisher
-  dashboard route: using it sent the code directly to Google's token endpoint,
-  where the existing Desktop registration was refused without its client
-  secret. One Web-client path keeps that secret only at the publisher exchange.
+- **Publisher Google signs in on the computer** (2026-10-13) with the
+  Desktop client `googleDesktopClient()` in `core/publisher-oauth-client.ts`,
+  whose secret ships in source (see
+  ["Google sign-in on the computer"](#google-sign-in-on-the-computer)). While
+  no Desktop client is configured, Google keeps the Web client, relay and
+  publisher exchange it used from 2026-09-03 to 2026-10-13. The older pilot
+  Desktop identity (`google-pilot-client.ts`) is not this client: it was
+  refused at Google's token endpoint because Olympus sent it no secret.
 
 Both publisher apps ship **filled in**. Dropbox: the owner created the
 "Olympus-Plugin" app 2026-09-03, registered both redirect URIs it needs (the
@@ -65,13 +78,13 @@ one redirect URI, and its client id is `DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID`
 in the same file.
 
 The publisher-side token-exchange endpoint the Google Web client needs
-(`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`) is built, DEPLOYED — verified live
-2026-09-03 — and wired into the worker: every publisher-mode Google flow's
-token exchange and refresh go through it instead of straight to Google, with
-`oauth2Refresh.exchangeVia: 'publisher_endpoint'` recorded on the resulting
-credential so refresh knows which path to use. Only the exchange leg moves —
-the relay contract, the state format, and the registered `redirect_uri` are
-unchanged by it.
+(`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`) is **legacy from Olympus 1.0.0**
+(decided 2026-10-13). It was deployed and verified live 2026-09-03, and
+Web-client connections made by the 1.0.0 release candidates record
+`oauth2Refresh.exchangeVia: 'publisher_endpoint'`, so they keep refreshing
+through it until it was retired on 2026-10-13, before the 1.0.0 launch. Such a
+connection can no longer refresh and needs Olympus 1.0.0 and then **Reconnect
+Google**. New Google sign-ins never used it.
 
 ### The worker's state signing key
 
@@ -96,6 +109,91 @@ type, the rotation, and the persisted JSON shape
 `parseOAuthRelayStateKeys`); nothing in this repository currently calls
 rotation on a schedule or exposes it as an operator command — until it does,
 rotation is a manual edit of the stored JSON.
+
+## Google sign-in on the computer
+
+Owner decision 2026-10-13. Code: `googleDesktopClient()` and
+`googleDesktopClientSecret()` in `src/core/publisher-oauth-client.ts`; the
+start route and `dashboardGoogleLoopbackOrigin` in
+`src/workers/email-source/index.ts`; the ChatGPT hand-off in
+`src/workers/chatgpt/handoff.ts`; the relay page in
+`connect-relay/server/signin-bridge.ts`; `olympus connect finish` in
+`src/core/oauth-callback-paste.ts`.
+
+**The client.** A Google *Desktop app* OAuth client in the same Google Cloud
+project as the Web client (project number 1027907846009), so both share one
+consent screen and one user cap. Google accepts any port on
+`http://127.0.0.1` as its redirect, supports PKCE (Olympus always uses it),
+and still asks for the client's secret at the token endpoint. Google documents an installed app's
+secret as not confidential, so it ships in source, as rclone and the Google
+Cloud CLI ship theirs; the protection is the loopback redirect plus PKCE. The
+secret is never stored per credential: exchange and refresh look it up by
+client id, so a release that rotates the client reaches every connection
+(the list is append-only, like the Web client ids).
+
+**The flow.**
+
+1. Connect starts on the engine (`POST /dashboard/connect/oauth/start`) with
+   `redirect_uri = http://127.0.0.1:<port>/oauth/callback/<source>` and a
+   random state. The port is the one the browser reached the dashboard on when
+   that dashboard is itself on loopback (`localhost`, `127.0.0.1`, `[::1]`, or
+   a Linux desktop's `*.localhost` origin, whose `127.0.0.1` entry point is the
+   same port); for any other dashboard origin it is the engine's own port
+   (`OLYMPUS_EMAIL_SOURCE_PORT`, default 8010).
+2. Google returns the browser to that address; the engine's public callback
+   route checks the state against the sign-in it started, exchanges the code
+   directly at `https://oauth2.googleapis.com/token` with PKCE and the shipped
+   secret, and redirects to the query-free `/done` page.
+3. Refresh goes directly to Google with the same secret.
+
+**From ChatGPT.** The Connect tool starts the sign-in on the engine
+(`handback: 'computer'`) and returns a one-time `https://<relay>/go/<id>`
+link of kind `computer`. When that link arrives through the relay, the engine
+does not spend it: it redirects to the relay's own page
+`/connect/signin?go=<id>&source=<source>`. That page probes the engine on
+`http://127.0.0.1:<port>` (the engine names its port in the redirect), like
+the approval bridge, and continues to `http://127.0.0.1:<port>/go/<id>`. Only
+a visit made on this computer, a loopback Host from a loopback peer, spends
+the link and redirects to Google; any other unrelayed visit (another device on
+the network) leaves it unspent and says to open it on the computer. When the engine does not answer (a phone, another
+computer), the page says **Open this on your computer**. Connecting Google
+from a phone is intentionally not offered. The relay's reviewed approval page
+(`/connect/authorize`) is unchanged. The `/connect/signin` route must be
+deployed on the relay **before** an engine release that uses it.
+
+**Linux.** A Linux desktop works as on the Mac. On a headless Linux server the
+owner opens the dashboard through the SSH tunnel
+(`ssh -N -L 8010:…` as on the help page), so Google's redirect to
+`http://127.0.0.1:8010/…` reaches the server through the tunnel. Without the
+tunnel, Google's last page does not load, but its address still carries the
+result: the owner copies it and runs `olympus connect finish '<address>'` on
+the server, which hands only `code`, `state` and `error` to the engine's own
+callback route on the server's loopback (rclone's remote-setup pattern). The
+engine checks the state as for a browser visit; nothing is trusted more.
+
+**Existing connections.** Nothing is forced to reconnect. A credential with
+`exchangeVia: 'publisher_endpoint'` keeps refreshing through the exchange
+Worker. Its Gmail or Drive row, while healthy, offers **Reconnect Google**
+once with one line of copy (`google_signin_moved` on the card); reconnecting
+moves it to the Desktop client and the offer disappears.
+
+**Retiring the exchange Worker** is a later step and needs the owner's
+explicit go (it is a Cloudflare deployment). Before it, legacy connections
+must have moved; the Worker's `GET /exchange/stats` shows accounts and the
+last new one, but it does not count refreshes, so judging "nothing uses it"
+needs either a refresh tally added to `exchange/` or a grace period after the
+nudge.
+
+**The user cap.** The Desktop and Web clients share Google's lifetime cap for
+an unverified app with restricted scopes. The Worker counted users from its own
+exchanges, so Desktop sign-ins are not counted there; the engine's
+`/exchange/capacity` check still reads the Worker (and fails open). Until the
+count has a new home, the owner watches the user count in the Google Cloud
+console and uses the Worker's manual full switch (`GOOGLE_SIGNIN_FULL`).
+
+**Verification.** `gmail.readonly` and `drive.readonly` are restricted scopes.
+Moving sign-in to the computer does not change that: publishing the app still
+needs Google's OAuth verification and the annual security assessment (CASA).
 
 ## Why a relay at all
 
@@ -568,15 +666,20 @@ token.
 2. **Authorized redirect URIs**: add
    `https://auth.olympusplugin.ai/oauth/callback/`, exactly, trailing slash
    included. Google matches the string, not the path prefix (RFC 9700 §4.1.3).
-3. Keep the existing **Desktop app** client only for legacy or explicitly
-   configured direct flows. New publisher dashboard connections use the Web
-   client and relay even when the dashboard is on loopback.
+3. **Desktop app client (2026-10-13).** Create an OAuth client of type
+   **Desktop app** in the same project. It needs no redirect URI (Google
+   allows any `http://127.0.0.1` port for it). Put its id and secret in
+   `DEFAULT_GOOGLE_DESKTOP_CLIENT_ID` and `DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET`
+   in `core/publisher-oauth-client.ts` (or, for one install,
+   `OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID` and `OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET`).
+   New sign-ins use it from then on; the Web client keeps serving connections
+   made through it.
 4. OAuth consent screen: add `olympusplugin.ai` to **Authorized domains**. It is
    an ordinary registrable domain the owner controls, so verification is the
    normal Search Console flow — either the DNS TXT record (easiest, the zone is
    already on Cloudflare) or an HTML file dropped into `relay/`. The Public
    Suffix List problem that `github.io` would have raised does not exist here.
-5. **Settled — the web client secret goes through a publisher-side exchange.**
+5. **Legacy since 2026-10-13 — the web client secret goes through a publisher-side exchange.**
    A Google *Web application* client must send `client_secret` at the token
    endpoint, even with PKCE, and the worker runs on the user's machine, so a
    publisher secret shipped with Olympus would not be secret. The owner picked

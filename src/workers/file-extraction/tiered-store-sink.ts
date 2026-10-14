@@ -30,11 +30,11 @@ import {
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
-import type { TierCopy, TierPlacementPlan } from '../classification/tier-ledger.ts';
+import { copyServingLayer, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
-import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
-import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
+import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
   TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
@@ -46,6 +46,7 @@ import {
   EXTRACTION_SINK_SKIPPED_SECRETS,
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
   createConnectorStoreExtractionSink,
+  extractionWriteClaim,
   planExtractionSinkWrite,
 } from './store-sink.ts';
 import type {
@@ -102,6 +103,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ...(options.claims ? { claims: options.claims } : {}),
       ...(tierClassification ? { tierClassification } : {}),
       ...(recordContentTier ? {} : { recordContentTier: false }),
+      // A routed landing has judged the text already (classifyContentTier)
+      // and settles Secrets through the ledger; a legacy one has not.
+      ...(contentRulesRan ? { secretsFloor: false } : {}),
       ...(contentRulesRan ? { mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256) } : {}),
     });
 
@@ -121,9 +125,40 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if (!ledger.isRouted(identity)) {
         const legacy = legacyStoreFor(set, ref.localItemId, options.home);
         if (!legacy) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        return sinkFor(legacy, true, classificationNow(), false).accept(request);
+        // Read before the landing: a Secret's row keeps no names afterwards.
+        const legacyPlan = planExtractionSinkWrite(legacy, request);
+        const legacyScope = legacy.activeLocalItemRow(ref.localItemId)?.sourceScope;
+        const result = await sinkFor(legacy, true, classificationNow(), false).accept(request);
+        if (result.skippedReason === EXTRACTION_SINK_SKIPPED_SECRETS && !('skippedReason' in legacyPlan)) {
+          // The plain sink settled its own store's copy. Another legacy leg
+          // may hold the same item, and no ledger row hides an unrouted copy,
+          // so every one of them is settled the same way, each fenced by its
+          // own store's accepted grant so an older generation never removes
+          // a newer one's copy; the location is recorded where the set keeps
+          // Secrets locations.
+          const writeClaim = extractionWriteClaim(request);
+          for (const domain of TIER_DOMAIN_ORDER) {
+            const other = set.legSpec(domain)?.legacy === true ? set.store(domain) : undefined;
+            if (!other || other === legacy) continue;
+            settleUntrackedSecretsCopy({
+              store: other,
+              identity: legacyPlan.item.identity,
+              connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+              metadata: legacyPlan.item.metadata,
+              ...(writeClaim ? { writeClaim } : {}),
+            });
+          }
+          const names = ledger.getCurrent(identity)?.metadataTier;
+          recordSecret(set, legacyPlan.item, request.text, {
+            namesReleasable: names === 'public' || names === 'private',
+            sourceScope: legacyScope,
+          });
+        }
+        return result;
       }
 
+      // Before anything else is read: the sniffer fence keys off this.
+      const read = ledger.classificationRead(identity);
       const record = ledger.getCurrent(identity);
       if (!record || record.state === 'moving') return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       const current = ledger.copies(identity).filter((copy) => copy.state === 'current');
@@ -135,7 +170,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if ('skippedReason' in plan) return skipped(plan.skippedReason);
 
       const tierClassification = classificationNow();
-      const override = ledger.getOverride(identity);
+      const override = read.override;
       const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
       const itemPath = stringMetadata(plan.item, ['locatorUri', 'pathDisplay']);
       // The photo judge's verdict on this exact picture, wherever in the set
@@ -155,7 +190,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           subject: identity,
         },
         {
-          ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity, read) } : {}),
           ...(override ? { override } : {}),
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
@@ -209,15 +244,42 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // listing (its names stay), also in a lane where only some items' does.
       // A re-judgment places it as every caller with only a decision does, so
       // the two never disagree into a move and back.
-      const placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
+      let placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
+      const fromContent = copyServingLayer(current, 'content');
+      const toContent = copyServingLayer(placement.copies, 'content');
+      // An edited Private copy waits in place for its new text's answer,
+      // just like an inline sync. Record the new decision's baseline so a
+      // Personal answer can lower it; the old tier is not a new-text floor.
+      if (record.contentRead && decision.contentPending && fromContent && toContent
+        && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain)
+        && !placementIsRaise(current, placement.copies)) {
+        placement = { copies: current, embedHold: true };
+      }
       const contentCopy = placement.copies.find((copy) => copy.layers !== 'metadata');
       const contentStore = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
 
       if (record.contentRead) {
         // Text already landed once: a re-judgment. Same stores: enrich the
-        // content copy in place. Different stores: queue the move, write nothing.
+        // content copy in place. Different stores: queue the move.
         if (!samePlacement(current, placement)) {
+          if (!placementIsRaise(current, placement.copies)) {
+            // A LOWERING move copies whatever the source store holds, and the
+            // verdict just reached judged THIS text. If the file was edited,
+            // the store still holds the older text, which the new verdict
+            // never judged (it may be Private and about to reach a store that
+            // may be shared). So the text in hand first replaces the old
+            // where the content already rests, which stays at least as
+            // private as the old; the queued move then carries the text the
+            // verdict is about. A raise needs no such step: it only moves
+            // content to a more private store.
+            const resting = current.find((copy) => copy.layers !== 'metadata');
+            const restingDomain = resting ? set.domainForCorpus(resting.corpusId) : undefined;
+            const restingStore = restingDomain ? set.store(restingDomain) : undefined;
+            if (!restingStore) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+            const replaced = await sinkFor(restingStore, false, tierClassification, true).accept(request);
+            if (!replaced.accepted) return replaced;
+          }
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }

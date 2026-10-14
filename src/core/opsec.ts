@@ -4,6 +4,7 @@ import type {
   SourceTrustDomain,
   SourceTrustTier,
 } from './source-index/types.ts';
+import { SHARED_SECRET_PATTERNS, hasSecretPatternHit, secretScreeningVariants } from './secret-patterns.ts';
 import { isSecureSensitivity } from './source-index/types.ts';
 
 export type EvidenceConfidence = 'low' | 'medium' | 'high';
@@ -252,8 +253,26 @@ function defaultReleaseSurfaceForSensitivity(sensitivity: SourceSensitivity): Ev
   return 'castor_answer';
 }
 
+/**
+ * Labels of every credential shape in `text`. The shapes this guard always had
+ * stay as they were (some match shorter values than the shared floor does);
+ * the shared patterns (src/core/secret-patterns.ts, the same list the Secrets
+ * floor reads) add environment-style and JSON keys, spaced passphrases, and
+ * provider tokens.
+ */
 export function secretLabelsInText(text: string): string[] {
-  return SECRET_PATTERNS
-    .filter(({ pattern }) => pattern.test(text))
-    .map(({ label }) => label);
+  const labels = new Set<string>();
+  const variants = secretScreeningVariants(text);
+  for (const { label, pattern } of SECRET_PATTERNS) {
+    // Preserve the outbound guard's shorter non-URL thresholds; URL values
+    // use the same parser and placeholder exclusions as every other screen.
+    const shared = { label: ['private_key', 'openai_key', 'github_token', 'slack_token'].includes(label) ? label : 'credential_assignment',
+      findingType: 'credential_assignment' as const, confidence: 1,
+      pattern: new RegExp(pattern.source, `${pattern.flags}g`) };
+    if (hasSecretPatternHit(text, shared, variants)) labels.add(label);
+  }
+  for (const shared of SHARED_SECRET_PATTERNS) {
+    if (hasSecretPatternHit(text, shared, variants)) labels.add(shared.label);
+  }
+  return [...labels];
 }

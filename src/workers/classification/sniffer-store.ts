@@ -20,7 +20,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import type { TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 1;
+export const TIER_SNIFFER_SCHEMA_VERSION = 3;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -54,6 +54,9 @@ export interface SnifferQuestion {
   flags: string[];
   attempts: number;
   queuedAt: string;
+  priority: number;
+  /** Stable insertion order for items queued in the same millisecond. */
+  sequence: number;
 }
 
 export function snifferMaterialHash(pass: SnifferPass, material: string): string {
@@ -147,20 +150,34 @@ export class TierSnifferStore {
   /**
    * Queue (or refresh) the question for one item and pass. A changed material
    * replaces the old one and resets the attempt count; an identical one keeps
-   * its place and attempts.
+   * its place and attempts. `stillAsk` is checked under this write's lock: the
+   * Secrets disposition deletes an item's questions only after the item is
+   * Secrets in the ledger, so a check that still finds it askable here runs
+   * before that deletion, and a later one finds it Secrets and queues nothing.
    */
   enqueue(question: {
     subject: TierSnifferSubject;
     pass: SnifferPass;
     material: string;
+    /** Full classification input digest, including text outside the excerpt. */
+    materialHash?: string;
     mapRevision: string;
     flags: readonly string[];
-  }): void {
-    const materialHash = snifferMaterialHash(question.pass, question.material);
-    this.db.query(`
+    priority?: number;
+    stillAsk?: () => boolean;
+  }): boolean {
+    const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const priority = Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0;
+    return this.db.transaction(() => {
+      if (question.stillAsk && !question.stillAsk()) return false;
+      const before = this.db.query(`
+        SELECT priority FROM sniffer_questions
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+      `).get(...subjectParams(question.subject), question.pass) as { priority: number } | null;
+      this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
@@ -168,6 +185,7 @@ export class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
+        priority = excluded.priority,
         flags_json = excluded.flags_json
     `).run(
       ...subjectParams(question.subject),
@@ -177,7 +195,19 @@ export class TierSnifferStore {
       question.material,
       JSON.stringify([...question.flags]),
       this.now().toISOString(),
+      priority,
     );
+      // Recent order is priority, then queue time, which an update keeps.
+      if (priority > 0 && (!before || priority > before.priority)) {
+        // A blocked scan may have moved below this new/promoted question.
+        // Revisit the recent window next tick, atomically with enqueue; keep
+        // the oldest cursors so priority arrivals cannot erase aging progress.
+        // An unchanged re-enqueue (every sync) must not rewind the scan.
+        this.db.query('DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)')
+          .run('all:recent', `${question.pass}:recent`);
+      }
+      return true;
+    }).immediate();
   }
 
   questionFor(subject: TierSnifferSubject, pass: SnifferPass): SnifferQuestion | undefined {
@@ -188,20 +218,106 @@ export class TierSnifferStore {
     return row ? questionFromRow(row) : undefined;
   }
 
-  /** Oldest questions first; the background pass reads these in bounded pages. */
-  listQuestions(options: { pass?: SnifferPass; limit?: number } = {}): SnifferQuestion[] {
+  /** Recent/high priority work plus the oldest eligible question. Blocked
+   * backlogs are scanned in bounded, durable slices rather than every tick. */
+  listQuestions(options: { pass?: SnifferPass; limit?: number; eligible?: (question: SnifferQuestion) => boolean } = {}): SnifferQuestion[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
-    const rows = options.pass
-      ? this.db.query('SELECT * FROM sniffer_questions WHERE pass = ? ORDER BY question_pk LIMIT ?').all(options.pass, limit)
-      : this.db.query('SELECT * FROM sniffer_questions ORDER BY question_pk LIMIT ?').all(limit);
-    return (rows as QuestionRow[]).map(questionFromRow);
+    const scanLimit = Math.max(64, limit);
+    const accepted = new Map<number, boolean>();
+    const eligible = (question: SnifferQuestion): boolean => {
+      if (!accepted.has(question.sequence)) accepted.set(question.sequence, options.eligible?.(question) ?? true);
+      return accepted.get(question.sequence)!;
+    };
+    const read = (oldest: boolean, count: number): SnifferQuestion[] => {
+      const key = `${options.pass ?? 'all'}:${oldest ? 'oldest' : 'recent'}`;
+      let cursor = options.eligible && !this.readOnly ? this.db.query(
+        'SELECT priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?',
+      ).get(key) as QuestionCursor | null : null;
+      if (oldest && cursor?.candidate_pk != null) {
+        const pinned = this.db.query('SELECT * FROM sniffer_questions WHERE question_pk = ?')
+          .get(cursor.candidate_pk) as QuestionRow | null;
+        if (pinned) {
+          const question = questionFromRow(pinned);
+          if (eligible(question)) return [question];
+        }
+        // Consumed, stale, or blocked: restart to find the next oldest eligible.
+        cursor = null;
+        this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key);
+      }
+      const filters: string[] = [];
+      const params: Array<string | number> = [];
+      if (options.pass) { filters.push('pass = ?'); params.push(options.pass); }
+      if (cursor) {
+        filters.push(oldest ? '(queued_at, question_pk) > (?, ?)'
+          : '(priority, queued_at, question_pk) < (?, ?, ?)');
+        if (!oldest) params.push(cursor.priority);
+        params.push(cursor.queued_at, cursor.question_pk);
+      }
+      const rows = this.db.query(`SELECT * FROM sniffer_questions
+        ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+        ORDER BY ${oldest ? 'queued_at, question_pk' : 'priority DESC, queued_at DESC, question_pk DESC'} LIMIT ?`)
+        .all(...params, scanLimit) as QuestionRow[];
+      const found: SnifferQuestion[] = [];
+      for (const row of rows) {
+        const question = questionFromRow(row);
+        if (eligible(question)) found.push(question);
+        if (found.length === count) break;
+      }
+      if (options.eligible && !this.readOnly) {
+        // Until eligible work is found, advance past blocked rows even when
+        // the store is reopened each tick. Reset on a hit/end so new arrivals
+        // keep recent priority and newly unblocked old work is revisited.
+        const last = rows.at(-1);
+        if (oldest && found[0]) {
+          // Discovery may precede the reserved fifth dispatch. Keep this
+          // candidate across passes/restarts until it is consumed or blocked.
+          const candidate = found[0];
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?)`)
+            .run(key, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+        } else if (found.length === 0 && rows.length === scanLimit && last) {
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk) VALUES (?, ?, ?, ?)`)
+            .run(key, last.priority, last.queued_at, last.question_pk);
+        } else this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key);
+      }
+      return found;
+    };
+    const questions = read(false, limit);
+    const oldest = read(true, 1)[0];
+    if (oldest && !questions.some(question => question.sequence === oldest.sequence)) questions.push(oldest);
+    return questions;
   }
 
-  deleteQuestion(subject: TierSnifferSubject, pass: SnifferPass): boolean {
+  dispatchCount(): number {
+    const used = (this.db.query('SELECT dispatches FROM sniffer_schedule WHERE id = 1').get() as { dispatches: number }).dispatches;
+    return used;
+  }
+
+  recordDispatch(): void {
+    this.db.exec('UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1');
+  }
+
+  clockMs(): number { return this.now().getTime(); }
+
+  deleteQuestion(subject: TierSnifferSubject, pass: SnifferPass, materialHash?: string): boolean {
     return this.db.query(`
       DELETE FROM sniffer_questions
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass).changes > 0;
+        AND (? IS NULL OR material_hash = ?)
+    `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
+  }
+
+  /**
+   * Drop every queued question for one item, both passes, with the material
+   * they hold. An item that becomes Secrets is never asked about again, and
+   * its names or excerpt do not wait here for the resolver's next pass.
+   */
+  deleteItemQuestions(subject: TierSnifferSubject): number {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
   }
 
   /**
@@ -243,7 +359,11 @@ export class TierSnifferStore {
   }
 }
 
+type QuestionCursor = Pick<QuestionRow, 'priority' | 'queued_at' | 'question_pk'> & { candidate_pk: number | null };
+
 interface QuestionRow {
+  question_pk: number;
+  priority: number;
   provider: string;
   account_scope: string;
   conversation_key: string;
@@ -270,6 +390,8 @@ function questionFromRow(row: QuestionRow): SnifferQuestion {
     flags: JSON.parse(row.flags_json) as string[],
     attempts: row.attempts,
     queuedAt: row.queued_at,
+    priority: row.priority ?? 0,
+    sequence: row.question_pk,
   };
 }
 
@@ -287,7 +409,7 @@ function restrictFiles(dbPath: string): void {
 function snifferMigrations(): SqliteMigration[] {
   return [
     {
-      version: TIER_SNIFFER_SCHEMA_VERSION,
+      version: 1,
       name: 'create_tier_sniffer',
       up(db) {
         db.exec(`
@@ -319,6 +441,29 @@ function snifferMigrations(): SqliteMigration[] {
             UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
           );
         `);
+      },
+    },
+    {
+      version: 2,
+      name: 'priority_and_aging',
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
+          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
+          INSERT INTO sniffer_schedule VALUES (1, 0);`);
+      },
+    },
+    {
+      version: 3,
+      name: 'bounded_queue_scans',
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
+          CREATE TABLE sniffer_scan (
+            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
+            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
+          );`);
       },
     },
   ];

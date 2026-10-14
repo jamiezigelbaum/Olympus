@@ -22,7 +22,7 @@
  * `_meta` reaches only the UI, never the model, but it still leaves the Mac
  * and passes through OpenAI, so it gets the same treatment.
  */
-import { isValidPort, isValidSshTarget } from '../../core/remote-open.ts';
+import { isValidPort, isValidSshTarget, isSshWorkerSocketPath } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE } from '../../core/google-signin-full-copy.ts';
@@ -225,10 +225,11 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     };
   }
   const remote = view.remote;
-  if (remote && isValidPort(remote.port)) {
+  if (remote && isValidPort(remote.port) && (remote.socketPath === undefined || isSshWorkerSocketPath(remote.socketPath))) {
     // The port and the owner's own SSH name, each checked; nothing else.
     out.remote = {
       port: remote.port,
+      ...(isSshWorkerSocketPath(remote.socketPath) ? { socketPath: remote.socketPath } : {}),
       ...(isValidSshTarget(remote.sshTarget) ? { sshTarget: remote.sshTarget.trim() } : {}),
       agent: remote.agent === true,
     };
@@ -320,7 +321,7 @@ function copyUnreadable(value: unknown): DashboardUnreadable | undefined {
 const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checking', 'checked', 'failed', 'busy']);
 
 const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
-const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'provider_unavailable', 'model_downloading']);
+const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'scope_root_missing', 'provider_unavailable', 'model_downloading']);
 const STALL_CAUSES = new Set<SourceStallDetail['cause']>(['failing', 'paused', 'switched_off', 'no_movement']);
 const STALL_STAGES = new Set<NonNullable<SourceStallDetail['stage']>>(['listing', 'reading', 'indexing']);
 
@@ -595,7 +596,8 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     // Anonymous only when the network address was hidden (Tor, verified).
     // Visible (Tor off, or a bypass observed): the question was not
     // anonymous; not verified (Tor ran but the route could not be confirmed,
-    // e.g. no confinement on Linux) is told as what it is: the route says why.
+    // e.g. confinement that does not filter loopback ports) is told as what
+    // it is: the route says why. A computer with no confinement sends nothing.
     // The route reads without its money clauses inside ChatGPT (zkapi-copy.ts).
     const hidden = record.networkIdentity === 'hidden';
     const visible = record.networkIdentity === 'visible';
@@ -933,7 +935,7 @@ const SOURCE_LABELS: Record<string, string> = {
   'readwise.library': 'Readwise',
 };
 
-export function connectSourceToolResult(result: ConnectSourceResult, options: { direct?: boolean } = {}): ChatGptToolResult {
+export function connectSourceToolResult(result: ConnectSourceResult, options: { direct?: boolean; onComputer?: boolean } = {}): ChatGptToolResult {
   const source = OAUTH_SOURCES.has(result.source) ? result.source : undefined;
   // `direct`: the computer's own panel, where the link is the provider's
   // sign-in page itself (the start route already checked its origin).
@@ -945,7 +947,10 @@ export function connectSourceToolResult(result: ConnectSourceResult, options: { 
       type: 'text',
       text: options.direct
         ? `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl}. Then choose what Olympus may read in the Olympus panel.`
-        : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`,
+        : options.onComputer
+          // Google sign-in runs on the computer where Olympus runs, never on a phone.
+          ? `Open this link on the computer where Olympus runs to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`
+          : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`,
     }],
     structuredContent: structured as unknown as Record<string, unknown>,
   };

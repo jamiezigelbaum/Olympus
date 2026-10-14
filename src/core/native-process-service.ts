@@ -105,6 +105,8 @@ export interface NativeProcessStartInput<TSettings extends NativeProcessStartSet
   context: NativeProcessServiceContext;
   /** Registration-time config snapshot, used only when the context omits config. */
   initialConfig: unknown;
+  /** Kernel proof that this lifetime's prior direct child exited and cleanup settled. */
+  previousChildReleased: boolean;
 }
 
 export interface NativeProcessServiceOptions<TSettings extends NativeProcessStartSettings> {
@@ -188,6 +190,8 @@ interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   /** Resets backoff once a ready child has stayed up for `stableUptimeMs`. */
   stableTimer: ReturnType<typeof setTimeout> | undefined;
   cleanupPromise: Promise<GroupStopResult> | undefined;
+  /** One-shot proof that the prior child group was confirmed stopped. */
+  previousChildReleased: boolean;
 }
 
 /**
@@ -271,7 +275,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
   let generation = 0;
   let current: ServiceLifetime<TSettings> | undefined;
   let retiring: ServiceLifetime<TSettings> | undefined;
-  let retirement: Promise<void> | undefined;
+  let retirement: Promise<boolean> | undefined;
 
   const isCurrent = (lifetime: ServiceLifetime<TSettings>): boolean => current === lifetime && !lifetime.stopping;
 
@@ -409,7 +413,9 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       serviceLabel: options.label,
       context: lifetime.context,
       initialConfig: options.initialConfig,
+      previousChildReleased: lifetime.previousChildReleased,
     });
+    lifetime.previousChildReleased = false;
     if (!settings) return;
     // A service may await during prepareStart (secret resolution, config read).
     // Re-check before spawning so stop() or a newer generation always wins.
@@ -513,7 +519,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     reload: { configPrefixes: [...options.reload.configPrefixes] },
     async start(context) {
       const requestedGeneration = ++generation;
-      await stopCurrent();
+      const previousChildReleased = await stopCurrent();
       if (requestedGeneration !== generation) return;
       const lifetime: ServiceLifetime<TSettings> = {
         serviceId: options.id,
@@ -526,6 +532,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         restartTimer: undefined,
         stableTimer: undefined,
         cleanupPromise: undefined,
+        previousChildReleased,
       };
       current = lifetime;
       try {
@@ -547,10 +554,10 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     },
   };
 
-  async function stopCurrent(): Promise<void> {
+  async function stopCurrent(): Promise<boolean> {
     if (retirement) return await retirement;
     const lifetime = current ?? retiring;
-    if (!lifetime) return;
+    if (!lifetime) return false;
     current = undefined;
     retiring = lifetime;
     lifetime.stopping = true;
@@ -569,10 +576,13 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         warn(lifetime, `Olympus ${options.label} descendants could not be confirmed stopped; its process group refused every signal.`);
       }
       if (retiring === lifetime) retiring = undefined;
+      // Carry only the retiring lifetime's confirmed release into a config
+      // replacement. A childless lifetime alone is not socket custody proof.
+      return lifetime.previousChildReleased;
     });
     retirement = cleanup;
     try {
-      await cleanup;
+      return await cleanup;
     } finally {
       if (retirement === cleanup) retirement = undefined;
     }
@@ -658,6 +668,7 @@ async function terminateChild<TSettings extends NativeProcessStartSettings>(
     // cleanup that cannot happen. Residual: a member we may not signal can
     // outlive the group until it exits by itself or the machine restarts.
     notifyChildObserver('stopped', lifetime.serviceId, child.pid);
+    lifetime.previousChildReleased = result === 'stopped';
     if (lifetime.child === child) lifetime.child = undefined;
     return result;
   } finally {

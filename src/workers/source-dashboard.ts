@@ -1,5 +1,7 @@
+import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { GOOGLE_SIGNIN_FULL_SENTENCE } from '../core/google-signin-full-copy.ts';
+import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
@@ -18,12 +20,14 @@ import {
   type SourceCorpusRegistry,
 } from '../core/source-corpus-registry.ts';
 import { SOURCE_TRUST_DOMAINS } from '../core/source-index/types.ts';
-import type {
-  SovereigntyEngine,
-  SovereigntyModelProfile,
-  SovereigntyProfileProvider,
+import {
+  isPublicTierRetired,
+  type SovereigntyEngine,
+  type SovereigntyModelProfile,
+  type SovereigntyProfileProvider,
 } from '../core/sovereignty.ts';
 import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './credential-broker/connected-handles.ts';
+import { WHATSAPP_UNOFFICIAL_CLIENT_NOTICE } from '../core/whatsapp-notice.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './dashboard/scheduler-markers.ts';
 import { sourceFailureKind, sourceFailureRef, type SourceFailureKind } from './dashboard/source-failure.ts';
 import {
@@ -132,6 +136,7 @@ export function dashboardSchedulerTaskFailing(
 ): boolean {
   if (task.consecutive_failures <= 0) return false;
   const kind = task.last_error_kind;
+  if (kind === 'scope_root_missing') return true;
   if (kind?.startsWith('credential_') && !DASHBOARD_CREDENTIAL_CONTENTION_KINDS.has(kind)) return true;
   return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
 }
@@ -372,7 +377,7 @@ export interface DashboardSourceRun {
   duration_seconds?: number;
   items_seen: number;
   items_indexed: number;
-  /** Provider traversal truth; false means this bounded pass did not finish the walk. */
+  /** Provider traversal truth; false means this bounded pass did not finish the walk. Absent when the source reports no walk (the card then settles on its other evidence). */
   traversal_complete?: boolean;
 }
 
@@ -389,6 +394,8 @@ export interface DashboardSourceSchedule {
   last_attempt_at?: string;
   next_run_at?: string;
   last_error_kind?: string;
+  /** Chosen paths for the computer-only dashboard metadata. */
+  missing_folders?: string[];
   /**
    * The newest failing task's `error_hash`: the value its log line carries,
    * so an unclassified failure can be found there.
@@ -917,6 +924,13 @@ export interface DashboardSourceCard {
      * chat sources) and for a card that is not connected at all.
      */
     connected_at?: string;
+    /**
+     * A working Google connection that still refreshes through Olympus's
+     * legacy token exchange, while new sign-ins run on this computer (owner,
+     * 2026-10-13). Nothing is forced: the panel offers Reconnect Google once,
+     * and the new connection uses the Desktop client.
+     */
+    google_signin_moved?: true;
     /** Present only for a locally connected broker-backed v0.4 source. */
     disconnect?: DashboardDisconnectAction;
     /** Present only for a paired-session source that currently reads paired. */
@@ -1602,6 +1616,19 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
   ],
 };
 
+/**
+ * The sensitivity table for this install's policy: without a Public tier
+ * (every install made from 1.0 on) the S0 Public row is left out, since
+ * nothing is ever placed there; an older policy keeps it.
+ */
+export function dashboardSensitivityTiers(sovereigntyEngine: SovereigntyEngine): DashboardSensitivityTiers {
+  if (!isPublicTierRetired(sovereigntyEngine.config)) return DASHBOARD_SENSITIVITY_TIERS;
+  return {
+    ...DASHBOARD_SENSITIVITY_TIERS,
+    tiers: DASHBOARD_SENSITIVITY_TIERS.tiers.filter((tier) => tier.tier_label !== 'S0'),
+  };
+}
+
 export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] = [
   {
     source_id: 'gmail.email',
@@ -1692,6 +1719,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
       source: 'whatsapp',
       instructions: [
         'WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).',
+        WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
         'Ask your agent to start WhatsApp pairing; this card updates once the scan completes.',
       ],
     },
@@ -1729,7 +1757,7 @@ const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
 
 export function defaultSourceDashboardHistoryDbPath(env: Record<string, string | undefined> = process.env): string {
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'source-dashboard.sqlite');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'source-dashboard.sqlite');
 }
 
 /**
@@ -2245,7 +2273,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // opens a store of its own, so the exclusion facts arrive the same way the
     // per-source ingestion health does.
     excluded_by_configuration: excludedByConfiguration,
-    sensitivity_tiers: DASHBOARD_SENSITIVITY_TIERS,
+    sensitivity_tiers: dashboardSensitivityTiers(options.sovereigntyEngine),
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
@@ -2448,6 +2476,8 @@ function sourceCardFromDefinition(
     baseConnection.state = 'reauth_required';
     baseConnection.label = 'Reconnect Google to continue syncing';
     if (baseConnection.action.kind === 'oauth') baseConnection.action.label = 'Reconnect Google';
+  } else if (googleSignInMoved(definition, registry, baseConnection.state)) {
+    baseConnection.google_signin_moved = true;
   }
   // Two custody controls, never both on one row. A paired session gets Unpair,
   // which removes the session this computer holds and is the only act that
@@ -2821,6 +2851,7 @@ function scheduleFromSchedulers(
   const failing = tasks
     .filter((task) => task.consecutive_failures > 0)
     .sort((left, right) => (Date.parse(right.last_attempt_at ?? '') || 0) - (Date.parse(left.last_attempt_at ?? '') || 0));
+  const missingFolders = tasks.flatMap(task => task.last_error_kind === 'scope_root_missing' && task.missing_scope_path ? [task.missing_scope_path] : []);
   const lastErrorKind = failing.find((task) => task.last_error_kind)?.last_error_kind;
   const lastErrorHash = failing.find((task) => task.last_error_hash)?.last_error_hash;
   const degradedReason = tasks.find((task) => task.degraded_reason)?.degraded_reason;
@@ -2833,6 +2864,7 @@ function scheduleFromSchedulers(
     ...(lastSuccessAt ? { last_success_at: lastSuccessAt } : {}),
     ...(lastAttemptAt ? { last_attempt_at: lastAttemptAt } : {}),
     ...(nextRunAt ? { next_run_at: nextRunAt } : {}),
+    ...(missingFolders.length ? { missing_folders: [...new Set(missingFolders)] } : {}),
     ...(lastErrorKind ? { last_error_kind: lastErrorKind } : {}),
     ...(lastErrorHash ? { last_error_hash: lastErrorHash } : {}),
     ...(degradedReason ? { degraded_reason: degradedReason } : {}),
@@ -4097,6 +4129,23 @@ function providerRefusalReason(
     : `${refusal} — check the redirect URI registered on the provider app, then try again`;
 }
 
+/**
+ * Whether a connected Gmail or Drive card should offer the move to sign-in on
+ * this computer: a Desktop client is configured, and a live handle still
+ * refreshes through the legacy publisher exchange.
+ */
+function googleSignInMoved(
+  definition: DashboardSupportedSourceDefinition,
+  registry: ConnectedHandleRegistry | undefined,
+  state: DashboardConnectionState,
+): boolean {
+  if (definition.provider !== 'gmail' && definition.provider !== 'google_drive') return false;
+  if (state === 'not_connected' || state === 'needs_setup' || state === 'reauth_required' || state === 'awaiting_consent') return false;
+  if (!googleDesktopClient()) return false;
+  return handlesForDefinition(definition, registry).some((handle) =>
+    !isRetiredGoogleHandle(handle) && handle.oauth2Refresh?.exchangeVia === 'publisher_endpoint');
+}
+
 function handlesForDefinition(
   definition: DashboardSupportedSourceDefinition,
   registry: ConnectedHandleRegistry | undefined,
@@ -4508,14 +4557,34 @@ function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined)
   return output;
 }
 
+/**
+ * Whether the metadata walk of this source finished, from what its sync tasks
+ * last reported; undefined when they say nothing either way.
+ *
+ * A task speaks through `traversal_complete`, or, for X bookmarks, whose
+ * reconcile walks the provider's whole list and reports no such counter,
+ * through its own `global_traversal_exhausted`. 1 means that walk finished and
+ * 0 means it did not. A task that has not reported at all has not finished a
+ * pass, so the answer is no. A task that reported but carries neither counter
+ * (Telegram's spool pull has no provider walk; X's head sync is not the walk)
+ * takes no part: a missing counter is "unknown", never "not finished", or the
+ * source would read as still listing for as long as it runs. The answer is
+ * derived on every read from the last counts, so a source whose counts were
+ * stored before this rule is not stuck on an old verdict.
+ */
 function metadataTraversalCompleteFromSchedulers(
   schedulers: readonly SourceSchedulerSourceStatus[],
 ): boolean | undefined {
   const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'sync'));
   if (tasks.length === 0) return undefined;
-  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
-  if (signals.some((value) => typeof value !== 'number' || !Number.isFinite(value))) return false;
-  return signals.every((value) => value === 1);
+  const walks: boolean[] = [];
+  for (const task of tasks) {
+    if (!task.last_result) return false;
+    const signal = [task.last_result.counts?.traversal_complete, task.last_result.counts?.global_traversal_exhausted]
+      .find((value): value is number => typeof value === 'number' && Number.isFinite(value));
+    if (signal !== undefined) walks.push(signal === 1);
+  }
+  return walks.length === 0 ? undefined : walks.every(Boolean);
 }
 
 function freshnessFrom(
@@ -4912,13 +4981,17 @@ function trustDomainCards(
   unassigned: DashboardUnassignedCorpora,
   sovereigntyEngine: SovereigntyEngine,
 ): DashboardTrustDomainCard[] {
-  // The three product tiers always render, in this order, even at zero. Any
-  // other trust domain reaching this page still gets a card appended, so the
-  // tier totals can never sum to less than "Items found".
+  // The product tiers always render, in this order, even at zero; Public only
+  // where the policy keeps a Public tier (installs made before 1.0). Any
+  // other trust domain reaching this page, Public included, still gets a card
+  // appended, so the tier totals can never sum to less than "Items found".
+  const productDomains = isPublicTierRetired(sovereigntyEngine.config)
+    ? DASHBOARD_TRUST_DOMAINS.filter((trustDomain) => trustDomain !== 'public_safe')
+    : DASHBOARD_TRUST_DOMAINS;
   const extraDomains = [...sourceCards.flatMap((card) => card.tier_composition.map((tier) => tier.trust_domain)),
     ...unassigned.entries.map((entry) => entry.trust_domain)]
-    .filter((trustDomain) => !DASHBOARD_TRUST_DOMAINS.includes(trustDomain));
-  return [...DASHBOARD_TRUST_DOMAINS, ...new Set(extraDomains)].map((trustDomain) => {
+    .filter((trustDomain) => !productDomains.includes(trustDomain));
+  return [...productDomains, ...new Set(extraDomains)].map((trustDomain) => {
     // Count per corpus tier, not per source: one source (Gmail) legitimately
     // spans tiers once items classify individually.
     const tiers = sourceCards.flatMap((card) => card.tier_composition.filter((tier) => tier.trust_domain === trustDomain));

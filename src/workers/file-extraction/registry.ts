@@ -208,10 +208,14 @@ export function createDefaultExtractorRegistry(
   // The three approved-remote kinds differ only by the model behind the
   // injected client; the extraction behaviour is one implementation. They are
   // registered from the same config block because the landed option shape
-  // carries exactly one client.
+  // carries exactly one client. Each reads its payload with the local OCR
+  // lane before sending it, and sends nothing that lane finds a secret in
+  // (or cannot read).
+  const remoteLocalReader = config.remote?.localReader ?? createOcrExtractor(ocrShared);
   for (const kind of REMOTE_VLM_EXTRACTOR_KINDS) {
     extractors.push(createRemoteVlmExtractor({
       kind,
+      localReader: remoteLocalReader,
       ...(config.remote?.client ? { client: config.remote.client } : {}),
       ...(config.remote?.prompt !== undefined ? { prompt: config.remote.prompt } : {}),
       ...(config.remote?.model !== undefined ? { model: config.remote.model } : {}),

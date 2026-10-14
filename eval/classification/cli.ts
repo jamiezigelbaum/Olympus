@@ -5,6 +5,7 @@
 // sends only the synthetic corpus, and only to a lane the sniffer lane
 // resolver admits; a standard-cloud lane is refused before any call.
 
+import { createBuiltInAnalystModel } from '../../src/core/analyst-built-in.ts';
 import { createDelphiAnalystModel } from '../../src/core/analyst-delphi.ts';
 import { createVeniceAnalystModel } from '../../src/core/analyst-venice.ts';
 import type { AnalystModel } from '../../src/core/analyst.ts';
@@ -14,6 +15,7 @@ import { loadSovereigntyEngine } from '../../src/core/sovereignty.ts';
 import { resolveSnifferLane, type SnifferLane } from '../../src/workers/classification/sniffer-lane.ts';
 import { createFakeSnifferModel } from './fake-sniffer.ts';
 import { runClassificationEval } from './run.ts';
+import { createInboxReplayModel, runInboxEval, type InboxSplit } from './inbox.ts';
 
 const FAKE_LANE: SnifferLane = {
   kind: 'local',
@@ -24,6 +26,25 @@ const FAKE_LANE: SnifferLane = {
 
 async function main(): Promise<void> {
   const real = process.argv.includes('--real');
+  if (process.argv.includes('--inbox')) {
+    const split = (process.argv.find(arg => arg.startsWith('--split='))?.split('=')[1] ?? 'all') as InboxSplit;
+    if (!['all', 'dev', 'held-out'].includes(split)) throw new Error('Invalid split');
+    if (real && process.argv.includes('--built-in')) {
+      const model = createBuiltInAnalystModel({ waitForInstall: true });
+      try {
+        await model.prepare();
+        const report = await runInboxEval({ model, modelId: `built_in/${model.spec.modelId}/${model.spec.file.sha256}`, split });
+        console.log(JSON.stringify(report, null, 2));
+        if (report.mistakes.length || report.secretDispatches) process.exitCode = 1;
+      } finally { await model.stop(); }
+      return;
+    }
+    const selected = real ? realSniffer() : { model: createInboxReplayModel(), lane: { modelId: 'inbox-scripted-v1' } };
+    const report = await runInboxEval({ model: selected.model, modelId: selected.lane.modelId, split });
+    console.log(JSON.stringify(report, null, 2));
+    if (report.mistakes.length || report.secretDispatches) process.exitCode = 1;
+    return;
+  }
   const { lane, model, label } = real ? realSniffer() : { lane: FAKE_LANE, model: createFakeSnifferModel(), label: 'fake (deterministic)' };
   const started = Date.now();
   const report = await runClassificationEval({ lane, model, label });

@@ -1,3 +1,11 @@
+import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
+import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
+import { linuxGraphicalSessionReadinessAsync } from '../../core/linux-desktop-opener.ts';
+import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
+import { workerFetch } from '../../core/worker-transport.ts';
+import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
+import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
+import { prepareWorkerSocket, bindWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
 import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -13,7 +21,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
-import { resolveServerMode } from '../../core/remote-open.ts';
+import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -368,7 +376,7 @@ import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-source
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
-import { createAnswerActivity } from '../answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -1037,6 +1045,7 @@ async function createSovereigntyAnalystMap(input: {
   veniceReasoningHeadroomTokens: number | undefined;
   bootSecretResolver?: WorkerBootSecretResolver;
   builtInAnalyst?: Analyst;
+  localModelActivity?: LocalModelActivity;
 }): Promise<Map<string, {
   profile: SovereigntyResolvedProfile;
   backend: AnalystBackend;
@@ -1077,6 +1086,7 @@ async function createSovereigntyAnalystMap(input: {
       : createAnalystForSovereigntyProfile({
           profile,
           profileId: id,
+          ...(input.localModelActivity ? { localModelActivity: input.localModelActivity } : {}),
           olympusConfig: input.olympusConfig,
           env: input.env,
           veniceAnalystTimeoutMs: input.veniceAnalystTimeoutMs,
@@ -1317,6 +1327,7 @@ function analystBackendForSovereigntyProfile(profile: SovereigntyModelProfile): 
 export function createAnalystForSovereigntyProfile(input: {
   profile: SovereigntyModelProfile;
   profileId?: string;
+  localModelActivity?: LocalModelActivity;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   veniceAnalystTimeoutMs: number | undefined;
@@ -1325,6 +1336,7 @@ export function createAnalystForSovereigntyProfile(input: {
 export function createAnalystForSovereigntyProfile(input: {
   profile: SovereigntyModelProfile;
   profileId?: string;
+  localModelActivity?: LocalModelActivity;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   veniceAnalystTimeoutMs: number | undefined;
@@ -1334,6 +1346,7 @@ export function createAnalystForSovereigntyProfile(input: {
 export function createAnalystForSovereigntyProfile(input: {
   profile: SovereigntyModelProfile;
   profileId?: string;
+  localModelActivity?: LocalModelActivity;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   veniceAnalystTimeoutMs: number | undefined;
@@ -1363,15 +1376,12 @@ export function createAnalystForSovereigntyProfile(input: {
       ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
       purpose: 'text_reasoning',
     };
-    return createAnalyst(
-      createDelphiAnalystModel(new DelphiClient(config, undefined, {
-        resolveSecretRef: () => apiKey,
-      }), {
-        profile: 'source_answer',
-        preflightTimeoutMs: 0,
-      }),
-      { auditSuspiciousDrafts: true },
-    );
+    const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
+      resolveSecretRef: () => apiKey,
+    }), { profile: 'source_answer', preflightTimeoutMs: 0 });
+    return createAnalyst(input.localModelActivity
+      ? input.localModelActivity.track(localModelResourceKey(profile), model) : model,
+    { auditSuspiciousDrafts: true });
   }
   if (profile.provider === 'openclaw-infer') {
     return createAnalyst(createOpenClawInferAnalystModel({
@@ -1850,9 +1860,12 @@ export async function main(): Promise<void> {
   // sniffer, the Private answer pool's fallback and ChatGPT's private answer
   // panel, so at most one local model server runs. Registered for the
   // sniffer before its runtime is resolved below.
+  const localModelActivity = createLocalModelActivity();
   const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
+  const answerBuiltInModel = workerBuiltInModel
+    ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
   registerBuiltInPrivateModel(workerBuiltInModel
-    ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
+    ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
     : undefined);
   // Four-tier classification inputs for every lane: the owner's map, tier
   // rules, their own words about privacy, and the privacy-safe sniffer. The
@@ -1873,21 +1886,16 @@ export async function main(): Promise<void> {
   const privacyOwnerWords = (): string | undefined => privacyOwnerContext({ env: process.env });
   const installedTierClassification = configureInstalledTierClassification({
     env: process.env,
-    ...(snifferLane ? { lane: { kind: snifferLane.kind, modelId: snifferLane.modelId } } : {}),
+    ...(snifferLane ? { lane: snifferLane } : {}),
     ...(publicTierRetired ? { retirePublic: true } : {}),
     ownerContext: privacyOwnerWords,
   });
   // Shared with the answer handler so the sniffer reads the private pool's
   // breakers, and counts answers in flight so it never competes with one.
   const secureAnalystPoolState = new SecureAnalystPoolState();
-  // Set once the sniffer runs: aborts its in-flight call when an answer starts.
-  let preemptTierSniffer: (() => void) | undefined;
-  // Answers in flight (source answers, ChatGPT searches, private answer
-  // panel jobs): the first one preempts the sniffer, which yields until none
-  // is left. The private panel's answer and the sniffer share one local model.
-  // A lease never released (an answer that never settles) expires, so it
-  // cannot hold the sniffer off for good; said once each, content-free.
-  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.(), {
+  // UI answer leases coordinate owner/background jobs. Actual local model
+  // dispatches have separate leases; cloud searches never preempt sorting.
+  const answerActivity = createAnswerActivity(() => undefined, {
     onExpired: (openMs) => console.warn(`Olympus answer activity: an answer still open after ${Math.round(openMs / 60_000)} min stopped holding background work.`),
   });
   // Set once the sniffer runs: its backlog, for the status surface.
@@ -3244,14 +3252,17 @@ export async function main(): Promise<void> {
           ? { timeoutMs: veniceAnalystTimeoutMs }
           : {}),
       });
-      const localSourceAnswerModel = createDelphiAnalystModel(
+      const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
+        ? olympusConfig.argus.lanes[analystLane]
+        : olympusConfig.argus.modelProfiles[analystProfile]), createDelphiAnalystModel(
         new DelphiClient(olympusConfig),
         process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
-      );
-      const builtInAnalystModel = workerBuiltInModel?.model;
+      ));
+      const builtInAnalystModel = answerBuiltInModel;
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
+        localModelActivity,
         engine: sovereigntyEngine,
         olympusConfig,
         env: process.env,
@@ -3446,14 +3457,17 @@ export async function main(): Promise<void> {
           : provider === 'google_drive' && googleFilePage(locator) ? { url: locator } : undefined),
         ...(process.platform === 'darwin'
           ? {
-              openFile: (path: string) => new Promise<void>((resolve, reject) => {
-                const args = unreadableOpenArguments(path, unreadableDropboxRoots());
-                if (!args) {
-                  reject(new Error('open refused'));
-                  return;
-                }
-                execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-              }),
+              openFile: async (path: string, eligible: () => Promise<boolean>) => {
+                if (!(await eligible())) throw new Error('open refused');
+                return new Promise<void>((resolve, reject) => {
+                  const args = unreadableOpenArguments(path, unreadableDropboxRoots());
+                  if (!args) {
+                    reject(new Error('open refused'));
+                    return;
+                  }
+                  execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+                });
+              },
             }
           : {}),
       })
@@ -4312,9 +4326,16 @@ export async function main(): Promise<void> {
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
+  let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+  let desktopPoll: ReturnType<typeof setInterval> | undefined;
+  let desktopPollingClosed = false;
+  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
   const worker = createEmailSourceWorker({
+    ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
+    agentConnectHost: agentApprovalHost,
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
+      ...(process.platform === 'linux' ? { relayInstallId: () => remotePublicUrls()?.installId } : {}),
       remoteAccess: () => dashboardRemoteAccess(),
       get remoteAccessControl() { return dashboardRemoteAccessControl; },
     },
@@ -4421,6 +4442,7 @@ export async function main(): Promise<void> {
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),
             ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
             oauthHandback: () => chatgptOAuthHandback(),
+            loopbackPort: port,
             ...(fileSourceScopes ? { fileSourceScopes } : {}),
             enforceConnectedSourceReads: true,
             // The filter applies to the override too. An override is a caller
@@ -4650,17 +4672,20 @@ export async function main(): Promise<void> {
   // again now: no symlink, still inside a Dropbox folder, and only a
   // document type opens; anything else is revealed in Finder.
   const openCitedFile = process.platform === 'darwin'
-    ? (path: string) => new Promise<void>((resolve, reject) => {
-        const args = localOpenArguments(path, localDropboxRoots());
-        if (!args) {
-          reject(new Error('open refused'));
-          return;
-        }
-        execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-      })
+    ? async (path: string, eligible: () => Promise<boolean>) => {
+        if (!(await eligible())) throw new Error('open refused');
+        return new Promise<void>((resolve, reject) => {
+          const args = localOpenArguments(path, localDropboxRoots());
+          if (!args) {
+            reject(new Error('open refused'));
+            return;
+          }
+          execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+        });
+      }
     : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
-    model: workerBuiltInModel?.model,
+    model: answerBuiltInModel,
     eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
@@ -4718,7 +4743,7 @@ export async function main(): Promise<void> {
     };
     const local = createLocalAnswerPath({
       lanes: sourceAnswerLanes,
-      model: workerBuiltInModel?.model,
+      model: answerBuiltInModel,
       available: () => workerBuiltInModel?.available() ?? false,
       relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
       sourceLinks: (item) => {
@@ -4841,7 +4866,7 @@ export async function main(): Promise<void> {
     {
       const { askAnonymously } = await import('../../core/consult-ask.ts');
       const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('../../core/consult-settings.ts');
-      askAnonymouslyNow = async (input) => {
+      const admittedAsk: NonNullable<typeof askAnonymouslyNow> = async (input) => {
         const result = await askAnonymously(input, {
           settings: () => readConsultSettings(),
           prepare: (writerInput, writer, level, signal) => runChosenWriter(writerInput, {
@@ -4876,6 +4901,13 @@ export async function main(): Promise<void> {
           else if (result.ok) chatgptModelProblem = undefined;
         }
         return result;
+      };
+      askAnonymouslyNow = async (input) => {
+        try { return await withEngineWorkerAdmission(defaultZkapiStatePath(), () => admittedAsk(input), { acquireTimeoutMs: 50 }); }
+        catch (error) {
+          if (error instanceof EngineMaintenanceInProgressError || (error as { code?: string }).code === 'file_lease_busy') return { ok: false, code: 'engine_maintenance_in_progress', message: 'Olympus engine maintenance or another consult is in progress; try again after it finishes.' };
+          throw error;
+        }
       };
     }
   }
@@ -5158,10 +5190,10 @@ export async function main(): Promise<void> {
     // computer for them; anywhere else (a hand-run worker, or a Hermes
     // install that turned the route off) the panel shows the by-hand lines only.
     remote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv() });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw';
       return mode.remote
-        ? { port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
+        ? { port, ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
         : undefined;
     },
     privacy: () => {
@@ -5185,10 +5217,8 @@ export async function main(): Promise<void> {
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
   });
 
-  const server = Bun.serve({
-    hostname,
-    port,
-    idleTimeout: 0,
+  const socketPath = prepareWorkerSocket();
+  const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
     // connection tokens, or OAuth access tokens bound to this resource); the
     // OAuth metadata and `/connect/*` routes serve the approval flow; every
@@ -5205,7 +5235,7 @@ export async function main(): Promise<void> {
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
       isRelayed: isRelayedRequest,
-    }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+    }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs, { isRelayed: carriesRelayMarker }), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       questions: privateQuestions,
       isRelayed: isRelayedRequest,
@@ -5213,6 +5243,7 @@ export async function main(): Promise<void> {
     }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
+        requireOwnerSocket: !!socketPath,
         // Any marker, verified or not, refuses approval (fails closed).
         isRelayed: carriesRelayMarker,
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
@@ -5244,12 +5275,71 @@ export async function main(): Promise<void> {
             ...chatgptSurface,
           },
         })),
-        // `GET /v1/engine/brief` (`olympus engine status --brief`) sits inside the
-        // bearer wrapper: it answers only a request that already proved the bearer.
-        withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, sessionSecret: dashboardSessionSecret.secret }),
+        // The brief route must pass both bearer and owner-socket authorization.
+        withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
       )),
-    ))))),
-  });
+    )))), !!socketPath),
+  };
+  const startServer = () => socketPath
+    ? Bun.serve({ unix: socketPath, fetch(request, server) {
+        server.timeout(request, 0);
+        if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
+          if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
+          return (async () => {
+            const status = desktopBridge?.status();
+            if (!status || status.state === 'headless') return Response.json({ state: 'headless' });
+            if (status.state !== 'listening') return Response.json(status, { status: 503 });
+            try {
+              const base = `http://127.0.0.1:${port}`;
+              const open = new URL(await mintDashboardOpeningUrl(base, authToken));
+              const requestedTarget = new URL(request.url).searchParams.get('target');
+              const target = requestedTarget ? parseOlympusOpenUrl(`olympus://open/${requestedTarget}`) : undefined;
+              if (requestedTarget && !target) return new Response(null, { status: 400 });
+              if (target) open.hash += `&olympus_open=${openTargetToken(target)}`;
+              const origin = await desktopBridge!.open(open.pathname + open.search + open.hash);
+              return Response.json({ state: 'listening', opened: true, url: origin + '/dashboard', hint: 'A private owner ticket was opened in your desktop browser. If *.localhost resolution fails, use the owner SSH socket forward; never use the fixed origin.' });
+            } catch { return Response.json({ error: 'Owner ticket could not open. Wait ten seconds and retry, or use the owner SSH socket forward.' }, { status: 503 }); }
+          })();
+        }
+        const response = serverOptions.fetch(request, server);
+        const path = new URL(request.url).pathname;
+        if (path === '/v1/health' || path === '/health') return Promise.resolve(response).then(async value => {
+          if (!value.ok) return value;
+          return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
+        });
+        return response;
+      } })
+    : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
+  const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  if (socketPath) {
+    let ready = false;
+    let probing = false;
+    const probeDesktop = async () => {
+      if (probing || desktopPollingClosed) return;
+      probing = true;
+      try {
+        // Coalesce bounded asynchronous probes; unauthenticated HTTP traffic
+        // only reads the current snapshot and cannot spawn systemctl.
+        const desktop = await linuxGraphicalSessionReadinessAsync();
+        if (desktopPollingClosed) return;
+        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => desktop.ready }).remote;
+      } catch { ready = false; }
+      finally { probing = false; if (!desktopPollingClosed) desktopBridge?.refresh(); }
+    };
+    await probeDesktop();
+    desktopBridge = manageLinuxOwnerBridge({ port, socketPath, ready: () => ready,
+      fetchSocket: request => workerFetch(request, { redirect: 'manual' }),
+      establishDashboard: async () => {
+        const base = `http://127.0.0.1:${port}`;
+        const response = await workerFetch(`${base}/dashboard/control/session`, { method: 'POST',
+          headers: { Authorization: `Bearer ${authToken ?? ''}`, Origin: base }, redirect: 'error', signal: AbortSignal.timeout(5_000) });
+        if (!response.ok) throw new Error('Owner dashboard session refused.');
+        await response.body?.cancel();
+        return response.headers.getSetCookie();
+      },
+    });
+    desktopPoll = setInterval(() => { void probeDesktop(); }, 2_000); desktopPoll.unref();
+  }
   sourceScheduler?.start();
   await reconcileCaptures();
   const captureTick = setInterval(() => { void reconcileCaptures(); }, 10_000);
@@ -5262,6 +5352,8 @@ export async function main(): Promise<void> {
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
       : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver });
+  const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
+    : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
   const tierSniffer = snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
@@ -5281,7 +5373,7 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
-        answersInFlight: () => answerActivity.busy,
+        answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved
@@ -5297,7 +5389,10 @@ export async function main(): Promise<void> {
         },
       })
     : undefined;
-  preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;
+  if (tierSniffer && snifferResource) {
+    localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
+    localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
+  }
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
 
@@ -5309,6 +5404,9 @@ export async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     capturesClosed = true;
+    desktopPollingClosed = true;
+    if (desktopPoll) clearInterval(desktopPoll);
+    desktopBridge?.close();
     clearInterval(captureTick);
     tierSniffer?.stop();
     installedTierClassification.close();
@@ -5335,7 +5433,7 @@ export async function main(): Promise<void> {
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 
-  console.log(`Olympus private email source worker listening on http://${hostname}:${port}/v1`);
+  console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog('WhatsApp connector-store storage', whatsappConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog('Telegram connector-store storage', telegramConnectorStoreLane));

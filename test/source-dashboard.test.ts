@@ -5036,3 +5036,15 @@ function approvedFolderScopesFixture() {
     async approveAndStart() { throw new Error('Approval is not part of this dispatch fixture'); },
   };
 }
+
+
+test('the dashboard aggregates every missing root even when another task failed more recently', () => {
+  const view = buildSourceDashboardViewModel({ sourceIndexStatus: fixtureStatus(), sovereigntyEngine: fixtureSovereigntyEngine(), connectedHandleRegistry: { version: 1, handles: [reconnectedDropboxHandle('2026-10-14T07:00:00Z')] }, fileSourceScopeStatus: { 'dropbox.files': 'approved' }, now: new Date('2026-10-14T09:00:00Z'), schedulerStatus: { kind: 'source_scheduler_status', sources: [{ source_id: 'dropbox.files', corpus_id: 'secure_local.dropbox.files', sync_cadence: 'continuous', sync_interval_seconds: 300, freshness_threshold_hours: 24, stale_sync_anomaly: false, tasks: [
+    { id: 'gone', kind: 'sync', running: false, consecutive_failures: 1, last_error_kind: 'scope_root_missing', missing_scope_path: '/Gone', degraded_reason: 'scope_root_missing', last_attempt_at: '2026-10-14T08:00:00Z' },
+    { id: 'other', kind: 'sync', running: false, consecutive_failures: 3, last_error_kind: 'timeout', last_attempt_at: '2026-10-14T08:59:00Z' },
+  ] }] } as any });
+  expect(view.sources.find(source => source.source_id === 'dropbox.files')!.schedule?.missing_folders).toEqual(['/Gone']);
+  const panel = buildChatGptDashboardViewModel(view);
+  expect(panel.sources.find(source => source.id === 'dropbox.files')!.progress?.stalledReason).toBe('scope_root_missing');
+  expect(JSON.stringify(panel)).not.toContain('/Gone');
+});

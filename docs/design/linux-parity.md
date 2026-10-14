@@ -49,7 +49,7 @@ Mac-only or different on Linux:
 | Photo content | `sips` converts to JPEG, long side ≤1,024 px (it does not strip metadata or normalise orientation) | one boolean gate is false, so every still image stays names-only | `extractors/image-prepare.ts:75-114`, `src/core/media-cache.ts:68`, `file-extraction/registry.ts:149` |
 | Audio transcription | on by default (`afconvert`) | runtime pinned, `ffmpeg` path written, default off | `transcription-model.ts:155-163`, `built-in-transcriber.ts:176-200` |
 | Built-in private model | on by default (Metal) | runtime pinned, CPU only (max four threads, `server.ts:123`), default off | `src/core/analyst-built-in.ts:58, 102-110` |
-| zkAPI confinement | `sandbox-exec` profile, per-session self-test, refuses on failure | level `none` | `consult-transport-zkapi.ts:695, 769-808` |
+| zkAPI confinement | `sandbox-exec` profile, per-session self-test, refuses on failure | level `none`: every session refuses (`confinement_unavailable`) and the dashboard offers no setup | `consult-transport-zkapi.ts:695, 769-808` |
 | Open a source from a private answer, open an unreadable file | wired | not wired | `workers/email-source/server.ts:3536, 4704` |
 | Standalone engine (ChatGPT path) | LaunchAgent with install, status, upgrade, uninstall | `assertDarwin` refuses; paths under `~/Library`; doctor skips it; uninstaller refuses | `src/core/engine-service.ts:89, 1426`, `src/core/doctor.ts:134`, `site/uninstall.sh:127` |
 | ChatGPT install and copy | `scripts/install-macos.sh` | none; README, relay errors and plugin skills say Mac | `scripts/install-macos.sh:135`, `connect-relay/server/relay-mcp.ts:45`, `chatgpt-plugin/skills/olympus-setup/SKILL.md:52` |

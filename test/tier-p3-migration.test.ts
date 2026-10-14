@@ -72,18 +72,19 @@ interface Spec {
   id: string;
   name: string;
   text: string;
+  url?: string;
 }
 
 const FILES = {
   garden: { id: 'garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden, the compost bins and the tomato beds.' },
-  therapy: { id: 'therapy', name: 'session-notes.txt', text: 'The oncologist reviewed the biopsy results; the diagnosis and the prescription follow.' },
-  medical: { id: 'medical', name: 'therapy-session.txt', text: 'The oncologist reviewed the biopsy results; the diagnosis and the prescription follow.' },
+  therapy: { id: 'therapy', name: 'session-notes.txt', text: 'The oncologist reviewed the biopsy results; patient SSN 123-45-6789; diagnosis and prescription follow.' },
+  medical: { id: 'medical', name: 'therapy-session SSN 123-45-6789.txt', text: 'The oncologist reviewed the biopsy results; patient SSN 123-45-6789; diagnosis and prescription follow.' },
   keys: { id: 'keys', name: 'deploy-notes.txt', text: `Deploy notes. The old key ${FAKE_AWS_KEY} was rotated last week.` },
 } satisfies Record<string, Spec>;
 
 const LIBRARY = {
   launch: { id: 'launch', name: 'Launch essay', text: 'An essay about the orchard launch and the cider press, saved for later reading.' },
-  journal: { id: 'journal', name: 'Reading note', text: 'Highlight: my psychiatrist adjusted the prescription after the diagnosis last spring.' },
+  journal: { id: 'journal', name: 'Reading note', text: 'Patient SSN 123-45-6789: my psychiatrist adjusted the prescription after the diagnosis last spring.' },
   essay: { id: 'essay', name: 'Long read', text: 'A long read about bridges, rivers and the engineers who built the old canal locks.' },
 } satisfies Record<string, Spec>;
 
@@ -114,6 +115,7 @@ function rawItem(provider: string, spec: Spec, family: 'file' | 'readwise'): Raw
       name: spec.name,
       title: spec.name,
       ...(family === 'file' ? { pathDisplay: `/Files/${spec.name}` } : {}),
+      ...(spec.url ? { url: spec.url } : {}),
     }),
     fetchedAt: '2026-09-23T00:00:00.000Z',
   };
@@ -176,7 +178,7 @@ function asMoveIdentity(provider: RecordingProvider): TierMoveEmbeddingIdentity 
 }
 
 /** The pre-routing install: every file in one Private store, every library item in one Personal store, embedded. */
-async function rehearsal(): Promise<Rehearsal> {
+async function rehearsal(extraLibrary: readonly Spec[] = []): Promise<Rehearsal> {
   const { dir, cleanup } = tempDir('olympus-tier-p3-');
   cleanups.push(cleanup);
   const files = {
@@ -219,7 +221,7 @@ async function rehearsal(): Promise<Rehearsal> {
   });
   await syncAndEmbedFromConnector({
     store: libraryStore,
-    connector: connector('rehearsal-library', () => Object.values(LIBRARY), 'readwise'),
+    connector: connector('rehearsal-library', () => [...Object.values(LIBRARY), ...extraLibrary], 'readwise'),
     embeddingProvider: cloud,
     sync: {
       fetchContent: true,
@@ -407,6 +409,17 @@ describe('tier migration M0 (dry run)', () => {
     } finally {
       invalidate.mockRestore();
     }
+  });
+
+  test('a legacy item whose stored link carries a credential plans as Secrets', async () => {
+    // Ordinary text; only the stored locator holds the credential.
+    const context = await rehearsal([{ id: 'shared', name: 'Shared file', text: 'Notes about the orchard and the cider press.', url: `https://example.test/file?token=${'a7B9c2D4e6F8g1H3k5M7'}` }]);
+    const read = lanes(context, 'read');
+    const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+    expect(plan.totals.secrets).toBe(2);
+    expect(plan.totals.moves).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'rehearsal.library', toNames: 'Secrets', toContent: 'Secrets', items: 1 }),
+    ]));
   });
 
   test('an owner override changes the plan (M1) and makes the earlier plan stale', async () => {
@@ -640,6 +653,97 @@ describe('tier migration M2-M6', () => {
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'journal').content).toEqual([LIBRARY_CORPORA.secure_local]);
   });
 
+  test('a crash between the Secrets flip and the Secrets policy resumes to a tombstoned, screened copy', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const keysRow = () => {
+      const db = new Database(context.files.secure_local, { readonly: true });
+      try {
+        return db.query('SELECT * FROM items WHERE local_item_id = ?').get(`${ACCOUNT}:keys`) as Record<string, unknown>;
+      } finally {
+        closeSqliteStore(db, { checkpoint: false });
+      }
+    };
+    const keysChunks = () => snapshotStore(context.files.secure_local, [`${ACCOUNT}:keys`]).chunks;
+    expect(keysRow()).toMatchObject({ tombstoned: 0, title: 'deploy-notes.txt' });
+    expect(keysChunks().length).toBeGreaterThan(0);
+
+    const flip = TierLedger.prototype.flipToSecrets;
+    const crash = spyOn(TierLedger.prototype, 'flipToSecrets').mockImplementation(function (this: TierLedger, ...args) {
+      // The ledger write lands; the process dies before the Secrets policy runs.
+      flip.apply(this, args);
+      throw new Error('simulated crash after the Secrets flip');
+    });
+    try {
+      await expect(runTierMigration({
+        planId: plan.planId,
+        lanes: write.lanes,
+        inputs: context.inputs,
+        domainIdentity: context.domainIdentity,
+        paths: context.paths,
+        selector: 'source:rehearsal.files',
+      })).rejects.toThrow(/simulated crash/u);
+    } finally {
+      crash.mockRestore();
+    }
+    const keys = identityOf('rehearsal-files', 'keys');
+    const ledger = write.lanes[0]!.set.ledger;
+    // Hidden by the flip, but the store copy is still whole: not tombstoned, not screened.
+    expect(ledger.getCurrent(keys)).toMatchObject({ contentTier: 'secrets' });
+    expect(ledger.copies(keys).map((copy) => copy.state)).toEqual(['superseded']);
+    expect(keysRow()).toMatchObject({ tombstoned: 0, title: 'deploy-notes.txt' });
+
+    const resumed = await runTierMigration({
+      planId: plan.planId,
+      lanes: write.lanes,
+      inputs: context.inputs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      selector: 'source:rehearsal.files',
+    });
+    expect(resumed).toMatchObject({ state: 'done', secrets: 1 });
+    // Settled by the one Secrets policy: tombstoned, screened to the location
+    // only, chunks gone, the copy rows forgotten, the location recorded.
+    expect(keysRow()).toMatchObject({ tombstoned: 1, trust_tier: 'S5', title: null, search_text: null });
+    expect(keysChunks()).toEqual([]);
+    expect(ledger.copies(keys)).toEqual([]);
+    expect(write.lanes[0]!.set.secrets()!.get(keys)?.findingKinds).toContain('aws_access_key_id');
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
+  });
+
+  test('under hide_until_purge, a crash right after the Secrets flip still records the location on resume and keeps the copy hidden', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const keys = identityOf('rehearsal-files', 'keys');
+    const flip = TierLedger.prototype.flipToSecrets;
+    const crash = spyOn(TierLedger.prototype, 'flipToSecrets').mockImplementation(function (this: TierLedger, ...args) {
+      flip.apply(this, args);
+      throw new Error('simulated crash after the Secrets flip');
+    });
+    try {
+      await expect(runTierMigration({
+        planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+        selector: 'source:rehearsal.files', secretsDisposition: 'hide_until_purge',
+      })).rejects.toThrow(/simulated crash/u);
+    } finally {
+      crash.mockRestore();
+    }
+    const set = write.lanes[0]!.set;
+    expect(set.secrets()!.get(keys)).toBeUndefined();
+
+    const resumed = await runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+      selector: 'source:rehearsal.files', secretsDisposition: 'hide_until_purge',
+    });
+    expect(resumed).toMatchObject({ state: 'done', secrets: 1 });
+    expect(set.secrets()!.get(keys)?.findingKinds).toContain('aws_access_key_id');
+    // Kept, hidden, for an approved purge: the policy this run was given.
+    expect(set.ledger.copies(keys).map((copy) => copy.state)).toEqual(['superseded']);
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
+  });
+
   test('the run stops before exceeding the approved chunks', async () => {
     const context = await rehearsal();
     const read = lanes(context, 'read');
@@ -810,7 +914,7 @@ describe('tier migration finishes moves a sync queued', () => {
     const specs: FixtureSpec[] = [{ id: 'new-garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden and the compost bins.' }];
     try {
       await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432 for the seeds.' };
+      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432.' };
       const queued = await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       expect(queued.routing.movesQueued).toBe(1);
     } finally {

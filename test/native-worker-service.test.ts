@@ -3,10 +3,15 @@ import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  createNativeWorkerService,
+  createNativeWorkerService as createWorkerService,
   type NativeWorkerServiceDefinition,
   type NativeWorkerServiceHealth,
 } from '../src/core/native-worker-service.ts';
+
+// These process-kernel fixtures deliberately serve TCP; Unix custody is proved
+// independently in worker-transport.test.ts. Never silently use production TCP.
+const createNativeWorkerService = (options: Parameters<typeof createWorkerService>[0]) =>
+  createWorkerService({ ...options, fetch: options.fetch ?? fetch });
 
 const roots: string[] = [];
 const services: NativeWorkerServiceDefinition[] = [];
