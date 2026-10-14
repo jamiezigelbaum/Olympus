@@ -53,7 +53,7 @@ import {
   type ReleaseDecision,
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
-import { recordReleaseManifest, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
+import { answerReleaseWithheldReason, recordReleaseManifest, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
@@ -139,6 +139,8 @@ export interface AnalystAnswerLanes {
 export interface AnalystSourceIndexAnswerHandlerOptions {
   // The local analyst (Argus on Delphi/local models).
   analyst: Analyst;
+  // Fresh tier-ledger snapshot at each dispatch, including in-flight promotions.
+  releaseCheck?: ReleaseCheck;
   // Optional frontier analyst (createAnalyst-wrapped cloud model).
   cloudAnalyst?: Analyst;
   // Optional per-request Venice factory. Provider eligibility is governed by
@@ -477,9 +479,37 @@ export function createAnalystSourceIndexAnswerHandler(
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? '',
         ] as const));
+        const guarded = (analyst: Analyst): Analyst => ({
+          analyze: (dispatchPack, analyzeOptions) => {
+            if (options.releaseCheck) {
+              const reason = answerReleaseWithheldReason([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
+              if (reason) throw new OperationError('source_index_policy_violation', reason);
+            }
+            if (lanes.visibilityGate) {
+              // The hydrated corpus is the serving layer. A move hides that
+              // copy even when a higher-tier copy is now current elsewhere.
+              const hits: SourceIndexRoutedSearchHit[] = analysisDetail.pack.candidates.map((candidate, index) => ({
+                corpusId: analysisDetail.candidateCorpusIds[index] ?? '',
+                servingLayer: candidate.chunks.length > 0 || (candidate.tables?.length ?? 0) > 0 || (candidate.facts?.length ?? 0) > 0 ? 'content' : 'metadata',
+                sourceItem: candidate.provenance.sourceItem,
+                provenance: candidate.provenance,
+                trustDomain: candidate.trustDomain,
+                trustTier: candidate.trustTier,
+                rawExposed: false,
+              }));
+              const kept = new Set(lanes.visibilityGate(hits));
+              if (hits.some((hit) => !kept.has(hit))) {
+                throw new OperationError('source_index_policy_violation',
+                  'Olympus withheld this answer because an item changed privacy tier before analysis.');
+              }
+            }
+            return analyst.analyze(dispatchPack, analyzeOptions);
+          },
+        });
         return {
-          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          trustedLeg: guarded,
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -509,14 +539,14 @@ export function createAnalystSourceIndexAnswerHandler(
       // was included by default or explicitly: slow-but-working private answers
       // are the product posture, so no default-path cap cuts them short.
       const analyze = (analysisDetail: EvidencePackBuildDetail, analysisLocalOnly: boolean) => {
-        const { localLeg, cloudLeg } = legFitting(analysisDetail);
+        const { localLeg, cloudLeg, trustedLeg } = legFitting(analysisDetail);
         return routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
           local: localLeg(options.analyst),
           ...(options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {}),
-          ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
+          ...(veniceAnalyst ? { venice: trustedLeg(veniceAnalyst) } : {}),
           // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
           // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
           // it must never inflate this bound, or a ~20s Venice attempt silently
@@ -525,7 +555,7 @@ export function createAnalystSourceIndexAnswerHandler(
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
           ...(options.sovereigntyAnalystRoute
-            ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg) }
+            ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg, trustedLeg) }
             : {}),
           secureAnalystPoolState,
           ...(options.secureAnalystPool?.sloMs !== undefined
@@ -872,6 +902,7 @@ function withLegPromptBudgets(
   route: NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']>,
   localLeg: (analyst: Analyst) => Analyst,
   cloudLeg: (analyst: Analyst) => Analyst,
+  trustedLeg: (analyst: Analyst) => Analyst,
 ): NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']> {
   return (input) => {
     const resolved = route(input);
@@ -880,7 +911,7 @@ function withLegPromptBudgets(
         ? { ...step, analyst: localLeg(step.analyst) }
         : step.backend === 'cloud'
           ? { ...step, analyst: cloudLeg(step.analyst) }
-          : step
+          : { ...step, analyst: trustedLeg(step.analyst) }
     ));
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
@@ -2703,6 +2734,10 @@ export async function searchReleasedEvidence(input: {
     }));
   });
   const released = input.releaseCheck ? recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  recordReleaseManifest({
+    inputs: identities.filter((_, index) => released.evidence.includes(evidence[index]!)),
+    constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
+  });
   withheld += released.withheld;
   const coverage = detail.pack.coverage;
   return {

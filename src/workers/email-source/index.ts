@@ -1,3 +1,4 @@
+import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import type { UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import {
@@ -411,6 +412,7 @@ export interface EmailSourceWorkerOptions {
   localModelReadiness?: () => readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   connector?: EmailSourceConnector;
   sourceAnswer?: SourceIndexAnswerHandler;
+  sourceAnswerReleaseCheck?: ReleaseCheck;
   /**
    * "Ask anonymously" (core/consult-ask.ts), bound by the composition root:
    * one typed question prepared at the chosen level and sent through zkAPI.
@@ -781,6 +783,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const connector = options.connector ?? new GogcliEmailConnectorStub();
   const agentConnections = options.agentConnections;
   const sourceAnswer = options.sourceAnswer;
+  // Content-free manifests for stdio's delayed collection. Tickets never
+  // appear on an assistant surface; missing/expired tickets fail closed.
+  const releaseTickets = new Map<string, { expires: number; manifests: readonly ReleaseManifest[] }>();
+  const pruneReleaseTickets = () => {
+    for (const [ticket, entry] of releaseTickets) if (entry.expires <= Date.now()) releaseTickets.delete(ticket);
+  };
   const consultAsk = options.consultAsk;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
@@ -974,6 +982,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
         }
 
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/release`) {
+          const body = await request.json() as { ticket?: unknown };
+          const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
+          // Look up before pruning so a late collection has an actionable reason.
+          const reason = entry?.expires !== undefined && entry.expires <= Date.now()
+            ? 'Olympus withheld this answer because its privacy release ticket expired after 15 minutes. Ask again.'
+            : !entry
+              ? 'Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again.'
+              : options.sourceAnswerReleaseCheck
+                ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck)
+                : 'Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.';
+          pruneReleaseTickets();
+          return json({ ...(reason ? { withheld: reason } : { allowed: true }) });
+        }
+
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer`) {
           if (!sourceAnswer) {
             throw new EmailSourceWorkerError(
@@ -993,12 +1016,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // The caller's cancellation reaches the analyst: a client that
               // disconnects (or a hand-off job's deadline, for remote agents)
               // stops the model call and frees the analyst lane.
-              const result = await runWithAnalystAbortSignal(
+              const manifests = createReleaseManifestSink();
+              const result = await runWithReleaseManifestSink(manifests, () => runWithAnalystAbortSignal(
                 callerCancellationSignal(request.signal),
                 () => retrySqliteBusy(() => sourceAnswer.answer(sourceAnswerRequest)),
-              );
+              ));
+              // Forward the manifest to an in-process remote call's sink too.
+              for (const manifest of manifests.manifests) recordReleaseManifest(manifest);
               assertNoRawEmailFields(result);
-              const response = json(result);
+              let releaseTicket: string | undefined;
+              if (caller?.surface === 'mcp') {
+                pruneReleaseTickets();
+                releaseTicket = randomBytes(32).toString('base64url');
+                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests });
+                while (releaseTickets.size > 256) releaseTickets.delete(releaseTickets.keys().next().value!);
+              }
+              const response = json({ ...result, ...(releaseTicket ? { _release_ticket: releaseTicket } : {}) });
               await emitSourceAnswerLatencyRecords({
                 log: sourceAnswerLatencyLog,
                 trace,

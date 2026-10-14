@@ -1057,14 +1057,39 @@ describe('over the wire', () => {
   });
 });
 
-describe('excluded surfaces are byte-for-byte unchanged', () => {
-  test('stdio MCP returns the whole serialized operation result, a release check on the context or not', async () => {
+describe('local and ChatGPT answer release boundaries', () => {
+  test('stdio preserves the first release check reason when a Personal input becomes Private', async () => {
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { answer: async () => {
+        recordReleaseManifest(manifest([input('garden')]));
+        return leakyAnswer();
+      } },
+      // The input was Personal when read, and is Private by the first release check.
+      sourceAnswerReleaseCheck: fixedCheck('private'),
+    });
+    try {
+      const result = await handleMcpCallTool({ params: { name: 'source_answer', arguments: { question: 'q' } } }, () =>
+        createInProcessOperationContext({
+          config: defaultConfig(), sourceIndexReadEnabled: true,
+          caller: { surface: 'mcp', displayName: 'codex' }, workerFetch: worker.fetch,
+        }));
+      expect(JSON.parse(result.content[0]!.text)).toEqual({
+        answer: 'Olympus withheld this answer because an item became Private.', evidence: [],
+      });
+    } finally { worker.close(); }
+  });
+
+  test('stdio MCP returns the whole serialized operation result after the worker verifies its ticket', async () => {
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { answer: async () => { recordReleaseManifest(manifest([input('garden')])); return leakyAnswer(); } },
+      sourceAnswerReleaseCheck: fixedCheck('public_or_personal'),
+    });
     const make = (withCheck: boolean) => ({
       ...createInProcessOperationContext({
         config: defaultConfig(),
         sourceIndexReadEnabled: true,
         caller: { surface: 'mcp', displayName: 'codex' },
-        workerFetch: async () => { recordReleaseManifest(manifest([input('garden')])); return Response.json(leakyAnswer()); },
+        workerFetch: worker.fetch,
       }),
       ...(withCheck ? { releaseCheck: fixedCheck('secret') } : {}),
     });
@@ -1082,12 +1107,13 @@ describe('excluded surfaces are byte-for-byte unchanged', () => {
     // The stdio tool list keeps every source_index_status parameter.
     const local = listMcpTools(defaultConfig()).find((tool) => tool.name === 'source_index_status')!;
     expect(Object.keys(local.inputSchema.properties as Record<string, unknown>)).toEqual(Object.keys(findOperationByName('source_index_status')!.params));
+    worker.close();
   });
 
-  test('the ChatGPT surface ignores the remote boundary: a withholding release check changes nothing', async () => {
+  test('the ChatGPT surface releases a proven Personal answer and withholds it after reclassification', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-remote-result-chatgpt-'));
     const store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
-    let releaseCheck: ReleaseCheck | undefined;
+    let releaseCheck: ReleaseCheck = fixedCheck('public_or_personal');
     const clean = leakyAnswer([leakyEvidence('garden')], 'The garden plan covers compost.') as unknown as Record<string, any>;
     clean.audit.answer_synthesis = { ...clean.audit.answer_synthesis, private_context_used: false, secure_local_items_consulted: 0 };
     clean.policy = { ...clean.policy, secure_local_content_exposed: false };
@@ -1124,11 +1150,13 @@ describe('excluded surfaces are byte-for-byte unchanged', () => {
     };
     try {
       const without = await call();
-      releaseCheck = fixedCheck('secret');
-      const withCheck = await call();
-      expect(withCheck).toBe(without);
       expect(without).toContain('compost');
-      expect(without).not.toContain(REMOTE_ANSWER_CHANGED);
+      for (const tier of ['private', 'secret'] as const) {
+        releaseCheck = fixedCheck(tier);
+        const withheld = await call();
+        expect(withheld).not.toContain('compost');
+        expect(withheld).toContain('Olympus withheld this answer');
+      }
     } finally {
       server.stop(true);
       store.close();

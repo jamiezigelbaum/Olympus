@@ -39,6 +39,7 @@ import {
   createPrivateAnswerHandler,
   isPrivateEligible,
 } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { recordReleaseManifest, type ReleaseCheck } from '../src/core/release-manifest.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
@@ -61,6 +62,12 @@ import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer
 
 /** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
 const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
+
+// These synthetic answers read no source items; record that empty read set explicitly.
+const NO_SOURCE_INPUTS: ReleaseCheck = {
+  inputs: () => [],
+  secureDerivativeDefault: () => 'allow',
+};
 
 const INSTALL = 'a'.repeat(32);
 const OTHER_INSTALL = 'b'.repeat(32);
@@ -764,6 +771,7 @@ describe('sentinel: over the real MCP surface', () => {
     const worker = createEmailSourceWorker({
       sourceAnswer: {
         async answer() {
+          recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
           return {
             answer: 'The released evidence does not answer this.',
             evidence: [],
@@ -776,7 +784,7 @@ describe('sentinel: over the real MCP surface', () => {
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
     const handler = createRemoteMcpHandler({
       connections: () => store,
-      makeOperationContext: (caller, signal) => createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }),
+      makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }), releaseCheck: NO_SOURCE_INPUTS }),
       chatgpt: {
         servesRequest: () => true,
         privateAnswers: jobs,
@@ -861,6 +869,7 @@ describe('a handed-off answer starts its private panel job only for its own conn
         async answer() {
           await held;
           held = Promise.resolve();
+          recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
           return {
             answer: 'The released evidence does not answer this.',
             evidence: [],
@@ -874,9 +883,9 @@ describe('a handed-off answer starts its private panel job only for its own conn
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
     const handler = createRemoteMcpHandler({
       connections: () => store,
-      makeOperationContext: (caller, signal) => createInProcessOperationContext({
+      makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({
         config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal, sourceAnswerJobs: registry,
-      }),
+      }), releaseCheck: NO_SOURCE_INPUTS }),
       chatgpt: {
         servesRequest: () => true,
         privateAnswers: jobs,
