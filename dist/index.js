@@ -8550,9 +8550,11 @@ function settingsBlockers(money) {
     blockers.push("note_expired");
   return blockers;
 }
-function versionSupported(version) {
+function versionSupported(version, platform2 = process.platform) {
   const normalized = version?.replace(/^v/, "");
-  return ZKAPI_SUPPORTED_DAEMON_VERSIONS.includes(normalized ?? "");
+  if (!ZKAPI_SUPPORTED_DAEMON_VERSIONS.includes(normalized ?? ""))
+    return false;
+  return platform2 !== "linux" || Number(/^0\.1\.6-olympus(\d+)$/.exec(normalized ?? "")?.[1] ?? 0) >= 4;
 }
 function supportsManagedConfinement(executable, env) {
   try {
@@ -9408,7 +9410,7 @@ async function zkapiConsultReadiness(options) {
   const now = (options.now ?? (() => new Date))();
   const env = options.env ?? process.env;
   const settings = options.settings;
-  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env, platform: options.platform ?? process.platform });
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
   const confinementCheck = await confinement.check?.();
@@ -9435,7 +9437,7 @@ async function zkapiConsultReadiness(options) {
     } catch {
       daemonVersion = undefined;
     }
-    if (!versionSupported(daemonVersion))
+    if (!versionSupported(daemonVersion, options.platform))
       blockers.push("daemon_version_unsupported");
     if (settings.tor === "per_consult" && confinement.level === "loopback_filtered" && !supportsManagedConfinement(daemonExecutable, childEnvironment(env)))
       blockers.push("daemon_supervisor_unsupported");
@@ -9673,7 +9675,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
   let fetchImpl = options.fetchImpl ?? fetch;
   let confinementSession;
   const inspect = options.inspectListener ?? inspectLoopbackListener;
-  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env, platform: options.platform ?? process.platform });
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === "per_consult";
@@ -9939,7 +9941,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
         return result = fail(sessionSignal.aborted ? interrupted() : filtered && facts.listen ? "daemon_identity_failed" : "daemon_start_failed");
       stage("daemonVerifyMs");
       receipt.daemonVersion = facts.version;
-      if (!versionSupported(facts.version))
+      if (!versionSupported(facts.version, options.platform))
         return result = fail("daemon_version_unsupported");
       if (facts.listen !== new URL(options.baseUrl).host)
         return result = fail("daemon_identity_failed");

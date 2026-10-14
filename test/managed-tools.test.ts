@@ -1283,6 +1283,16 @@ describe('the card section', () => {
     expect(outsideHelpToolsNeedAttention(parts)).toBe(true);
   });
 
+  test('Linux custody version blocker offers the managed update path', () => {
+    const parts: DashboardOutsideHelpTools = {
+      tools: [{ tool: 'tor', label: 'Tor', source: 'olympus' }, { tool: 'zkapi-clientd', label: 'zkAPI', source: 'outdated', installedVersion: '0.1.6-olympus3', version: ZK }],
+      install: { state: 'idle' },
+    };
+    const html = problems(cardWith(parts, ['daemon_version_unsupported']));
+    expect(html).toContain('zkAPI needs an update before anonymous answers can run.');
+    expect(html).toContain('>Update zkAPI</button>');
+  });
+
   test('a too-old zkAPI found on the system: one To fix line says so and offers Olympus\'s own build; never a silent block', () => {
     const parts: DashboardOutsideHelpTools = {
       tools: [{ tool: 'tor', label: 'Tor', source: 'olympus' }, { tool: 'zkapi-clientd', label: 'zkAPI', source: 'system', version: ZK, offered: true }],

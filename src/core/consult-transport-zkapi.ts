@@ -396,6 +396,8 @@ export interface ZkapiConsultTransportOptions {
   statePath?: string;
   /** PATH and the daemon's config location are taken from here. */
   env?: Record<string, string | undefined>;
+  /** Host platform; defaults to the current process. */
+  platform?: NodeJS.Platform;
   fetchImpl?: typeof fetch;
   inspectListener?: ZkapiListenerInspector;
   /** Defaults to this platform's implementation (`defaultZkapiConfinement`). */
@@ -627,9 +629,12 @@ function settingsBlockers(money: ZkapiMoneyStatus): ZkapiConsultErrorCode[] {
   return blockers;
 }
 
-function versionSupported(version: string | undefined): boolean {
+function versionSupported(version: string | undefined, platform: NodeJS.Platform = process.platform): boolean {
   const normalized = version?.replace(/^v/, '');
-  return (ZKAPI_SUPPORTED_DAEMON_VERSIONS as readonly string[]).includes(normalized ?? '');
+  if (!(ZKAPI_SUPPORTED_DAEMON_VERSIONS as readonly string[]).includes(normalized ?? '')) return false;
+  // Linux companion custody first shipped in olympus4. Keep the reviewed
+  // version ceiling as well: newer allowance tables still need review.
+  return platform !== 'linux' || Number(/^0\.1\.6-olympus(\d+)$/.exec(normalized ?? '')?.[1] ?? 0) >= 4;
 }
 
 /** Help reads no wallet state; an old binary must refuse before Tor starts. */
@@ -1941,7 +1946,7 @@ export async function zkapiConsultReadiness(
   const now = (options.now ?? (() => new Date()))();
   const env = options.env ?? process.env;
   const settings = options.settings;
-  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env, platform: options.platform ?? process.platform });
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
   const confinementCheck = await confinement.check?.();
@@ -1966,7 +1971,7 @@ export async function zkapiConsultReadiness(
     } catch {
       daemonVersion = undefined;
     }
-    if (!versionSupported(daemonVersion)) blockers.push('daemon_version_unsupported');
+    if (!versionSupported(daemonVersion, options.platform)) blockers.push('daemon_version_unsupported');
     if (settings.tor === 'per_consult' && confinement.level === 'loopback_filtered'
       && !supportsManagedConfinement(daemonExecutable, childEnvironment(env))) blockers.push('daemon_supervisor_unsupported');
   }
@@ -2395,7 +2400,7 @@ async function runSession(
   let fetchImpl = options.fetchImpl ?? fetch;
   let confinementSession: ZkapiPreparedConfinement | undefined;
   const inspect = options.inspectListener ?? inspectLoopbackListener;
-  const confinement = options.confinement ?? defaultZkapiConfinement({ env });
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env, platform: options.platform ?? process.platform });
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === 'per_consult';
@@ -2678,7 +2683,7 @@ async function runSession(
       : filtered && facts.listen ? 'daemon_identity_failed' : 'daemon_start_failed'));
     stage('daemonVerifyMs');
     receipt.daemonVersion = facts.version!;
-    if (!versionSupported(facts.version)) return (result = fail('daemon_version_unsupported'));
+    if (!versionSupported(facts.version, options.platform)) return (result = fail('daemon_version_unsupported'));
     if (facts.listen !== new URL(options.baseUrl).host) return (result = fail('daemon_identity_failed'));
     const expectedTransport = perConsultTor ? 'SOCKS5 proxy required' : 'direct HTTPS (network proxy off)';
     if (facts.transport !== expectedTransport) return (result = fail('relay_mismatch'));

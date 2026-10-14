@@ -8,7 +8,9 @@
   widget, keys in the desktop keyring, and the same dashboard as on a Mac.
   On Omarchy the dashboard opens in its own app window, and the app launcher shows the Olympus mountain icon.
   Anonymous answers (zkAPI) work on supported Linux x64 computers after the
-  network isolation checks pass. Other Linux hosts stay unavailable.
+  network isolation checks pass, using zkAPI 0.1.6-olympus4 or a later
+  reviewed build. Older Linux builds show the existing update guidance.
+  Other Linux hosts stay unavailable.
 - **Linux full removal cleans up empty cache and state folders** when the
   installer recorded creating them. Pre-existing folders and other files stay.
 - **Linux install rollback removes the service link it created**, including
@@ -89,7 +91,7 @@
   under 10 normal, from 10 warn, from 40 critical). Without either file it
   still refuses. macOS is unchanged.
 - **Anonymous answers work on a fresh install again.** The one-click install
-  of Tor and zkAPI now fetches zkAPI 0.1.6-olympus2, the Olympus build the
+  of Tor and zkAPI now fetches zkAPI 0.1.6-olympus4, the Olympus build the
   anonymous route requires, from its published, checksummed and attested
   release, instead of upstream 0.1.6, which the route refuses. An existing
   Olympus install of 0.1.6 shows **Update zkAPI** on the dashboard (or run

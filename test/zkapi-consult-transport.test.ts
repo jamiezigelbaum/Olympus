@@ -134,7 +134,7 @@ describe('zkAPI consult transport: a supervised session', () => {
         postStopProbe: 'route_lost',
         settlement: 'confirmed',
         fence: 'clear',
-        daemonVersion: '0.1.6',
+        daemonVersion: '0.1.6-olympus4',
         network: 'mainnet',
         listedAllowanceUsd: 1,
         reservedUsd: 1,
@@ -564,6 +564,16 @@ describe('zkAPI consult transport: verification refusals', () => {
   test('a daemon not routed through SOCKS refuses', async () => {
     writePlan({ relayPort: null });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'relay_mismatch' } });
+  }, SLOW);
+
+  test('Linux requires reviewed companion custody while macOS keeps its reviewed versions', async () => {
+    for (const version of ['0.1.5', '0.1.6', '0.1.6-olympus2', '0.1.6-olympus3', '0.1.6-olympus4']) {
+      writePlan({ version });
+      const linux = await zkapiConsultReadiness(transport({ platform: 'linux' }));
+      expect(linux.blockers.includes('daemon_version_unsupported'), version).toBe(version !== '0.1.6-olympus4');
+      const mac = await zkapiConsultReadiness(transport({ platform: 'darwin' }));
+      expect(mac.blockers).not.toContain('daemon_version_unsupported');
+    }
   }, SLOW);
 
   test('only reviewed daemon versions are accepted', async () => {
