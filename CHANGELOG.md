@@ -3,7 +3,9 @@
 ## 1.0.0 - 2026-10-13
 
 - ChatGPT connection steps now start in Plugins and explain when to turn on Developer mode.
-- Anonymous answers show Add zkAPI before the turn-on switch when zkAPI is not set up.
+- Anonymous answers show Add zkAPI before the turn-on switch when zkAPI is not set up; adding it asks you to finish setup without repeating the key step.
+
+- An out-of-date Linux dashboard window asks you to close it and open Olympus again.
 
 - Progress finishes when everything allowed by your privacy settings is ready. Private items kept out of search indexing no longer leave it stuck at 0%; unmeasured progress stays unmeasured.
 

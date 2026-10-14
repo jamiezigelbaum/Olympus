@@ -37986,7 +37986,7 @@ function page(body, status = 200) {
   } });
 }
 function refusal(status = 403) {
-  return page(`<p>Owner confirmation refused. ${DESKTOP_BRIDGE_REMEDY}</p>`, status);
+  return page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status);
 }
 function safeTarget(value) {
   return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);

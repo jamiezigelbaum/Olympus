@@ -44,7 +44,7 @@ function page(body: string, status = 200): Response {
     'Cross-Origin-Opener-Policy': 'same-origin', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
   } });
 }
-function refusal(status = 403): Response { return page(`<p>Owner confirmation refused. ${DESKTOP_BRIDGE_REMEDY}</p>`, status); }
+function refusal(status = 403): Response { return page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status); }
 function safeTarget(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 16_384 && value.startsWith('/') && !value.startsWith('//')
     && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith('/owner-') && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);

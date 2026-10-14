@@ -1277,7 +1277,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     const { backend, reloads, path } = adapter({ home, zkapi: false });
     expect(await backend.addRoute({})).toMatchObject({ ok: false, code: 'confirmation_required' });
     const added = await backend.addRoute({ confirm: true });
-    expect(added).toMatchObject({ ok: true, restarting: true });
+    expect(added).toMatchObject({ ok: true, restarting: true, status_message: 'The zkAPI route is added. Finish the steps below.' });
     expect(reloads).toEqual([1]);
     const written = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
     expect(written.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID]).toMatchObject({ provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult', baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', secretRef: 'env:OLYMPUS_ZKAPI_API_KEY' });

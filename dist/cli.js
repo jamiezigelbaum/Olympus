@@ -7720,7 +7720,7 @@ function page(body, status = 200) {
   } });
 }
 function refusal(status = 403) {
-  return page(`<p>Owner confirmation refused. ${DESKTOP_BRIDGE_REMEDY}</p>`, status);
+  return page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status);
 }
 function safeTarget(value) {
   return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
@@ -155080,7 +155080,7 @@ var init_dashboard_consult = __esm(() => {
     turnedOff: "Anonymous answers are off. No question is sent.",
     routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
     routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
-    routeAdded: "The zkAPI route is added. Put the daemon's API key in the worker environment file, then finish the steps below.",
+    routeAdded: "The zkAPI route is added. Finish the steps below.",
     recovered: "Recovered: the held request settled and consults can run again.",
     recoveryIncomplete: "The recovery session ran, but settlement was not confirmed. The request is still held; try again later.",
     recoveryFailed: "The recovery session did not complete. The request is still held.",

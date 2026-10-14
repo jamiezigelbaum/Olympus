@@ -85,6 +85,7 @@ test('no cookie, forged headers, stolen cross-port cookie and previous-instance 
   const second = new LinuxOwnerBridge(f.options); cleanup.push(() => second.close());
   const r = await second.handle(new Request(second.origin + '/dashboard', { headers: { Host: new URL(second.origin).host, Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof } }));
   expect(r.status).toBe(403);
+  expect(await r.text()).toContain('<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>');
   const shell = await f.bridge.handle(f.request('/dashboard', { headers: { Cookie: owner.cookie, Accept: 'text/html' } }));
   const text = await shell.text(); expect(text).toContain("Confirm it's you"); expect(text).not.toContain(owner.proof); expect(text).not.toContain('private dashboard');
 });
