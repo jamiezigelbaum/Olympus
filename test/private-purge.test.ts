@@ -149,3 +149,28 @@ test('a metadata-only raise removes zero-chunk version remnants', async () => {
   await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
   expect(contentCounts(f.paths.internal)).toEqual(empty);
 });
+
+test('a move between vector scan pages cannot crowd out a Personal match at ranking time', async () => {
+  const x = await fixture(); const f = x.f; const lower = f.stores.internal!;
+  const copy = lower.exportItemCopy(x.identity)!;
+  lower.importItemCopy({ ...copy, chunks: Array.from({ length: 260 }, (_, chunkIndex) => ({ ...copy.chunks[0]!, chunkIndex })) },
+    { trustTier: 'S3', syncConnectorId: 'paged-fixture', layers: 'both' });
+  const db = new Database(f.paths.internal);
+  db.query(`INSERT OR REPLACE INTO chunk_embeddings (chunk_pk, item_pk, model_id, content_hash, embedding, embedded_at)
+    SELECT c.chunk_pk, c.item_pk, ?, c.embedding_input_hash, ?, '2026-10-14'
+    FROM chunks c JOIN items i ON i.item_pk = c.item_pk WHERE i.local_item_id = ?`)
+    .run(f.cloud.modelId, new Uint8Array(new Float32Array([1, 0, 0, 0]).buffer), localId('mail'));
+  db.query('UPDATE chunk_embeddings SET embedding = ? WHERE item_pk = (SELECT item_pk FROM items WHERE local_item_id = ?)')
+    .run(new Uint8Array(new Float32Array([0, 1, 0, 0]).buffer), localId('safe'));
+  db.close();
+  let moved!: Promise<unknown>;
+  let began!: () => void;
+  const started = new Promise<void>(resolve => { began = resolve; });
+  f.cloud.embed = async () => {
+    setTimeout(() => { moved = moveTieredItem({ set: f.set, identity: x.identity, target }); began(); }, 0);
+    return [[1, 0.8, 0, 0]];
+  };
+  const searching = lower.vectorSearchItems('garden', f.cloud, 1);
+  await started; await moved;
+  expect((await searching).map(row => row.sourceItem.localItemId)).toEqual([localId('safe')]);
+});

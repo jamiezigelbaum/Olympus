@@ -9808,7 +9808,14 @@ export class LocalConnectorStore {
     // real corpus, where duplicated and forwarded content is normal. Naming the
     // tiebreak here keeps the ranking identical to the ordered scan's and, more
     // importantly, makes it independent of whatever plan SQLite chooses.
+    // A move can land while a paged scan yields. Recheck all winners before
+    // applying the rank limit so a now-hidden score cannot crowd out a match.
+    const visibleAtRanking = new Set(this.tierVisibleRows(
+      this.searchRowsByItemPks([...bestByItem.keys()], selectedAccount, filters),
+      row => row.sourceItem, () => 'content',
+    ).map(row => row.sourceItem.localItemId));
     const rankedItems = Array.from(bestByItem.entries())
+      .filter(([, candidate]) => visibleAtRanking.has(candidate.localItemId))
       .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
       .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0])
       .slice(0, limit);
