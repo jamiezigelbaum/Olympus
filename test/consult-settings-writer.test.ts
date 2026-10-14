@@ -38,8 +38,8 @@ afterEach(() => {
   __consultSettingsWriterTestHooks.afterPublish = undefined;
   for (const home of homes.splice(0)) {
     try {
-      chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o700);
-      chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), 0o600);
+      chmodSync(join(home, '.olympus'), 0o700);
+      chmodSync(join(home, '.olympus', 'consult.json'), 0o600);
     } catch {
       // Not every test leaves these behind.
     }
@@ -57,7 +57,7 @@ const UPDATE: ConsultSettingsWriteInput = {
 };
 
 function settingsFile(home: string): string {
-  return join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json');
+  return join(home, '.olympus', 'consult.json');
 }
 
 describe('writeConsultSettings: the happy path', () => {
@@ -66,14 +66,14 @@ describe('writeConsultSettings: the happy path', () => {
     const env = { HOME: home };
     const result = writeConsultSettings(UPDATE, { env });
     expect(result).toEqual({ ok: true, settings: { v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: UPDATE.domains, strict: false, level: 'unnamed' } });
-    expect(statSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).mode & 0o777).toBe(0o700);
+    expect(statSync(join(home, '.olympus')).mode & 0o777).toBe(0o700);
     expect(statSync(settingsFile(home)).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(settingsFile(home), 'utf8'))).toEqual({ v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: UPDATE.domains, strict: false, level: 'unnamed' });
     const read = readConsultSettings({ env });
     expect(read.state).toBe('valid');
     expect(read.settings.enabled).toBe(true);
     // No temporary file or lock is left behind.
-    expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'))).toEqual(['consult.json']);
+    expect(readdirSync(join(home, '.olympus'))).toEqual(['consult.json']);
   });
 
   test('the level is always written, so the file never relies on the reader\'s default; an invalid level writes nothing', () => {
@@ -118,14 +118,14 @@ describe('writeConsultSettings: the happy path', () => {
     // A write that cannot complete: the directory is made read-only for the
     // duration, so the temporary file cannot be created. The existing file
     // is untouched.
-    chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o500);
+    chmodSync(join(home, '.olympus'), 0o500);
     const failed = writeConsultSettings({ ...UPDATE, enabled: false, expectedRevision: 1 }, { env });
-    chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o700);
+    chmodSync(join(home, '.olympus'), 0o700);
     expect(failed.ok).toBe(false);
     if (!failed.ok) expect(['write_failed', 'directory_custody']).toContain(failed.reason);
     expect(readFileSync(settingsFile(home), 'utf8')).toBe(before);
     // No temp file was left behind either.
-    expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).filter((name) => name !== 'consult.json')).toEqual([]);
+    expect(readdirSync(join(home, '.olympus')).filter((name) => name !== 'consult.json')).toEqual([]);
   });
 
   test('a failure after the publish (the rename) is not "nothing changed": the file is read back and the new state reported', () => {
@@ -138,9 +138,9 @@ describe('writeConsultSettings: the happy path', () => {
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false } });
     __consultSettingsWriterTestHooks.afterPublish = undefined;
     // A failure before the publish is "nothing changed", and says so.
-    chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o500);
+    chmodSync(join(home, '.olympus'), 0o500);
     const before = writeConsultSettings({ ...UPDATE, enabled: true, expectedRevision: 2 }, { env });
-    chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o700);
+    chmodSync(join(home, '.olympus'), 0o700);
     if (!before.ok) expect(['write_failed', 'directory_custody']).toContain(before.reason);
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: before.ok ? 3 : 2 } });
   });
@@ -204,13 +204,13 @@ describe('writeConsultSettings: refusals', () => {
     for (const input of cases) {
       expect(writeConsultSettings(input, { env })).toEqual({ ok: false, reason: 'invalid_input' });
     }
-    expect(existsSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'))).toBe(false);
+    expect(existsSync(join(home, '.olympus'))).toBe(false);
   });
 
   test('an invalid current file is refused unless replaceInvalid is given; then it is replaced at the next revision', () => {
     const home = tempHome();
     const env = { HOME: home };
-    mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { mode: 0o700 });
+    mkdirSync(join(home, '.olympus'), { mode: 0o700 });
     writeFileSync(settingsFile(home), '{"v":1,"revision":4,"enabled":true', { mode: 0o600 });
     const refused = writeConsultSettings({ ...UPDATE, expectedRevision: 0 }, { env });
     expect(refused).toMatchObject({ ok: false, reason: 'invalid_current', invalidReason: 'malformed_json', current: { state: 'invalid' } });
@@ -241,32 +241,32 @@ describe('writeConsultSettings: refusals', () => {
     const home = tempHome();
     const real = join(home, 'real-olympus');
     mkdirSync(real, { mode: 0o700 });
-    symlinkSync(real, join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'));
+    symlinkSync(real, join(home, '.olympus'));
     expect(writeConsultSettings(UPDATE, { env: { HOME: home } })).toEqual({ ok: false, reason: 'directory_symlink' });
     expect(readdirSync(real)).toEqual([]);
-    expect(lstatSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(home, '.olympus')).isSymbolicLink()).toBe(true);
   });
 
   test('directory custody: group- or other-accessible, or not a directory, is refused with nothing written', () => {
     for (const mode of [0o750, 0o705, 0o755, 0o770]) {
       const home = tempHome();
-      mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { mode });
-      chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), mode);
+      mkdirSync(join(home, '.olympus'), { mode });
+      chmodSync(join(home, '.olympus'), mode);
       expect(writeConsultSettings(UPDATE, { env: { HOME: home } })).toEqual({ ok: false, reason: 'directory_custody' });
-      expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'))).toEqual([]);
+      expect(readdirSync(join(home, '.olympus'))).toEqual([]);
       // The mode is left as found: the writer repairs nothing it did not create.
-      expect(statSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).mode & 0o777).toBe(mode);
+      expect(statSync(join(home, '.olympus')).mode & 0o777).toBe(mode);
     }
     const home = tempHome();
-    writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 'not a directory', { mode: 0o600 });
-    expect(writeConsultSettings(UPDATE, { env: { HOME: home } })).toEqual({ ok: false, reason: process.platform === 'linux' ? 'directory_unavailable' : 'directory_custody' });
-    expect(readFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 'utf8')).toBe('not a directory');
+    writeFileSync(join(home, '.olympus'), 'not a directory', { mode: 0o600 });
+    expect(writeConsultSettings(UPDATE, { env: { HOME: home } })).toEqual({ ok: false, reason: 'directory_custody' });
+    expect(readFileSync(join(home, '.olympus'), 'utf8')).toBe('not a directory');
   });
 
   test('a held lease is reported as busy at once, with nothing written; the write proceeds once it is released', () => {
     const home = tempHome();
     const env = { HOME: home };
-    mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { mode: 0o700 });
+    mkdirSync(join(home, '.olympus'), { mode: 0o700 });
     const path = settingsFile(home);
     // Hold the lease (the nested call is what a second process would be).
     withFileLeaseSync(path, () => {
@@ -283,7 +283,7 @@ describe('writeConsultSettings: refusals', () => {
   test('the default settings are what a missing file means; the writer never writes them implicitly', () => {
     const home = tempHome();
     expect(readConsultSettings({ env: { HOME: home } })).toEqual({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
-    expect(existsSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'))).toBe(false);
+    expect(existsSync(join(home, '.olympus'))).toBe(false);
   });
 });
 

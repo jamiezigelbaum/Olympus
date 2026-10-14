@@ -292,8 +292,8 @@ describe('runDoctor', () => {
       });
       expect(checkByName(checks, 'consult_vocabulary').detail).toContain('languages en (default)');
 
-      mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
-      writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), JSON.stringify({
+      mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.olympus', 'consult.json'), JSON.stringify({
         v: 1,
         revision: 1,
         enabled: true,
@@ -312,7 +312,7 @@ describe('runDoctor', () => {
       expect(vocabulary.detail).toContain('languages en, pt-BR (configured)');
       expect(vocabulary.detail).toContain('pt-br-hunspell verified');
 
-      writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), '{"v":1,"revision":2,"enabled":true}', { mode: 0o600 });
+      writeFileSync(join(home, '.olympus', 'consult.json'), '{"v":1,"revision":2,"enabled":true}', { mode: 0o600 });
       checks = await run();
       expect(checkByName(checks, 'consult_settings')).toMatchObject({
         ok: false,

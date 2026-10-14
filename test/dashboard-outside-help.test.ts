@@ -847,6 +847,7 @@ function adapter(input: {
 }) {
   const path = join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
   mkdirSync(join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(input.home, '.olympus'), { recursive: true, mode: 0o700 });
   const config = policyWith(input.zkapi ?? true, input.profileOverrides);
   writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
   const reloads: number[] = [];
@@ -1039,7 +1040,7 @@ describe('the adapter: status', () => {
     const home = tempHome();
     expect(summaryOf(await adapter({ home, zkapi: false }).backend.status())).toEqual({ state: 'route_not_configured' });
     const second = adapter({ home: tempHome() });
-    writeFileSync(join(second.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), '{bad', { mode: 0o600 });
+    writeFileSync(join(second.env.HOME, '.olympus', 'consult.json'), '{bad', { mode: 0o600 });
     expect(summaryOf(await second.backend.status())).toEqual({ state: 'invalid' });
     const third = tempHome();
     const { backend, env } = adapter({ home: third });
@@ -1103,7 +1104,7 @@ describe('the adapter: turning outside help on and off', () => {
     const home = tempHome();
     const noRoute = adapter({ home, zkapi: false }).backend;
     expect(await noRoute.setEnabled({ enabled: true, revision: 0 })).toMatchObject({ ok: false, httpStatus: 409, code: 'route_not_configured' });
-    expect(existsSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'))).toBe(false);
+    expect(existsSync(join(home, '.olympus', 'consult.json'))).toBe(false);
     const second = tempHome();
     const incomplete = adapter({ home: second, profileOverrides: { acknowledgements: { version: 2, accepted: ALL_IDS } } }).backend;
     expect(await incomplete.setEnabled({ enabled: true, revision: 0 })).toMatchObject({ ok: false, httpStatus: 409, code: 'acknowledgements_incomplete' });
@@ -1119,9 +1120,9 @@ describe('the adapter: turning outside help on and off', () => {
     expect((await backend.setEnabled({ enabled: true, revision: 0 })).ok).toBe(true);
     expect(await backend.setEnabled({ enabled: false, revision: 0 })).toEqual({ ok: false, httpStatus: 409, code: 'conflict', message: expect.stringContaining('changed somewhere else'), revision: 1 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 1, enabled: true } });
-    writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
+    writeFileSync(join(home, '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
     expect(await backend.setEnabled({ enabled: false, revision: 0 })).toMatchObject({ ok: false, httpStatus: 409, code: 'settings_invalid' });
-    expect(readFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), 'utf8')).toBe('{"v":1');
+    expect(readFileSync(join(home, '.olympus', 'consult.json'), 'utf8')).toBe('{"v":1');
     expect(await backend.setEnabled({ enabled: false, revision: 0, replace_invalid: true })).toMatchObject({ ok: true, revision: 1 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: false } });
   });
@@ -1136,13 +1137,13 @@ describe('the adapter: turning outside help on and off', () => {
     const older = tempHome();
     const { backend: olderBackend, env: olderEnv } = adapter({ home: older });
     // A file written before the level existed reads as Standard; sending still needs the current statements.
-    writeFileSync(join(older, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 4, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
+    writeFileSync(join(older, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 4, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     expect((await olderBackend.status()).settings.level).toBe('unnamed');
     expect((await olderBackend.setEnabled({ enabled: false, revision: 4 })).ok).toBe(true);
     expect((await olderBackend.setEnabled({ enabled: true, revision: 5 })).ok).toBe(true);
     expect(readConsultSettings({ env: olderEnv })).toMatchObject({ state: 'valid', settings: { revision: 6, enabled: true, level: 'unnamed' } });
     // A damaged file replaced without a choice is written Strict, and off: a repair never widens the scope.
-    writeFileSync(join(older, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
+    writeFileSync(join(older, '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
     expect((await olderBackend.setEnabled({ enabled: false, revision: 0, replace_invalid: true })).ok).toBe(true);
     expect(readConsultSettings({ env: olderEnv })).toMatchObject({ state: 'valid', settings: { enabled: false, level: 'general' } });
   });
@@ -1150,7 +1151,7 @@ describe('the adapter: turning outside help on and off', () => {
   test('level: choosing a level is never refused for the statements; on with stale statements stays on and reads paused', async () => {
     // The owner's state: outside help on, no level key, statements accepted at an older version.
     const stale = adapter({ home: tempHome(), profileOverrides: { acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION - 2, accepted: ['per_consult_cost', 'deposit_fee'] } } });
-    writeFileSync(join(stale.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
+    writeFileSync(join(stale.env.HOME, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     expect(summaryOf(await stale.backend.status())).toEqual({ state: 'needs_acceptance' });
     for (const [revision, level] of [[3, 'general'], [4, 'unnamed'], [5, 'general']] as const) {
       expect(await stale.backend.setEnabled({ enabled: true, revision, level })).toEqual({ ok: true, status_message: 'Saved. Anonymous answers stay paused until you accept the statements on this page.', revision: revision + 1 });
@@ -1170,7 +1171,7 @@ describe('the adapter: turning outside help on and off', () => {
   test('the owner\'s Save, end to end: the real card script against the real worker and adapter saves the level and says it is paused', async () => {
     const home = tempHome();
     const stale = adapter({ home, profileOverrides: { acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION - 2, accepted: [] } } });
-    writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
+    writeFileSync(join(home, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     const fetcher = worker(stale.backend);
     const { cookie, csrf } = await localSession(fetcher);
     const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();

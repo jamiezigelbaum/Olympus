@@ -58,7 +58,7 @@ afterEach(() => {
   __consultSettingsTestHooks.afterRead = undefined;
   for (const home of homes.splice(0)) {
     try {
-      chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'), 0o600);
+      chmodSync(join(home, '.olympus', 'consult.json'), 0o600);
     } catch {
       // Not every test leaves a file behind.
     }
@@ -77,11 +77,11 @@ const VALID = {
 };
 
 function settingsFile(home: string): string {
-  return join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json');
+  return join(home, '.olympus', 'consult.json');
 }
 
 function placeFile(home: string, content: string | Buffer, mode = 0o600): string {
-  mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
   const path = settingsFile(home);
   writeFileSync(path, content, { mode });
   chmodSync(path, mode);
@@ -276,7 +276,7 @@ describe('readConsultSettings fails closed', () => {
     ['a symlink to a valid file', (home) => {
       const target = join(home, 'elsewhere.json');
       writeFileSync(target, JSON.stringify(VALID), { mode: 0o600 });
-      mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true });
+      mkdirSync(join(home, '.olympus'), { recursive: true });
       symlinkSync(target, settingsFile(home));
     }, 'not_a_regular_file'],
   ];
@@ -293,7 +293,7 @@ describe('readConsultSettings fails closed', () => {
 
   test('a FIFO is refused without blocking', () => {
     const home = tempHome();
-    mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
     const made = spawnSync('mkfifo', ['-m', '600', settingsFile(home)]);
     if (made.status !== 0) throw new Error('mkfifo unavailable');
     // No writer ever opens the FIFO: a blocking open or read would hang here.
@@ -368,7 +368,7 @@ describe('the file examined is the file read', () => {
 describe('settings location honours the injected HOME', () => {
   test('the path comes from env.HOME with no operating-system fallback', () => {
     const home = tempHome();
-    expect(consultSettingsPath({ HOME: home })).toBe(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'consult.json'));
+    expect(consultSettingsPath({ HOME: home })).toBe(join(home, '.olympus', 'consult.json'));
     expect(consultSettingsPath({ HOME: '  ' })).toBeUndefined();
     expect(consultSettingsPath({})).toBeUndefined();
   });

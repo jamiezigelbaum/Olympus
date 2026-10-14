@@ -182,14 +182,14 @@ describe('Olympus data lifecycle', () => {
     try {
       const source = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!;
       const dbPath = source.connectorStorePaths!({ homeDir })[0]!;
-      mkdirSync(join(homeDir, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sources'), { recursive: true });
+      mkdirSync(join(homeDir, '.olympus', 'sources'), { recursive: true });
       mkdirSync(join(homeDir, '.config', 'olympus'), { recursive: true });
       mkdirSync(dirname(dbPath), { recursive: true });
       const db = new Database(dbPath, { create: true });
       db.exec('CREATE TABLE preserved (value TEXT NOT NULL);');
       db.query('INSERT INTO preserved (value) VALUES (?)').run('db bytes');
       db.close();
-      writeFileSync(join(homeDir, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sources', 'dropbox.personal.ingestion.json'), JSON.stringify({
+      writeFileSync(join(homeDir, '.olympus', 'sources', 'dropbox.personal.ingestion.json'), JSON.stringify({
         schemaVersion: 1,
         source: 'dropbox.personal',
         token: 'do-not-export',
@@ -371,14 +371,14 @@ describe('Olympus data lifecycle', () => {
       mkdirSync(dirname(dropboxPath), { recursive: true });
       writeFileSync(dropboxPath, 'dropbox');
       writeFileSync(gmailPath, 'gmail');
-      mkdirSync(join(homeDir, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sources'), { recursive: true });
-      writeFileSync(join(homeDir, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sources', 'dropbox.personal.ingestion.json'), '{}');
+      mkdirSync(join(homeDir, '.olympus', 'sources'), { recursive: true });
+      writeFileSync(join(homeDir, '.olympus', 'sources', 'dropbox.personal.ingestion.json'), '{}');
 
       const result = deleteOlympusData({ sourceId: 'dropbox.files', homeDir });
 
       expect(result.mode).toBe('source');
       expect(existsSync(dropboxPath)).toBe(false);
-      expect(existsSync(join(homeDir, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sources', 'dropbox.personal.ingestion.json'))).toBe(false);
+      expect(existsSync(join(homeDir, '.olympus', 'sources', 'dropbox.personal.ingestion.json'))).toBe(false);
       expect(existsSync(gmailPath)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
