@@ -244,6 +244,8 @@ export interface SourceSchedulerTask {
   scopePath?: string | undefined;
   id: string;
   kind: SourceSchedulerTaskKind;
+  /** The regular listing gates discovery; a maintenance snapshot does not. */
+  metadataWalkRole?: 'primary' | 'maintenance';
   writer: true;
   /**
    * Task-specific liveness. Falls back to the host lane's cadence.
@@ -413,6 +415,7 @@ export interface SourceSchedulerTaskStatus {
   missing_scope_path?: string;
   id: string;
   kind: SourceSchedulerTaskKind;
+  metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
   interval_seconds?: number;
   effective_interval_seconds?: number;
   freshness_threshold_seconds?: number;
@@ -1158,6 +1161,7 @@ export class SourceScheduler {
     return {
       id: state.task.id,
       kind: state.task.kind,
+      ...(state.task.metadataWalkRole ? { metadata_walk_role: state.task.metadataWalkRole } : {}),
       ...(state.lastErrorKind === 'scope_root_missing' && state.task.scopePath
         ? { missing_scope_path: state.task.scopePath } : {}),
       interval_seconds: Math.round(configuredIntervalMs / 1_000),
@@ -1912,6 +1916,7 @@ export function createGmailConnectorStoreSchedulerSource(input: {
       {
         id: 'gmail.email_store_pull',
         kind: 'sync',
+        metadataWalkRole: 'primary',
         writer: true,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
@@ -1936,6 +1941,7 @@ export function createGmailConnectorStoreSchedulerSource(input: {
       {
         id: 'gmail.email_store_reconcile',
         kind: 'sync',
+        metadataWalkRole: 'maintenance',
         writer: true,
         intervalMs: liveConfig.storeReconcileIntervalMs,
         freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,

@@ -121,7 +121,7 @@ export const DASHBOARD_OUTSIDE_HELP_CSS = `
 .outside .ohsect-sum:empty { display: none; }
 .outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
 .outside .ohsect-body { padding: 0 0 16px 18px; }
-.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0 16px; margin: 0 0 8px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 0 16px; margin: 0 0 8px; }
 .outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
 .outside .ohform.ohinline { margin: 0 0 12px; }
 .outside .ohform .keyfield { width: 100%; max-width: 220px; }

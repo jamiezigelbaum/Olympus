@@ -24427,7 +24427,7 @@ var init_venice_models = __esm(() => {
 
 // src/core/sovereignty.ts
 import { chmodSync as chmodSync7, existsSync as existsSync22, mkdirSync as mkdirSync15, readFileSync as readFileSync26 } from "node:fs";
-import { dirname as dirname24, join as join31 } from "node:path";
+import { dirname as dirname24, join as join31, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID5 } from "node:crypto";
@@ -24441,7 +24441,14 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync22(configPath)) {
-    const standaloneDefault = !requestedConfigPath && !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1");
+    const isDefaultPath = (path) => {
+      try {
+        return resolve7(path) === resolve7(defaultSovereigntyConfigPath(env));
+      } catch {
+        return false;
+      }
+    };
+    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);
@@ -26602,7 +26609,7 @@ import {
   statSync as statSync13,
   writeFileSync as writeFileSync8
 } from "node:fs";
-import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute13, join as join32, resolve as resolve7 } from "node:path";
+import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute13, join as join32, resolve as resolve8 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute13(configured))
@@ -26619,11 +26626,11 @@ function isSha256(value) {
   return true;
 }
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute13(path) || !isSha256(sha256) || resolve7(path) !== path)
+  if (!isAbsolute13(path) || !isSha256(sha256) || resolve8(path) !== path)
     return false;
   if (basename4(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename4(dirname25(path))))
     return false;
-  if (dir !== undefined && dirname25(path) !== resolve7(dir))
+  if (dir !== undefined && dirname25(path) !== resolve8(dir))
     return false;
   try {
     const stat3 = lstatSync17(path);
@@ -26638,7 +26645,7 @@ function mediaHolderName(holder) {
   try {
     return realpathSync6(holder);
   } catch {
-    return resolve7(holder);
+    return resolve8(holder);
   }
 }
 function writeMediaCacheFile(dir, bytes, mimeType) {
@@ -29575,7 +29582,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function normalizeSemanticRelevanceBar(value) {
   if (value === undefined)
@@ -31509,7 +31516,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -37267,7 +37274,7 @@ class HelperProcess {
       helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
       child.kill("SIGKILL");
     });
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       let started = false;
       const timer = setTimeout(() => {
         if (started)
@@ -37291,7 +37298,7 @@ class HelperProcess {
             clearTimeout(timer);
             helper.device = message2.device === "gpu" ? "gpu" : "cpu";
             helper.vision = message2.vision === true;
-            resolve8(helper);
+            resolve9(helper);
           } else if (message2.fatal) {
             started = true;
             clearTimeout(timer);
@@ -37328,13 +37335,13 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       const timer = setTimeout(() => {
         this.child.kill("SIGKILL");
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve8, reject, count: items.length, timer });
+      this.pending.set(id, { resolve: resolve9, reject, count: items.length, timer });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
       this.child.stdin.write(`${JSON.stringify(request)}
 `);
@@ -37375,7 +37382,7 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve8) => this.child.once("close", () => resolve8()));
+    const exited = new Promise((resolve9) => this.child.once("close", () => resolve9()));
     this.child.stdin.end();
     const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
@@ -37861,7 +37868,7 @@ class BuiltInSourceEmbeddingProvider {
   }
   async withSlot(taskType, run) {
     if (this.slotBusy) {
-      await new Promise((resolve8) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve8));
+      await new Promise((resolve9) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve9));
     } else {
       this.slotBusy = true;
     }
@@ -41726,7 +41733,7 @@ function executableFile(path) {
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     const child = spawn4(command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -41769,7 +41776,7 @@ async function runExtractionCommand(request, internals = {}) {
         stderr: Buffer4.concat(stderr).toString("utf8")
       };
       if (code === 0) {
-        resolve8(result);
+        resolve9(result);
         return;
       }
       reject(new ExtractionCommandError({
@@ -44039,8 +44046,8 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId) {
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve8) => {
-    timer = setTimeout(() => resolve8({ kind: "timeout" }), timeoutMs);
+  const deadline = new Promise((resolve9) => {
+    timer = setTimeout(() => resolve9({ kind: "timeout" }), timeoutMs);
   });
   try {
     const settled = await Promise.race([laneSettled, deadline]);
@@ -45787,7 +45794,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
           }, () => {
             return;
           }),
-          new Promise((resolve8) => setTimeout(resolve8, cancellationSettleMs))
+          new Promise((resolve9) => setTimeout(resolve9, cancellationSettleMs))
         ]);
       } else {
         await Promise.resolve();
@@ -46500,8 +46507,8 @@ async function probePrivateMatch(input) {
   try {
     return await Promise.race([
       run(),
-      new Promise((resolve8) => {
-        timer = setTimeout(() => resolve8("unknown"), input.timeoutMs);
+      new Promise((resolve9) => {
+        timer = setTimeout(() => resolve9("unknown"), input.timeoutMs);
         timer.unref?.();
       })
     ]);
@@ -47848,10 +47855,10 @@ class GoogleGmailSourceConnector {
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    const metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
+    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
-    const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
     const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
@@ -47943,7 +47950,7 @@ class GoogleGmailSourceConnector {
       pageToken = page2.nextPageToken;
       const pageTruncated = messagesExamined < listed.length;
       const legDone = !pageToken && !pageTruncated;
-      const enterMetadataLeg = legDone && splitsAtCutoff;
+      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
       const done = legDone && !enterMetadataLeg;
       const promoted = promotedWatermark({
         highWaterMs,
@@ -47968,7 +47975,13 @@ class GoogleGmailSourceConnector {
         ...nextCursor ? { nextCursor } : {},
         done
       };
-      if (done || !pageToken || items.length === 0 && messagesFetched > 0 || pageTruncated)
+      if (done || pageTruncated)
+        break;
+      if (enterMetadataLeg) {
+        metadataLeg = true;
+        query = this.metadataLegQuery(cutoffMs);
+        requestedPageTokens.clear();
+      } else if (!pageToken)
         break;
     }
   }
@@ -48263,7 +48276,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -49433,7 +49446,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -57682,7 +57695,7 @@ import {
   rmSync as rmSync11,
   writeFileSync as writeFileSync10
 } from "node:fs";
-import { resolve as resolve8 } from "node:path";
+import { resolve as resolve9 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
   const account = requireNonEmpty3(options.account, "X bookmark content-recovery account");
   const userId = requireNonEmpty3(options.userId, "X bookmark content-recovery provider user id");
@@ -57893,7 +57906,7 @@ function contentRecoveryEmbeddingJournalId(restoreItems) {
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
-  return resolve8(`${storePath}.content-recovery-receipt.json`);
+  return resolve9(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
   const session = await issueGrantFencedXSession({
@@ -57983,7 +57996,7 @@ function buildReceipt(status, counts, retryAt) {
   return { ...unsigned, receipt_sha256: sha256Json2(unsigned) };
 }
 function writeReceipt(pathValue, receipt) {
-  const path = resolve8(pathValue);
+  const path = resolve9(pathValue);
   const temporary = `${path}.tmp-${randomUUID14()}`;
   try {
     writeFileSync10(temporary, `${JSON.stringify(receipt, null, 2)}
@@ -59153,7 +59166,7 @@ var init_file_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile5, realpath, stat as stat3 } from "node:fs/promises";
-import { basename as basename5, relative as relative6, resolve as resolve9, sep as sep6 } from "node:path";
+import { basename as basename5, relative as relative6, resolve as resolve10, sep as sep6 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -59172,7 +59185,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty5(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve9(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve10(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -62549,8 +62562,8 @@ ${inspect.stdout}`)) {
   return signed;
 }
 async function defaultClearQuarantine(dir) {
-  await new Promise((resolve11) => {
-    execFile2("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve11());
+  await new Promise((resolve12) => {
+    execFile2("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve12());
   });
 }
 function ensureOwnedDirectory(path, uid, label, options = {}) {
@@ -62935,7 +62948,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
   const compressed = readFileSync38(archivePath);
   let tar;
   try {
-    tar = await new Promise((resolve11, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve11(out)));
+    tar = await new Promise((resolve12, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve12(out)));
   } catch {
     throw new ManagedToolsError("unsafe_archive", "The archive could not be unpacked.", tool);
   }
@@ -63062,27 +63075,27 @@ function createManagedToolsJob(options = {}) {
     settled: () => current2
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve11) => {
+var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve12) => {
   execFile2(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (!error) {
-      resolve11({ code: 0, stdout, stderr });
+      resolve12({ code: 0, stdout, stderr });
       return;
     }
     const failure = error;
     if (typeof failure.code === "string")
-      resolve11({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
+      resolve12({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
     else
-      resolve11({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
+      resolve12({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
   });
-}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve11) => {
+}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve12) => {
   execFile2(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
     if (error) {
       const failure = error;
       const detail = failure.signal ? `stopped by ${failure.signal}` : failure.code !== undefined ? `exit ${String(failure.code)}` : failure.message;
-      resolve11({ ok: false, detail });
+      resolve12({ ok: false, detail });
       return;
     }
-    resolve11({ ok: true, stdout });
+    resolve12({ ok: true, stdout });
   });
 });
 var init_managed_tools = __esm(() => {
@@ -63180,7 +63193,7 @@ function bridgeMac(token, role, name, ...parts) {
   return hmac.digest();
 }
 function authenticate(socketPath, token, name, signal) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     const socket = createConnection({ path: socketPath });
     const clientNonce = randomBytes11(16);
     let buffered = Buffer.alloc(0);
@@ -63231,7 +63244,7 @@ function authenticate(socketPath, token, name, signal) {
         }
         settled = true;
         cleanup();
-        resolve11(socket);
+        resolve12(socket);
       });
     };
     const timer = setTimeout(() => fail(authError("timeout")), HANDSHAKE_TIMEOUT_MS);
@@ -63302,8 +63315,8 @@ Connection: close\r
 function writeSocket(socket, bytes) {
   if (bytes.byteLength === 0)
     return Promise.resolve();
-  return new Promise((resolve11, reject) => {
-    socket.write(bytes, (error) => error ? reject(error) : resolve11());
+  return new Promise((resolve12, reject) => {
+    socket.write(bytes, (error) => error ? reject(error) : resolve12());
   });
 }
 async function writeRequestBody(socket, request, contentLength, signal) {
@@ -63347,7 +63360,7 @@ function validHeaderValue(value) {
   return true;
 }
 function exchange(socket, request, head, contentLength, signal) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     let state = "head";
     let buffered = Buffer.alloc(0);
     let remaining = 0;
@@ -63504,7 +63517,7 @@ function exchange(socket, request, head, contentLength, signal) {
               headers.append(name, value);
             const response = new Response(responseStream ?? null, { status, statusText: statusMatch[2] ?? "", headers });
             settled = true;
-            resolve11(response);
+            resolve12(response);
             if (bodyless) {
               finish();
               break;
@@ -63781,33 +63794,33 @@ async function runLinuxConfinementSelfTestWithRunner(launcher, workDir, env, por
   }
 }
 function listen(server, port, host, ipv6Only = false) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ port, host, exclusive: true, ipv6Only }, () => {
       server.removeListener("error", reject);
-      resolve11(server.address().port);
+      resolve12(server.address().port);
     });
   });
 }
 function listenPath(server, path) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ path }, () => {
       server.removeListener("error", reject);
-      resolve11();
+      resolve12();
     });
   });
 }
 function closeServer(server) {
-  return new Promise((resolve11) => server.close(() => resolve11()));
+  return new Promise((resolve12) => server.close(() => resolve12()));
 }
 function socketFd(socket) {
   return socket._handle?.fd ?? -1;
 }
 function connected(options) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     const socket = createConnection2(options);
-    socket.once("connect", () => resolve11(socket));
+    socket.once("connect", () => resolve12(socket));
     socket.once("error", reject);
   });
 }
@@ -63842,14 +63855,14 @@ async function stopGroup(pgid) {
   } catch {}
   const deadline = Date.now() + 2500;
   while (!processGone(pgid) && Date.now() < deadline)
-    await new Promise((resolve11) => setTimeout(resolve11, 50));
+    await new Promise((resolve12) => setTimeout(resolve12, 50));
   if (!processGone(pgid)) {
     try {
       process.kill(-pgid, "SIGKILL");
     } catch {}
     const killDeadline = Date.now() + 1500;
     while (!processGone(pgid) && Date.now() < killDeadline)
-      await new Promise((resolve11) => setTimeout(resolve11, 50));
+      await new Promise((resolve12) => setTimeout(resolve12, 50));
   }
   if (!processGone(pgid))
     throw new Error(`self-test process group ${pgid} survived cleanup`);
@@ -63859,8 +63872,8 @@ function startDgramDecoy(script2, pathname, env, watchdogPath, supervise) {
   let started = false;
   let resolveReady;
   let rejectReady;
-  const ready = new Promise((resolve11, reject) => {
-    resolveReady = resolve11;
+  const ready = new Promise((resolve12, reject) => {
+    resolveReady = resolve12;
     rejectReady = reject;
   });
   const timer = setTimeout(() => rejectReady(new Error("Unix datagram decoy did not start")), 3000);
@@ -63893,8 +63906,8 @@ async function releaseFixtureResources(servers, datagrams, sockets, acceptedSock
     try {
       await Promise.race([
         closeServer(server),
-        new Promise((resolve11) => {
-          timer = setTimeout(resolve11, 1000);
+        new Promise((resolve12) => {
+          timer = setTimeout(resolve12, 1000);
         })
       ]);
     } catch {} finally {
@@ -63992,9 +64005,9 @@ async function createFixture(script2, workDir, launcher, ports, env, watchdogPat
       const answer = Buffer.from([192, 12, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 127, 0, 0, 1]);
       dnsUdp.send(Buffer.concat([response, answer]), info.port, info.address);
     });
-    await new Promise((resolve11, reject) => {
+    await new Promise((resolve12, reject) => {
       dnsUdp.once("error", reject);
-      dnsUdp.bind(dnsPort, "127.0.0.53", resolve11);
+      dnsUdp.bind(dnsPort, "127.0.0.53", resolve12);
     });
     let controlStreams = 0;
     let confinedStreams = 0;
@@ -64406,11 +64419,11 @@ main().catch(() => process.exit(1));
           let status;
           let instanceBound = false;
           let listenerSetBound = false;
-          const controlDone = new Promise((resolve11, reject) => {
+          const controlDone = new Promise((resolve12, reject) => {
             control = transport.supervise("daemon", watchdogPath, [process.execPath, probePath, JSON.stringify(fixture.controlTarget)], env, (line) => {
               controlResult ??= parseProbeLine(line);
               if (controlResult)
-                resolve11();
+                resolve12();
             }, () => {
               if (!controlResult)
                 reject(new Error("control exited"));
@@ -64423,8 +64436,8 @@ main().catch(() => process.exit(1));
           });
           let resolveConfined;
           let rejectConfined;
-          const confinedDone = new Promise((resolve11, reject) => {
-            resolveConfined = resolve11;
+          const confinedDone = new Promise((resolve12, reject) => {
+            resolveConfined = resolve12;
             rejectConfined = reject;
           });
           const args = [
@@ -64485,7 +64498,7 @@ main().catch(() => process.exit(1));
             if (timeoutId)
               clearTimeout(timeoutId);
           }
-          await new Promise((resolve11) => setTimeout(resolve11, 50));
+          await new Promise((resolve12) => setTimeout(resolve12, 50));
           if (!controlResult || !confinedResult)
             throw new Error("probe missing");
           return {
@@ -64727,7 +64740,7 @@ function linuxZkapiConfinement(deps = {}) {
   const proc = deps.proc ?? realProc;
   const now = deps.now ?? Date.now;
   const identity = deps.launcherIdentity ?? launcherIdentity;
-  const resolve11 = deps.resolveLauncher ?? (() => launcherPath(env));
+  const resolve12 = deps.resolveLauncher ?? (() => launcherPath(env));
   let cache = hostChecks;
   if (deps.check) {
     cache = injectedChecks.get(deps.check) ?? new Map;
@@ -64739,7 +64752,7 @@ function linuxZkapiConfinement(deps = {}) {
     if ((deps.platform ?? process.platform) !== "linux" || (deps.arch ?? process.arch) !== "x64")
       return check = { ok: false, code: "unsupported_platform" };
     try {
-      const selected = await resolve11();
+      const selected = await resolve12();
       if (!selected)
         return check = { ok: false, code: "launcher_missing_or_untrusted" };
       const before = await identity(selected);
@@ -64776,7 +64789,7 @@ function linuxZkapiConfinement(deps = {}) {
           cache.delete(cache.keys().next().value);
       }
       const result = await entry.result;
-      if (await resolve11() !== selected || await identity(selected) !== before) {
+      if (await resolve12() !== selected || await identity(selected) !== before) {
         cache.delete(key2);
         return check = { ok: false, code: "launcher_missing_or_untrusted" };
       }
@@ -65101,11 +65114,11 @@ function runSelfTestProbe(argv, env) {
 }
 async function listenProbe(port = 0, host = "127.0.0.1") {
   const server = createServer3((socket) => socket.end());
-  await new Promise((resolve11, reject) => {
+  await new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ port, host, exclusive: true }, () => {
       server.removeListener("error", reject);
-      resolve11();
+      resolve12();
     });
   });
   return server;
@@ -65687,7 +65700,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   return;
 }
 function sleep2(ms) {
-  return new Promise((resolve11) => setTimeout(resolve11, ms));
+  return new Promise((resolve12) => setTimeout(resolve12, ms));
 }
 async function waitFor(condition, timeoutMs, options = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -65702,11 +65715,11 @@ async function waitFor(condition, timeoutMs, options = {}) {
   }
 }
 function portAnswers(port) {
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     const socket = createConnection3({ host: "127.0.0.1", port });
     const done = (value) => {
       socket.destroy();
-      resolve11(value);
+      resolve12(value);
     };
     socket.setTimeout(1000, () => done(false));
     socket.once("connect", () => done(true));
@@ -65996,16 +66009,16 @@ async function zkapiConsultReadiness(options) {
 }
 function deferred() {
   let settled = false;
-  let resolve11;
+  let resolve12;
   const promise = new Promise((done) => {
-    resolve11 = (value) => {
+    resolve12 = (value) => {
       if (settled)
         return;
       settled = true;
       done(value);
     };
   });
-  return { promise, resolve: resolve11, settled: () => settled };
+  return { promise, resolve: resolve12, settled: () => settled };
 }
 async function openZkapiConsultSession(options, control = {}) {
   return openSession(options, control, false);
@@ -66487,11 +66500,11 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
       timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
       bridge.state = "ready";
       bridge.ready.resolve();
-      const aborted = new Promise((resolve11) => {
+      const aborted = new Promise((resolve12) => {
         if (sessionSignal.aborted)
-          resolve11(undefined);
+          resolve12(undefined);
         else
-          sessionSignal.addEventListener("abort", () => resolve11(undefined), { once: true });
+          sessionSignal.addEventListener("abort", () => resolve12(undefined), { once: true });
       });
       const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
       const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
@@ -67524,7 +67537,7 @@ function installEngineUnderFence(options = {}) {
 }
 async function waitForEngineHealthy(input, deps = {}) {
   const now = deps.now ?? Date.now;
-  const sleep3 = deps.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
+  const sleep3 = deps.sleep ?? ((ms) => new Promise((resolve12) => setTimeout(resolve12, ms)));
   const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? workerFetch;
@@ -68308,7 +68321,7 @@ var init_engine_service = __esm(() => {
 import { spawnSync as spawnSync11 } from "node:child_process";
 import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants7, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync4, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync27, linkSync, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync43, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync11, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve11, sep as sep9 } from "node:path";
+import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve12, sep as sep9 } from "node:path";
 import { userInfo } from "node:os";
 import { randomBytes as randomBytes14, createHash as createHash50, randomUUID as randomUUID19 } from "node:crypto";
 function linuxEngineExec(command, args) {
@@ -68519,7 +68532,7 @@ function inheritedUtilLinuxFlock(lockPath) {
       const executable = realpathSync11(`/proc/${pid}/exe`);
       const executableStat = statSync23(executable);
       const args = readFileSync43(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
-      if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve11(arg) === lockPath))
+      if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve12(arg) === lockPath))
         return true;
     } catch {}
     const parent = processParent(pid);
@@ -68633,7 +68646,7 @@ function linuxMachineArtifactDigest(path, kind) {
       throw new Error(`${path} is not a symbolic link.`);
     return createHash50("sha256").update(readlinkSync4(path)).digest("hex");
   }
-  const root = resolve11(path);
+  const root = resolve12(path);
   const rootInfo = lstatSync27(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
@@ -68762,7 +68775,7 @@ function ownedUnitLink(layout, path) {
   if (!info)
     return false;
   assertLinuxManagedPath(dirname46(path), process.getuid(), "directory");
-  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve11(dirname46(path), readlinkSync4(path)) !== layout.unitPath) {
+  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve12(dirname46(path), readlinkSync4(path)) !== layout.unitPath) {
     throw new Error(`The systemd unit link changed at ${path}; it was retained.`);
   }
   return true;
@@ -68856,8 +68869,8 @@ function readInstallTransaction(layout) {
   const value2 = JSON.parse(readFileSync43(path, "utf8"));
   const hasDesktop = Object.hasOwn(value2?.before?.files ?? {}, linuxDesktopEntryPaths(layout).desktop);
   const allowedFiles = transactionManagedFiles(layout, hasDesktop), actualFiles = value2?.before?.files && typeof value2.before.files === "object" ? Object.keys(value2.before.files) : [];
-  const backupDir = typeof value2?.backupDir === "string" ? resolve11(value2.backupDir) : "";
-  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname46(resolve11(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
+  const backupDir = typeof value2?.backupDir === "string" ? resolve12(value2.backupDir) : "";
+  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname46(resolve12(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const legacy = value2.legacySettings;
   if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join65(backupDir, `file-${1e4 + index}.backup`))))
     throw new Error("Invalid legacy settings recovery journal.");
@@ -68866,7 +68879,7 @@ function readInstallTransaction(layout) {
     throw new Error("Invalid legacy settings restore journal.");
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve11(dirname46(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve11(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve12(dirname46(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve12(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve12(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
@@ -69019,7 +69032,7 @@ function assertLegacySettingOverrides(layout, env) {
   for (const [key2, value2] of Object.entries(effective)) {
     if (!/^OLYMPUS_.*(?:_PATH|_DIR|_CONFIG)$/.test(key2) || !value2?.trim())
       continue;
-    const selected = resolve11(value2.trim());
+    const selected = resolve12(value2.trim());
     const moved = files.find((name) => {
       const source = join65(layout.home, ".olympus", name);
       return selected === source || source.startsWith(selected + sep9);
@@ -71595,7 +71608,7 @@ var init_vocabulary = __esm(() => {
     askLabel: "Ask privately",
     askPlaceholder: "Ask about your private things",
     ask: "Ask",
-    waitingTitle: "Waiting",
+    waitingTitle: "Questions waiting for you",
     waitingIntro: "Agents asked these, and the answer needs your private things. Answer them here.",
     noneWaiting: "Nothing is waiting.",
     olderRemoved: "Older questions were removed.",
@@ -74421,7 +74434,11 @@ function schedulerTaskCounts(scheduler) {
   return output;
 }
 function metadataTraversalCompleteFromSchedulers(schedulers) {
-  const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "sync"));
+  const tasks = schedulers.flatMap((scheduler) => {
+    const sync = scheduler.tasks.filter((task) => task.kind === "sync");
+    const primary = sync.filter((task) => task.metadata_walk_role === "primary");
+    return primary.length > 0 ? primary : sync;
+  });
   if (tasks.length === 0)
     return;
   const walks = [];
@@ -84384,7 +84401,7 @@ async function yieldToAnswers(options) {
   }
 }
 function sleep3(ms) {
-  return new Promise((resolve12) => setTimeout(resolve12, ms));
+  return new Promise((resolve13) => setTimeout(resolve13, ms));
 }
 function adoptedByThisPlan(record2, proposal) {
   const expected = proposal.expectedGeneration ?? 0;
@@ -86547,20 +86564,20 @@ function isCleanExit(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve12) => {
+  await new Promise((resolve13) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve12();
+      resolve13();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve12) => {
-    const timeout = setTimeout(resolve12, ms);
+  return new Promise((resolve13) => {
+    const timeout = setTimeout(resolve13, ms);
     timeout.unref?.();
   });
 }
@@ -87701,7 +87718,7 @@ async function startEngineHost(options) {
       status.state = "stopping";
       writeStatus();
       log("engine: stopping.");
-      const deadline = new Promise((resolve12) => setTimeout(resolve12, STOP_DEADLINE_MS).unref?.());
+      const deadline = new Promise((resolve13) => setTimeout(resolve13, STOP_DEADLINE_MS).unref?.());
       await Promise.race([
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline
@@ -87984,7 +88001,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve12) => setTimeout(resolve12, HEALTH_POLL_MS));
+      await new Promise((resolve13) => setTimeout(resolve13, HEALTH_POLL_MS));
     }
     if (current2 !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -88095,11 +88112,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve12) => {
+      return new Promise((resolve13) => {
         const settle = (value2) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve12(value2);
+          resolve13(value2);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -88142,12 +88159,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value2) => {
       signal.removeEventListener("abort", onAbort);
-      resolve12(value2);
+      resolve13(value2);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -88184,14 +88201,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const server = createServer4();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve12(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve13(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -95877,7 +95894,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve12) => setTimeout(resolve12, pollInterval));
+        await new Promise((resolve13) => setTimeout(resolve13, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -95889,7 +95906,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve12, reject) => {
+    return new Promise((resolve13, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -95967,7 +95984,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve12(parseResult.data);
+            resolve13(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -96158,12 +96175,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve12, reject) => {
+    return new Promise((resolve13, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve12, interval);
+      const timeoutId = setTimeout(resolve13, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -99148,7 +99165,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve12.call(this, root, ref);
+    let _sch = resolve13.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a4 = root.localRefs) === null || _a4 === undefined ? undefined : _a4[ref];
       const { schemaId } = this.opts;
@@ -99175,7 +99192,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve12(root, ref) {
+  function resolve13(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -99705,7 +99722,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve12(baseURI, relativeURI, options) {
+  function resolve13(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse7(baseURI, schemelessOptions), parse7(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -99933,7 +99950,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize5,
-    resolve: resolve12,
+    resolve: resolve13,
     resolveComponent,
     equal: equal2,
     serialize,
@@ -103316,12 +103333,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message2) {
-    return new Promise((resolve12) => {
+    return new Promise((resolve13) => {
       const json = serializeMessage(message2);
       if (this._stdout.write(json)) {
-        resolve12();
+        resolve13();
       } else {
-        this._stdout.once("drain", resolve12);
+        this._stdout.once("drain", resolve13);
       }
     });
   }
@@ -104139,8 +104156,8 @@ class SourceAnswerJobRegistry {
     }
     const outcome = pending.then((value2) => ({ ok: true, value: value2 }), (error2) => ({ ok: false, error: error2 }));
     let timer;
-    const handoff = new Promise((resolve12) => {
-      timer = setTimeout(() => resolve12("handoff"), this.limits.handoffMs);
+    const handoff = new Promise((resolve13) => {
+      timer = setTimeout(() => resolve13("handoff"), this.limits.handoffMs);
     });
     const first = await Promise.race([outcome, handoff]);
     clearTimeout(timer);
@@ -104159,8 +104176,8 @@ class SourceAnswerJobRegistry {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      done: new Promise((resolve12) => {
-        wake = resolve12;
+      done: new Promise((resolve13) => {
+        wake = resolve13;
       }),
       finish: (result) => {
         if (job.outcome)
@@ -104192,12 +104209,12 @@ class SourceAnswerJobRegistry {
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
       let onAbort;
-      const stop = new Promise((resolve12) => {
-        timer = setTimeout(resolve12, this.limits.resultWaitMs);
+      const stop = new Promise((resolve13) => {
+        timer = setTimeout(resolve13, this.limits.resultWaitMs);
         if (signal) {
-          onAbort = () => resolve12();
+          onAbort = () => resolve13();
           if (signal.aborted)
-            resolve12();
+            resolve13();
           else
             signal.addEventListener("abort", onAbort, { once: true });
         }
@@ -104303,10 +104320,10 @@ class SourceAnswerJobRegistry {
     }
     let state = "queued";
     let detached = false;
-    let resolve12;
+    let resolve13;
     let reject;
     const ready = new Promise((ok, fail) => {
-      resolve12 = ok;
+      resolve13 = ok;
       reject = fail;
     });
     ready.catch(() => {
@@ -104341,7 +104358,7 @@ class SourceAnswerJobRegistry {
         this.runningTotal += 1;
         priority.lastGrant = kind;
         this.unqueue(waiter);
-        resolve12();
+        resolve13();
       },
       cancel: (reason, wake = true) => {
         if (state !== "queued")
@@ -104938,7 +104955,7 @@ async function solveRegistrationPow(bits, nonce, installId, relayHost, signal) {
   for (let counter = 0;; counter += 1) {
     if (counter % 4096 === 0) {
       if (counter > 0)
-        await new Promise((resolve12) => setTimeout(resolve12, 0));
+        await new Promise((resolve13) => setTimeout(resolve13, 0));
       if (signal?.aborted)
         throw new PowCancelledError;
     }
@@ -105607,7 +105624,7 @@ class RelayClient {
   }
   async drained() {
     while (this.socket && this.socket.readyState === WebSocket.OPEN && this.socket.bufferedAmount > SEND_HIGH_WATER_BYTES) {
-      await new Promise((resolve12) => setTimeout(resolve12, 10));
+      await new Promise((resolve13) => setTimeout(resolve13, 10));
     }
   }
 }
@@ -105729,9 +105746,9 @@ async function startRelayRuntime(options) {
 }
 async function runRelayRuntimeProcess(instanceId, overrides = {}) {
   const runtime = await startRelayRuntime({ ...overrides, env: process.env, instanceId });
-  await new Promise((resolve12) => {
+  await new Promise((resolve13) => {
     const shutdown = () => {
-      runtime.stop().finally(resolve12);
+      runtime.stop().finally(resolve13);
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
@@ -106405,7 +106422,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream3(path);
@@ -106418,7 +106435,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error2);
       } else {
-        resolve12();
+        resolve13();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -106443,7 +106460,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve12) => setTimeout(resolve12, LOCK_POLL_MS2));
+    await new Promise((resolve13) => setTimeout(resolve13, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -107806,7 +107823,7 @@ var init_dashboard_session_secret = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile9, realpath as realpath2, stat as stat5 } from "node:fs/promises";
-import { relative as relative9, resolve as resolve12, sep as sep10 } from "node:path";
+import { relative as relative9, resolve as resolve13, sep as sep10 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -107948,7 +107965,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve12(rootRealPath, relativePath);
+    const candidatePath = resolve13(rootRealPath, relativePath);
     const relativeToRoot = relative9(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep10}`)) {
       return;
@@ -112454,7 +112471,7 @@ function createBuiltInTranscriber(options = {}) {
       if (state === "pending" && installing && filesOnDisk()) {
         const pending = installing;
         const waitMs = Math.max(0, Math.min(verifyWaitMs, deadline - now()));
-        await Promise.race([pending, new Promise((resolve13) => setTimeout(resolve13, waitMs).unref?.())]);
+        await Promise.race([pending, new Promise((resolve14) => setTimeout(resolve14, waitMs).unref?.())]);
         state = prepare();
       }
       if (state === "unavailable")
@@ -113021,7 +113038,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve13) => setTimeout(resolve13, pageRetryDelayMs));
+            await new Promise((resolve14) => setTimeout(resolve14, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -117783,7 +117800,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve14, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -117806,7 +117823,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve13(response);
+      resolve14(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -118919,6 +118936,15 @@ var init_theme = __esm(() => {
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
+/* Text can wrap inside the window; intrinsic grid/flex minima must not
+   widen a page for a filename, URL, or diagnostic. */
+body { overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+input, select, textarea { max-width: 100%; min-width: 0; }
+.top { flex-wrap: wrap; }
+.attncard .grow, .card, .kpi, .setrow > *, .rowform { min-width: 0; }
+.btn { max-width: 100%; white-space: normal; }
+
 /* No card around the page: the page is the surface, as wide as a reading
    layout allows, and every row below shares its left and right edges. */
 .frame { max-width: 1120px; margin: 0 auto; }
@@ -118979,7 +119005,7 @@ a.attncard.rowzone .go { color: var(--t3); font-size: var(--fs-body); }
 .hint { color: var(--t3); font-size: var(--fs-caption); }
 /* Two button styles and no third: filled for the row's one main action,
    outlined for everything else. Links are for navigation only. */
-.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: nowrap; }
+.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: normal; }
 .btn:hover { background: var(--panel2); }
 .btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
@@ -119009,8 +119035,8 @@ details.howto > summary { color: var(--link); font-size: var(--fs-caption); curs
 details.howto > summary:hover { text-decoration: underline; }
 details.howto[open] > summary { margin-bottom: 6px; }
 details.howto p { margin: 0 0 6px; }
-.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
-.cards.four { grid-template-columns: repeat(4, 1fr); }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 22px; }
+.cards.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .card .hd { display: flex; gap: 9px; align-items: center; font-weight: 600; font-size: var(--fs-row); }
 .card .ln { color: var(--t3); font-size: var(--fs-caption); margin-top: 6px; }
@@ -119025,7 +119051,7 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
 .bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
-.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .kpi .u { font-size: var(--fs-caption); color: var(--t3); }
 .kpi .n { font-size: var(--fs-section); font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
@@ -119059,13 +119085,13 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .evidence[open] > summary { margin-bottom: 4px; }
 .ok { color: var(--good); }
 .no { color: var(--bad); }
-table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
+table { table-layout: fixed; border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
 /* A not-connected source: one flat list row, like the source rows above it. */
-.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
+.setrow { display: grid; grid-template-columns: 20px minmax(0, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
-.setrow.noblurb { grid-template-columns: 20px 1fr auto; }
+.setrow.noblurb { grid-template-columns: 20px minmax(0, 1fr) auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
 .setrow a.name { text-decoration: none; }
 .setrow a.name:hover { color: var(--link); text-decoration: underline; }
@@ -119116,9 +119142,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 @media (max-width: 700px) {
   body { padding: 0 16px 60px; }
   .page { padding: 20px 0 28px; }
-  .cards, .cards.four { grid-template-columns: 1fr 1fr; }
-  .kpis { grid-template-columns: 1fr 1fr; }
-  .setrow { grid-template-columns: 20px 1fr auto; }
+  .cards, .cards.four { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .kpis { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .setrow { grid-template-columns: 20px minmax(0, 1fr) auto; }
   .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
   .setrow .btn { justify-self: end; width: max-content; }
   /* A row's control and its hint wrap under the reason rather than squeezing
@@ -120418,12 +120444,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve13, reject) => {
+    return new Promise((resolve14, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve13, reject, timer };
+      pending[id] = { resolve: resolve14, reject, timer };
     });
   }
   function notify(method, params) {
@@ -124839,7 +124865,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .reason.error{color:var(--danger)}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
-.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+.sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
@@ -125270,7 +125296,7 @@ var init_host_page = __esm(() => {
 @media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
 *{box-sizing:border-box}
 html,body{height:100%}
-body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
 .update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
 .update p{margin:0 0 0.5rem}
 .update code{overflow-wrap:anywhere;white-space:pre-wrap}
@@ -125281,7 +125307,7 @@ body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(
 .gate .title{font-weight:600}
 .gate .line{color:var(--muted);font-size:0.875rem}
 .gate .line .btn{margin-right:0.25rem}
-.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:nowrap}
+.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:pre-wrap}
 a.btn{display:inline-flex;align-items:center;text-decoration:none}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
 .btn.plain{background:transparent}
@@ -125295,7 +125321,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
 details{margin-top:0.5rem}
 summary{cursor:pointer;color:var(--muted);font-size:0.875rem}
 form{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem}
-input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:12rem}
+input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:0;max-width:100%}
 .status{color:var(--muted);font-size:0.875rem}
 `;
   COMPUTER_HOST_PAGE_CSP = [
@@ -126046,7 +126072,7 @@ var LOCAL_PAGE_CSS = `
 .outside .ohsect-sum:empty { display: none; }
 .outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
 .outside .ohsect-body { padding: 0 0 16px 18px; }
-.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0 16px; margin: 0 0 8px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 0 16px; margin: 0 0 8px; }
 .outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
 .outside .ohform.ohinline { margin: 0 0 12px; }
 .outside .ohform .keyfield { width: 100%; max-width: 220px; }
@@ -126249,6 +126275,261 @@ var init_local = __esm(() => {
   W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 });
 
+// src/workers/dashboard/chatgpt/markdown.ts
+function chatgptMarkdownRender(doc2, container, text3) {
+  const lines = text3.replace(/\r\n?/g, `
+`).split(`
+`);
+  let i = 0;
+  const node = (tag, parent, cls) => {
+    const made = doc2.createElement(tag);
+    if (cls)
+      made.className = cls;
+    parent.appendChild(made);
+    return made;
+  };
+  const isBlank = (line) => line === undefined || !line.trim();
+  const fence = (line) => {
+    const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    return m ? m[1] : null;
+  };
+  const tableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
+  const tableRule = (line) => /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line) || /^\s*\|(\s*:?-{3,}:?\s*\|)+\s*$/.test(line);
+  const listItem = (line) => {
+    const m = /^(\s*)(?:([-*+])|(\d{1,3}[.)]))\s+(.*)$/.exec(line);
+    if (!m)
+      return null;
+    return { indent: m[1].length, ordered: m[3] !== undefined, text: m[4] };
+  };
+  const cells = (line) => {
+    const trimmed2 = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+    const out = [];
+    let cur = "";
+    for (let k = 0;k < trimmed2.length; k++) {
+      const ch = trimmed2[k];
+      if (ch === "\\" && trimmed2[k + 1] === "|") {
+        cur += "|";
+        k++;
+        continue;
+      }
+      if (ch === "|") {
+        out.push(cur.trim());
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    out.push(cur.trim());
+    return out;
+  };
+  const inline = (parent, src) => {
+    let buf = "";
+    const flush = () => {
+      if (buf) {
+        parent.appendChild(doc2.createTextNode(buf));
+        buf = "";
+      }
+    };
+    let k = 0;
+    while (k < src.length) {
+      const ch = src[k];
+      if (ch === "\\" && k + 1 < src.length && /[\\`*_[\]()#+\-.!|>~]/.test(src[k + 1])) {
+        buf += src[k + 1];
+        k += 2;
+        continue;
+      }
+      if (ch === "`") {
+        const run = /^`+/.exec(src.slice(k))[0];
+        const close = src.indexOf(run, k + run.length);
+        if (close > 0) {
+          flush();
+          const span = src.slice(k + run.length, close);
+          node("code", parent).textContent = span.length > 2 && span[0] === " " && span[span.length - 1] === " " ? span.slice(1, -1) : span;
+          k = close + run.length;
+          continue;
+        }
+      }
+      if (ch === "[") {
+        const m = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/.exec(src.slice(k));
+        if (m) {
+          flush();
+          const a = node("a", parent);
+          a.setAttribute("href", m[2]);
+          a.setAttribute("target", "_blank");
+          a.setAttribute("rel", "noopener noreferrer");
+          inline(a, m[1]);
+          k += m[0].length;
+          continue;
+        }
+      }
+      if (ch === "*" || ch === "_") {
+        const double = src[k + 1] === ch;
+        const mark = double ? ch + ch : ch;
+        const rest = src.slice(k + mark.length);
+        if (rest && !/^\s/.test(rest)) {
+          let close = -1;
+          let from = 0;
+          for (;; ) {
+            const at = rest.indexOf(mark, from);
+            if (at < 0)
+              break;
+            if (at > 0 && !/\s/.test(rest[at - 1]) && (ch === "*" || !/\w/.test(rest[at + mark.length] || ""))) {
+              close = at;
+              break;
+            }
+            from = at + 1;
+          }
+          if (close > 0) {
+            flush();
+            inline(node(double ? "strong" : "em", parent), rest.slice(0, close));
+            k += mark.length + close + mark.length;
+            continue;
+          }
+        }
+      }
+      buf += ch;
+      k++;
+    }
+    flush();
+  };
+  const blocks = (parent, stop) => {
+    let para = [];
+    const endPara = () => {
+      if (!para.length)
+        return;
+      inline(node("p", parent), para.join(" ").replace(/\s+/g, " ").trim());
+      para = [];
+    };
+    while (i < lines.length) {
+      const line = lines[i];
+      if (stop(line))
+        break;
+      if (isBlank(line)) {
+        endPara();
+        i++;
+        continue;
+      }
+      const open7 = fence(line);
+      if (open7) {
+        endPara();
+        i++;
+        const body = [];
+        while (i < lines.length && !(fence(lines[i]) && fence(lines[i])[0] === open7[0] && fence(lines[i]).length >= open7.length))
+          body.push(lines[i++]);
+        if (i < lines.length)
+          i++;
+        node("code", node("pre", parent)).textContent = body.join(`
+`);
+        continue;
+      }
+      const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (heading) {
+        endPara();
+        inline(node("h" + Math.min(6, heading[1].length + 2), parent), heading[2]);
+        i++;
+        continue;
+      }
+      if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+        endPara();
+        node("hr", parent);
+        i++;
+        continue;
+      }
+      if (/^\s{0,3}>/.test(line)) {
+        endPara();
+        const quoted = [];
+        while (i < lines.length && /^\s{0,3}>/.test(lines[i]))
+          quoted.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
+        chatgptMarkdownRender(doc2, node("blockquote", parent), quoted.join(`
+`));
+        continue;
+      }
+      if (tableRow(line) && i + 1 < lines.length && tableRule(lines[i + 1])) {
+        endPara();
+        const table = node("table", parent);
+        const headRow = node("tr", node("thead", table));
+        for (const cell of cells(line))
+          inline(node("th", headRow), cell);
+        i += 2;
+        const tbody = node("tbody", table);
+        while (i < lines.length && tableRow(lines[i])) {
+          const row = node("tr", tbody);
+          for (const cell of cells(lines[i]))
+            inline(node("td", row), cell);
+          i++;
+        }
+        continue;
+      }
+      const item = listItem(line);
+      if (item && (para.length === 0 || item.indent === 0)) {
+        endPara();
+        list(parent, item.indent, item.ordered);
+        continue;
+      }
+      if (/^(?: {4}|\t)/.test(line) && para.length === 0) {
+        const body = [];
+        while (i < lines.length && (/^(?: {4}|\t)/.test(lines[i]) || isBlank(lines[i]) && i + 1 < lines.length && /^(?: {4}|\t)/.test(lines[i + 1])))
+          body.push(lines[i++].replace(/^(?: {4}|\t)/, ""));
+        node("code", node("pre", parent)).textContent = body.join(`
+`);
+        continue;
+      }
+      para.push(line.trim());
+      i++;
+    }
+    endPara();
+  };
+  const list = (parent, indent, ordered) => {
+    const wrap = node(ordered ? "ol" : "ul", parent);
+    while (i < lines.length) {
+      const item = listItem(lines[i]);
+      if (!item || item.indent < indent)
+        break;
+      if (item.indent >= indent + 2) {
+        const last = wrap.lastElementChild;
+        if (!last)
+          break;
+        list(last, item.indent, item.ordered);
+        continue;
+      }
+      if (item.ordered !== ordered)
+        break;
+      i++;
+      const li = node("li", wrap);
+      const text4 = [item.text];
+      while (i < lines.length && !isBlank(lines[i]) && !listItem(lines[i]) && /^\s/.test(lines[i]))
+        text4.push(lines[i++].trim());
+      inline(li, text4.join(" "));
+      if (i < lines.length && isBlank(lines[i]) && i + 1 < lines.length) {
+        const next = listItem(lines[i + 1]);
+        if (next && next.indent >= indent)
+          i++;
+      }
+    }
+  };
+  blocks(container, () => false);
+}
+var CHATGPT_MARKDOWN_CSS = `
+.answer.md{white-space:normal;display:block}
+.answer.md>*{margin:0 0 0.625rem}
+.answer.md>*:last-child{margin-bottom:0}
+.answer.md h3,.answer.md h4,.answer.md h5,.answer.md h6{font-size:1rem;font-weight:650;line-height:1.35;margin-top:0.875rem}
+.answer.md h3{font-size:1.0625rem}
+.answer.md>h3:first-child,.answer.md>h4:first-child{margin-top:0}
+.answer.md ul,.answer.md ol{padding-left:1.375rem}
+.answer.md li{margin:0.25rem 0}
+.answer.md li>ul,.answer.md li>ol{margin:0.25rem 0 0}
+.answer.md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875em;background:var(--code-bg,rgba(128,128,128,0.14));border-radius:4px;padding:0.1em 0.3em}
+.answer.md pre{background:var(--code-bg,rgba(128,128,128,0.14));border-radius:8px;padding:0.625rem 0.75rem;overflow-x:auto}
+.answer.md pre code{background:none;padding:0;font-size:0.8125rem;line-height:1.5}
+.answer.md blockquote{margin:0 0 0.625rem;padding:0 0 0 0.75rem;border-left:3px solid var(--rule,rgba(128,128,128,0.35));opacity:0.9}
+.answer.md hr{border:0;border-top:1px solid var(--rule,rgba(128,128,128,0.35));margin:0.75rem 0}
+.answer.md table{border-collapse:collapse;width:100%;font-size:0.875rem;display:block;overflow-x:auto}
+.answer.md th,.answer.md td{border:1px solid var(--rule,rgba(128,128,128,0.35));padding:0.375rem 0.5rem;text-align:left;vertical-align:top}
+.answer.md th{font-weight:650}
+.answer.md a{color:inherit;text-decoration:underline}
+`;
+
 // src/workers/dashboard/pages/private-answers.ts
 function renderDashboardPrivateAnswersPage(options) {
   const basePath = options?.basePath;
@@ -126258,7 +126539,7 @@ function renderDashboardPrivateAnswersPage(options) {
     ...basePath === undefined ? {} : { basePath },
     meta: "",
     body: renderPrivateAnswersBody(options),
-    styles: [LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS]
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS]
   });
 }
 function readToken(basePath) {
@@ -126292,13 +126573,13 @@ function renderPrivateAnswersBody(options) {
   return `<div class="privacy pa" data-private-answers>${parts.join("")}</div>${script2}`;
 }
 function renderAsk() {
-  return `<form class="paask" data-pa-ask>` + `<label class="plabel" for="pa-question">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</label>` + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form>`;
+  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</h3><form class="paask" data-pa-ask>` + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form></section>`;
 }
 function renderWaiting(waiting, now) {
-  const parts = [`<div class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</div>`];
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
-    return parts.join("");
+    return parts.join("") + "</section>";
   }
   if (waiting.questions.length === 0) {
     parts.push(`<p class="pnote" data-pa-none>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
@@ -126317,7 +126598,7 @@ function renderWaiting(waiting, now) {
   }
   if (waiting.olderRemoved)
     parts.push(`<p class="pnote hint" data-pa-older-removed>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
-  return parts.join("");
+  return parts.join("") + "</section>";
 }
 function renderAnonymous(options, csrfToken) {
   const status = options?.outsideHelp;
@@ -126337,7 +126618,7 @@ function renderAnonymous(options, csrfToken) {
       ...options?.basePath === undefined ? {} : { basePath: options.basePath }
     });
   }
-  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>` + `<summary><span class="paanon-title">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</span><span class="paanon-sum">${escapeHtml2(sum2)}</span></summary>` + `<div class="paanon-body">${body}</div></details>`;
+  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>` + `<summary><h3 class="paanon-title">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3><span class="paanon-sum">${escapeHtml2(sum2)}</span></summary>` + `<div class="paanon-body">${body}</div></details>`;
 }
 function privateAnswersClientScript(input) {
   const config2 = {
@@ -126362,7 +126643,8 @@ function privateAnswersClientScript(input) {
       dismissAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.dismissAllConfirm
     }
   };
-  return `(function () {
+  return `window.olympusMarkdown=(${chatgptMarkdownRender.toString()});
+(function () {
   var config = ${escapeScriptJson(JSON.stringify(config2))};
   var root = document.querySelector('[data-private-answers]');
   if (!root) return;
@@ -126413,11 +126695,20 @@ function privateAnswersClientScript(input) {
     if (text !== undefined) node.textContent = text;
     return node;
   }
-  function message(out, text, bad) {
+  function panel(out, question) {
     out.textContent = '';
+    var card = el('div', 'pacard');
+    var heading = el('p', 'paquestion');
+    heading.appendChild(el('strong', '', question));
+    card.appendChild(heading);
+    out.appendChild(card);
+    return card;
+  }
+  function message(out, text, bad, question) {
+    var card = panel(out, question || '');
     var line = el('p', 'pamsg', text);
     if (bad) line.setAttribute('data-state', 'error');
-    out.appendChild(line);
+    card.appendChild(line);
   }
   function errorText(outcome) {
     var error = outcome.result && outcome.result.error;
@@ -126431,19 +126722,21 @@ function privateAnswersClientScript(input) {
       if (!outcome.ok) { button.textContent = errorText(outcome); button.disabled = true; }
     });
   }
-  // The answer, drawn in place with plain text nodes: nothing from the model is parsed as HTML.
-  function render(out, result) {
-    out.textContent = '';
+  // Shared Markdown builds text-only DOM nodes; no model HTML is interpreted.
+  function render(out, result, question) {
+    var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
     if (status === 'answered') {
-      var card = el('div', 'pacard');
-      var box = el('div', 'paanswer');
-      String(result.answer || '').split(/\\n{2,}/).forEach(function (para) {
-        if (para.trim() !== '') box.appendChild(el('p', '', para.trim()));
-      });
+      var box = el('div', 'paanswer answer');
+      var markdown = window.olympusMarkdown;
+      if (typeof markdown === 'function') {
+        box.classList.add('md');
+        markdown(document, box, String(result.answer || ''));
+      } else {
+        box.textContent = String(result.answer || '');
+      }
       card.appendChild(box);
-      out.appendChild(card);
       var meta = el('div', 'pameta');
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
@@ -126478,15 +126771,16 @@ function privateAnswersClientScript(input) {
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
     } else if (status === 'not_found') {
-      out.appendChild(el('p', 'pamsg', config.copy.notFound));
+      card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
       var words = status === 'no_model' ? config.copy.noModel
         : status === 'model_downloading' ? config.copy.downloading
         : status === 'changed' ? config.copy.changed
         : config.copy.failed;
-      message(out, words, true);
+      message(out, words, true, question);
+      card = out.firstChild;
     }
-    if (leftOut.length > 0) out.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+    if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
   var ask = root.querySelector('form[data-pa-ask]');
   if (ask) {
@@ -126498,15 +126792,16 @@ function privateAnswersClientScript(input) {
       var question = field ? String(field.value || '').trim() : '';
       if (!question || !out) return;
       if (button) button.disabled = true;
-      message(out, config.copy.answering, false);
+      message(out, config.copy.answering, false, question);
       var outcome = await send({ action: 'ask', question: question });
       if (button) button.disabled = false;
-      if (!outcome.ok) { message(out, errorText(outcome), true); return; }
-      render(out, outcome.result);
+      if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
+      render(out, outcome.result, question);
     });
   }
   root.querySelectorAll('[data-pa-question]').forEach(function (row) {
     var id = row.getAttribute('data-pa-question');
+    var question = row.querySelector('.paq').textContent;
     var out = row.querySelector('[data-pa-out]');
     var actions = row.querySelector('.sact');
     var answer = row.querySelector('[data-pa-answer]');
@@ -126517,14 +126812,14 @@ function privateAnswersClientScript(input) {
     }
     if (answer) answer.addEventListener('click', async function () {
       busy(true);
-      message(out, config.copy.answering, false);
+      message(out, config.copy.answering, false, question);
       var outcome = await send({ action: 'answer', id: id });
       if (!outcome.ok) {
-        message(out, errorText(outcome), true);
+        message(out, errorText(outcome), true, question);
         if (outcome.status === 410 && actions) actions.remove(); else busy(false);
         return;
       }
-      render(out, outcome.result);
+      render(out, outcome.result, question);
       if (outcome.result.status === 'answered') row.classList.add('answered');
       // The answer is on screen: only now may the question be cleared.
       if (typeof outcome.result.ack === 'string') {
@@ -126536,7 +126831,7 @@ function privateAnswersClientScript(input) {
     if (dismiss) dismiss.addEventListener('click', async function () {
       busy(true);
       var outcome = await send({ action: 'dismiss', id: id });
-      if (!outcome.ok) { message(out, errorText(outcome), true); busy(false); return; }
+      if (!outcome.ok) { message(out, errorText(outcome), true, question); busy(false); return; }
       row.remove();
     });
   });
@@ -126551,6 +126846,13 @@ function privateAnswersClientScript(input) {
 })();`;
 }
 var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
+.pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
+.pa .pasection > .sect { margin: 0 0 12px; }
+.pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
+.pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
+.pa .paanswer:not(.md) { white-space: pre-wrap; }
+.pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer table { table-layout: fixed; display: table; }
 .pa .paask { display: grid; gap: 8px; margin: 0 0 8px; }
 .pa .paask textarea { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 8px 10px; min-height: 64px; resize: vertical; width: 100%; box-sizing: border-box; }
 .pa .paask textarea:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
@@ -126561,7 +126863,7 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .paout:empty { display: none; }
 .pa .srow.answered .paq { font-weight: 600; }
 .pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-.pa .paanswer p { margin: 0 0 10px; color: var(--t1); line-height: 1.55; max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer p { margin: 0 0 10px; max-width: 72ch; overflow-wrap: anywhere; }
 .pa .paanswer p:last-child { margin-bottom: 0; }
 .pa .pameta { margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); color: var(--t3); font-size: var(--fs-body); }
 .pa .pameta .palabel { margin: 0 0 4px; color: var(--t3); }
@@ -126580,7 +126882,7 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa details.paanon > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
 .pa details.paanon[open] > summary::before { content: '\\25BE'; }
 .pa details.paanon > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.pa .paanon-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.pa .paanon-title { margin: 0; font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
 .pa .paanon-sum { color: var(--t3); font-size: var(--fs-body); }
 .pa .paanon-body { padding: 0 0 16px; }
 `;
@@ -128057,12 +128359,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve13) => {
+        new Promise((resolve14) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve13({
+              resolve14({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -128089,7 +128391,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 import { createHash as createHash69, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync66, statSync as statSync29 } from "node:fs";
 import { homedir as homedir58 } from "node:os";
-import { join as join100, resolve as resolve13 } from "node:path";
+import { join as join100, resolve as resolve14 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -129812,8 +130114,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve14) => {
-      release = resolve14;
+    dashboardGrantMutationTail = new Promise((resolve15) => {
+      release = resolve15;
     });
     await previous;
     try {
@@ -130129,7 +130431,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve14) => setTimeout(resolve14, ms));
+  return new Promise((resolve15) => setTimeout(resolve15, ms));
 }
 async function parseConsultAskRequest(request) {
   const record4 = await parseObjectBody(request);
@@ -131145,10 +131447,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve13(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve14(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve13(path)))].sort();
+  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve14(path)))].sort();
   const a = normalize5(left);
   const b = normalize5(right);
   return a.length === b.length && a.every((value2, index) => value2 === b[index]);
@@ -132596,7 +132898,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve14) => setTimeout(resolve14, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -133142,6 +133444,7 @@ ${request.taskId}`);
     return {
       id: state.task.id,
       kind: state.task.kind,
+      ...state.task.metadataWalkRole ? { metadata_walk_role: state.task.metadataWalkRole } : {},
       ...state.lastErrorKind === "scope_root_missing" && state.task.scopePath ? { missing_scope_path: state.task.scopePath } : {},
       interval_seconds: Math.round(configuredIntervalMs / 1000),
       effective_interval_seconds: Math.round(effectiveIntervalMs / 1000),
@@ -133670,6 +133973,7 @@ function createGmailConnectorStoreSchedulerSource(input) {
       {
         id: "gmail.email_store_pull",
         kind: "sync",
+        metadataWalkRole: "primary",
         writer: true,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
@@ -133690,6 +133994,7 @@ function createGmailConnectorStoreSchedulerSource(input) {
       {
         id: "gmail.email_store_reconcile",
         kind: "sync",
+        metadataWalkRole: "maintenance",
         writer: true,
         intervalMs: liveConfig.storeReconcileIntervalMs,
         freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,
@@ -136842,9 +137147,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve14) => {
+        return new Promise((resolve15) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve14,
+            resolveJson: resolve15,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -137901,261 +138206,6 @@ var init_private_answer_contract = __esm(() => {
   };
 });
 
-// src/workers/dashboard/chatgpt/markdown.ts
-function chatgptMarkdownRender(doc2, container, text3) {
-  const lines = text3.replace(/\r\n?/g, `
-`).split(`
-`);
-  let i = 0;
-  const node = (tag, parent, cls) => {
-    const made = doc2.createElement(tag);
-    if (cls)
-      made.className = cls;
-    parent.appendChild(made);
-    return made;
-  };
-  const isBlank = (line) => line === undefined || !line.trim();
-  const fence = (line) => {
-    const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
-    return m ? m[1] : null;
-  };
-  const tableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
-  const tableRule = (line) => /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line) || /^\s*\|(\s*:?-{3,}:?\s*\|)+\s*$/.test(line);
-  const listItem = (line) => {
-    const m = /^(\s*)(?:([-*+])|(\d{1,3}[.)]))\s+(.*)$/.exec(line);
-    if (!m)
-      return null;
-    return { indent: m[1].length, ordered: m[3] !== undefined, text: m[4] };
-  };
-  const cells = (line) => {
-    const trimmed2 = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-    const out = [];
-    let cur = "";
-    for (let k = 0;k < trimmed2.length; k++) {
-      const ch = trimmed2[k];
-      if (ch === "\\" && trimmed2[k + 1] === "|") {
-        cur += "|";
-        k++;
-        continue;
-      }
-      if (ch === "|") {
-        out.push(cur.trim());
-        cur = "";
-        continue;
-      }
-      cur += ch;
-    }
-    out.push(cur.trim());
-    return out;
-  };
-  const inline = (parent, src) => {
-    let buf = "";
-    const flush = () => {
-      if (buf) {
-        parent.appendChild(doc2.createTextNode(buf));
-        buf = "";
-      }
-    };
-    let k = 0;
-    while (k < src.length) {
-      const ch = src[k];
-      if (ch === "\\" && k + 1 < src.length && /[\\`*_[\]()#+\-.!|>~]/.test(src[k + 1])) {
-        buf += src[k + 1];
-        k += 2;
-        continue;
-      }
-      if (ch === "`") {
-        const run = /^`+/.exec(src.slice(k))[0];
-        const close = src.indexOf(run, k + run.length);
-        if (close > 0) {
-          flush();
-          const span = src.slice(k + run.length, close);
-          node("code", parent).textContent = span.length > 2 && span[0] === " " && span[span.length - 1] === " " ? span.slice(1, -1) : span;
-          k = close + run.length;
-          continue;
-        }
-      }
-      if (ch === "[") {
-        const m = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/.exec(src.slice(k));
-        if (m) {
-          flush();
-          const a = node("a", parent);
-          a.setAttribute("href", m[2]);
-          a.setAttribute("target", "_blank");
-          a.setAttribute("rel", "noopener noreferrer");
-          inline(a, m[1]);
-          k += m[0].length;
-          continue;
-        }
-      }
-      if (ch === "*" || ch === "_") {
-        const double = src[k + 1] === ch;
-        const mark = double ? ch + ch : ch;
-        const rest = src.slice(k + mark.length);
-        if (rest && !/^\s/.test(rest)) {
-          let close = -1;
-          let from = 0;
-          for (;; ) {
-            const at = rest.indexOf(mark, from);
-            if (at < 0)
-              break;
-            if (at > 0 && !/\s/.test(rest[at - 1]) && (ch === "*" || !/\w/.test(rest[at + mark.length] || ""))) {
-              close = at;
-              break;
-            }
-            from = at + 1;
-          }
-          if (close > 0) {
-            flush();
-            inline(node(double ? "strong" : "em", parent), rest.slice(0, close));
-            k += mark.length + close + mark.length;
-            continue;
-          }
-        }
-      }
-      buf += ch;
-      k++;
-    }
-    flush();
-  };
-  const blocks = (parent, stop) => {
-    let para = [];
-    const endPara = () => {
-      if (!para.length)
-        return;
-      inline(node("p", parent), para.join(" ").replace(/\s+/g, " ").trim());
-      para = [];
-    };
-    while (i < lines.length) {
-      const line = lines[i];
-      if (stop(line))
-        break;
-      if (isBlank(line)) {
-        endPara();
-        i++;
-        continue;
-      }
-      const open7 = fence(line);
-      if (open7) {
-        endPara();
-        i++;
-        const body = [];
-        while (i < lines.length && !(fence(lines[i]) && fence(lines[i])[0] === open7[0] && fence(lines[i]).length >= open7.length))
-          body.push(lines[i++]);
-        if (i < lines.length)
-          i++;
-        node("code", node("pre", parent)).textContent = body.join(`
-`);
-        continue;
-      }
-      const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
-      if (heading) {
-        endPara();
-        inline(node("h" + Math.min(6, heading[1].length + 2), parent), heading[2]);
-        i++;
-        continue;
-      }
-      if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
-        endPara();
-        node("hr", parent);
-        i++;
-        continue;
-      }
-      if (/^\s{0,3}>/.test(line)) {
-        endPara();
-        const quoted = [];
-        while (i < lines.length && /^\s{0,3}>/.test(lines[i]))
-          quoted.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
-        chatgptMarkdownRender(doc2, node("blockquote", parent), quoted.join(`
-`));
-        continue;
-      }
-      if (tableRow(line) && i + 1 < lines.length && tableRule(lines[i + 1])) {
-        endPara();
-        const table = node("table", parent);
-        const headRow = node("tr", node("thead", table));
-        for (const cell of cells(line))
-          inline(node("th", headRow), cell);
-        i += 2;
-        const tbody = node("tbody", table);
-        while (i < lines.length && tableRow(lines[i])) {
-          const row = node("tr", tbody);
-          for (const cell of cells(lines[i]))
-            inline(node("td", row), cell);
-          i++;
-        }
-        continue;
-      }
-      const item = listItem(line);
-      if (item && (para.length === 0 || item.indent === 0)) {
-        endPara();
-        list(parent, item.indent, item.ordered);
-        continue;
-      }
-      if (/^(?: {4}|\t)/.test(line) && para.length === 0) {
-        const body = [];
-        while (i < lines.length && (/^(?: {4}|\t)/.test(lines[i]) || isBlank(lines[i]) && i + 1 < lines.length && /^(?: {4}|\t)/.test(lines[i + 1])))
-          body.push(lines[i++].replace(/^(?: {4}|\t)/, ""));
-        node("code", node("pre", parent)).textContent = body.join(`
-`);
-        continue;
-      }
-      para.push(line.trim());
-      i++;
-    }
-    endPara();
-  };
-  const list = (parent, indent, ordered) => {
-    const wrap = node(ordered ? "ol" : "ul", parent);
-    while (i < lines.length) {
-      const item = listItem(lines[i]);
-      if (!item || item.indent < indent)
-        break;
-      if (item.indent >= indent + 2) {
-        const last = wrap.lastElementChild;
-        if (!last)
-          break;
-        list(last, item.indent, item.ordered);
-        continue;
-      }
-      if (item.ordered !== ordered)
-        break;
-      i++;
-      const li = node("li", wrap);
-      const text4 = [item.text];
-      while (i < lines.length && !isBlank(lines[i]) && !listItem(lines[i]) && /^\s/.test(lines[i]))
-        text4.push(lines[i++].trim());
-      inline(li, text4.join(" "));
-      if (i < lines.length && isBlank(lines[i]) && i + 1 < lines.length) {
-        const next = listItem(lines[i + 1]);
-        if (next && next.indent >= indent)
-          i++;
-      }
-    }
-  };
-  blocks(container, () => false);
-}
-var CHATGPT_MARKDOWN_CSS = `
-.answer.md{white-space:normal;display:block}
-.answer.md>*{margin:0 0 0.625rem}
-.answer.md>*:last-child{margin-bottom:0}
-.answer.md h3,.answer.md h4,.answer.md h5,.answer.md h6{font-size:1rem;font-weight:650;line-height:1.35;margin-top:0.875rem}
-.answer.md h3{font-size:1.0625rem}
-.answer.md>h3:first-child,.answer.md>h4:first-child{margin-top:0}
-.answer.md ul,.answer.md ol{padding-left:1.375rem}
-.answer.md li{margin:0.25rem 0}
-.answer.md li>ul,.answer.md li>ol{margin:0.25rem 0 0}
-.answer.md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875em;background:var(--code-bg,rgba(128,128,128,0.14));border-radius:4px;padding:0.1em 0.3em}
-.answer.md pre{background:var(--code-bg,rgba(128,128,128,0.14));border-radius:8px;padding:0.625rem 0.75rem;overflow-x:auto}
-.answer.md pre code{background:none;padding:0;font-size:0.8125rem;line-height:1.5}
-.answer.md blockquote{margin:0 0 0.625rem;padding:0 0 0 0.75rem;border-left:3px solid var(--rule,rgba(128,128,128,0.35));opacity:0.9}
-.answer.md hr{border:0;border-top:1px solid var(--rule,rgba(128,128,128,0.35));margin:0.75rem 0}
-.answer.md table{border-collapse:collapse;width:100%;font-size:0.875rem;display:block;overflow-x:auto}
-.answer.md th,.answer.md td{border:1px solid var(--rule,rgba(128,128,128,0.35));padding:0.375rem 0.5rem;text-align:left;vertical-align:top}
-.answer.md th{font-weight:650}
-.answer.md a{color:inherit;text-decoration:underline}
-`;
-
 // src/workers/dashboard/chatgpt/private-answer.ts
 function chatgptPrivateAnswerProgram(config2) {
   const doc2 = document;
@@ -138331,7 +138381,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -138342,7 +138392,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve14(db);
+        resolve15(db);
       };
       try {
         const factory = window.indexedDB;
@@ -138369,7 +138419,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -138378,7 +138428,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve14(value2);
+        resolve15(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -138513,10 +138563,10 @@ function chatgptPrivateAnswerProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve14) => setTimeout(resolve14, ms));
+    return new Promise((resolve15) => setTimeout(resolve15, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -138526,7 +138576,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve14(value2);
+        resolve15(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -139737,7 +139787,7 @@ function chatgptPrivateQuestionProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -139748,7 +139798,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return;
         }
         settled = true;
-        resolve14(db);
+        resolve15(db);
       };
       try {
         const factory = window.indexedDB;
@@ -139775,7 +139825,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -139784,7 +139834,7 @@ function chatgptPrivateQuestionProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve14(value2);
+        resolve15(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -139848,10 +139898,10 @@ function chatgptPrivateQuestionProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve14) => setTimeout(resolve14, ms));
+    return new Promise((resolve15) => setTimeout(resolve15, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -139861,7 +139911,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve14(value2);
+        resolve15(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -142485,10 +142535,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve14) => {
+  const timeout = new Promise((resolve15) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve14(false);
+      resolve15(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -142559,8 +142609,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none2;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve14) => {
-    const timer = setTimeout(() => resolve14(none2), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve15) => {
+    const timer = setTimeout(() => resolve15(none2), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -150815,7 +150865,7 @@ function createRemoteOAuthHandler(options) {
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
   const pending = new Map;
   const codes = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve14) => setTimeout(resolve14, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -151930,8 +151980,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve14) => {
-          timer = setTimeout(resolve14, holdMs);
+        await Promise.race([settled, new Promise((resolve15) => {
+          timer = setTimeout(resolve15, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -152079,8 +152129,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve14) => {
-      settle = resolve14;
+    const settled = new Promise((resolve15) => {
+      settle = resolve15;
     });
     const analysis = {
       key: key2,
@@ -152276,10 +152326,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve14) => {
+    const stopped = new Promise((resolve15) => {
       if (abort.signal.aborted)
-        resolve14();
-      abort.signal.addEventListener("abort", () => resolve14(), { once: true });
+        resolve15();
+      abort.signal.addEventListener("abort", () => resolve15(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -152306,8 +152356,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve14) => {
-      claimSettled = resolve14;
+    const done = new Promise((resolve15) => {
+      claimSettled = resolve15;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -152346,10 +152396,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve14) => {
+    const stopped = new Promise((resolve15) => {
       if (abort.signal.aborted)
-        resolve14();
-      abort.signal.addEventListener("abort", () => resolve14(), { once: true });
+        resolve15();
+      abort.signal.addEventListener("abort", () => resolve15(), { once: true });
     });
     const record4 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -152480,8 +152530,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve14) => {
-      timer = setTimeout(resolve14, this.resetTimeoutMs);
+    const timeout = new Promise((resolve15) => {
+      timer = setTimeout(resolve15, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -154113,8 +154163,8 @@ function createRemotePrivateParts(options) {
     try {
       return await Promise.race([
         options.probe(request, probeTimeoutMs),
-        new Promise((resolve14) => {
-          timer = setTimeout(() => resolve14("unknown"), probeTimeoutMs);
+        new Promise((resolve15) => {
+          timer = setTimeout(() => resolve15("unknown"), probeTimeoutMs);
           timer.unref?.();
         })
       ]);
@@ -158036,13 +158086,13 @@ async function main() {
       openFile: async (path, eligible) => {
         if (!await eligible())
           throw new Error("open refused");
-        return new Promise((resolve14, reject) => {
+        return new Promise((resolve15, reject) => {
           const args = unreadableOpenArguments(path, unreadableDropboxRoots());
           if (!args) {
             reject(new Error("open refused"));
             return;
           }
-          execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+          execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve15());
         });
       }
     } : {}
@@ -158903,13 +158953,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const openCitedFile = process.platform === "darwin" ? async (path, eligible) => {
     if (!await eligible())
       throw new Error("open refused");
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const args = localOpenArguments2(path, localDropboxRoots2());
       if (!args) {
         reject(new Error("open refused"));
         return;
       }
-      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve15());
     });
   } : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel2({
@@ -160598,7 +160648,7 @@ import { randomBytes as randomBytes29 } from "node:crypto";
 import { readFileSync as readFileSync68, openSync as openSync18, closeSync as closeSync19, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve14 } from "node:path";
+import { resolve as resolve15 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -160946,7 +160996,7 @@ import {
   statSync as statSync19
 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
-import { basename as basename6, dirname as dirname39, join as join57, relative as relative7, resolve as resolve10, sep as sep7 } from "node:path";
+import { basename as basename6, dirname as dirname39, join as join57, relative as relative7, resolve as resolve11, sep as sep7 } from "node:path";
 import { Database as Database11 } from "bun:sqlite";
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
@@ -161186,7 +161236,7 @@ function exportOlympusData(options) {
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
 }
 function verifyOlympusDataExport(options) {
-  const destination = resolve10(requirePath(options.destination, "--input"));
+  const destination = resolve11(requirePath(options.destination, "--input"));
   const manifestPath = join57(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync36(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
@@ -161195,7 +161245,7 @@ function verifyOlympusDataExport(options) {
   const verified = [];
   for (const value of parsed.artifacts) {
     const artifact = parseExportArtifact(value);
-    const path = resolve10(destination, artifact.relativePath);
+    const path = resolve11(destination, artifact.relativePath);
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
@@ -161573,7 +161623,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   return {
     sourceId,
     role,
-    relativePath: relative7(resolve10(exportRoot), resolve10(path)),
+    relativePath: relative7(resolve11(exportRoot), resolve11(path)),
     bytes: stats.size,
     sha256: sha256File2(path)
   };
@@ -161626,7 +161676,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current2 = dirname39(resolve10(destination));
+  let current2 = dirname39(resolve11(destination));
   for (;; ) {
     if (existsSync37(current2))
       return current2;
@@ -161638,7 +161688,7 @@ function exportDurabilityBoundary(destination) {
 }
 function makeDurableDirectory(path, boundary) {
   mkdirSync25(path, { recursive: true, mode: 448 });
-  let current2 = resolve10(path);
+  let current2 = resolve11(path);
   for (;; ) {
     syncDirectorySync2(current2);
     if (current2 === boundary)
@@ -161766,8 +161816,8 @@ function isInsideKnownOlympusRoot(path, context2) {
   return knownOlympusDataRoots(context2).some((root) => isSameOrInsidePath(path, root));
 }
 function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve10(path);
-  const absoluteRoot = resolve10(root);
+  const absolutePath = resolve11(path);
+  const absoluteRoot = resolve11(root);
   return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep7}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
@@ -164087,7 +164137,7 @@ async function followEngineLogs(deps, lines) {
   const child = spawn6("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child.stdout });
   reader.on("line", (line) => console.log(redactLogLine(line)));
-  await new Promise((resolve12) => child.once("exit", () => resolve12()));
+  await new Promise((resolve13) => child.once("exit", () => resolve13()));
 }
 function parseNowArg(command, args) {
   if (args.length === 0)
@@ -164178,7 +164228,7 @@ function expectNoArgs(command, args) {
 init_engine_service();
 init_remote_access();
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve14(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve15(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -165081,7 +165131,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve14(out),
+    out_dir: resolve15(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -165131,7 +165181,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync68(resolve14(input2), "utf8");
+    raw = readFileSync68(resolve15(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -165436,7 +165486,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve14(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve15(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };

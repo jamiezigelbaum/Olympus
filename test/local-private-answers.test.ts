@@ -1036,7 +1036,7 @@ describe('the waiting count reaches only the computer\'s control session', () =>
 // ---- the page's own script ----------------------------------------------------------
 
 describe('the Private answers page', () => {
-  function renderAndRun(answer: (body: Record<string, unknown>) => { status: number; body: unknown }, url = 'http://127.0.0.1:8010/dashboard?private-answers') {
+  function renderAndRun(answer: (body: Record<string, unknown>) => { status: number; body: unknown }, url = 'http://127.0.0.1:8010/dashboard?private-answers', markdown = true) {
     const html = renderDashboardPrivateAnswersPage({
       now: DASHBOARD_PREVIEW_NOW,
       controlSessionCsrfToken: 'csrf-token',
@@ -1064,8 +1064,57 @@ describe('the Private answers page', () => {
     };
     const pageWindow = { location: window.location, confirm: () => true, addEventListener: () => undefined };
     new Function('window', 'document', 'fetch', script)(pageWindow, document, fetchStub);
+    if (!markdown) (pageWindow as { olympusMarkdown?: unknown }).olympusMarkdown = undefined;
     return { html, document, posts, settle: () => new Promise((resolve) => setTimeout(resolve, 20)) };
   }
+
+  test('Ask renders Markdown safely in a panel under its question, with ordered section headings', async () => {
+    const page = renderAndRun(() => ({ status: 200, body: {
+      ok: true, status: 'answered', answer: '**Renewal**\n\n- May\n- June\n\n<img src=x onerror=alert(1)>',
+      citations: [{ title: 'Lease', source: 'Dropbox' }], left_out: ['Gmail'],
+    } }));
+    expect([...page.document.querySelectorAll('.pa h3')].map((node) => node.textContent)).toEqual([
+      'Ask privately', 'Questions waiting for you', 'Anonymous answers',
+    ]);
+    const field = page.document.querySelector('textarea')!;
+    (field as unknown as { value: string }).value = 'When do I renew?';
+    page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { bubbles: true, cancelable: true }));
+    await page.settle();
+    const card = page.document.querySelector('form[data-pa-ask] .pacard')!;
+    expect(card.querySelector('.paquestion strong')!.textContent).toBe('When do I renew?');
+    expect(card.querySelector('.paanswer strong')!.textContent).toBe('Renewal');
+    expect(card.querySelectorAll('.paanswer ul li').length).toBe(2);
+    expect(card.querySelector('.paanswer')!.textContent).toContain('<img src=x onerror=alert(1)>');
+    expect(card.querySelector('img')).toBeNull();
+    expect(card.querySelector('.pameta')!.textContent).toContain('Lease');
+    expect(card.querySelector('.pameta')!.textContent).toContain('Left out: Gmail.');
+  });
+
+  test('pending, not-found and error states stay in the question panel; Markdown has a text fallback', async () => {
+    for (const reply of [
+      { status: 200, body: { ok: true, status: 'not_found', left_out: ['Gmail'] } },
+      { status: 500, body: { ok: false, error: { message: 'Could not answer.' } } },
+      { status: 200, body: { ok: true, status: 'answered', answer: '**Raw** <img src=x>' } },
+    ]) {
+      const page = renderAndRun(() => reply, undefined, false);
+      (page.document.querySelector('textarea') as unknown as { value: string }).value = 'My question';
+      page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { cancelable: true }));
+      expect(page.document.querySelector('.pacard .paquestion strong')!.textContent).toBe('My question');
+      expect(page.document.querySelector('.pacard')!.textContent).toContain('Answering');
+      await page.settle();
+      const card = page.document.querySelector('.pacard')!;
+      expect(card.querySelector('.paquestion strong')!.textContent).toBe('My question');
+      if (reply.body.status === 'not_found') {
+        expect(card.textContent).toContain('Nothing on this computer answers this.');
+        expect(card.textContent).toContain('Left out: Gmail.');
+      } else if (reply.status === 500) {
+        expect(card.querySelector('[data-state="error"]')!.textContent).toBe('Could not answer.');
+      } else {
+        expect(card.querySelector('.paanswer')!.textContent).toBe('**Raw** <img src=x>');
+        expect(card.querySelector('.paanswer strong, img')).toBeNull();
+      }
+    }
+  });
 
   test('lists the question, who asked and when; Answer shows the answer in place as text, then marks it seen', async () => {
     const page = renderAndRun((body) => (body.action === 'answer'
@@ -1082,6 +1131,7 @@ describe('the Private answers page', () => {
     const out = row.querySelector('[data-pa-out]')!;
     expect(out.textContent).toContain('It ends in May. <img src=x onerror=alert(1)>');
     expect(out.querySelector('img')).toBeNull();
+    expect(out.querySelector('.pacard .paquestion strong')!.textContent).toBe('Where is the lease?');
     expect(out.querySelector('a')!.getAttribute('href')).toBe('https://www.dropbox.com/preview/lease.pdf');
     expect(out.textContent).toContain('Left out: Gmail.');
     // Cleared: the row keeps its answer and loses its buttons.

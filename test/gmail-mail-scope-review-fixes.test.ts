@@ -14,6 +14,7 @@ import {
   readMailSourceScopeApproval,
   type MailScopeSelection,
 } from '../src/core/mail-source-scope.ts';
+import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import type { SourceConnectorListPage, RawItem } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
@@ -46,6 +47,8 @@ import type { SourceEmbeddingProvider } from '../src/workers/source-index/embedd
 import { withLocalPrivateEmbeddingBackfill } from '../src/workers/source-scheduler.ts';
 import { createGmailConnectorStoreSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { defaultConfig } from '../src/core/config.ts';
+
+const OFFLINE_BROKER = { async issueSession() { throw new Error('Unexpected credential request in offline Gmail fixture'); } } as unknown as CredentialBroker;
 
 const NOW = new Date('2026-09-23T12:00:00.000Z');
 const DAY = 86_400_000;
@@ -116,7 +119,7 @@ function laneFor(
   return createGmailConnectorStoreSyncHandler({
     ...stores,
     account: 'personal',
-    apiClient: client,
+    credentialBroker: OFFLINE_BROKER, apiClient: client,
     env: {},
     internalEmbeddingProvider: input.internal,
     secureEmbeddingProvider: input.secure,
@@ -303,10 +306,12 @@ describe('a dormant mailbox is not re-read forever', () => {
     const cutoffMs = Date.parse('2024-09-23T00:00:00.000Z');
     const client = fakeClient([message('old-1', cutoffMs - 10 * DAY), message('old-2', cutoffMs - 20 * DAY)]);
     const connector = () => new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: {}, scope: { contentAfterMs: cutoffMs }, now: () => NOW.getTime(),
+      credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {}, scope: { contentAfterMs: cutoffMs }, now: () => NOW.getTime(),
     });
     const contentLeg = await collect(connector().listItems({ limit: 50 }));
-    expect(contentLeg.items).toHaveLength(0);
+    expect(contentLeg.items.map((item) => item.identity.providerItemId)).toEqual(['old-1', 'old-2']);
+    expect(contentLeg.items.every((item) => item.content.kind === 'metadata_only')).toBe(true);
+    expect(contentLeg.done).toBe(true);
     const metadataLeg = await collect(connector().listItems({ limit: 50, cursor: contentLeg.cursor! }));
     expect(metadataLeg.done).toBe(true);
     expect(metadataLeg.cursor).toBeDefined();
@@ -364,7 +369,7 @@ describe('skipped labels', () => {
     const chat = { ...message('chat', NOW.getTime() - DAY), labelIds: ['CHAT'] };
     const client = fakeClient([tagged, chat, message('plain', NOW.getTime() - 2 * DAY)]);
     const page = await collect(new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: {}, scope: { skippedLabelIds: ['Label_7', 'CHAT'] },
+      credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {}, scope: { skippedLabelIds: ['Label_7', 'CHAT'] },
     }).listItems({ limit: 50 }));
     expect(page.items.map((item) => item.identity.providerItemId)).toEqual(['plain']);
     const compiled = compileGmailMailScope(withCutoff({
@@ -438,7 +443,7 @@ describe('re-review at 537f909b', () => {
 
     let clock = NOW.getTime();
     const scoped = createGmailConnectorStoreSyncHandler({
-      ...stores, account: 'personal', apiClient: client, env: {}, now: () => clock,
+      ...stores, account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {}, now: () => clock,
       internalEmbeddingProvider: internal, secureEmbeddingProvider: secure,
       scope: { contentAfterMs: NOW.getTime() - 2 * 365 * DAY },
       scopeApproval: { generation: 'g'.repeat(64), revision: 'rev-1' },
@@ -525,7 +530,7 @@ describe('re-review at 537f909b', () => {
       withFrom('lookalike', 'news@notshop.example'),
     ]);
     const page = await collect(new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: {}, scope: { skipSenders: ['@shop.example'] },
+      credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {}, scope: { skipSenders: ['@shop.example'] },
     }).listItems({ limit: 50 }));
     expect(page.items.map((item) => item.identity.providerItemId)).toEqual(['lookalike']);
   });
@@ -593,7 +598,7 @@ describe('delta review at 15d261cb: sender parsing', () => {
       payload: { mimeType: 'text/plain', headers: [{ name: 'Subject', value: 'x' }, { name: 'From', value: from }], body: { data: Buffer.from('Body.').toString('base64url') } },
     };
     const page = await collect(new GoogleGmailSourceConnector({
-      apiClient: fakeClient([mail]), account: 'personal', env: {}, scope: { skipSenders: ['@therapist.example'] },
+      credentialBroker: OFFLINE_BROKER, apiClient: fakeClient([mail]), account: 'personal', env: {}, scope: { skipSenders: ['@therapist.example'] },
     }).listItems({ limit: 50 }));
     expect(page.items).toHaveLength(skipped ? 0 : 1);
   });
@@ -663,7 +668,7 @@ describe('delta review at a201e996: bounded parsing and multi-author From', () =
       ...message('huge', NOW.getTime() - DAY),
       payload: { mimeType: 'text/plain', headers: [{ name: 'Subject', value: 's' }, { name: 'From', value: huge }], body: { data: Buffer.from('b').toString('base64url') } },
     };
-    const page = await collect(new GoogleGmailSourceConnector({ apiClient: fakeClient([mail]), account: 'personal', env: {} }).listItems({ limit: 5 }));
+    const page = await collect(new GoogleGmailSourceConnector({ credentialBroker: OFFLINE_BROKER, apiClient: fakeClient([mail]), account: 'personal', env: {} }).listItems({ limit: 5 }));
     const stored = String(page.items[0]!.metadata.from);
     expect(stored.length).toBe(MAX_FROM_HEADER_CHARS + 1);
     expect(stored.endsWith('…')).toBe(true);
@@ -681,7 +686,7 @@ describe('picker budget', () => {
     const pickerBudget = createGmailPickerRequestBudget({ laneStatePath: lanePath });
     const client = fakeClient(Array.from({ length: 5 }, (_, index) => message(`m-${index}`, NOW.getTime() - index * DAY)));
     await createGmailMailScopeBrowser({
-      credentialHandle: 'gmail.personal', account: 'personal', apiClient: client, env: {}, requestBudget: pickerBudget,
+      credentialHandle: 'gmail.personal', account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {}, requestBudget: pickerBudget,
     }).summarize({ scope: defaultMailScopeSelection(), now: NOW });
     expect(pickerBudget.status().requests).toBe(1 + 5 + 2 + 5);
     expect(pickerBudget.status().dailyRequestBudget).toBe(GMAIL_PICKER_DAILY_REQUEST_BUDGET);
@@ -788,7 +793,7 @@ describe('a reconnect that lands mid-task stops the Gmail traversal before any s
     return createGmailConnectorStoreSyncHandler({
       ...stores,
       account: 'personal',
-      apiClient: client,
+      credentialBroker: OFFLINE_BROKER, apiClient: client,
       env: {},
       internalEmbeddingProvider: recordingProvider('cloud'),
       secureEmbeddingProvider: recordingProvider('local'),

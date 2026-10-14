@@ -342,10 +342,10 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     const cutoffMs = this.scope?.contentAfterMs;
     // The metadata leg exists only under a scope with a cutoff; a phase marker
     // arriving without one is a stale cursor and restarts the content leg.
-    const metadataLeg = !this.scope?.confirmationOnly && resume.phase === 'metadata' && cutoffMs !== undefined;
+    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === 'metadata' && cutoffMs !== undefined;
     const staleLeg = resume.phase === 'metadata' && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
-    const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
     // A scoped first traversal is two legs: full content after the cutoff,
     // then metadata-only before it. Incremental passes read only new mail.
     const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
@@ -473,7 +473,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       const legDone = !pageToken && !pageTruncated;
       // The content leg finishing hands over to the metadata leg instead of
       // ending the traversal; the watermark waits until both legs are read.
-      const enterMetadataLeg = legDone && splitsAtCutoff;
+      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
       const done = legDone && !enterMetadataLeg;
       // A scoped mailbox with nothing new since the cutoff still completes
       // with a watermark (the cutoff), so the next pass asks only for new
@@ -507,10 +507,19 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         ...(nextCursor ? { nextCursor } : {}),
         done,
       };
-      // A page of already-stored mail spends no gets, so the walk continues
-      // to the next page (bounded by the list-page cap) instead of ending the
-      // run on an empty page.
-      if (done || !pageToken || (items.length === 0 && messagesFetched > 0) || pageTruncated) break;
+      // Empty pages can be entirely held or filtered mail, not the end of
+      // the provider walk. Both date legs share this run's get and page
+      // budgets; stopping at their hand-off stranded un-cursored reconciles
+      // on the content leg forever. If the budget expires here, nextCursor
+      // still resumes at the metadata leg on the next pull.
+      if (done || pageTruncated) break;
+      if (enterMetadataLeg) {
+        metadataLeg = true;
+        query = this.metadataLegQuery(cutoffMs);
+        // Gmail page tokens belong to one query, so the other leg gets its
+        // own token history while the shared page budget remains in force.
+        requestedPageTokens.clear();
+      } else if (!pageToken) break;
     }
   }
   /**

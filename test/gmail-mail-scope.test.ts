@@ -35,7 +35,11 @@ import {
 } from '../src/workers/source-scope-runtime.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { SourceScheduler } from '../src/workers/source-scheduler.ts';
+import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
+
+// Provider I/O is injected; constructing a real secret store is outside this fixture.
+const OFFLINE_BROKER = { async issueSession() { throw new Error('Unexpected credential request in offline Gmail fixture'); } } as unknown as CredentialBroker;
 
 const NOW = new Date('2026-09-23T12:00:00.000Z');
 const tempDirs: string[] = [];
@@ -213,6 +217,81 @@ describe('scoped Gmail traversal', () => {
     skippedCategoryLabelIds: ['CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL'],
   };
 
+  test('a tiny scoped reconcile finishes both date legs, including an empty filtered content leg', async () => {
+    const otp = message('otp', cutoffMs + 1_000);
+    otp.payload!.headers = [{ name: 'Subject', value: 'Your verification code is 482910' }];
+    const client = fakeClient([
+      ...Array.from({ length: 9 }, (_, i) => message(`recent-${i}`, cutoffMs + (i + 1) * 86_400_000)),
+      message('older', cutoffMs - 86_400_000),
+      otp,
+    ]);
+    const internalStore = store(GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, 'internal');
+    const secureStore = store(GMAIL_SECURE_CONNECTOR_CORPUS_ID, 'secure_local');
+    const handler = createGmailConnectorStoreSyncHandler({
+      internalStore, secureStore, account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {},
+      scope: connectorScope, scopeApproval: { generation: 'g'.repeat(64), revision: 'tiny-mailbox' },
+    });
+    let seed = await handler.pull({ max_items: 50 });
+    for (let i = 0; i < 3 && seed.receipt.counts.traversal_complete === 0; i++) {
+      seed = await handler.pull({ max_items: 50, checkpoint: seed.checkpoint! });
+    }
+    expect(seed.receipt.counts.traversal_complete).toBe(1);
+    const listsBefore = client.queries.length;
+    const result = await handler.reconcile();
+    // Held mail is deliberately not emitted again; skipped OTP is normal
+    // filtering, not a failure to walk the older-mail partition.
+    expect(result.receipt.counts.items_seen).toBe(0);
+    expect(result.receipt.counts.items_skipped_otp).toBe(1);
+    expect(result.receipt.warnings).toEqual(['gmail_ingest_filtered_items']);
+    expect(result.receipt.counts.traversal_complete).toBe(1);
+    expect(client.queries.slice(listsBefore)).toHaveLength(2);
+    expect(client.queries.at(-1)).toContain('before:');
+    expect(result.receipt.counts.absence_authoritative).toBe(0);
+    expect(result.receipt.counts.internal_items_tombstoned).toBe(0);
+    expect(result.checkpoint).toBeNull();
+  });
+
+  test('a reconcile reaches older unseen mail in the same bounded provider walk', async () => {
+    const client = fakeClient([message('recent', cutoffMs + 1_000), message('older', cutoffMs - 86_400_000)]);
+    const internalStore = store(GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, 'internal');
+    const secureStore = store(GMAIL_SECURE_CONNECTOR_CORPUS_ID, 'secure_local');
+    const handler = createGmailConnectorStoreSyncHandler({
+      internalStore, secureStore, account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {}, scope: connectorScope,
+    });
+    const result = await handler.reconcile();
+    expect(result.receipt.counts.items_seen).toBe(2);
+    expect(result.receipt.counts.traversal_complete).toBe(1);
+    expect(client.formats).toEqual(['full', 'metadata']);
+    expect(internalStore.localContent('personal:older')?.chunks ?? []).toEqual([]);
+  });
+
+  test('a filtered-only provider page does not hide the next page', async () => {
+    const otp = message('otp', cutoffMs + 1_000);
+    otp.payload!.headers = [{ name: 'Subject', value: 'Your verification code is 482910' }];
+    const client = fakeClient([otp, message('personal', cutoffMs + 2_000)]);
+    const list = client.listMessages.bind(client);
+    client.listMessages = (request) => list({ ...request, maxResults: 1 });
+    const connector = new GoogleGmailSourceConnector({ credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {} });
+    const result = await collect(connector.listItems({ limit: 50 }));
+    expect(result.items.map((item) => item.identity.providerItemId)).toEqual(['personal']);
+    expect(result.done).toBe(true);
+    expect(connector.traversalStatus().itemsSkippedOtp).toBe(1);
+  });
+
+  test('date partitions may reuse provider page tokens without losing mail', async () => {
+    const client = fakeClient([
+      message('recent-1', cutoffMs + 1_000), message('recent-2', cutoffMs + 2_000),
+      message('old-1', cutoffMs - 1_000), message('old-2', cutoffMs - 2_000),
+    ]);
+    const list = client.listMessages.bind(client);
+    client.listMessages = (request) => list({ ...request, maxResults: 1 });
+    const connector = new GoogleGmailSourceConnector({ credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {}, scope: connectorScope });
+    const result = await collect(connector.listItems({ limit: 50 }));
+    expect(result.items.map((item) => item.identity.providerItemId)).toEqual(['recent-1', 'recent-2', 'old-1', 'old-2']);
+    expect(result.done).toBe(true);
+    expect(client.pageTokens).toEqual([undefined, '1', undefined, '1']);
+  });
+
   test('recent mail is read in full, older mail metadata-only with no body, and the leg hand-off holds the watermark', async () => {
     const client = fakeClient([
       message('new-1', cutoffMs + 10 * 86_400_000),
@@ -221,9 +300,9 @@ describe('scoped Gmail traversal', () => {
       message('old-2', cutoffMs - 400 * 86_400_000),
     ]);
     const connector = new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope, now: () => NOW.getTime(),
+      credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope, now: () => NOW.getTime(),
     });
-    const contentLeg = await collect(connector.listItems({ limit: 50 }));
+    const contentLeg = await collect(connector.listItems({ limit: 2 }));
     expect(client.queries[0]).toBe(`after:${cutoffMs / 1_000 - 1} -category:promotions -category:social (in:anywhere)`);
     expect(contentLeg.items.map((item) => item.identity.providerItemId)).toEqual(['new-1', 'new-2']);
     for (const item of contentLeg.items) {
@@ -231,11 +310,11 @@ describe('scoped Gmail traversal', () => {
       expect(item.content.kind === 'text' && item.content.text).toContain('Body of');
     }
     expect(client.formats).toEqual(['full', 'full']);
-    // Not done: the metadata-only leg is still owed.
+    // The two-get budget is spent: the metadata-only leg is still owed.
     expect(contentLeg.done).toBe(false);
 
     const metadataLeg = await collect(new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope, now: () => NOW.getTime(),
+      credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope, now: () => NOW.getTime(),
     }).listItems({ limit: 50, cursor: contentLeg.cursor! }));
     expect(client.queries[1]).toBe(`before:${cutoffMs / 1_000} -category:promotions -category:social (in:anywhere)`);
     expect(metadataLeg.items.map((item) => item.identity.providerItemId)).toEqual(['old-1', 'old-2']);
@@ -255,14 +334,14 @@ describe('scoped Gmail traversal', () => {
     // internalDate or the traversal's own start less a day, whichever is
     // later (here the start: the newest message is older than a day).
     await collect(new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: {}, scope: connectorScope, now: () => NOW.getTime(),
+      credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {}, scope: connectorScope, now: () => NOW.getTime(),
     }).listItems({ limit: 50, cursor: metadataLeg.cursor! }));
     expect(client.queries[2]).toBe(`after:${Math.floor((NOW.getTime() - 86_400_000) / 1_000)} -category:promotions -category:social`);
   });
 
   test('a message older than the cutoff that the content query still returns is kept metadata-only', async () => {
     const client = fakeClient([message('boundary', cutoffMs - 1)], { ignoreDates: true });
-    const connector = new GoogleGmailSourceConnector({ apiClient: client, account: 'personal', env: {}, scope: connectorScope });
+    const connector = new GoogleGmailSourceConnector({ credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {}, scope: connectorScope });
     const page = await collect(connector.listItems({ limit: 50 }));
     expect(page.items[0]?.content).toEqual({ kind: 'metadata_only' });
   });
@@ -271,10 +350,10 @@ describe('scoped Gmail traversal', () => {
     const promo = { ...message('promo', cutoffMs + 1_000), labelIds: ['CATEGORY_PROMOTIONS'] };
     const client = fakeClient([promo]);
     const included = await collect(new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: {}, scope: { baseQuery: '-category:social', skippedCategoryLabelIds: ['CATEGORY_SOCIAL'] },
+      credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {}, scope: { baseQuery: '-category:social', skippedCategoryLabelIds: ['CATEGORY_SOCIAL'] },
     }).listItems({ limit: 50 }));
     expect(included.items).toHaveLength(1);
-    const unscoped = await collect(new GoogleGmailSourceConnector({ apiClient: client, account: 'personal', env: {} }).listItems({ limit: 50 }));
+    const unscoped = await collect(new GoogleGmailSourceConnector({ credentialBroker: OFFLINE_BROKER, apiClient: client, account: 'personal', env: {} }).listItems({ limit: 50 }));
     expect(unscoped.items).toHaveLength(0);
   });
 });
@@ -290,7 +369,7 @@ describe('Gmail lane bound to the approval revision', () => {
     const internalStore = store(GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, 'internal');
     const secureStore = store(GMAIL_SECURE_CONNECTOR_CORPUS_ID, 'secure_local');
     const lane = (revision: string) => createGmailConnectorStoreSyncHandler({
-      internalStore, secureStore, account: 'personal', apiClient: client, env: {},
+      internalStore, secureStore, account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {},
       scope: { contentAfterMs: cutoffMs }, scopeApproval: { generation: 'g'.repeat(64), revision },
     });
     const first = await lane('rev-1').pull({ max_items: 2 });
@@ -304,7 +383,7 @@ describe('Gmail lane bound to the approval revision', () => {
     expect(rebound.receipt.counts.resumed_from_checkpoint).toBe(0);
     expect(rebound.receipt.counts.resume_cursor_rejected).toBe(0);
     expect(client.pageTokens[listsBefore]).toBeUndefined();
-    expect(client.queries.at(-1)).toBe(`after:${cutoffMs / 1_000 - 1}`);
+    expect(client.queries[listsBefore]).toBe(`after:${cutoffMs / 1_000 - 1}`);
   });
 
   test('scheduler tasks are keyed to the mail revision and refuse to run once it changes', async () => {
@@ -381,7 +460,7 @@ describe('mail picker summary', () => {
       ...message(`m-${index}`, NOW.getTime() - index * 3_600_000),
       payload: { headers: [{ name: 'From', value: index % 3 === 0 ? 'Bank <no-reply@bank.example>' : `person${index}@example.com` }] },
     })), { estimates: { content: 20_000, metadata: 30_000 } });
-    const browser = createGmailMailScopeBrowser({ credentialHandle: 'gmail.personal', account: 'personal', apiClient: client, env: {} });
+    const browser = createGmailMailScopeBrowser({ credentialHandle: 'gmail.personal', account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {} });
     const summary = await browser.summarize({
       scope: defaultMailScopeSelection(), now: NOW,
     });
