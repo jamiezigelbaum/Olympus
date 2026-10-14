@@ -101,6 +101,7 @@ import {
   queryInitialisms,
   sourceIndexFtsQuery,
   sourceIndexFtsTermGroups,
+  sourceIndexTopicTokens,
   type SourceIndexFtsMigrationSpec,
 } from '../../core/source-index/fts.ts';
 import {
@@ -14758,11 +14759,14 @@ const LOCAL_RELAXED_STOPWORDS = new Set([
   'can', 'could', 'would', 'should', 'please', 'how', 'when', 'where', 'why',
 ]);
 
-/** Literal terms only: neither FTS operators nor lexical expansions enter the retry. */
+/**
+ * Literal terms only: neither FTS operators nor lexical expansions enter the
+ * retry. The shared stopword decision comes first, so words the strict search
+ * deliberately ignores ("show", "files", "saved") never become OR matches.
+ */
 function toRelaxedLocalFtsQuery(query: string): string {
   const terms = new Set<string>();
-  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    const term = match[0];
+  for (const term of sourceIndexTopicTokens(query)) {
     if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term)) continue;
     terms.add(term);
     if (terms.size === 8) break;

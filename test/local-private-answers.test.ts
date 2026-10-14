@@ -405,6 +405,15 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect((await local.answer({ question })).status).toBe('not_found');
   });
 
+  test('the retry never matches on request scaffolding the strict search ignores', async () => {
+    const filesSpec: FixtureSpec = { ...oweSpec, id: 'files', name: 'Saved files.txt', text: 'SENTINEL_FILES: show and find the saved files and documents here.' };
+    const local = await localFixture({ specs: [filesSpec], privateIds: ['files'], keywordOnly: true, answer: oweAnswer });
+    const question = 'show me files about zephyr';
+    expect(await searchPrivateEvidence({ lanes: local.lanes, question })).toEqual({ matched: 0, candidates: [] });
+    expect(await probePrivateMatch({ lanes: local.lanes, request: { question, corpus_ids: [local.fixture.stores.secure_local!.corpusId] }, timeoutMs: 5000 })).toBe('no_match');
+    expect(local.fixture.stores.secure_local!.searchItemsDetailed('show me saved documents', 50, undefined, undefined, { relaxed: true }).rows).toEqual([]);
+  });
+
   test('relaxed search keeps readable content ahead of more than fifty title-only matches', async () => {
     const titles: FixtureSpec[] = Array.from({ length: 60 }, (_, i) => ({ id: `title-${i}`, name: `owe owe owe ${i}.txt`, legacyDomain: 'secure_local' }));
     const specs = [...titles, oweSpec];
