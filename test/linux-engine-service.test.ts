@@ -281,7 +281,7 @@ for (const failure of ['none', 'link', 'start', 'health', 'parent', 'replacement
  },20_000);
 }
 
-for (const failure of [false, true, 'edited'] as const) test(`legacy privacy migration ${failure === 'edited' ? 'preserves later owner edits on recovery' : failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
+for (const failure of [false, true, 'edited', 'new-rule'] as const) test(`legacy privacy migration ${failure === 'new-rule' ? 'preserves newly created tier rules on recovery' : failure === 'edited' ? 'preserves later owner edits on recovery' : failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
  const l=layout();publishLinuxEngineReceipt(l);
  const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
  let original=JSON.stringify({schemaVersion:1,description:'Synthetic health preference',rules:[],updatedAt:'2026-10-14T00:00:00Z'});
@@ -302,8 +302,10 @@ for (const failure of [false, true, 'edited'] as const) test(`legacy privacy mig
  expect(existsSync(join(legacy,'privacy.json'))).toBe(false);
  const read=Bun.spawnSync([process.execPath,'-e',`const { readPrivacyProfile } = await import('./src/workers/classification/privacy-profile.ts');console.log(JSON.stringify(readPrivacyProfile()));`],{env:linuxEngineEnvironment(l),stdout:'pipe',stderr:'pipe'});
  expect(read.exitCode).toBe(0);expect(JSON.parse(read.stdout.toString()).description).toBe('Synthetic health preference');
+ if(failure==='new-rule'){const {writePrivacyProfile}=await import('../src/workers/classification/privacy-profile.ts');writePrivacyProfile({description:'New rule',rules:[{kind:'sender',source_id:'gmail.email',value:'@example.test'}]},{env:linuxEngineEnvironment(l)});original=readFileSync(target,'utf8');}
  if(failure==='edited'){original=JSON.stringify({schemaVersion:1,description:'Updated synthetic preference',rules:[]});writeFileSync(target,original,{mode:0o600});}
  await settleLinuxEngineInstall(options,{ok:!failure,expected_build:result.program.build??null,running_build:result.program.build??null,pid:42,worker:'ok',waited_ms:0});
+ if(failure==='new-rule'){expect(existsSync(join(legacy,'tier-rules.json'))).toBe(true);expect(existsSync(join(l.configDir,'tier-rules.json'))).toBe(false);}
  if(failure){expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe(original);expect(existsSync(target)).toBe(false);}
  else{expect(readFileSync(target,'utf8')).toBe(original);expect(existsSync(legacy)).toBe(false);}
 },30_000);
@@ -325,4 +327,5 @@ test('rollback refuses a previous generation that cannot read receipt-owned priv
  await expect(rollbackEngine({...options,exec,uid:process.getuid!()})).rejects.toThrow('cannot read receipt-owned settings');
  expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);
  expect(readFileSync(l.unitPath,'utf8')).toBe('unit');
+ expect(()=>installEngine({...options,exec,uid:process.getuid!(),fromCheckout:old,bunBin:runtimeAt(l.home)})).toThrow('cannot read receipt-owned settings');
 });

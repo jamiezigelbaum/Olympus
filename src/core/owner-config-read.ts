@@ -16,14 +16,14 @@
 import { readFileSync, statSync, lstatSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { LEGACY_LINUX_POLICY_FILES, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 
 /** Never silently drop a hosted/pre-receipt Linux installation's existing policy. */
 export function linuxOwnerConfigPath(name: string, env: Record<string, string | undefined> = process.env): string | undefined {
   if (process.platform !== 'linux') return undefined;
   const layout = resolveLinuxEngineLayout(env);
-  if (lstatSync(join(layout.home, '.olympus', name), { throwIfNoEntry: false }) && !readLinuxEngineReceipt(layout.receiptPath)) {
-    throw new Error('Legacy Olympus settings exist without an install receipt. Back up and migrate them before using the Linux configuration layout; existing privacy protections were not ignored.');
+  if ([name, ...LEGACY_LINUX_POLICY_FILES].some(file => lstatSync(join(layout.home, '.olympus', file), { throwIfNoEntry: false }))) {
+    throw new Error('Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.');
   }
   return join(layout.configDir, name);
 }

@@ -180,8 +180,8 @@ authoritative; any mismatch falls back to a full main run rather than skipping
 proof.
 
 Linux generations that read settings from the receipt-owned config directory
-advertise `olympus.linuxSettingsLayout = "receipt-v1"`. Rollback refuses older
-generations before stopping the engine, because those readers would silently
+advertise `olympus.linuxSettingsLayout = "receipt-v1"`. Installation and rollback
+refuse older generations before stopping the engine, because those readers would silently
 ignore migrated privacy rules. Failed installation recovery restores settings
 (including later owner edits) to their prior paths before restarting the prior
 engine; successful upgrade removes only empty legacy directories.

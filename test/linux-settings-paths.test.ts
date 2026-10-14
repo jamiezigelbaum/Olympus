@@ -50,12 +50,14 @@ test('dashboard privacy backend saves and reads Linux preferences in the receipt
   expect(JSON.parse(readFileSync(join(layout.configDir, 'privacy.json'), 'utf8')).description).toBe(result.description);
 });
 
-test('Linux without a receipt refuses legacy privacy settings instead of silently ignoring them', () => {
-  const { home, env, layout } = fixture(); rmSync(layout.receiptPath);
+for (const owned of [false, true]) test(`Linux refuses unmigrated privacy settings (receipt: ${owned}) instead of silently ignoring them`, () => {
+  const { home, env, layout } = fixture(); if (!owned) rmSync(layout.receiptPath);
   mkdirSync(join(home, '.olympus'), { mode: 0o700 });
   writeFileSync(join(home, '.olympus/privacy.json'), JSON.stringify({ schemaVersion: 1, description: 'synthetic', rules: [] }), { mode: 0o600 });
   const result = probe(env, `const { readPrivacyProfile } = await import('./src/workers/classification/privacy-profile.ts');
     try { readPrivacyProfile(); console.log(JSON.stringify({ refused: false })); }
     catch { console.log(JSON.stringify({ refused: true })); }`);
   expect(result.refused).toBe(true);
+  const tier = probe(env, `const { loadOwnerTierRules } = await import('./src/workers/classification/tier-rules.ts');try { loadOwnerTierRules({ allowMissing: true });console.log(false); } catch {console.log(true);}`);
+  expect(tier).toBe(true);
 });

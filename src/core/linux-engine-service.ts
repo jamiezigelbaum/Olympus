@@ -104,7 +104,7 @@ export function systemdMust(exec: EngineExec, args: string[]): string {
 
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync, removeFileDurablySync, syncDirectorySync } from './atomic-file.ts';
-import { createLinuxPrivateDirectory, legacyLinuxSettings, isLegacyLinuxSetting, LEGACY_LINUX_SETTINGS_DIRECTORIES, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { createLinuxPrivateDirectory, legacyLinuxSettings, isLegacyLinuxSetting, LEGACY_LINUX_SETTINGS_DIRECTORIES, LEGACY_LINUX_POLICY_FILES, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { engineBuildIdentity, engineServicePaths, reconcileEngineConfig, seedEngineSovereignty, resolveEngineProgram, waitForQuietEngine, waitForEngineHealthy,
  type EngineInstallOptions, type EngineInstallResult, type EngineServiceOptions, type EngineHealthDeps, type EngineHealthProof, type EngineLifecycleCheckpoint, type EngineRollbackResult } from './engine-service.ts';
 import { reapRecordedEngineChildren, readEngineChildren, parseProcessTable } from './engine-children.ts';
@@ -234,6 +234,7 @@ function requireLinuxApprovalTransport(program: EngineProgram): void {
  const manifest=JSON.parse(readFileSync(join(program.workingDirectory,'package.json'),'utf8'));
  if(manifest.olympus?.linuxApprovalTransport !== 'owner-unix-socket-v1') throw new Error('This package does not provide Linux owner-only approval. Install a Linux-enabled Olympus release; the existing service was left running.');
  if(manifest.olympus?.linuxStateCompatibility!==1)throw new Error('This package does not declare Linux state compatibility 1. Installation or rollback was refused before service mutation.');
+ if(manifest.olympus?.linuxSettingsLayout!=='receipt-v1')throw new Error('The selected engine cannot read receipt-owned settings. Installation or rollback was refused before service mutation.');
 }
 
 function hashFile(path: string): string {
@@ -443,11 +444,11 @@ function readInstallTransaction(layout: LinuxEngineLayout): LinuxInstallTransact
    &&/^[0-9a-f]{64}$/.test(snapshot.sha256??'')&&Number.isInteger(snapshot.mode)&&snapshot.mode!>=0&&snapshot.mode!<=0o777));
  const legacy=value.legacySettings;
  if(legacy!==undefined && (!legacy || typeof legacy!=='object' || Array.isArray(legacy)
-  || Object.entries(legacy).some(([name,snapshot],index)=>!isLegacyLinuxSetting(name)||!snapshotValid(snapshot)||!snapshot.present||snapshot.backupPath!==join(backupDir,`file-${10000+index}.backup`)))) throw new Error('Invalid legacy settings recovery journal.');
+  || Object.entries(legacy).some(([name,snapshot],index)=>!isLegacyLinuxSetting(name)||!snapshotValid(snapshot)||(snapshot.present&&snapshot.backupPath!==join(backupDir,`file-${10000+index}.backup`))))) throw new Error('Invalid legacy settings recovery journal.');
  const restore=value.legacyRestoreSettings;
  if(restore!==undefined && (!legacy || !restore || typeof restore!=='object' || Array.isArray(restore)
   || Object.keys(restore).length!==Object.keys(legacy).length
-  || Object.entries(restore).some(([name,snapshot],index)=>!Object.hasOwn(legacy,name)||!snapshotValid(snapshot)||!snapshot.present||snapshot.backupPath!==join(backupDir,`file-${20000+index}.backup`)))) throw new Error('Invalid legacy settings restore journal.');
+  || Object.entries(restore).some(([name,snapshot],index)=>!Object.hasOwn(legacy,name)||!snapshotValid(snapshot)||(snapshot.present&&snapshot.backupPath!==join(backupDir,`file-${20000+index}.backup`))))) throw new Error('Invalid legacy settings restore journal.');
  const createdAllowed=new Set(transactionCreatedFiles(layout));const absent=value?.before?.absentCreatedFiles;
  if (value.schema !== 'olympus.engine.install-transaction.v1'||!['install','rollback'].includes(value.action)|| !['preparing','activating','rollback_required','qualified','recovered'].includes(value.phase)
   ||(value.priorUnitLinks!==undefined&&(!Array.isArray(value.priorUnitLinks)
@@ -520,9 +521,27 @@ function writeTransactionDesktop(layout:LinuxEngineLayout,program:EngineProgram,
 function legacySettingTarget(layout: LinuxEngineLayout, name: string): string {
  return join(layout.configDir, name);
 }
+function legacyOAuthWriterRunning(layout: LinuxEngineLayout, name: string): boolean {
+ if(!name.startsWith('pending-oauth/')||name.endsWith('.tmp'))return false;
+ const request=name.match(/[.]request[.]([0-9]+)[.][0-9]+[.]json$/);
+ let pid:number|undefined;
+ if(request)pid=Number(request[1]);
+ else {
+  let state:{status?:string;pid?:number};
+  try { state=JSON.parse(readFileSync(join(layout.home,'.olympus',name),'utf8')); }
+  catch { throw new Error('A legacy Olympus sign-in state is unreadable. Back it up before retrying the upgrade. Nothing was changed.'); }
+  if(!state || typeof state!=='object')throw new Error('A legacy Olympus sign-in state is invalid. Back it up before retrying the upgrade. Nothing was changed.');
+  if(state.status!=='pending')return false;
+  pid=state.pid;
+ }
+ if(!Number.isSafeInteger(pid)||pid!<=0)throw new Error('A pending legacy sign-in has no writer identity. Back up its state before retrying the upgrade. Nothing was changed.');
+ try { process.kill(pid!,0);return true; } catch(error) { if((error as NodeJS.ErrnoException).code==='ESRCH')return false;throw error; }
+}
 function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
  const files=legacyLinuxSettings(layout);
- for(const name of files){const target=legacySettingTarget(layout,name);assertLinuxManagedPath(target);
+ for(const name of files){
+  if(legacyOAuthWriterRunning(layout,name))throw new Error('Finish or cancel the running Olympus sign-in before upgrading. Nothing was changed.');
+  const target=legacySettingTarget(layout,name);assertLinuxManagedPath(target);
   if(lstatSync(target,{throwIfNoEntry:false}))throw new Error(`Legacy Olympus settings conflict at ${target}; nothing was migrated.`);}
  return files;
 }
@@ -530,9 +549,10 @@ function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
 function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
  const files=assertLegacySettingDestinations(layout); if(!files.length)return;
  const snapshots:Record<string,LinuxFileSnapshot>={};
- for(const [index,name] of files.entries()){
-  const source=join(layout.home,'.olympus',name);
-  snapshots[name]=writeSnapshot(transaction.backupDir,10000+index,readFileSync(source),lstatSync(source).mode&0o777);
+ const tracked=[...files,...LEGACY_LINUX_POLICY_FILES.filter(name=>!files.includes(name)&&!existsSync(legacySettingTarget(layout,name)))];
+ for(const [index,name] of tracked.entries()){
+  const source=join(layout.home,'.olympus',name),present=existsSync(source);
+  snapshots[name]=writeSnapshot(transaction.backupDir,10000+index,present?readFileSync(source):null,present?lstatSync(source).mode&0o777:0o600);
  }
  transaction.legacySettings=snapshots;writeInstallTransaction(layout,transaction);
  for(const name of files){
@@ -559,7 +579,7 @@ function restoreLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInst
    const source=join(layout.home,'.olympus',name),target=legacySettingTarget(layout,name);
    assertLinuxManagedPath(source);assertLinuxManagedPath(target);
    if(existsSync(source)&&hashFile(source)!==original.sha256)throw new Error(`Legacy settings changed at ${source}; retained for recovery.`);
-   const bytes=existsSync(target)?readFileSync(target):snapshotBytes(original)!;
+   const bytes=existsSync(target)?readFileSync(target):snapshotBytes(original);
    snapshots[name]=writeSnapshot(transaction.backupDir,20000+index,bytes,0o600);
   }
   transaction.legacyRestoreSettings=snapshots;writeInstallTransaction(layout,transaction);
@@ -915,7 +935,6 @@ export function stopLinuxEngine(options: EngineServiceOptions & { reap?: EngineC
  const l=linuxLayoutFor(options), exec=options.exec ?? linuxEngineExec; assertInstalled(l);
  return locked(l,()=>{
   assertNoInterruptedInstall(l);
-  assertLegacySettingDestinations(l);
   const before=inspectSystemdEngine(l,exec); assertKnown(before); if(before.active && !before.control_group)throw new Error('Engine cgroup custody is unknown; stop refused.'); waitForQuietEngine(options);
   systemdMust(exec,['disable','--now',SYSTEMD_ENGINE_UNIT]);
   const after=inspectSystemdEngine(l,exec); assertKnown(after);

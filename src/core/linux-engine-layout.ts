@@ -153,6 +153,8 @@ export function linuxEngineEnvironment(layout: LinuxEngineLayout): Record<string
   return { HOME: layout.home, XDG_CONFIG_HOME: layout.configHome, XDG_DATA_HOME: layout.dataHome, XDG_STATE_HOME: layout.stateHome,
     XDG_CACHE_HOME: layout.cacheHome, XDG_RUNTIME_DIR: layout.runtimeHome, OLYMPUS_SOVEREIGNTY_CONFIG: layout.sovereigntyPath };
 }
+export const LEGACY_LINUX_POLICY_FILES = ['privacy.json', 'tier-rules.json', 'consult.json',
+  'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json'] as const;
 /** Files the pre-XDG Linux writers could create. Never adopt an arbitrary tree. */
 export function isLegacyLinuxSetting(name: string): boolean {
   const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
@@ -185,11 +187,6 @@ export function legacyLinuxSettings(layout: LinuxEngineLayout): string[] {
         if (!isLegacyLinuxSetting(name)) throw new Error(`Unrecognized legacy Olympus data: ${child}. Nothing was changed.`);
         assertLinuxManagedPath(child);
         if (info.nlink !== 1) throw new Error(`${child} must be singly linked.`);
-        if (name.startsWith('pending-oauth/')) {
-          if (name.includes('.request.') || JSON.parse(readFileSync(child, 'utf8')).status === 'pending') {
-            throw new Error('Finish or cancel the pending Olympus sign-in before upgrading; its detached writer still owns the legacy state. Nothing was changed.');
-          }
-        }
         files.push(name);
       }
     }
