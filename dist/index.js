@@ -5331,12 +5331,18 @@ var init_local_model_policy = __esm(() => {
 
 // src/core/release-manifest.ts
 import { AsyncLocalStorage } from "node:async_hooks";
-function withheldSourceAnswer(reason) {
-  return { answer: reason, evidence: [] };
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
 }
-var storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.";
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
   storage = new AsyncLocalStorage;
+  withheldAnswers = new WeakSet;
 });
 
 // src/core/sqlite-migrations.ts
@@ -21245,6 +21251,8 @@ class EmailClient {
   }
   async revalidateSourceAnswer(result) {
     if (!result || typeof result !== "object" || typeof result.answer !== "string")
+      return result;
+    if (isWithheldSourceAnswer(result))
       return result;
     const ticket = sourceAnswerTickets.get(result);
     if (!ticket)

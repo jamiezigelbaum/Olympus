@@ -45103,33 +45103,49 @@ function recordReleaseManifest(manifest) {
 function adoptReleaseManifests(into, from) {
   into.manifests.push(...from.manifests);
 }
+function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
+  return !privateNow || constraints.includeSecureLocalContent || postureNow === "allow";
+}
 function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
   if (manifests.length === 0)
     return ANSWER_RELEASE_UNVERIFIED;
-  const inputs = manifests.flatMap((manifest) => manifest.inputs);
+  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
+  const inputs = entries.map(({ input }) => input);
   try {
     const verdicts = check.inputs(inputs);
     if (verdicts.length !== inputs.length)
       return ANSWER_RELEASE_UNVERIFIED;
+    const postureNow = check.secureDerivativeDefault();
     for (const [index, verdict] of verdicts.entries()) {
       if (verdict.tier === "unknown" || verdict.gone)
         return ANSWER_RELEASE_UNVERIFIED;
       if (verdict.tier === "secret")
         return ANSWER_RELEASE_UNVERIFIED;
-      if (verdict.tier === "private" && (ceiling === "personal" || !inputs[index].privateAtAnswer))
+      const { input, constraints } = entries[index];
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
         return ANSWER_BECAME_PRIVATE;
+      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
+        return "Olympus withheld this answer because current settings require approval for Private content.";
+      }
     }
   } catch {
     return ANSWER_RELEASE_UNVERIFIED;
   }
   return;
 }
-function withheldSourceAnswer(reason) {
-  return { answer: reason, evidence: [] };
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
 }
-var storage2, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.";
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var storage2, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
   storage2 = new AsyncLocalStorage4;
+  withheldAnswers = new WeakSet;
 });
 
 // src/core/secret-location-note.ts
@@ -61451,6 +61467,8 @@ class EmailClient {
   }
   async revalidateSourceAnswer(result) {
     if (!result || typeof result !== "object" || typeof result.answer !== "string")
+      return result;
+    if (isWithheldSourceAnswer(result))
       return result;
     const ticket = sourceAnswerTickets.get(result);
     if (!ticket)
@@ -103956,11 +103974,7 @@ function recheckRelease(evidence, manifests, check) {
     return { withhold: REMOTE_ANSWER_UNVERIFIED };
   for (const [index, { input, manifest: manifest2 }] of inputs.entries()) {
     const verdict = verdicts[index];
-    const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
-    if (!privateNow)
-      continue;
-    const releasableNow = manifest2.constraints.includeSecureLocalContent || postureNow === "allow";
-    if (!releasableNow)
+    if (!privateInputReleaseAllowed(input, verdict, manifest2.constraints, postureNow))
       return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
   }
   const dropped = new Set;
@@ -104184,6 +104198,7 @@ var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, 
 var init_remote_result = __esm(() => {
   init_operation_error();
   init_opsec();
+  init_release_manifest();
   init_secret_location_note();
   MAX_ANSWER = 64 * 1024;
   MAX_SENT = 16 * 1024;

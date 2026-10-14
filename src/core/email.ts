@@ -1,4 +1,4 @@
-import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
+import { ANSWER_RELEASE_UNVERIFIED, isWithheldSourceAnswer, withheldSourceAnswer } from './release-manifest.ts';
 import { workerFetch } from './worker-transport.ts';
 import { isSourceIndexReadSurfaceEnabled, type OlympusConfig } from './config.ts';
 import { assertNoRawEmailFields } from './email-policy.ts';
@@ -509,6 +509,8 @@ export class EmailClient {
   /** Current-tier check for an answer collected from a local in-memory job. */
   async revalidateSourceAnswer(result: unknown): Promise<unknown> {
     if (!result || typeof result !== 'object' || typeof (result as { answer?: unknown }).answer !== 'string') return result;
+    // A prior check already removed all source content. Keep its precise reason on collection.
+    if (isWithheldSourceAnswer(result)) return result;
     const ticket = sourceAnswerTickets.get(result);
     if (!ticket) return withheldSourceAnswer('Olympus withheld this answer because the engine did not provide a privacy release ticket. Update Olympus, then ask again.');
     try {

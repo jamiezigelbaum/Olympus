@@ -29312,9 +29312,10 @@ var init_evidence_pack = __esm(() => {
 
 // src/core/release-manifest.ts
 import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-var storage2;
+var storage2, withheldAnswers;
 var init_release_manifest = __esm(() => {
   storage2 = new AsyncLocalStorage4;
+  withheldAnswers = new WeakSet;
 });
 
 // src/core/secret-location-note.ts

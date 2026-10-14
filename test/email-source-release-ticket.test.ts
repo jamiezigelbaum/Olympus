@@ -24,6 +24,34 @@ function client(fetcher: EmailFetch): EmailClient {
 }
 
 describe('stdio release ticket diagnostics', () => {
+  test.each(['private', 'legacy'] as const)('cached Private-derived answer follows current posture and explicit consent (%s)', async (tier) => {
+    let posture: 'allow' | 'approval' = 'allow';
+    let includeSecureLocalContent = false;
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { answer: async () => {
+        recordReleaseManifest({
+          inputs: [{ corpusId: 'secure_local.fixture.files', provider: 'fixture', accountScope: 'personal', providerItemId: 'lease', privateAtAnswer: true }],
+          constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent },
+        });
+        return answer;
+      } },
+      sourceAnswerReleaseCheck: { inputs: (inputs) => inputs.map(() => ({ tier, gone: false })), secureDerivativeDefault: () => posture },
+    });
+    try {
+      const email = client(async (input, init) => worker.fetch(new Request(input, init)));
+      const cached = await email.sourceAnswer({ question: 'fixture?', caller: { surface: 'mcp' } });
+      expect(cached.answer).toBe(answer.answer);
+      posture = 'approval';
+      const withheld = await email.revalidateSourceAnswer(cached);
+      expect(withheld).toEqual({ answer: 'Olympus withheld this answer because current settings require approval for Private content.', evidence: [] });
+      expect(JSON.stringify(withheld)).not.toContain(answer.answer);
+      // Explicit consent in the manifest still permits Private under approval.
+      includeSecureLocalContent = true;
+      const explicit = await email.sourceAnswer({ question: 'fixture?', includeSecureLocalContent: true, caller: { surface: 'mcp' } });
+      expect(explicit.answer).toBe(answer.answer);
+    } finally { worker.close(); }
+  });
+
   test('late collection is withheld with expiry and ask-again instructions', async () => {
     const clock = spyOn(Date, 'now');
     let now = 1_000_000;

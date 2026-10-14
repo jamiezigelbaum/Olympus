@@ -1058,6 +1058,27 @@ describe('over the wire', () => {
 });
 
 describe('local and ChatGPT answer release boundaries', () => {
+  test('stdio preserves the first release check reason when a Personal input becomes Private', async () => {
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { answer: async () => {
+        recordReleaseManifest(manifest([input('garden')]));
+        return leakyAnswer();
+      } },
+      // The input was Personal when read, and is Private by the first release check.
+      sourceAnswerReleaseCheck: fixedCheck('private'),
+    });
+    try {
+      const result = await handleMcpCallTool({ params: { name: 'source_answer', arguments: { question: 'q' } } }, () =>
+        createInProcessOperationContext({
+          config: defaultConfig(), sourceIndexReadEnabled: true,
+          caller: { surface: 'mcp', displayName: 'codex' }, workerFetch: worker.fetch,
+        }));
+      expect(JSON.parse(result.content[0]!.text)).toEqual({
+        answer: 'Olympus withheld this answer because an item became Private.', evidence: [],
+      });
+    } finally { worker.close(); }
+  });
+
   test('stdio MCP returns the whole serialized operation result after the worker verifies its ticket', async () => {
     const worker = createEmailSourceWorker({
       sourceAnswer: { answer: async () => { recordReleaseManifest(manifest([input('garden')])); return leakyAnswer(); } },
