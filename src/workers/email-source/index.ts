@@ -1489,7 +1489,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             return html(renderDashboardLocalPage('keys', {
               url,
               view,
-              options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) },
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+                ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
+              },
             }));
           }
         }

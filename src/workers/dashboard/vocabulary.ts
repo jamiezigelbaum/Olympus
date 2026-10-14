@@ -1709,7 +1709,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   rows: {
     keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
     agents: { title: 'Agents', line: 'Remote access and connected agents' },
-    privateAnswers: { title: 'Private answers', line: 'Questions answered only on this computer' },
+    privateAnswers: { title: 'Private answers', line: 'Private and anonymous answers kept on this computer' },
     connector: { title: 'Build a connector', line: 'For a source Olympus does not have yet' },
   },
   /**
@@ -2311,17 +2311,31 @@ export const DASHBOARD_LOCAL_COPY = {
  * The Private answers page (pages/private-answers.ts; design
  * background-agents.md sections A and B, "Dashboard changes" 1 and 2).
  * Questions are answered by the model built into Olympus, on this computer
- * only. Anonymous answers (zkAPI) sit beneath it, collapsed, as outside help.
+ * only. Anonymous answers have a parallel ask panel; setup lives in Models.
  */
 export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   crumb: 'Private answers',
   title: 'Private answers',
-  intro: 'Answered on this computer by the model built into Olympus. Nothing here leaves this computer.',
+  intro: 'Two ways to ask. Answers stay in your inbox on this computer.',
+  privateIntro: 'Answered by the built-in model on this computer. Nothing leaves.',
+  anonymousIntro: 'Answered by a stronger outside model without your name. Your prepared question leaves this computer, paid through zkAPI.',
+  anonymousAsk: 'Ask anonymously',
+  anonymousPlaceholder: 'Ask with outside help',
+  anonymousNotSetUp: 'Anonymous answers are not set up.',
+  anonymousPending: 'Anonymous question pending',
+  inboxUnavailable: 'The inbox cannot keep another answer right now. Try again later.',
+  inboxBeforeSend: 'The inbox cannot keep this answer right now. Nothing was sent.',
+  anonymousRateLimit: 'Too many questions. Try again later. Nothing was sent.',
+  anonymousFailed: 'Olympus could not answer this question.',
+  goToModels: 'Go to Models',
+  privatePath: 'Private',
+  anonymousPath: 'Anonymous',
+  sent: 'What was sent outside',
   askLabel: 'Ask privately',
   askPlaceholder: 'Ask about your private things',
   ask: 'Ask',
   waitingTitle: 'Private inbox',
-  waitingIntro: 'Questions from your connections, answered here.',
+  waitingIntro: 'Private and anonymous answers, kept on this computer.',
   noneWaiting: 'Your private inbox is empty.',
   olderRemoved: 'Older private answers were removed.',
   delete: 'Delete',

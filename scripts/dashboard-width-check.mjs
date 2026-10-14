@@ -15,14 +15,24 @@ try {
     const page = await browser.newPage({ colorScheme });
     for (const width of [320, 390, 700, 1280]) {
       await page.setViewportSize({ width, height: 1000 });
-      for (const name of ['home', 'keys', 'agents', 'private-answers', 'connector']) {
-        await page.goto(`${base}/dashboard?controls&${name === 'home' ? '' : name}`);
+      for (const name of ['home', 'keys', 'agents', 'private-answers', 'private-answers-on', 'private-answers-opened', 'connector']) {
+        const privatePage = name.startsWith('private-answers');
+        await page.goto(`${base}/dashboard?controls&${privatePage ? 'private-answers&anonymous=' + (name === 'private-answers' ? 'off' : 'on') : name === 'home' ? '' : name}`);
         await page.waitForTimeout(250);
-        if (name === 'private-answers') {
-          await page.locator('textarea').fill('What does my lease say about renewal?');
-          await page.locator('[data-pa-ask] button[type=submit]').click();
-          await page.locator('.paanswer ul').waitFor();
-          assert.equal(await page.locator('.paquestion strong').first().textContent(), 'What does my lease say about renewal?');
+        if (privatePage) {
+          assert.deepEqual(await page.locator('.paasks h3').allTextContents(), ['Ask privately', 'Ask anonymously']);
+          assert.equal(await page.locator('.paasks .paask textarea').count(), 2);
+          assert.equal(await page.locator('[data-pa-path=anonymous] button').isEnabled(), name !== 'private-answers');
+          assert.equal(await page.locator('#anonymous a').getAttribute('href'), '/dashboard?keys#anonymous');
+          if (name === 'private-answers-opened') {
+            await page.locator('#wq_preview_2 [data-pa-read]').click();
+            await page.locator('#wq_preview_2 .paanswer').waitFor();
+            assert.ok((await page.locator('#wq_preview_2 .paout').textContent()).includes('What was sent outside'));
+          }
+          await page.locator('[data-pa-ask]').first().locator('textarea').fill('What does my lease say about renewal?');
+          await page.locator('[data-pa-ask]').first().locator('button[type=submit]').click();
+          await page.locator('[data-pa-ask]').first().locator('.paanswer ul').waitFor();
+          assert.equal(await page.locator('[data-pa-ask]').first().locator('.paquestion strong').textContent(), 'What does my lease say about renewal?');
         }
         if (shots && [390, 1280].includes(width) && ['private-answers', 'home'].includes(name)) {
           await page.screenshot({ path: `${shots}/${name}-${colorScheme}-${width}.png`, fullPage: true });
@@ -47,5 +57,5 @@ try {
     }
     await page.close();
   }
-  console.log('No horizontal overflow: all five dashboard pages, light/dark, 320/390/700/1280px, opened disclosures and long text/code/tables.');
+  console.log('No horizontal overflow: all five dashboard pages plus anonymous on/off/opened states, light/dark, 320/390/700/1280px, opened disclosures and long text/code/tables.');
 } finally { await browser.close(); }

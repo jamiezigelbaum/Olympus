@@ -1,6 +1,7 @@
 /**
  * Private answers inbox, worker private state (owner decision 2026-10-14).
- * Questions retain their exact bounded selectors. A v2 migration adds local
+ * Questions retain their exact bounded selectors; v4 also retains anonymous
+ * replies with the exact sent text and an explicit path. A v2 migration adds local
  * answer text, citation locators, content-free source identities, answered-at
  * and read/unread. Unanswered rows keep the original 20/connection, 50 total,
  * 256 KB and seven-day bounds. Answered rows stay until deletion, including
@@ -30,12 +31,14 @@ import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } 
 import { closeSqliteStore } from './sqlite-store.ts';
 
 export const WAITING_PRIVATE_QUESTIONS_STORE_ID = 'waiting-private-questions';
-export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 3;
+export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 4;
 export const WAITING_PRIVATE_QUESTIONS_FILE_NAME = 'waiting-private-questions.sqlite';
 
 export const WAITING_QUESTION_LIMITS = Object.freeze({
   /** UTF-8 bytes of the question. */
   questionBytes: 2_048,
+  /** Existing on-computer box: up to 2,000 characters, including multibyte text. */
+  localQuestionBytes: 8 * 1024,
   /** UTF-8 bytes of the serialized retrieval selectors (selected items can be long). */
   selectorBytes: 4_096,
   perConnection: 20,
@@ -113,6 +116,7 @@ export interface StoredPrivateAnswer {
 export const CHATGPT_INBOX_GRACE_MS = 30_000;
 
 export interface WaitingQuestion {
+  path?: 'private' | 'anonymous';
   id: string;
   connectionId: string;
   surface: WaitingQuestionSurface;
@@ -146,6 +150,9 @@ export interface WaitingQuestionRef {
 }
 
 export interface WaitingQuestionInput {
+  /** Explicit local asks retain each reply; agent Private matches keep their dedupe. */
+  retainEachAsk?: boolean;
+  path?: 'private' | 'anonymous';
   question: string;
   surface: WaitingQuestionSurface;
   state: WaitingQuestionState;
@@ -184,8 +191,8 @@ export interface WaitingQuestionStore {
   /** Generation fences every completion, retry and invalidation against delete/revoke/re-ask. */
   subscribe(listener: () => void): () => void;
   markRead(ref: WaitingQuestionRef): boolean;
-  reserveAutoAnswer(ref: WaitingQuestionRef): boolean;
-  saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer): boolean;
+  reserveAutoAnswer(ref: WaitingQuestionRef, lane?: 'anonymous'): boolean;
+  saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer, sent?: string): boolean;
   retry(ref: WaitingQuestionRef): boolean;
   invalidate(ref: WaitingQuestionRef): boolean;
   /** Source deletion also clears pending questions, whose dependencies are not yet known. */
@@ -194,6 +201,7 @@ export interface WaitingQuestionStore {
 }
 
 interface QuestionRow {
+  answer_path: string;
   id: string;
   dedupe_key: string;
   connection_id: string;
@@ -381,7 +389,7 @@ export function openWaitingPrivateQuestionStore(
 
     record(ticket: WaitingQuestionTicket, input: WaitingQuestionInput): WaitingQuestionRef | undefined {
       const question = typeof input.question === 'string' ? input.question.trim() : '';
-      if (!question || utf8Length(question) > WAITING_QUESTION_LIMITS.questionBytes) return undefined;
+      if (!question || utf8Length(question) > (input.retainEachAsk ? WAITING_QUESTION_LIMITS.localQuestionBytes : WAITING_QUESTION_LIMITS.questionBytes)) return undefined;
       if (typeof ticket.connectionId !== 'string' || !ticket.connectionId) return undefined;
       if (input.surface !== 'chatgpt' && input.surface !== 'remote') return undefined;
       if (input.state !== 'waiting' && input.state !== 'unchecked') return undefined;
@@ -389,7 +397,7 @@ export function openWaitingPrivateQuestionStore(
       if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes) return undefined;
       const detail: WaitingQuestionDetail = input.detail === 'full' ? 'full' : 'summary';
       const dedupeKey = createHash('sha256')
-        .update(JSON.stringify([ticket.connectionId, selectors, normalizeWaitingQuestion(question)]))
+        .update(JSON.stringify([ticket.connectionId, ...(input.path === 'anonymous' || input.retainEachAsk ? [input.path ?? 'private', randomBytes(16).toString('hex')] : []), selectors, normalizeWaitingQuestion(question)]))
         .digest('hex');
       const at = now();
       // The connection store's word now: a revocation whose own cleanup here
@@ -436,9 +444,9 @@ export function openWaitingPrivateQuestionStore(
           const id = randomBytes(16).toString('base64url');
           db.query(`
             INSERT INTO waiting_questions
-              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?)
-          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at);
+              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === 'anonymous' ? 'anonymous' : 'private');
           ref = { id, generation: 1, connectionId: ticket.connectionId };
         }
         enforceBounds(ticket.connectionId, at);
@@ -455,7 +463,7 @@ export function openWaitingPrivateQuestionStore(
       if (db.query('SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1')
         .get(at - WAITING_QUESTION_LIMITS.ttlMs)) expire(at);
       const columns = options?.includeResults === false
-        ? 'id, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result'
+        ? 'id, connection_id, surface, answer_path, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result'
         : '*';
       const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`)
         .all(now() - WAITING_QUESTION_LIMITS.ttlMs) as QuestionRow[];
@@ -535,13 +543,16 @@ export function openWaitingPrivateQuestionStore(
         .run(ref.id, ref.generation, ref.connectionId).changes > 0;
     },
 
-    reserveAutoAnswer(ref) {
+    reserveAutoAnswer(ref, lane) {
+      // Anonymous agent calls have the same bound without consuming Private
+      // background synthesis slots. Connection ids cannot use this JSON prefix.
+      const budgetKey = lane === 'anonymous' ? JSON.stringify(['anonymous', ref.connectionId]) : ref.connectionId;
       return db.transaction(() => {
         if (!db.query('SELECT 1 FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL')
           .get(ref.id, ref.generation, ref.connectionId)) return false;
         const at = now();
         const budget = db.query('SELECT started_at, attempts FROM auto_answer_budgets WHERE connection_id = ?')
-          .get(ref.connectionId) as { started_at: number; attempts: number } | null;
+          .get(budgetKey) as { started_at: number; attempts: number } | null;
         if (budget && at < budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs && budget.attempts >= WAITING_QUESTION_LIMITS.autoAnswersPerWindow) {
           db.query('UPDATE waiting_questions SET next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ?')
             .run(budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs, ref.id, ref.generation, ref.connectionId);
@@ -549,17 +560,20 @@ export function openWaitingPrivateQuestionStore(
         }
         const fresh = !budget || at >= budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs;
         db.query('INSERT INTO auto_answer_budgets (connection_id, started_at, attempts) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET started_at = excluded.started_at, attempts = excluded.attempts')
-          .run(ref.connectionId, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
+          .run(budgetKey, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
         return true;
       }).immediate();
     },
 
-    saveAnswer(ref, result) {
+    saveAnswer(ref, result, sent) {
       const serialized = JSON.stringify(result);
-      if (utf8Length(serialized) > WAITING_QUESTION_LIMITS.answerBytes) return false;
+      if (utf8Length(serialized) + utf8Length(sent ?? '') > WAITING_QUESTION_LIMITS.answerBytes) return false;
+      if (sent !== undefined && options.isActive) {
+        try { if (!options.isActive(ref.connectionId)) return false; } catch { return false; }
+      }
       return db.transaction(() => {
-        const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
-          .run(serialized, now(), ref.id, ref.generation, ref.connectionId).changes > 0;
+        const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
+          .run(serialized, now(), sent ?? null, ref.id, ref.generation, ref.connectionId).changes > 0;
         if (!changed) return false;
         const rows = db.query('SELECT id, connection_id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC').all() as Array<{ id: string; connection_id: string; bytes: number }>;
         let ownBytes = 0;
@@ -654,6 +668,7 @@ function toQuestion(row: QuestionRow): WaitingQuestion {
   }
   return {
     id: row.id,
+    path: row.answer_path === 'anonymous' ? 'anonymous' : 'private',
     connectionId: row.connection_id,
     surface: row.surface === 'chatgpt' ? 'chatgpt' : 'remote',
     question: row.question,
@@ -716,6 +731,10 @@ function migrations(): SqliteMigration[] {
     up(db) {
       db.exec('CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL)');
     },
+  }, {
+    version: 4,
+    name: 'anonymous_answers_inbox',
+    up(db) { db.exec("ALTER TABLE waiting_questions ADD COLUMN answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private', 'anonymous'))"); },
   }];
 }
 

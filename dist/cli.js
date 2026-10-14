@@ -16340,7 +16340,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     },
     record(ticket, input) {
       const question = typeof input.question === "string" ? input.question.trim() : "";
-      if (!question || utf8Length(question) > WAITING_QUESTION_LIMITS.questionBytes)
+      if (!question || utf8Length(question) > (input.retainEachAsk ? WAITING_QUESTION_LIMITS.localQuestionBytes : WAITING_QUESTION_LIMITS.questionBytes))
         return;
       if (typeof ticket.connectionId !== "string" || !ticket.connectionId)
         return;
@@ -16352,7 +16352,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
         return;
       const detail = input.detail === "full" ? "full" : "summary";
-      const dedupeKey = createHash12("sha256").update(JSON.stringify([ticket.connectionId, selectors, normalizeWaitingQuestion(question)])).digest("hex");
+      const dedupeKey = createHash12("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes9(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
       const at = now();
       let active = false;
       try {
@@ -16386,9 +16386,9 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           const id = randomBytes9(16).toString("base64url");
           db.query(`
             INSERT INTO waiting_questions
-              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?)
-          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at);
+              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === "anonymous" ? "anonymous" : "private");
           ref = { id, generation: 1, connectionId: ticket.connectionId };
         }
         enforceBounds(ticket.connectionId, at);
@@ -16400,7 +16400,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       const at = now();
       if (db.query("SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1").get(at - WAITING_QUESTION_LIMITS.ttlMs))
         expire(at);
-      const columns = options2?.includeResults === false ? "id, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result" : "*";
+      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result" : "*";
       const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`).all(now() - WAITING_QUESTION_LIMITS.ttlMs);
       const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
       return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
@@ -16465,27 +16465,36 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     markRead(ref) {
       return db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NOT NULL").run(ref.id, ref.generation, ref.connectionId).changes > 0;
     },
-    reserveAutoAnswer(ref) {
+    reserveAutoAnswer(ref, lane) {
+      const budgetKey = lane === "anonymous" ? JSON.stringify(["anonymous", ref.connectionId]) : ref.connectionId;
       return db.transaction(() => {
         if (!db.query("SELECT 1 FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").get(ref.id, ref.generation, ref.connectionId))
           return false;
         const at = now();
-        const budget = db.query("SELECT started_at, attempts FROM auto_answer_budgets WHERE connection_id = ?").get(ref.connectionId);
+        const budget = db.query("SELECT started_at, attempts FROM auto_answer_budgets WHERE connection_id = ?").get(budgetKey);
         if (budget && at < budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs && budget.attempts >= WAITING_QUESTION_LIMITS.autoAnswersPerWindow) {
           db.query("UPDATE waiting_questions SET next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ?").run(budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs, ref.id, ref.generation, ref.connectionId);
           return false;
         }
         const fresh = !budget || at >= budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs;
-        db.query("INSERT INTO auto_answer_budgets (connection_id, started_at, attempts) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET started_at = excluded.started_at, attempts = excluded.attempts").run(ref.connectionId, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
+        db.query("INSERT INTO auto_answer_budgets (connection_id, started_at, attempts) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET started_at = excluded.started_at, attempts = excluded.attempts").run(budgetKey, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
         return true;
       }).immediate();
     },
-    saveAnswer(ref, result) {
+    saveAnswer(ref, result, sent) {
       const serialized = JSON.stringify(result);
-      if (utf8Length(serialized) > WAITING_QUESTION_LIMITS.answerBytes)
+      if (utf8Length(serialized) + utf8Length(sent ?? "") > WAITING_QUESTION_LIMITS.answerBytes)
         return false;
+      if (sent !== undefined && options.isActive) {
+        try {
+          if (!options.isActive(ref.connectionId))
+            return false;
+        } catch {
+          return false;
+        }
+      }
       return db.transaction(() => {
-        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), ref.id, ref.generation, ref.connectionId).changes > 0;
+        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, ref.id, ref.generation, ref.connectionId).changes > 0;
         if (!changed)
           return false;
         const rows = db.query("SELECT id, connection_id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC").all();
@@ -16568,6 +16577,7 @@ function toQuestion(row) {
   }
   return {
     id: row.id,
+    path: row.answer_path === "anonymous" ? "anonymous" : "private",
     connectionId: row.connection_id,
     surface: row.surface === "chatgpt" ? "chatgpt" : "remote",
     question: row.question,
@@ -16629,6 +16639,12 @@ function migrations() {
     up(db) {
       db.exec("CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL)");
     }
+  }, {
+    version: 4,
+    name: "anonymous_answers_inbox",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private', 'anonymous'))");
+    }
   }];
 }
 function hardenPrivatePath(dbPath) {
@@ -16651,11 +16667,12 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 3, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 4, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
   WAITING_QUESTION_LIMITS = Object.freeze({
     questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
     selectorBytes: 4096,
     perConnection: 20,
     total: 50,
@@ -72292,7 +72309,7 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      privateAnswers: { title: "Private answers", line: "Questions answered only on this computer" },
+      privateAnswers: { title: "Private answers", line: "Private and anonymous answers kept on this computer" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
@@ -72732,12 +72749,26 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_PRIVATE_ANSWERS_COPY = {
     crumb: "Private answers",
     title: "Private answers",
-    intro: "Answered on this computer by the model built into Olympus. Nothing here leaves this computer.",
+    intro: "Two ways to ask. Answers stay in your inbox on this computer.",
+    privateIntro: "Answered by the built-in model on this computer. Nothing leaves.",
+    anonymousIntro: "Answered by a stronger outside model without your name. Your prepared question leaves this computer, paid through zkAPI.",
+    anonymousAsk: "Ask anonymously",
+    anonymousPlaceholder: "Ask with outside help",
+    anonymousNotSetUp: "Anonymous answers are not set up.",
+    anonymousPending: "Anonymous question pending",
+    inboxUnavailable: "The inbox cannot keep another answer right now. Try again later.",
+    inboxBeforeSend: "The inbox cannot keep this answer right now. Nothing was sent.",
+    anonymousRateLimit: "Too many questions. Try again later. Nothing was sent.",
+    anonymousFailed: "Olympus could not answer this question.",
+    goToModels: "Go to Models",
+    privatePath: "Private",
+    anonymousPath: "Anonymous",
+    sent: "What was sent outside",
     askLabel: "Ask privately",
     askPlaceholder: "Ask about your private things",
     ask: "Ask",
     waitingTitle: "Private inbox",
-    waitingIntro: "Questions from your connections, answered here.",
+    waitingIntro: "Private and anonymous answers, kept on this computer.",
     noneWaiting: "Your private inbox is empty.",
     olderRemoved: "Older private answers were removed.",
     delete: "Delete",
@@ -106907,174 +106938,6 @@ var init_remote_relay_runtime = __esm(() => {
   init_remote_access();
 });
 
-// src/core/update-check.ts
-import { readFileSync as readFileSync59 } from "node:fs";
-import { join as join88 } from "node:path";
-function installerForPlatform(platform2) {
-  if (platform2 === "darwin")
-    return {
-      url: "https://olympusplugin.ai/install.sh",
-      command: "curl -fsSL https://olympusplugin.ai/install.sh | sh"
-    };
-  if (platform2 === "linux")
-    return {
-      url: "https://olympusplugin.ai/install-linux.sh",
-      command: "curl -fsSL https://olympusplugin.ai/install-linux.sh | sh"
-    };
-  return;
-}
-function semver(version2) {
-  if (version2.length > 64 || !VERSION_PATTERN.test(version2))
-    return;
-  const [core2, suffix] = version2.split("-");
-  const numbers = core2.split(".");
-  const pre = suffix?.split(".") ?? [];
-  if ([...numbers, ...pre.filter((part) => /^\d+$/.test(part))].some((part) => part.length > 1 && part.startsWith("0")))
-    return;
-  return { core: numbers.map(BigInt), pre };
-}
-function parseInstallerVersion(script2) {
-  if (new TextEncoder().encode(script2).byteLength > UPDATE_MAX_BYTES)
-    return;
-  const version2 = /^OLYMPUS_VERSION=([^\r\n]*)\r?$/m.exec(script2)?.[1];
-  return version2 && semver(version2) ? version2 : undefined;
-}
-function newerVersion(remote, running) {
-  const next = semver(remote);
-  const current2 = semver(running);
-  if (!next || !current2 || current2.pre.length === 0 && next.pre.length > 0)
-    return false;
-  for (let i = 0;i < 3; i++) {
-    if (next.core[i] !== current2.core[i])
-      return next.core[i] > current2.core[i];
-  }
-  if (next.pre.length === 0 || current2.pre.length === 0)
-    return next.pre.length === 0 && current2.pre.length > 0;
-  for (let i = 0;i < Math.max(next.pre.length, current2.pre.length); i++) {
-    const a = next.pre[i], b = current2.pre[i];
-    if (a === undefined || b === undefined)
-      return b === undefined;
-    if (a === b)
-      continue;
-    const an = /^\d+$/.test(a), bn = /^\d+$/.test(b);
-    return an && bn ? BigInt(a) > BigInt(b) : an !== bn ? !an : a > b;
-  }
-  return false;
-}
-function runningOlympusVersion() {
-  try {
-    const value2 = JSON.parse(readFileSync59(join88(olympusPackageRoot(), "package.json"), "utf8")).version;
-    return typeof value2 === "string" ? value2 : "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-function createUpdateChecker(options) {
-  const installer = installerForPlatform(options.platform);
-  const schedule = options.schedule ?? ((callback, delay2) => {
-    const timer = setTimeout(callback, delay2);
-    timer.unref();
-    return () => clearTimeout(timer);
-  });
-  let result;
-  let cancelTimer;
-  let controller;
-  let started = false;
-  let stopped = false;
-  const proxied = () => ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].some((key2) => Boolean(options.env[key2]?.trim()));
-  const off = (value2) => ["off", "0", "false", "no"].includes(value2?.trim().toLowerCase() ?? "");
-  const enabled = () => Boolean(installer) && !proxied() && !off(options.env.OLYMPUS_UPDATE_CHECK) && !off(options.fileEnv()?.OLYMPUS_UPDATE_CHECK);
-  async function check() {
-    if (controller)
-      return;
-    let reader;
-    let timeout;
-    try {
-      if (stopped || !enabled()) {
-        result = undefined;
-        return;
-      }
-      controller = new AbortController;
-      timeout = setTimeout(() => controller?.abort(), options.timeoutMs ?? UPDATE_TIMEOUT_MS);
-      const response = await (options.fetchImpl ?? fetch)(installer.url, {
-        method: "GET",
-        headers: { "User-Agent": "Olympus" },
-        credentials: "omit",
-        redirect: "error",
-        signal: controller.signal
-      });
-      reader = response.body?.getReader();
-      if (!response.ok || Number(response.headers.get("content-length")) > UPDATE_MAX_BYTES || !reader)
-        throw new Error("unavailable");
-      const chunks2 = [];
-      let size = 0;
-      for (;; ) {
-        const { done, value: value2 } = await reader.read();
-        if (done)
-          break;
-        size += value2.byteLength;
-        if (size > UPDATE_MAX_BYTES)
-          throw new Error("oversized");
-        chunks2.push(value2);
-      }
-      const bytes = new Uint8Array(size);
-      let offset = 0;
-      for (const chunk of chunks2) {
-        bytes.set(chunk, offset);
-        offset += chunk.length;
-      }
-      const version2 = parseInstallerVersion(new TextDecoder().decode(bytes));
-      result = !stopped && enabled() && version2 && newerVersion(version2, options.runningVersion) ? { version: version2 } : undefined;
-    } catch {
-      result = undefined;
-      try {
-        options.debug?.("[update] check unavailable");
-      } catch {}
-    } finally {
-      if (timeout)
-        clearTimeout(timeout);
-      reader?.cancel().catch(() => {
-        return;
-      });
-      controller = undefined;
-    }
-  }
-  function tick() {
-    check().finally(() => {
-      if (!stopped)
-        cancelTimer = schedule(tick, 86400000 * (0.95 + (options.random ?? Math.random)() * 0.1));
-    });
-  }
-  return {
-    check,
-    available() {
-      try {
-        return enabled() && !stopped ? result : undefined;
-      } catch {
-        return;
-      }
-    },
-    start() {
-      if (started || stopped || !installer)
-        return;
-      started = true;
-      cancelTimer = schedule(tick, 120000);
-    },
-    stop() {
-      stopped = true;
-      result = undefined;
-      cancelTimer?.();
-      controller?.abort();
-    }
-  };
-}
-var VERSION_PATTERN, UPDATE_MAX_BYTES, UPDATE_TIMEOUT_MS = 1e4;
-var init_update_check = __esm(() => {
-  init_package_root();
-  VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
-  UPDATE_MAX_BYTES = 512 * 1024;
-});
-
 // src/workers/source-index/built-in-reasoning/manifest.ts
 function unslothQwen(size, revision, bytes, sha2565) {
   const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
@@ -107211,7 +107074,7 @@ import {
   existsSync as existsSync58,
   mkdirSync as mkdirSync43,
   openSync as openSync17,
-  readFileSync as readFileSync60,
+  readFileSync as readFileSync59,
   readdirSync as readdirSync14,
   renameSync as renameSync17,
   rmSync as rmSync21,
@@ -107221,33 +107084,33 @@ import {
   writeSync as writeSync5
 } from "node:fs";
 import { homedir as homedir54 } from "node:os";
-import { dirname as dirname63, isAbsolute as isAbsolute25, join as join89 } from "node:path";
+import { dirname as dirname63, isAbsolute as isAbsolute25, join as join88 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
     root,
-    modelDir: join89(root, model.modelId),
+    modelDir: join88(root, model.modelId),
     runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
-    statusPath: join89(root, "status.json"),
-    lockPath: join89(root, "install.lock"),
-    runtimeLockPath: join89(root, "runtime.lock")
+    statusPath: join88(root, "status.json"),
+    lockPath: join88(root, "install.lock"),
+    runtimeLockPath: join88(root, "runtime.lock")
   };
 }
 function builtInReasoningRoot(env) {
-  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join89(olympusModelsDir(env), "built-in-reasoning");
+  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join88(olympusModelsDir(env), "built-in-reasoning");
   if (!isAbsolute25(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return root;
 }
 function olympusModelsDir(env = process.env) {
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join89(env.HOME?.trim() || homedir54(), ".local", "share");
-  return join89(standaloneLinuxDataDir(env) ?? join89(dataRoot, "openclaw", "olympus"), "models");
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join88(env.HOME?.trim() || homedir54(), ".local", "share");
+  return join88(standaloneLinuxDataDir(env) ?? join88(dataRoot, "openclaw", "olympus"), "models");
 }
 function llamaServerRuntimeDir(env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  return join89(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
+  return join88(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
 }
 function llamaServerRuntimeLockPath(env = process.env) {
-  return join89(builtInReasoningRoot(env), "runtime.lock");
+  return join88(builtInReasoningRoot(env), "runtime.lock");
 }
 function currentPlatform2() {
   return `${process.platform}-${process.arch}`;
@@ -107266,7 +107129,7 @@ function readPinnedModelStatus(statusPath, modelId, noun) {
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync60(statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync59(statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -107289,7 +107152,7 @@ async function installPinnedModel(options) {
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
   const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
-  const files = bundle.files.map((file) => ({ file, path: join89(paths.modelDir, file.name) }));
+  const files = bundle.files.map((file) => ({ file, path: join88(paths.modelDir, file.name) }));
   const filesPresent = () => files.every(({ path }) => existsSync58(path));
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
@@ -107443,7 +107306,7 @@ function reportPinnedModelState(target, state, failure2) {
 function findServerBinary(runtimeDir) {
   const marker = readRuntimeMarker(runtimeDir);
   if (marker?.serverPath)
-    return join89(runtimeDir, marker.serverPath);
+    return join88(runtimeDir, marker.serverPath);
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
 async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
@@ -107463,20 +107326,20 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync60(join89(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync59(join88(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
 }
 function runtimeInstalled2(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync58(join89(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync58(join88(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
   const staging = `${runtimeDir}.staging-${randomUUID24()}`;
   ensureDirectory2(staging);
   try {
-    const archivePath = join89(staging, archive.name);
+    const archivePath = join88(staging, archive.name);
     await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
@@ -107493,7 +107356,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync21(join89(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync21(join88(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync21(runtimeDir, { recursive: true, force: true });
     renameSync17(staging, runtimeDir);
@@ -107516,14 +107379,14 @@ function extractWithTar(archivePath, targetDir) {
 function locateFile(root, name, depth2 = 0, prefix = "") {
   let entries;
   try {
-    entries = readdirSync14(join89(root, prefix));
+    entries = readdirSync14(join88(root, prefix));
   } catch {
     return;
   }
   if (entries.includes(name)) {
     const relative9 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync28(join89(root, relative9)).isFile())
+      if (statSync28(join88(root, relative9)).isFile())
         return relative9;
     } catch {}
   }
@@ -107532,7 +107395,7 @@ function locateFile(root, name, depth2 = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync28(join89(root, child)).isDirectory())
+      if (!statSync28(join88(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -107617,7 +107480,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
 }
 function lockHolder(lockPath) {
   try {
-    return JSON.parse(readFileSync60(lockPath, "utf8"));
+    return JSON.parse(readFileSync59(lockPath, "utf8"));
   } catch {
     return;
   }
@@ -107647,7 +107510,7 @@ function tryAcquireLock2(lockPath, token) {
 }
 function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync60(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync59(lockPath, "utf8"));
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
@@ -108369,6 +108232,1386 @@ var init_analyst_built_in = __esm(() => {
   utf82 = new TextEncoder;
 });
 
+// src/workers/chatgpt/private-answer-contract.ts
+async function checkPrivateEvidence(guard, items) {
+  if (items.length === 0)
+    return [];
+  if (!guard)
+    return items.map(() => false);
+  let answer;
+  try {
+    answer = await guard(items);
+  } catch {
+    return items.map(() => false);
+  }
+  if (!Array.isArray(answer) || answer.length !== items.length)
+    return items.map(() => false);
+  return answer.map((value2) => value2 === true);
+}
+var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, PRIVATE_ANSWER_NONE_META, NoPrivateEvidenceError;
+var init_private_answer_contract = __esm(() => {
+  PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
+  PRIVATE_ANSWER_NONE_META = Object.freeze({ v: 1, count: 0, state: "none" });
+  NoPrivateEvidenceError = class NoPrivateEvidenceError extends Error {
+    constructor() {
+      super("no private evidence may be read");
+      this.name = "NoPrivateEvidenceError";
+    }
+  };
+});
+
+// src/workers/chatgpt/private-answer-model.ts
+var exports_private_answer_model = {};
+__export(exports_private_answer_model, {
+  withoutRepeatedSentences: () => withoutRepeatedSentences,
+  withoutRepeatedEntries: () => withoutRepeatedEntries,
+  withoutEvidenceMarkers: () => withoutEvidenceMarkers,
+  privateEvidenceItems: () => privateEvidenceItems,
+  privateEvidence: () => privateEvidence,
+  panelSelection: () => panelSelection,
+  panelItems: () => panelItems,
+  leadingCount: () => leadingCount,
+  embeddingPanelRelevance: () => embeddingPanelRelevance,
+  createBuiltInPrivateAnswerModel: () => createBuiltInPrivateAnswerModel,
+  citedVersionNote: () => citedVersionNote,
+  PANEL_ANSWER_LIMITS: () => PANEL_ANSWER_LIMITS
+});
+function createBuiltInPrivateAnswerModel(options) {
+  const { model } = options;
+  const limits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
+  return {
+    status() {
+      if (!model)
+        return { state: "no_model" };
+      if (options.available())
+        return { state: "ready" };
+      let status;
+      try {
+        status = model.status();
+      } catch {
+        return { state: "no_model" };
+      }
+      if (status.state === "downloading" || status.state === "verifying" || status.state === "loading") {
+        return { state: "model_downloading", ...Number.isFinite(status.percent) ? { percent: status.percent } : {} };
+      }
+      return { state: "no_model" };
+    },
+    async answerPrivately(question, evidence, signal, observe, request) {
+      const full = request?.detail === "full";
+      if (!model)
+        throw new Error("no private answer model");
+      const read = privateEvidence(evidence, limits.maxPassageChars);
+      let unreadable = read.unreadable;
+      const readableHits = new Set(read.sources);
+      const unreadableHits = evidence.filter((hit, index) => !readableHits.has(index) && hit.neighbour !== true);
+      const hitOf = (index) => evidence[read.sources[index]];
+      const admit = async (indexes) => {
+        const ok = await checkPrivateEvidence(options.eligible, indexes.map(hitOf));
+        return indexes.filter((_, position) => ok[position]);
+      };
+      let live = read.items.map((_, index) => index);
+      let scores;
+      if (options.relevance && live.length > 1) {
+        const offered = live;
+        let admitted;
+        let raw;
+        try {
+          raw = await options.relevance(question, async () => {
+            admitted = await admit(offered);
+            const kept = new Set(admitted);
+            return offered.map((index) => {
+              if (!kept.has(index))
+                return;
+              const item = read.items[index];
+              return { ...item.title ? { title: item.title } : {}, text: item.text };
+            });
+          }, signal);
+        } catch {
+          raw = undefined;
+        }
+        if (admitted)
+          live = admitted;
+        if (raw && raw.length === offered.length) {
+          const byIndex = new Map(offered.map((index, position) => [index, raw[position]]));
+          const kept = live.map((index) => byIndex.get(index));
+          scores = kept.every((score) => Number.isFinite(score)) ? kept : undefined;
+        }
+      }
+      const liveRead = {
+        items: live.map((index) => read.items[index]),
+        neighbours: live.map((index) => hitOf(index).neighbour === true)
+      };
+      const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
+      let picked = selection.items.map((position) => live[position]);
+      const deepItems = new Map;
+      if (options.readItem && picked.length > 0) {
+        picked = await admit(picked);
+        const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits.deepEvidenceChars : selection.leading ? limits.leadingEvidenceChars : limits.summaryEvidenceChars, options.readItem, signal);
+        const kept = deep.flatMap((item, position) => item ? [{ item, index: picked[position] }] : []);
+        picked = kept.map((entry) => entry.index);
+        for (const entry of kept)
+          deepItems.set(entry.index, entry.item);
+      }
+      const hadReadable = read.items.length > 0;
+      const readableMatch = read.sources.some((source) => evidence[source].neighbour !== true);
+      const siblings = unreadVersions(live, picked, (index) => read.items[index]);
+      let eligibleSiblings = [];
+      {
+        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
+        eligibleSiblings = siblings.filter((_, position) => ok[picked.length + position]);
+        picked = picked.filter((_, position) => ok[position]);
+        unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
+      }
+      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0))
+        throw new NoPrivateEvidenceError;
+      const items = picked.map((index) => deepItems.get(index) ?? read.items[index]);
+      try {
+        observe?.evidence?.({
+          items: items.length,
+          unreadable,
+          bytes: items.reduce((sum2, item) => sum2 + utf8Bytes2(item.text), 0),
+          used: [...picked, ...eligibleSiblings].map((index) => read.sources[index])
+        });
+      } catch {}
+      if (items.length === 0) {
+        if (unreadable === 0)
+          throw new Error("no private evidence");
+        return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
+      }
+      const prompted = picked.map(hitOf);
+      let revoked = false;
+      const guarded = {
+        name: model.name,
+        spec: model.spec,
+        prepare: () => model.prepare(),
+        status: () => model.status(),
+        stop: () => model.stop(),
+        async complete(modelRequest) {
+          const guard = async () => {
+            const ok = await checkPrivateEvidence(options.eligible, prompted);
+            if (!ok.every(Boolean)) {
+              revoked = true;
+              throw new NoPrivateEvidenceError;
+            }
+          };
+          return runWithLocalInferenceGuard(guard, async () => {
+            await guard();
+            return model.complete(modelRequest);
+          });
+        }
+      };
+      let result;
+      try {
+        result = await options.answer(question, items, {
+          model: guarded,
+          maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
+          maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
+          audit: limits.audit,
+          evidenceFormat: "compact",
+          ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
+          ...signal ? { signal } : {}
+        });
+      } catch (error2) {
+        if (revoked)
+          throw new NoPrivateEvidenceError;
+        throw error2;
+      }
+      if (revoked)
+        throw new NoPrivateEvidenceError;
+      const byId = new Map(items.map((item, position) => [item.id, { item, hit: hitOf(picked[position]) }]));
+      const citations = [];
+      const seen = new Set;
+      for (const citation of result.citations) {
+        if (seen.has(citation.id))
+          continue;
+        seen.add(citation.id);
+        const entry = byId.get(citation.id);
+        if (!entry)
+          continue;
+        const item = entry.item;
+        const title = citation.title ?? item?.title;
+        let links;
+        try {
+          links = entry?.hit && options.sourceLinks ? options.sourceLinks(entry.hit) : undefined;
+        } catch {
+          links = undefined;
+        }
+        citations.push({
+          ...title ? { title } : {},
+          ...item?.source ? { source: item.source } : {},
+          ...item?.date ? { date: item.date } : {},
+          ...links?.url ? { url: links.url } : {},
+          ...links?.localPath ? { localPath: links.localPath } : {}
+        });
+      }
+      const unanswered = withoutRepeatedEntries(result.unanswered);
+      if (unreadable > 0)
+        unanswered.push(unreadableNote(unreadable));
+      const answerText = withoutRepeatedSentences(withoutEvidenceMarkers(result.answer));
+      const versionNote = citedVersionNote([...picked, ...eligibleSiblings].map((index) => read.items[index]), result.citations.map((citation) => citation.id));
+      return {
+        answer: versionNote ? `${answerText} ${versionNote}` : answerText,
+        citations,
+        unanswered
+      };
+    },
+    async reset() {
+      await model?.stop();
+    }
+  };
+}
+function citedVersionNote(items, citedIds) {
+  const groups = evidenceVersionGroups(items.map(versionText));
+  const cited = new Set(citedIds);
+  for (const group of groups) {
+    const members = group.map((index) => items[index]);
+    const used = members.filter((item) => cited.has(item.id));
+    if (used.length === 0 || members.some((item) => !Number.isFinite(evidenceDateValue(item.date))))
+      continue;
+    const label = versionDateLabel(members.map((item) => item.date));
+    const newest = members[0];
+    if (used.includes(newest)) {
+      return `Several versions of ${quoteTitle(newest)} were found; this answer uses the newest, saved ${label(newest.date)}.`;
+    }
+    return `This answer uses an older version of ${quoteTitle(used[0])}, saved ${label(used[0].date)}; the newest version was saved ${label(newest.date)}.`;
+  }
+  return;
+}
+function versionText(item) {
+  return { text: item.text, ...item.date ? { date: item.date } : {}, ...item.family ? { family: item.family } : {} };
+}
+function unreadVersions(live, picked, itemAt) {
+  const chosen = new Set(picked);
+  const out = [];
+  for (const group of evidenceVersionGroups(live.map((index) => versionText(itemAt(index))))) {
+    const members = group.map((position) => live[position]);
+    if (!members.some((index) => chosen.has(index)))
+      continue;
+    for (const index of members)
+      if (!chosen.has(index))
+        out.push(index);
+  }
+  return out;
+}
+function quoteTitle(item) {
+  return item.title ? `“${item.title}”` : "this document";
+}
+function versionDateLabel(dates) {
+  const day = (date4) => new Date(Date.parse(date4)).toISOString().slice(0, 10);
+  const sameDay = new Set(dates.map(day)).size < dates.length;
+  return (date4) => {
+    const at = new Date(Date.parse(date4));
+    const text2 = at.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+    return sameDay ? `${text2}, ${at.toISOString().slice(11, 16)} UTC` : text2;
+  };
+}
+function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
+  const items = [];
+  const sources = [];
+  let unreadable = 0;
+  hits.forEach((hit, index) => {
+    const provenance = record4(hit.provenance);
+    const sourceItem = record4(hit.sourceItem) ?? record4(provenance?.sourceItem);
+    const citation = record4(provenance?.citation);
+    const content = record4(hit.internalContent);
+    const title = string4(citation?.title) ?? string4(hit.title);
+    const chunks2 = Array.isArray(hit.chunks) ? hit.chunks.filter((chunk) => typeof chunk === "string" && chunk.trim() !== "").map((chunk) => chunk.trim()) : [];
+    const passage = (chunks2.length > 0 ? chunks2.join(`
+…
+`) : undefined) ?? string4(content?.passage) ?? string4(hit.excerpt) ?? string4(hit.text);
+    const text2 = passage?.slice(0, maxPassageChars);
+    if (!text2) {
+      unreadable += 1;
+      return;
+    }
+    const id = string4(sourceItem?.localItemId) ?? string4(sourceItem?.providerItemId) ?? `item-${index + 1}`;
+    const locator = string4(hit.locator) ?? string4(citation?.uri) ?? string4(content?.url);
+    const source = string4(citation?.sourceLabel) ?? string4(sourceItem?.provider);
+    const date4 = string4(citation?.authoredAt) ?? string4(content?.authoredAt) ?? string4(citation?.updatedAt);
+    const family = string4(sourceItem?.family);
+    sources.push(index);
+    items.push({
+      id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
+      text: text2,
+      ...title ? { title } : {},
+      ...locator ? { locator } : {},
+      ...source ? { source } : {},
+      ...date4 ? { date: date4 } : {},
+      ...family ? { family } : {}
+    });
+  });
+  return { items, unreadable, sources };
+}
+async function panelItems(question, read, limits, relevance, signal) {
+  return (await panelSelection(question, read, limits, relevance, signal)).items;
+}
+async function panelSelection(question, read, limits, relevance, signal) {
+  const max = Math.max(1, limits.maxItems);
+  const maxLeading = Math.max(0, Math.floor(limits.maxLeadingItems ?? 0));
+  const isNeighbour = (index) => read.neighbours?.[index] === true;
+  const all = read.items.map((_, index) => index);
+  const matches2 = all.filter((index) => !isNeighbour(index));
+  if (matches2.length === 0)
+    return { items: [], leading: false };
+  if (all.length === 1)
+    return { items: all, leading: maxLeading > 0 };
+  let scores;
+  if (relevance) {
+    try {
+      scores = await relevance(question, async () => read.items.map((item) => ({ ...item.title ? { title: item.title } : {}, text: item.text })), signal);
+    } catch {
+      scores = undefined;
+    }
+  }
+  const versions2 = evidenceVersions(read.items.map(versionText));
+  const groupOf = new Map;
+  for (const group of versions2.groups) {
+    for (const member of group)
+      groupOf.set(member, group);
+  }
+  const units = (ranked2) => {
+    const placed = new Set;
+    const copies = new Set;
+    const out = [];
+    for (const index of ranked2) {
+      if (placed.has(index) || copies.has(index))
+        continue;
+      const unit = [index];
+      const group = groupOf.get(index);
+      if (group) {
+        const newest = group[0];
+        if (newest !== index && !placed.has(newest))
+          unit.push(newest);
+        for (const member of group) {
+          if (!unit.includes(member) && unit.some((kept) => versions2.similarity(kept, member) >= EVIDENCE_COPY_SIMILARITY))
+            copies.add(member);
+        }
+      }
+      for (const member of unit)
+        placed.add(member);
+      out.push(unit);
+    }
+    return out;
+  };
+  const flatten = (picked2) => {
+    const items = [];
+    for (const unit of picked2) {
+      const room = max - items.length;
+      if (room <= 0)
+        break;
+      items.push(...unit.length <= room ? unit : unit.slice(-room));
+    }
+    return items;
+  };
+  if (!scores || scores.length !== all.length || scores.some((score) => !Number.isFinite(score))) {
+    const items = flatten(units(matches2).slice(0, max));
+    return { items, leading: matches2.length === 1 && items.length === 1 && maxLeading > 0 };
+  }
+  const bestMatch = Math.max(...matches2.map((index) => scores[index]));
+  const order = all.filter((index) => !isNeighbour(index) || scores[index] >= bestMatch);
+  const ranked = units([...order].sort((a, b) => scores[b] - scores[a] || a - b));
+  const unitScore = (unit) => scores[unit[0]];
+  const floor = unitScore(ranked[0]) - Math.max(0, limits.relevanceMargin);
+  const picked = ranked.filter((unit) => unitScore(unit) >= floor).slice(0, max);
+  const leading = leadingCount(ranked.map(unitScore), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
+  return leading > 0 ? { items: flatten(picked.slice(0, leading)), leading: true } : { items: flatten(picked), leading: false };
+}
+function leadingCount(sorted, maxLeading, gap) {
+  let best = 0;
+  let bestDrop = Number.NEGATIVE_INFINITY;
+  for (let k = 1;k <= Math.min(maxLeading, sorted.length); k += 1) {
+    const drop = k < sorted.length ? sorted[k - 1] - sorted[k] : Number.POSITIVE_INFINITY;
+    const spread = sorted[0] - sorted[k - 1];
+    if (drop >= gap && drop >= spread && drop > bestDrop) {
+      best = k;
+      bestDrop = drop;
+    }
+  }
+  return best;
+}
+async function readInDepth(question, items, hits, budget, readItem, signal) {
+  const read = async (index, maxChars) => {
+    let chunks2;
+    try {
+      chunks2 = await readItem(hits[index], { question, maxChars }, signal);
+    } catch (error2) {
+      return error2 instanceof SourceModelPolicyDeniedError ? { kind: "refused" } : { kind: "failed" };
+    }
+    if (chunks2 === undefined)
+      return { kind: "refused" };
+    const text2 = chunks2.map((chunk) => chunk.trim()).filter(Boolean).join(`
+…
+`);
+    return text2 ? { kind: "text", text: text2.slice(0, maxChars) } : { kind: "failed" };
+  };
+  const whole = await Promise.all(items.map((_, index) => read(index, budget)));
+  const sizes = whole.map((entry, index) => entry.kind === "text" ? entry.text.length : items[index].text.length);
+  const share = new Array(items.length).fill(0);
+  const byLength = sizes.map((size, index) => ({ size, index })).filter(({ index }) => whole[index].kind !== "refused").sort((a, b) => a.size - b.size);
+  let remaining = budget;
+  byLength.forEach(({ size, index }, position) => {
+    const fair = Math.floor(remaining / (byLength.length - position));
+    share[index] = Math.min(size, fair);
+    remaining -= share[index];
+  });
+  return Promise.all(items.map(async (item, index) => {
+    const first = whole[index];
+    if (first.kind === "refused")
+      return;
+    if (first.kind === "failed")
+      return item;
+    let text2 = first.text;
+    if (text2.length > share[index]) {
+      const again = await read(index, share[index]);
+      if (again.kind === "refused")
+        return;
+      text2 = again.kind === "text" ? again.text : text2.slice(0, share[index]);
+    }
+    return text2.length > item.text.length ? { ...item, text: text2 } : item;
+  }));
+}
+function embeddingPanelRelevance(provider) {
+  return async (question, items, signal) => {
+    const model = provider();
+    if (!model || model.backend !== "local")
+      return;
+    const [query] = await model.embed([{ text: question }], { taskType: "RETRIEVAL_QUERY" });
+    if (signal?.aborted || !query)
+      return;
+    const offered = await items();
+    const present = offered.flatMap((item, index) => item ? [{ index, item }] : []);
+    if (present.length === 0)
+      return;
+    const named = present.filter((entry) => entry.item.title?.trim());
+    const [titles, texts] = await Promise.all([
+      named.length > 0 ? model.embed(named.map((entry) => ({ text: entry.item.title.trim() })), { taskType: "RETRIEVAL_DOCUMENT" }) : Promise.resolve([]),
+      model.embed(present.map(({ item }) => {
+        const head = item.text.slice(0, RELEVANCE_TEXT_CHARS);
+        return { text: item.title ? `${item.title}
+${head}` : head };
+      }), { taskType: "RETRIEVAL_DOCUMENT" })
+    ]);
+    if (texts.length !== present.length || titles.length !== named.length)
+      return;
+    const titleScore = new Map(named.map((entry, position) => [entry.index, cosine(query, titles[position])]));
+    const textScore = new Map(present.map((entry, position) => [entry.index, cosine(query, texts[position])]));
+    return offered.map((_, index) => {
+      const text2 = textScore.get(index);
+      if (text2 === undefined)
+        return Number.NaN;
+      const title = titleScore.get(index);
+      return title === undefined ? text2 : TITLE_WEIGHT * title + (1 - TITLE_WEIGHT) * text2;
+    });
+  };
+}
+function cosine(a, b) {
+  if (a.length === 0 || a.length !== b.length)
+    return Number.NaN;
+  let dot2 = 0;
+  let left = 0;
+  let right = 0;
+  for (let index = 0;index < a.length; index += 1) {
+    dot2 += a[index] * b[index];
+    left += a[index] * a[index];
+    right += b[index] * b[index];
+  }
+  return left > 0 && right > 0 ? dot2 / Math.sqrt(left * right) : Number.NaN;
+}
+function privateEvidenceItems(hits) {
+  return privateEvidence(hits).items;
+}
+function withoutEvidenceMarkers(answer) {
+  return answer.replace(/\s*\[\d{1,2}(?:\s*[,;–-]\s*\d{1,2})*\]/g, "").trim();
+}
+function withoutRepeatedSentences(answer) {
+  const lines = [];
+  let changed = false;
+  let previous;
+  for (const line of answer.split(`
+`)) {
+    if (!line.trim() || !isProseLine(line)) {
+      previous = undefined;
+      lines.push(line);
+      continue;
+    }
+    const sentences = sentencesOf(line.trim());
+    const kept = sentences.filter((sentence) => {
+      const key2 = repeatKey(sentence);
+      if (key2 !== undefined && key2 === previous)
+        return false;
+      previous = key2;
+      return true;
+    });
+    if (kept.length === sentences.length) {
+      lines.push(line);
+      continue;
+    }
+    changed = true;
+    if (kept.length > 0)
+      lines.push(`${/^\s*/.exec(line)[0]}${kept.join(" ")}`);
+  }
+  return changed ? lines.join(`
+`).trim() : answer;
+}
+function isProseLine(line) {
+  const text2 = line.trim();
+  if (/^#{1,6}\s/u.test(text2))
+    return false;
+  if (/^(?:[-*+•]|\d{1,3}[.)])\s+/u.test(text2))
+    return false;
+  if (text2.startsWith("|"))
+    return false;
+  if (/^(?:\*\*|__)[^*_]+(?:\*\*|__):?$/u.test(text2))
+    return false;
+  if (text2.endsWith(":") && wordCount(text2) <= 8)
+    return false;
+  return true;
+}
+function withoutRepeatedEntries(entries) {
+  const seen = new Set;
+  return entries.filter((entry) => {
+    const key2 = repeatKey(entry);
+    if (key2 === undefined)
+      return true;
+    if (seen.has(key2))
+      return false;
+    seen.add(key2);
+    return true;
+  });
+}
+function sentencesOf(line) {
+  const out = [];
+  let carry = "";
+  for (const piece of line.split(/(?<=[.!?])\s+(?=\S)/u)) {
+    const sentence = carry ? `${carry} ${piece}` : piece;
+    if (wordCount(piece) <= 1 && /[.!?]$/u.test(piece)) {
+      carry = sentence;
+      continue;
+    }
+    carry = "";
+    out.push(sentence);
+  }
+  if (carry)
+    out.push(carry);
+  return out;
+}
+function wordCount(text2) {
+  return text2.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
+}
+function repeatKey(sentence) {
+  if (wordCount(sentence) < MIN_REPEAT_WORDS)
+    return;
+  return sentence.normalize("NFKC").toLowerCase().replace(/\s+([,.;:!?])/gu, "$1").replace(/[\s.,;:!?…]+$/u, "").replace(/\s+/gu, " ").trim();
+}
+function unreadableNote(count) {
+  return count === 1 ? "1 matching private item has no readable text on this computer, so it was not read." : `${count} matching private items have no readable text on this computer, so they were not read.`;
+}
+function unreadableAnswer(count) {
+  return count === 1 ? "The matching private item has no readable text on this computer, so there is no private answer." : `None of the ${count} matching private items has readable text on this computer, so there is no private answer.`;
+}
+function utf8Bytes2(text2) {
+  return Buffer.byteLength(text2, "utf8");
+}
+function record4(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
+}
+function string4(value2) {
+  return typeof value2 === "string" && value2.trim() ? value2.trim() : undefined;
+}
+var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
+var init_private_answer_model = __esm(() => {
+  init_answer_activity();
+  init_source_model_policy();
+  init_evidence_versions();
+  init_private_answer_contract();
+  PANEL_ANSWER_LIMITS = {
+    maxItems: 4,
+    relevanceMargin: 0.04,
+    maxPassageChars: 2400,
+    maxPromptBytes: 11000,
+    maxAnswerChars: 2000,
+    audit: false,
+    maxLeadingItems: 2,
+    leadGap: 0.03,
+    leadingEvidenceChars: 5000,
+    summaryEvidenceChars: 8000,
+    deepEvidenceChars: 7000,
+    deepPromptBytes: 11500,
+    deepAnswerChars: 2700
+  };
+});
+
+// src/workers/source-index/local-answer.ts
+function localAnswerRequest(question, selectors = {}) {
+  const { retrieval_mode: mode, selected_items: selected, ...rest } = selectors;
+  return {
+    ...rest,
+    ...selected?.length ? { selected_items: selected } : {},
+    question,
+    retrieval_mode: mode === "keyword" ? "keyword" : "hybrid",
+    include_internal: true,
+    include_internal_content: true,
+    include_secure_local: true,
+    include_secure_local_content: true,
+    max_results: LOCAL_MAX_RESULTS
+  };
+}
+async function answerOnThisComputer(input, options) {
+  const question = input.question.trim();
+  if (!question)
+    return { status: "failed" };
+  const status = options.model.status();
+  if (status.state === "no_model")
+    return { status: "no_model" };
+  if (status.state === "model_downloading") {
+    return { status: "model_downloading", ...typeof status.percent === "number" ? { percent: status.percent } : {} };
+  }
+  const request = localAnswerRequest(question, input.selectors);
+  const lanes = options.lanes(request);
+  const corpusIds = sourceAnswerCorpusIds(request);
+  const selectedItems = selectedEvidenceItemsFromRequest(request);
+  const explicitQuery = request.query?.trim();
+  const detail = await buildEvidencePackDetailed({
+    question,
+    ...explicitQuery ? { searchQuery: explicitQuery } : {},
+    ...selectedItems.length > 0 ? { selectedItems } : {},
+    maxResults: LOCAL_MAX_RESULTS,
+    searchContext: {
+      allowedTrustDomains: LOCAL_TRUST_DOMAINS,
+      allowCloudQueries: false,
+      ...corpusIds ? { allowedCorpusIds: corpusIds } : {}
+    },
+    ...corpusIds ? { corpusIds } : {},
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    maxCharsPerCandidate: LOCAL_MAX_CHARS_PER_CANDIDATE,
+    evidenceByteBudget: LOCAL_EVIDENCE_BYTE_BUDGET,
+    ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
+    ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
+  });
+  assertEvidencePackModelEligible(detail.pack);
+  const leftOut = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, options.sourceName);
+  const skip = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []]);
+  const candidates = detail.pack.candidates.flatMap((candidate, index) => {
+    const corpusId = detail.candidateCorpusIds[index] ?? "";
+    if (skip.has(index) || !corpusId || !LOCAL_TRUST_DOMAINS.includes(candidate.trustDomain))
+      return [];
+    return [{ ...candidate, corpusId }];
+  });
+  if (candidates.length === 0)
+    return { status: "not_found", leftOut };
+  let used;
+  let result;
+  try {
+    result = await options.model.answerPrivately(question, candidates, input.signal, {
+      evidence: (stats) => {
+        used = stats.used;
+      }
+    }, { detail: input.detail === "full" ? "full" : "summary" });
+  } catch (error2) {
+    if (error2 instanceof NoPrivateEvidenceError)
+      return { status: "failed" };
+    return { status: "failed" };
+  }
+  const read = (used ?? candidates.map((_, index) => index)).map((index) => candidates[index]).filter((item) => item !== undefined);
+  if (read.length > 0) {
+    let ok;
+    try {
+      ok = await options.eligible(read);
+    } catch {
+      ok = read.map(() => false);
+    }
+    if (ok.length !== read.length || !ok.every((value2) => value2 === true))
+      return { status: "changed" };
+  }
+  return {
+    status: "answered",
+    answer: result.answer,
+    citations: result.citations,
+    unanswered: result.unanswered ?? [],
+    leftOut,
+    read
+  };
+}
+function leftOutSources(skipped, excluded, sourceName) {
+  const names = new Set;
+  for (const skip of skipped) {
+    if (IN_SCOPE_SKIPS.has(skip.reason))
+      continue;
+    if (skip.reason === "no_adapter" && excluded?.has(skip.corpusId))
+      continue;
+    let name;
+    try {
+      name = sourceName?.(skip.corpusId);
+    } catch {
+      name = undefined;
+    }
+    names.add(name ?? "One source");
+  }
+  return [...names].sort();
+}
+async function checkLocalEvidenceItems(input) {
+  if (input.items.length === 0)
+    return [];
+  let lanes;
+  try {
+    lanes = input.lanes(localAnswerRequest("eligibility", { retrieval_mode: "keyword" }));
+  } catch (error2) {
+    if (input.throwOnUnavailable)
+      throw error2;
+    return input.items.map(() => false);
+  }
+  return Promise.all(input.items.map(async (item) => {
+    try {
+      const corpusId = typeof item.corpusId === "string" ? item.corpusId : undefined;
+      const provenance = item.provenance;
+      const trustDomain = item.trustDomain;
+      if (!corpusId || !provenance?.sourceItem?.localItemId || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain))
+        return false;
+      if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
+        return false;
+      const provider = lanes.contentProviders[corpusId];
+      if (!provider)
+        return false;
+      if (typeof provider.contentServable === "function") {
+        return provider.contentServable({ provenance, trustDomain }) === true;
+      }
+      const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
+      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
+        return false;
+      if (content.sensitivity.trustDomain !== trustDomain)
+        return false;
+      if (content.sensitivity.trustTier === "S5")
+        return false;
+      assertModelTrustTierAllowed(content.sensitivity.trustTier);
+      return true;
+    } catch (error2) {
+      if (input.throwOnUnavailable)
+        throw error2;
+      return false;
+    }
+  }));
+}
+async function readLocalEvidenceItem(input) {
+  const corpusId = typeof input.item.corpusId === "string" ? input.item.corpusId : undefined;
+  const provenance = input.item.provenance;
+  const trustDomain = input.item.trustDomain;
+  if (!corpusId || !provenance?.sourceItem || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain))
+    return;
+  const lanes = input.lanes(localAnswerRequest(input.question));
+  if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
+    return;
+  const provider = lanes.contentProviders[corpusId];
+  if (!provider)
+    return;
+  const content = await provider.fetchLocalContent({
+    provenance,
+    trustDomain,
+    maxChars: Math.max(1, Math.floor(input.maxChars)),
+    query: input.question,
+    maxPassages: LOCAL_DEPTH_MAX_PASSAGES
+  });
+  if (!content || content.namesOnly || content.contentPrivate)
+    return;
+  return content.chunks;
+}
+var LOCAL_TRUST_DOMAINS, LOCAL_MAX_RESULTS = 16, LOCAL_MAX_CHARS_PER_CANDIDATE = 3000, LOCAL_EVIDENCE_BYTE_BUDGET = 24000, LOCAL_DEPTH_MAX_PASSAGES = 24, IN_SCOPE_SKIPS;
+var init_local_answer = __esm(() => {
+  init_evidence_pack();
+  init_source_model_policy();
+  init_private_answer_contract();
+  init_analyst_answer();
+  init_embeddings();
+  LOCAL_TRUST_DOMAINS = ["internal", "secure_local"];
+  IN_SCOPE_SKIPS = new Set(["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"]);
+});
+
+// src/workers/email-source/local-private-answers.ts
+var exports_local_private_answers = {};
+__export(exports_local_private_answers, {
+  inboxEvidenceIdentity: () => inboxEvidenceIdentity,
+  createLocalPrivateAnswers: () => createLocalPrivateAnswers,
+  createLocalAnswerPath: () => createLocalAnswerPath,
+  askWithAnonymousInbox: () => askWithAnonymousInbox,
+  LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH
+});
+import { lstatSync as lstatSync33 } from "node:fs";
+import { randomBytes as randomBytes20 } from "node:crypto";
+function createLocalAnswerPath(options) {
+  const lanes = (request) => options.lanes(request, "built_in_only");
+  const eligible = async (items) => {
+    const served = await checkLocalEvidenceItems({ lanes, items, throwOnUnavailable: true });
+    const inputs = items.map((item) => {
+      const provenance = item.provenance;
+      const identity = provenance?.sourceItem;
+      return {
+        corpusId: typeof item.corpusId === "string" ? item.corpusId : "",
+        provider: identity?.provider ?? "",
+        accountScope: identity?.accountScope ?? "",
+        providerItemId: identity?.providerItemId ?? "",
+        ...identity?.providerConversationId ? { providerConversationId: identity.providerConversationId } : {},
+        privateAtAnswer: item.trustDomain === "secure_local" || item.trustTier === "S4" || item.trustTier === "S5"
+      };
+    });
+    const verdicts = options.releaseCheck.inputs(inputs);
+    if (verdicts.length !== inputs.length || verdicts.some((v) => v.tier === "unknown"))
+      throw new Error("Eligibility unavailable");
+    const posture = options.releaseCheck.secureDerivativeDefault();
+    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: true } }], { inputs: () => verdicts, secureDerivativeDefault: () => posture });
+    return reason ? items.map(() => false) : served;
+  };
+  const model = createBuiltInPrivateAnswerModel({
+    model: options.model,
+    eligible,
+    available: options.available,
+    answer: answerPrivately,
+    relevance: embeddingPanelRelevance(options.relevanceEmbedding),
+    readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
+    ...options.sourceLinks ? { sourceLinks: options.sourceLinks } : {},
+    ...options.limits ? { limits: options.limits } : {}
+  });
+  return {
+    eligible,
+    answer: (input) => answerOnThisComputer(input, {
+      lanes,
+      model,
+      eligible,
+      ...options.sourceName ? { sourceName: options.sourceName } : {}
+    })
+  };
+}
+function refused(status, code, message2) {
+  return { status, body: { ok: false, error: { code, message: message2 } } };
+}
+function inboxEvidenceIdentity(item) {
+  const out = {};
+  for (const key2 of ["corpusId", "trustDomain", "trustTier", "tier"]) {
+    if (typeof item[key2] === "string")
+      out[key2] = item[key2];
+  }
+  const provenance = item.provenance;
+  const source = provenance?.sourceItem;
+  if (source) {
+    const kept = {};
+    for (const key2 of ["family", "localItemId", ...TIER_LEDGER_IDENTITY_FIELDS]) {
+      if (typeof source[key2] === "string")
+        kept[key2] = source[key2];
+    }
+    out.provenance = { sourceItem: kept };
+  }
+  return out;
+}
+function createLocalPrivateAnswers(options) {
+  const now = options.now ?? Date.now;
+  const opens = new Map;
+  let running = false;
+  let closed = false;
+  let pass;
+  let timer;
+  let unsubscribe;
+  const abort = new AbortController;
+  const store = () => {
+    try {
+      return options.store();
+    } catch {
+      return;
+    }
+  };
+  const refOf = (q) => ({ id: q.id, generation: q.generation, connectionId: q.connectionId });
+  const active = (q) => {
+    try {
+      return !closed && (!options.isActive || options.isActive(q.connectionId));
+    } catch {
+      return false;
+    }
+  };
+  const hidden = (q) => q.surface === "chatgpt" && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
+  const current2 = (q) => {
+    const fresh2 = store()?.get(q.id);
+    return fresh2 && fresh2.generation === q.generation && active(fresh2) && !hidden(fresh2) ? fresh2 : undefined;
+  };
+  const eligible = async (read) => {
+    try {
+      const ok = options.eligible ? await options.eligible(read) : read.map(() => false);
+      if (ok.length !== read.length)
+        return "unknown";
+      return ok.every((value2) => value2 === true) ? "eligible" : "ineligible";
+    } catch {
+      return "unknown";
+    }
+  };
+  const sweep = () => {
+    for (const [id, entry] of opens)
+      if (entry.expiresAt <= now())
+        opens.delete(id);
+    while (opens.size > MAX_TOKENS)
+      opens.delete(opens.keys().next().value);
+  };
+  const answerFor = async (input, background = false) => {
+    try {
+      return await (background ? options.backgroundAnswer ?? options.answer : options.answer)(input);
+    } catch {
+      return { status: "failed" };
+    }
+  };
+  const wake = () => {
+    if (!closed)
+      api2.tick().catch(() => {
+        return;
+      });
+  };
+  const invalidate = (q) => {
+    store()?.invalidate?.(refOf(q));
+    for (const [id, entry] of opens)
+      if (entry.ref?.id === q.id)
+        opens.delete(id);
+    wake();
+  };
+  const answerBody = (result, session, q) => {
+    if (result.status !== "answered")
+      return { status: result.status, ..."leftOut" in result ? { left_out: result.leftOut } : {} };
+    sweep();
+    const citations = result.citations.map((citation) => {
+      const view2 = {
+        ...citation.title ? { title: citation.title } : {},
+        ...citation.source ? { source: citation.source } : {},
+        ...citation.date ? { date: citation.date } : {}
+      };
+      const path = citation.localPath && options.openFile ? citation.localPath : undefined;
+      const url = !path && citation.url?.startsWith("https://") && options.openUrl ? citation.url : undefined;
+      if (path || url) {
+        const id = randomBytes20(24).toString("base64url");
+        opens.set(id, { session, ...path ? { path } : { url }, read: result.read.map(inboxEvidenceIdentity), expiresAt: now() + TOKEN_TTL_MS, ...q ? { ref: refOf(q) } : {} });
+        view2.open = id;
+      }
+      return view2;
+    });
+    return { status: "answered", answer: result.answer, citations, unanswered: result.unanswered, left_out: result.leftOut };
+  };
+  const api2 = {
+    start() {
+      if (timer || closed)
+        return;
+      unsubscribe = store()?.subscribe?.(wake);
+      timer = setInterval(wake, 1000);
+      timer.unref?.();
+      wake();
+    },
+    tick() {
+      if (pass)
+        return pass;
+      if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.())
+        return Promise.resolve();
+      pass = (async () => {
+        const currentStore = store();
+        if (!currentStore)
+          return;
+        if (options.isActive)
+          currentStore.reconcileConnections?.(options.isActive);
+        for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
+          if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.())
+            break;
+          if (q.path === "anonymous" || q.hasResult || q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
+            continue;
+          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q)))
+            continue;
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
+          if (!current2(q))
+            continue;
+          if (result.status === "answered" && await eligible(result.read) === "eligible" || result.status === "not_found") {
+            if (!current2(q))
+              continue;
+            const saved = result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
+            if (!currentStore.saveAnswer?.(refOf(q), saved))
+              currentStore.retry?.(refOf(q));
+          } else
+            currentStore.retry?.(refOf(q));
+        }
+      })().catch(() => {
+        return;
+      }).finally(() => {
+        pass = undefined;
+      });
+      return pass;
+    },
+    close() {
+      closed = true;
+      abort.abort();
+      if (timer)
+        clearInterval(timer);
+      unsubscribe?.();
+      opens.clear();
+    },
+    waiting() {
+      try {
+        const listed = store()?.list({ includeResults: false });
+        if (!listed)
+          return;
+        return { questions: listed.questions.filter((q) => active(q) && !hidden(q) && (q.path !== "anonymous" || q.hasResult || q.result)).map((q) => ({
+          id: q.id,
+          path: q.path ?? "private",
+          question: q.question,
+          from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === "chatgpt" ? "ChatGPT" : "An agent"),
+          askedAt: q.askedAt,
+          unchecked: q.state === "unchecked",
+          unread: !q.seen,
+          state: q.hasResult || q.result ? "answered" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering",
+          ...q.answeredAt ? { answeredAt: q.answeredAt } : {}
+        })), olderRemoved: listed.olderRemoved };
+      } catch {
+        return;
+      }
+    },
+    waitingCount() {
+      return api2.waiting()?.questions.filter((q) => q.unread && q.state === "answered").length ?? 0;
+    },
+    async handle(body, session) {
+      const action = body.action;
+      if (action === "list")
+        return { status: 200, body: { ok: true, ...api2.waiting() } };
+      if (action === "ask_anonymous") {
+        if (!options.anonymousAsk)
+          return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp);
+        const result = await options.anonymousAsk({ question: typeof body.question === "string" ? body.question : "" });
+        return result.ok ? { status: 200, body: { ok: true, status: "answered", answer: result.reply, sent: result.sent, citations: [] } } : refused(400, result.code, result.message);
+      }
+      if (action === "ask") {
+        const question = typeof body.question === "string" ? body.question.trim() : "";
+        if (!question || question.length > MAX_QUESTION_CHARS)
+          return refused(400, "invalid_params", "Type a question first.");
+        if (running)
+          return refused(429, "busy", "Olympus is answering another question. Try again in a moment.");
+        running = true;
+        try {
+          const currentStore = store();
+          const ticket = options.localConnectionId && currentStore?.ticket?.(options.localConnectionId);
+          const ref = ticket && currentStore?.record?.(ticket, { question, surface: "remote", state: "waiting", retainEachAsk: true, detail: body.detail === "full" ? "full" : "summary" });
+          if (options.localConnectionId && !ref) {
+            if (ref)
+              currentStore?.acknowledge(ref);
+            return refused(429, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.inboxUnavailable);
+          }
+          let retained = false;
+          try {
+            const result = await answerFor({ question, detail: body.detail === "full" ? "full" : "summary" });
+            if (result.status === "answered") {
+              const check = await eligible(result.read);
+              if (check !== "eligible")
+                return { status: 200, body: { ok: true, status: check === "unknown" ? "check_unavailable" : "changed" } };
+            }
+            if (ref && (result.status === "answered" || result.status === "not_found")) {
+              retained = currentStore?.saveAnswer?.(ref, result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
+            }
+            return { status: 200, body: { ok: true, ...answerBody(result, session) } };
+          } finally {
+            if (ref && !retained)
+              currentStore?.acknowledge(ref);
+          }
+        } finally {
+          running = false;
+        }
+      }
+      if (action === "read") {
+        const q = typeof body.id === "string" ? store()?.get(body.id) : undefined;
+        if (!q || !current2(q))
+          return refused(410, "gone", "That answer was deleted");
+        if (!q.result)
+          return { status: 200, body: { ok: true, status: q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering" } };
+        const check = await eligible(q.result.read);
+        if (check === "unknown")
+          return { status: 200, body: { ok: true, status: "check_unavailable" } };
+        if (check === "ineligible" || !current2(q)) {
+          invalidate(q);
+          return { status: 200, body: { ok: true, status: "answering" } };
+        }
+        return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q), ...q.path === "anonymous" ? { sent: q.question } : {} } };
+      }
+      if (action === "seen") {
+        const q = typeof body.id === "string" ? store()?.get(body.id) : undefined;
+        const marked = !!q && q.generation === body.generation && !!current2(q) && store()?.markRead?.(refOf(q)) === true;
+        return { status: 200, body: { ok: true, status: marked ? "read" : "kept" } };
+      }
+      if (action === "delete" || action === "delete_all") {
+        try {
+          const removed = action === "delete_all" ? store()?.dismissAll() ?? 0 : typeof body.id === "string" && store()?.dismiss(body.id) ? 1 : 0;
+          if (action === "delete_all")
+            opens.clear();
+          else
+            for (const [id, entry] of opens)
+              if (entry.ref?.id === body.id)
+                opens.delete(id);
+          return { status: 200, body: { ok: true, status: "deleted", removed } };
+        } catch {
+          return refused(503, "unavailable", "Private answers cannot be changed right now.");
+        }
+      }
+      if (action === "open") {
+        sweep();
+        const id = typeof body.token === "string" && TOKEN_PATTERN3.test(body.token) ? body.token : "";
+        const entry = opens.get(id);
+        if (!entry || entry.session !== session)
+          return refused(410, "gone", "This source cannot be opened from this session.");
+        let checkUnavailable = false;
+        const allowed = async () => {
+          sweep();
+          if (!entry || entry.session !== session || opens.get(id) !== entry)
+            return false;
+          if (entry.ref) {
+            const q = store()?.get(entry.ref.id);
+            if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
+              return false;
+          }
+          const check = await eligible(entry.read);
+          if (check === "unknown")
+            checkUnavailable = true;
+          if (check !== "eligible")
+            return false;
+          sweep();
+          if (opens.get(id) !== entry)
+            return false;
+          if (entry.ref) {
+            const q = store()?.get(entry.ref.id);
+            if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
+              return false;
+          }
+          return true;
+        };
+        if (!entry || !await allowed()) {
+          if (checkUnavailable)
+            return refused(503, "check_unavailable", "Couldn't check this answer right now");
+          if (entry?.ref) {
+            const q = store()?.get(entry.ref.id);
+            if (q)
+              invalidate(q);
+          }
+          opens.delete(id);
+          return refused(410, "gone", "This source changed. The answer is being written again.");
+        }
+        try {
+          if (entry.path && options.openFile && lstatSync33(entry.path).isFile())
+            await options.openFile(entry.path, allowed);
+          else if (entry.url && options.openUrl)
+            await options.openUrl(entry.url, allowed);
+          else
+            return refused(410, "gone", "This file is no longer on this computer.");
+        } catch {
+          return refused(500, "failed", "The source could not be opened.");
+        }
+        return { status: 200, body: { ok: true, status: "opened" } };
+      }
+      return refused(400, "invalid_params", "Unknown action.");
+    }
+  };
+  return api2;
+}
+async function askWithAnonymousInbox(input, options) {
+  if (options.deliveredToPanel)
+    return options.ask(input);
+  if (typeof input.question !== "string" || !input.question.trim())
+    return { ok: false, code: "transport_unavailable", message: "Type a question first." };
+  const store = options.store();
+  const ref = store?.record(store.ticket(options.connectionId), { question: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPending, surface: "remote", state: "waiting", path: "anonymous" });
+  if (!store || !ref)
+    return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.inboxBeforeSend };
+  if (!options.local && !store.reserveAutoAnswer(ref, "anonymous")) {
+    store.acknowledge(ref);
+    return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousRateLimit };
+  }
+  try {
+    const result = await options.ask(input);
+    if (result.ok) {
+      if (!store.saveAnswer(ref, { status: "answered", answer: result.reply, citations: [], unanswered: [], leftOut: [], read: [] }, result.sent))
+        store.acknowledge(ref);
+    } else
+      store.acknowledge(ref);
+    return result;
+  } catch {
+    store.acknowledge(ref);
+    return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousFailed };
+  }
+}
+var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
+var init_local_private_answers = __esm(() => {
+  init_vocabulary();
+  init_tier_ledger();
+  init_release_manifest();
+  init_waiting_private_questions();
+  init_analyst_built_in();
+  init_private_answer_model();
+  init_local_answer();
+  TOKEN_TTL_MS = 30 * 60000;
+  TOKEN_PATTERN3 = /^[A-Za-z0-9_-]{32,64}$/;
+});
+
+// src/core/update-check.ts
+import { readFileSync as readFileSync60 } from "node:fs";
+import { join as join89 } from "node:path";
+function installerForPlatform(platform2) {
+  if (platform2 === "darwin")
+    return {
+      url: "https://olympusplugin.ai/install.sh",
+      command: "curl -fsSL https://olympusplugin.ai/install.sh | sh"
+    };
+  if (platform2 === "linux")
+    return {
+      url: "https://olympusplugin.ai/install-linux.sh",
+      command: "curl -fsSL https://olympusplugin.ai/install-linux.sh | sh"
+    };
+  return;
+}
+function semver(version2) {
+  if (version2.length > 64 || !VERSION_PATTERN.test(version2))
+    return;
+  const [core2, suffix] = version2.split("-");
+  const numbers = core2.split(".");
+  const pre = suffix?.split(".") ?? [];
+  if ([...numbers, ...pre.filter((part) => /^\d+$/.test(part))].some((part) => part.length > 1 && part.startsWith("0")))
+    return;
+  return { core: numbers.map(BigInt), pre };
+}
+function parseInstallerVersion(script2) {
+  if (new TextEncoder().encode(script2).byteLength > UPDATE_MAX_BYTES)
+    return;
+  const version2 = /^OLYMPUS_VERSION=([^\r\n]*)\r?$/m.exec(script2)?.[1];
+  return version2 && semver(version2) ? version2 : undefined;
+}
+function newerVersion(remote, running) {
+  const next = semver(remote);
+  const current2 = semver(running);
+  if (!next || !current2 || current2.pre.length === 0 && next.pre.length > 0)
+    return false;
+  for (let i = 0;i < 3; i++) {
+    if (next.core[i] !== current2.core[i])
+      return next.core[i] > current2.core[i];
+  }
+  if (next.pre.length === 0 || current2.pre.length === 0)
+    return next.pre.length === 0 && current2.pre.length > 0;
+  for (let i = 0;i < Math.max(next.pre.length, current2.pre.length); i++) {
+    const a = next.pre[i], b = current2.pre[i];
+    if (a === undefined || b === undefined)
+      return b === undefined;
+    if (a === b)
+      continue;
+    const an = /^\d+$/.test(a), bn = /^\d+$/.test(b);
+    return an && bn ? BigInt(a) > BigInt(b) : an !== bn ? !an : a > b;
+  }
+  return false;
+}
+function runningOlympusVersion() {
+  try {
+    const value2 = JSON.parse(readFileSync60(join89(olympusPackageRoot(), "package.json"), "utf8")).version;
+    return typeof value2 === "string" ? value2 : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+function createUpdateChecker(options) {
+  const installer = installerForPlatform(options.platform);
+  const schedule = options.schedule ?? ((callback, delay2) => {
+    const timer = setTimeout(callback, delay2);
+    timer.unref();
+    return () => clearTimeout(timer);
+  });
+  let result;
+  let cancelTimer;
+  let controller;
+  let started = false;
+  let stopped = false;
+  const proxied = () => ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].some((key2) => Boolean(options.env[key2]?.trim()));
+  const off = (value2) => ["off", "0", "false", "no"].includes(value2?.trim().toLowerCase() ?? "");
+  const enabled = () => Boolean(installer) && !proxied() && !off(options.env.OLYMPUS_UPDATE_CHECK) && !off(options.fileEnv()?.OLYMPUS_UPDATE_CHECK);
+  async function check() {
+    if (controller)
+      return;
+    let reader;
+    let timeout;
+    try {
+      if (stopped || !enabled()) {
+        result = undefined;
+        return;
+      }
+      controller = new AbortController;
+      timeout = setTimeout(() => controller?.abort(), options.timeoutMs ?? UPDATE_TIMEOUT_MS);
+      const response = await (options.fetchImpl ?? fetch)(installer.url, {
+        method: "GET",
+        headers: { "User-Agent": "Olympus" },
+        credentials: "omit",
+        redirect: "error",
+        signal: controller.signal
+      });
+      reader = response.body?.getReader();
+      if (!response.ok || Number(response.headers.get("content-length")) > UPDATE_MAX_BYTES || !reader)
+        throw new Error("unavailable");
+      const chunks2 = [];
+      let size = 0;
+      for (;; ) {
+        const { done, value: value2 } = await reader.read();
+        if (done)
+          break;
+        size += value2.byteLength;
+        if (size > UPDATE_MAX_BYTES)
+          throw new Error("oversized");
+        chunks2.push(value2);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks2) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      const version2 = parseInstallerVersion(new TextDecoder().decode(bytes));
+      result = !stopped && enabled() && version2 && newerVersion(version2, options.runningVersion) ? { version: version2 } : undefined;
+    } catch {
+      result = undefined;
+      try {
+        options.debug?.("[update] check unavailable");
+      } catch {}
+    } finally {
+      if (timeout)
+        clearTimeout(timeout);
+      reader?.cancel().catch(() => {
+        return;
+      });
+      controller = undefined;
+    }
+  }
+  function tick() {
+    check().finally(() => {
+      if (!stopped)
+        cancelTimer = schedule(tick, 86400000 * (0.95 + (options.random ?? Math.random)() * 0.1));
+    });
+  }
+  return {
+    check,
+    available() {
+      try {
+        return enabled() && !stopped ? result : undefined;
+      } catch {
+        return;
+      }
+    },
+    start() {
+      if (started || stopped || !installer)
+        return;
+      started = true;
+      cancelTimer = schedule(tick, 120000);
+    },
+    stop() {
+      stopped = true;
+      result = undefined;
+      cancelTimer?.();
+      controller?.abort();
+    }
+  };
+}
+var VERSION_PATTERN, UPDATE_MAX_BYTES, UPDATE_TIMEOUT_MS = 1e4;
+var init_update_check = __esm(() => {
+  init_package_root();
+  VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
+  UPDATE_MAX_BYTES = 512 * 1024;
+});
+
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
 import { accessSync as accessSync9, constants as constants9, readFileSync as readFileSync61 } from "node:fs";
 import { delimiter as delimiter8, isAbsolute as isAbsolute26, join as join90 } from "node:path";
@@ -108912,14 +110155,14 @@ function createModelKeyReload(options) {
 }
 
 // src/core/dashboard-session-secret.ts
-import { randomBytes as randomBytes20 } from "node:crypto";
-import { chmodSync as chmodSync26, lstatSync as lstatSync33, mkdirSync as mkdirSync44, readFileSync as readFileSync62 } from "node:fs";
+import { randomBytes as randomBytes21 } from "node:crypto";
+import { chmodSync as chmodSync26, lstatSync as lstatSync34, mkdirSync as mkdirSync44, readFileSync as readFileSync62 } from "node:fs";
 import { dirname as dirname64, join as join91 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
   return join91(dirname64(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
 }
 function newDashboardSessionSecret() {
-  return randomBytes20(32).toString("base64url");
+  return randomBytes21(32).toString("base64url");
 }
 function loadOrCreateDashboardSessionSecret(options = {}) {
   let path = options.path ?? "";
@@ -108930,7 +110173,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
   }
   let existing = "missing";
   try {
-    const stats = lstatSync33(path);
+    const stats = lstatSync34(path);
     if (!stats.isFile() || stats.isSymbolicLink())
       existing = "invalid";
     else if (typeof process.getuid === "function" && stats.uid !== process.getuid())
@@ -113292,14 +114535,14 @@ function collectJsonMessages(value2, messages) {
   }
   if (!value2 || typeof value2 !== "object")
     return;
-  const record4 = value2;
+  const record5 = value2;
   for (const key2 of ["message", "error", "code"]) {
-    const field = record4[key2];
+    const field = record5[key2];
     if (typeof field === "string")
       messages.push(field);
   }
   for (const key2 of ["issues", "errors", "details"]) {
-    collectJsonMessages(record4[key2], messages);
+    collectJsonMessages(record5[key2], messages);
   }
 }
 var REMOTE_VLM_EXTRACTOR_VERSION = "venice-v1", APPROVED_REMOTE_EXTRACTION_HOST = "api.venice.ai", REMOTE_WITHHELD_SECRET_WARNING = "remote_withheld_secret", REMOTE_SECRET_CHECK_NOT_CONFIGURED = "remote_secret_check_not_configured", REMOTE_SECRET_CHECK_FAILED = "remote_secret_check_failed", REMOTE_VLM_EXTRACTOR_KINDS, DEFAULT_REMOTE_EXTRACTION_PROMPT;
@@ -114993,9 +116236,9 @@ function createFileExtractionRunner(options) {
       const byKind = new Map;
       let jobsUnroutable = 0;
       let jobsSkippedImageNotPrivate = 0;
-      const refused = new Map;
+      const refused2 = new Map;
       const refuse3 = (reason, count) => {
-        refused.set(reason, (refused.get(reason) ?? 0) + count);
+        refused2.set(reason, (refused2.get(reason) ?? 0) + count);
       };
       for (const ref of page2.candidates) {
         if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
@@ -115076,7 +116319,7 @@ function createFileExtractionRunner(options) {
           prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
         }
       }
-      const jobsRefused = [...refused.values()].reduce((total, count) => total + count, 0);
+      const jobsRefused = [...refused2.values()].reduce((total, count) => total + count, 0);
       return {
         kind: "file_extraction_plan",
         corpusId: request.corpusId,
@@ -115087,7 +116330,7 @@ function createFileExtractionRunner(options) {
         jobsSkippedTooLarge,
         jobsUnroutable,
         jobsRefused,
-        ...refused.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused) } : {},
+        ...refused2.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused2) } : {},
         ...jobsSkippedImageNotPrivate > 0 ? { jobsSkippedImageNotPrivate } : {},
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
@@ -115152,9 +116395,9 @@ function createFileExtractionRunner(options) {
           },
           now
         });
-        const record4 = await recordOutcome(jobs, job, workerId, outcome);
-        records.push(record4);
-        if (record4.status === "failed_retryable") {
+        const record5 = await recordOutcome(jobs, job, workerId, outcome);
+        records.push(record5);
+        if (record5.status === "failed_retryable") {
           consecutiveRetryableFailures += 1;
           if (consecutiveRetryableFailures >= maxConsecutiveRetryableFailures)
             paused = true;
@@ -115197,7 +116440,7 @@ function createFileExtractionRunner(options) {
           tempBytesCleaned: true,
           localOnly,
           trustDomain: corpus.trustDomain,
-          ...summarizeEgressDestinations(records.map((record4) => record4.egressDestination))
+          ...summarizeEgressDestinations(records.map((record5) => record5.egressDestination))
         }
       };
     }
@@ -115563,8 +116806,8 @@ function countRecords(records) {
     failed_retryable: 0,
     failed_terminal: 0
   };
-  for (const record4 of records)
-    counts[record4.status] += 1;
+  for (const record5 of records)
+    counts[record5.status] += 1;
   return counts;
 }
 function pausedResult(input) {
@@ -115829,8 +117072,8 @@ function createTieredStoreExtractionSink(options) {
         return result2;
       }
       const read = ledger.classificationRead(identity);
-      const record4 = ledger.getCurrent(identity);
-      if (!record4 || record4.state === "moving")
+      const record5 = ledger.getCurrent(identity);
+      if (!record5 || record5.state === "moving")
         return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       const current2 = ledger.copies(identity).filter((copy) => copy.state === "current");
       const anchor = current2.find((copy) => copy.layers !== "content");
@@ -115848,10 +117091,10 @@ function createTieredStoreExtractionSink(options) {
       const imageJudgment = plan.media ? setMediaJudgment(set2, plan.media.sha256) : undefined;
       const content = classifyContentTier({
         text: request.text,
-        metadataTier: record4.metadataTier,
-        metadataForced: record4.metadataForced,
-        metadataFlagged: record4.metadataFlagged,
-        metadataOwnerDecided: namesDecidedByOwner(record4.reasons),
+        metadataTier: record5.metadataTier,
+        metadataForced: record5.metadataForced,
+        metadataFlagged: record5.metadataFlagged,
+        metadataOwnerDecided: namesDecidedByOwner(record5.reasons),
         ...itemTitle2 ? { title: itemTitle2 } : {},
         ...itemPath ? { path: itemPath } : {},
         mimeType: plan.item.mimeType,
@@ -115865,27 +117108,27 @@ function createTieredStoreExtractionSink(options) {
       const held = tierClassification?.unavailableReason !== undefined && content.contentTier !== "secrets";
       const contentPending = content.contentPending || held;
       const decision = {
-        metadataTier: record4.metadataTier,
-        contentTier: maxTier(content.contentTier, record4.metadataTier),
+        metadataTier: record5.metadataTier,
+        contentTier: maxTier(content.contentTier, record5.metadataTier),
         decidedBy: content.decidedBy,
         reasons: [
-          ...record4.reasons.filter((reason) => !reason.startsWith("content:")),
+          ...record5.reasons.filter((reason) => !reason.startsWith("content:")),
           ...content.reasons,
           ...held ? [`content:${tierClassification.unavailableReason}`] : []
         ],
-        state: record4.metadataPending || contentPending ? "pending" : "current",
+        state: record5.metadataPending || contentPending ? "pending" : "current",
         contentRead: true,
-        metadataPending: record4.metadataPending,
+        metadataPending: record5.metadataPending,
         contentPending,
-        metadataForced: record4.metadataForced,
-        metadataFlagged: record4.metadataFlagged,
+        metadataForced: record5.metadataForced,
+        metadataFlagged: record5.metadataFlagged,
         engineVersion: content.engineVersion,
         mapRevision: content.mapRevision,
         snifferId: content.snifferId
       };
       if (decision.contentTier === "secrets") {
         recordSecret(set2, plan.item, request.text, {
-          namesReleasable: record4.metadataTier === "public" || record4.metadataTier === "private",
+          namesReleasable: record5.metadataTier === "public" || record5.metadataTier === "private",
           sourceScope: anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope
         });
         const recorded = ledger.recordRoutedPlacement(identity, decision, { copies: [], embedHold: false });
@@ -115901,17 +117144,17 @@ function createTieredStoreExtractionSink(options) {
         });
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
-      let placement = set2.placementFor(decision, record4.contentRead ? {} : { contentArrivesLater: true });
+      let placement = set2.placementFor(decision, record5.contentRead ? {} : { contentArrivesLater: true });
       const fromContent = copyServingLayer(current2, "content");
       const toContent = copyServingLayer(placement.copies, "content");
-      if (record4.contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(current2, placement.copies)) {
+      if (record5.contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(current2, placement.copies)) {
         placement = { copies: current2, embedHold: true };
       }
       const contentCopy = placement.copies.find((copy) => copy.layers !== "metadata");
       const contentStore = contentCopy ? set2.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore)
         return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
-      if (record4.contentRead) {
+      if (record5.contentRead) {
         if (!samePlacement2(current2, placement)) {
           if (!placementIsRaise(current2, placement.copies)) {
             const resting = current2.find((copy) => copy.layers !== "metadata");
@@ -115939,7 +117182,7 @@ function createTieredStoreExtractionSink(options) {
       if (contentStore !== anchorStore) {
         contentStore.bindTierSet(ledger);
         ledger.stageLandingCopy(identity, contentCopy, {
-          expectedGeneration: record4.generation,
+          expectedGeneration: record5.generation,
           embedHold: placement.embedHold
         });
       }
@@ -115963,7 +117206,7 @@ function createTieredStoreExtractionSink(options) {
       const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
       if (!result.accepted)
         return result;
-      ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: record4.generation });
+      ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: record5.generation });
       return result;
     }
   };
@@ -116457,14 +117700,14 @@ function parseFileExtractionCorporaEnv(raw) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} entries must be objects.`);
     }
-    const record4 = entry;
-    const corpusId = requiredString5(record4.corpus_id, "corpus_id");
-    const provider = requiredString5(record4.provider, "provider");
-    const scopes = Array.isArray(record4.scopes) ? record4.scopes.map((scope) => requiredString5(scope, "scopes[]")) : [];
+    const record5 = entry;
+    const corpusId = requiredString5(record5.corpus_id, "corpus_id");
+    const provider = requiredString5(record5.provider, "provider");
+    const scopes = Array.isArray(record5.scopes) ? record5.scopes.map((scope) => requiredString5(scope, "scopes[]")) : [];
     if (scopes.length === 0) {
       throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} entry ${corpusId} needs at least one approved scope key.`);
     }
-    const maxTier2 = optionalString10(record4.max_trust_tier_for_remote);
+    const maxTier2 = optionalString10(record5.max_trust_tier_for_remote);
     if (maxTier2 !== undefined && maxTier2 !== "S3" && maxTier2 !== "S4") {
       throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} entry ${corpusId} max_trust_tier_for_remote must be S3 or S4.`);
     }
@@ -116472,10 +117715,10 @@ function parseFileExtractionCorporaEnv(raw) {
       corpusId,
       provider,
       scopes,
-      ...optionalString10(record4.credential_handle) !== undefined ? { credentialHandle: optionalString10(record4.credential_handle) } : {},
-      ...optionalString10(record4.owner_connector_id) !== undefined ? { ownerConnectorId: optionalString10(record4.owner_connector_id) } : {},
+      ...optionalString10(record5.credential_handle) !== undefined ? { credentialHandle: optionalString10(record5.credential_handle) } : {},
+      ...optionalString10(record5.owner_connector_id) !== undefined ? { ownerConnectorId: optionalString10(record5.owner_connector_id) } : {},
       ...maxTier2 !== undefined ? { maxTrustTierForRemote: maxTier2 } : {},
-      ...record4.allow_default_deferred === true ? { allowDefaultDeferred: true } : {}
+      ...record5.allow_default_deferred === true ? { allowDefaultDeferred: true } : {}
     };
   });
 }
@@ -116689,7 +117932,7 @@ var init_readiness_ledger = __esm(() => {
 });
 
 // src/workers/file-extraction/unreadable-files.ts
-import { createHash as createHash65, randomBytes as randomBytes21 } from "node:crypto";
+import { createHash as createHash65, randomBytes as randomBytes22 } from "node:crypto";
 function createUnreadableVerdict(input) {
   return (item) => {
     const located = input.locate(item.ref);
@@ -116702,8 +117945,8 @@ function createUnreadableVerdict(input) {
     for (const lane of input.lanes()) {
       if (!lane.corpusIds.has(item.ref.corpusId))
         continue;
-      const record4 = lane.ledger.getCurrent(identity);
-      if (record4 && (record4.metadataTier === "secrets" || record4.contentTier === "secrets"))
+      const record5 = lane.ledger.getCurrent(identity);
+      if (record5 && (record5.metadataTier === "secrets" || record5.contentTier === "secrets"))
         return "blocked_policy";
       const override = lane.ledger.getOverride?.(identity);
       if (override?.kind === "tier" && override.tier === "secrets")
@@ -116836,10 +118079,10 @@ function createUnreadableFiles(options) {
       byToken.get(existing).item = item;
       return existing;
     }
-    const token = randomBytes21(32).toString("base64url");
+    const token = randomBytes22(32).toString("base64url");
     byToken.set(token, { slot, opener, item, expiresAt: at + ttl });
     tokenBySlot.set(slot, token);
-    while (byToken.size > MAX_TOKENS) {
+    while (byToken.size > MAX_TOKENS2) {
       const [oldest, old] = byToken.entries().next().value;
       drop(oldest, old);
     }
@@ -116926,7 +118169,7 @@ function createUnreadableFiles(options) {
     }
   };
 }
-var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
+var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS2 = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
@@ -117822,12 +119065,12 @@ function parseCapacityBody(text2) {
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
     return;
-  const record4 = parsed;
-  if (Object.keys(record4).length !== 1)
+  const record5 = parsed;
+  if (Object.keys(record5).length !== 1)
     return;
-  if (record4.google === "full")
+  if (record5.google === "full")
     return true;
-  if (record4.google === "open")
+  if (record5.google === "open")
     return false;
   return;
 }
@@ -117871,7 +119114,7 @@ var init_google_publisher_capacity = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes22 } from "node:crypto";
+import { randomBytes as randomBytes23 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -117901,7 +119144,7 @@ function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-refe
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes22(16).toString("base64");
+  const nonce = randomBytes23(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -117947,7 +119190,7 @@ ${TERMS_ASSENT}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderLoopbackConsentPage(input) {
-  const nonce = randomBytes22(16).toString("base64");
+  const nonce = randomBytes23(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
   const body = `<!doctype html>
@@ -117989,7 +119232,7 @@ ${TERMS_ASSENT}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderDemoSignInPage(input) {
-  const nonce = randomBytes22(16).toString("base64");
+  const nonce = randomBytes23(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const error2 = input.error ? `<p class="err" role="alert">${escapeHtml(input.error)}</p>` : "";
   const body = `<!doctype html>
@@ -118028,7 +119271,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin, DEMO_REFERRER_POLICY) };
 }
 function renderConsentErrorPage(message2) {
-  const nonce = randomBytes22(16).toString("base64");
+  const nonce = randomBytes23(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -118215,8 +119458,8 @@ function buildSourceAnswerLatencyTraceRecord(input) {
     }
   };
 }
-async function appendSourceAnswerLatencyLine(path, record4, options = {}) {
-  const line = `${JSON.stringify(record4)}
+async function appendSourceAnswerLatencyLine(path, record5, options = {}) {
+  const line = `${JSON.stringify(record5)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
   await mkdir5(dirname69(path), { recursive: true, mode: 448 });
@@ -118584,12 +119827,12 @@ class OpenClawSourceWatchDeliveryTransport {
     const result = await response.json().catch(() => {
       return;
     });
-    const record4 = asRecord16(result);
-    if (record4?.status !== "sent") {
-      const outcome = typeof record4?.status === "string" ? record4.status : "invalid_response";
+    const record5 = asRecord16(result);
+    if (record5?.status !== "sent") {
+      const outcome = typeof record5?.status === "string" ? record5.status : "invalid_response";
       return { status: "failed", errorKind: safeErrorKind(`openclaw_${outcome}`) };
     }
-    const receipt = asRecord16(record4.receipt);
+    const receipt = asRecord16(record5.receipt);
     return {
       status: "delivered",
       receipt: {
@@ -118830,14 +120073,14 @@ async function loadOpenClawGatewayConfig(env = process.env) {
     } catch {
       throw new Error("OpenClaw gateway configuration returned invalid JSON.");
     }
-    const record4 = asRecord16(parsed);
-    if (!record4 || record4.ok === false) {
+    const record5 = asRecord16(parsed);
+    if (!record5 || record5.ok === false) {
       throw new Error("OpenClaw gateway configuration was refused.");
     }
-    const tls = asRecord16(record4.tls);
+    const tls = asRecord16(record5.tls);
     return {
       gateway: {
-        ...record4.port !== undefined ? { port: record4.port } : {},
+        ...record5.port !== undefined ? { port: record5.port } : {},
         ...tls ? {
           tls: {
             ...tls.enabled !== undefined ? { enabled: tls.enabled } : {},
@@ -119635,6 +120878,10 @@ function mountDashboardController(options) {
       if (meta2 && nextMeta)
         meta2.textContent = nextMeta.textContent;
       applyWriteCapability();
+      return;
+    }
+    if (query("[data-outside-help]")) {
+      options.navigate(options.returnUrl);
       return;
     }
     const openSheets = queryAll(".sheet.on").map((sheet) => sheet.id);
@@ -126049,7 +127296,7 @@ function dashboardHostBridge(config2, io) {
   function fail(id, code, message2) {
     post2({ jsonrpc: "2.0", id, error: { code, message: message2 } });
   }
-  function refused(text2) {
+  function refused2(text2) {
     return { isError: true, content: [{ type: "text", text: text2 }] };
   }
   function localTarget(url) {
@@ -126082,14 +127329,14 @@ function dashboardHostBridge(config2, io) {
     const name = params && typeof params.name === "string" ? params.name : "";
     const args = params && params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
     if (config2.tools.indexOf(name) < 0) {
-      reply(id, refused("This tool is not available here."));
+      reply(id, refused2("This tool is not available here."));
       return;
     }
     if (readOnly && name !== config2.readTool) {
-      reply(id, refused("Open dashboard controls first."));
+      reply(id, refused2("Open dashboard controls first."));
       return;
     }
-    io.callTool(name, args).then((result) => reply(id, result), () => reply(id, refused("Could not reach Olympus.")));
+    io.callTool(name, args).then((result) => reply(id, result), () => reply(id, refused2("Could not reach Olympus.")));
   }
   function onMessage(event) {
     if (event.source !== io.frame.contentWindow)
@@ -126529,12 +127776,12 @@ function dashboardAgentsView(backend) {
   }
   return {
     remoteAccess,
-    connections: records.filter((record4) => record4.revokedAt === null).map((record4) => ({
-      id: record4.id,
-      name: record4.displayName,
-      kind: record4.kind,
-      createdAt: record4.createdAt,
-      lastUsedAt: record4.lastUsedAt
+    connections: records.filter((record5) => record5.revokedAt === null).map((record5) => ({
+      id: record5.id,
+      name: record5.displayName,
+      kind: record5.kind,
+      createdAt: record5.createdAt,
+      lastUsedAt: record5.lastUsedAt
     }))
   };
 }
@@ -126601,7 +127848,7 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
   if (!/^[a-f0-9]{18}$/.test(id))
     return refusal2(400, "invalid_request", "That is not a connection id.");
   const store = openStore(backend, false);
-  const existing = store?.list().find((record4) => record4.id === id);
+  const existing = store?.list().find((record5) => record5.id === id);
   if (!store || !existing)
     return refusal2(404, "connection_not_found", "No connection has that id.");
   const revoked = store.revoke(id);
@@ -126676,15 +127923,15 @@ function openStore(backend, create = true) {
 function storeUnavailable() {
   return refusal2(503, "agent_connections_unavailable", "Olympus could not open its connection list. Try again, or run olympus doctor.");
 }
-function connectionView(record4) {
+function connectionView(record5) {
   return {
-    id: record4.id,
-    name: record4.displayName,
-    kind: record4.kind,
-    provider: record4.provider,
-    created_at: record4.createdAt,
-    last_used_at: record4.lastUsedAt,
-    revoked_at: record4.revokedAt
+    id: record5.id,
+    name: record5.displayName,
+    kind: record5.kind,
+    provider: record5.provider,
+    created_at: record5.createdAt,
+    last_used_at: record5.lastUsedAt,
+    revoked_at: record5.revokedAt
   };
 }
 async function objectBody(request) {
@@ -127008,108 +128255,6 @@ var init_agents = __esm(() => {
   MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 });
 
-// src/workers/dashboard/model-setup.ts
-function renderModelSetup(view2, options = {}) {
-  if (!view2)
-    return "";
-  const bannerOwnsToggle = blockerOwnsLocalToggle(view2);
-  const cards = view2.cards.map((card) => {
-    if (card.state === "ready")
-      return readyModelRow(card);
-    const state = modelStateWord(card);
-    let action = "";
-    let sheet = "";
-    if (card.id === "local") {
-      if (card.state === "not_configured" && !bannerOwnsToggle) {
-        action = `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`;
-        sheet = localModelsSheet();
-      }
-    } else {
-      action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
-    }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml2(card.label)}</b><span role="status">${escapeHtml2(state)}</span></header>` + `<p>${escapeHtml2(card.detail)}</p>${action}</section>${sheet}`;
-  }).join("");
-  const localCard = view2.cards.some((card) => card.id === "local");
-  const extras = view2.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view2.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view2.attention ? `<p role="status">${escapeHtml2(view2.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
-}
-function localModelsSheet() {
-  return connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
-}
-function blockingCard(view2) {
-  return view2.ready ? undefined : view2.cards.find((entry) => entry.state !== "ready");
-}
-function blockerOwnsLocalToggle(view2) {
-  const card = blockingCard(view2);
-  return card?.id === "local" && card.state === "not_configured";
-}
-function readyModelRow(card) {
-  const label = escapeHtml2(card.label);
-  const state = card.id === "local" ? "Ready" : "Ready · key connected";
-  const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
-  if (card.id === "local") {
-    return `${head}${rowMenu(card.label, `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)}</div>${localModelsSheet()}`;
-  }
-  const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-  const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
-  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml2(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
-}
-function modelStateWord(card) {
-  if (card.state === "applying")
-    return card.id === "local" ? "Checking…" : "Applying…";
-  if (card.state === "needs_attention")
-    return card.id === "local" ? "Not answering" : "Needs attention";
-  if (card.state === "ready")
-    return "Ready";
-  return "Not configured";
-}
-function renderModelSetupBlocker(view2) {
-  if (!view2 || view2.ready)
-    return "";
-  const card = blockingCard(view2);
-  if (!card) {
-    return blockerBanner({ sentence: view2.attention ?? "Model setup is not finished, so sources stay locked." });
-  }
-  if (card.id === "local") {
-    if (card.state === "applying") {
-      return blockerBanner({ sentence: "Checking your local models… Sources unlock when the check passes." });
-    }
-    if (card.state === "needs_attention") {
-      return blockerBanner({
-        sentence: "Your local model server is not answering, so sources stay locked. Start it, then check again.",
-        controlHtml: `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check again</button>${CHECK_FORM_TAIL}`
-      });
-    }
-    return blockerBanner({
-      sentence: "Connect your local models to start connecting sources.",
-      controlHtml: `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`
-    }) + localModelsSheet();
-  }
-  if (card.state === "applying") {
-    return blockerBanner({ sentence: `Applying your ${card.label} key… Sources unlock when it is ready.` });
-  }
-  if (card.state === "needs_attention")
-    return blockerBanner({ sentence: card.detail });
-  return blockerBanner({
-    sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
-  });
-}
-function modelKeyFieldId(card) {
-  return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-}
-function modelKeyForm(card) {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
-}
-function modelKeyAction(card, lead) {
-  const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
-  return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
-}
-var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>';
-var init_model_setup2 = __esm(() => {
-  init_components();
-});
-
 // src/workers/dashboard/static-styles.ts
 var LOCAL_PAGE_CSS = `
 .srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
@@ -127236,6 +128381,108 @@ var LOCAL_PAGE_CSS = `
 }
 `;
 
+// src/workers/dashboard/model-setup.ts
+function renderModelSetup(view2, options = {}) {
+  if (!view2)
+    return "";
+  const bannerOwnsToggle = blockerOwnsLocalToggle(view2);
+  const cards = view2.cards.map((card) => {
+    if (card.state === "ready")
+      return readyModelRow(card);
+    const state = modelStateWord(card);
+    let action = "";
+    let sheet = "";
+    if (card.id === "local") {
+      if (card.state === "not_configured" && !bannerOwnsToggle) {
+        action = `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`;
+        sheet = localModelsSheet();
+      }
+    } else {
+      action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
+    }
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml2(card.label)}</b><span role="status">${escapeHtml2(state)}</span></header>` + `<p>${escapeHtml2(card.detail)}</p>${action}</section>${sheet}`;
+  }).join("");
+  const localCard = view2.cards.some((card) => card.id === "local");
+  const extras = view2.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
+  return `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view2.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view2.attention ? `<p role="status">${escapeHtml2(view2.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+}
+function localModelsSheet() {
+  return connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
+}
+function blockingCard(view2) {
+  return view2.ready ? undefined : view2.cards.find((entry) => entry.state !== "ready");
+}
+function blockerOwnsLocalToggle(view2) {
+  const card = blockingCard(view2);
+  return card?.id === "local" && card.state === "not_configured";
+}
+function readyModelRow(card) {
+  const label = escapeHtml2(card.label);
+  const state = card.id === "local" ? "Ready" : "Ready · key connected";
+  const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
+  if (card.id === "local") {
+    return `${head}${rowMenu(card.label, `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)}</div>${localModelsSheet()}`;
+  }
+  const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+  const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
+  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml2(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
+}
+function modelStateWord(card) {
+  if (card.state === "applying")
+    return card.id === "local" ? "Checking…" : "Applying…";
+  if (card.state === "needs_attention")
+    return card.id === "local" ? "Not answering" : "Needs attention";
+  if (card.state === "ready")
+    return "Ready";
+  return "Not configured";
+}
+function renderModelSetupBlocker(view2) {
+  if (!view2 || view2.ready)
+    return "";
+  const card = blockingCard(view2);
+  if (!card) {
+    return blockerBanner({ sentence: view2.attention ?? "Model setup is not finished, so sources stay locked." });
+  }
+  if (card.id === "local") {
+    if (card.state === "applying") {
+      return blockerBanner({ sentence: "Checking your local models… Sources unlock when the check passes." });
+    }
+    if (card.state === "needs_attention") {
+      return blockerBanner({
+        sentence: "Your local model server is not answering, so sources stay locked. Start it, then check again.",
+        controlHtml: `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check again</button>${CHECK_FORM_TAIL}`
+      });
+    }
+    return blockerBanner({
+      sentence: "Connect your local models to start connecting sources.",
+      controlHtml: `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`
+    }) + localModelsSheet();
+  }
+  if (card.state === "applying") {
+    return blockerBanner({ sentence: `Applying your ${card.label} key… Sources unlock when it is ready.` });
+  }
+  if (card.state === "needs_attention")
+    return blockerBanner({ sentence: card.detail });
+  return blockerBanner({
+    sentence: `Add your ${card.label} API key to start connecting sources.`,
+    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
+  });
+}
+function modelKeyFieldId(card) {
+  return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+}
+function modelKeyForm(card) {
+  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+}
+function modelKeyAction(card, lead) {
+  const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
+  return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
+}
+var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>';
+var init_model_setup2 = __esm(() => {
+  init_components();
+});
+
 // src/workers/dashboard/pages/local.ts
 function unlocked(options) {
   return options?.controlSessionCsrfToken !== undefined;
@@ -127263,6 +128510,7 @@ function renderDashboardKeysPage(view2, options) {
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view2.model_setup),
     renderModelSetup(view2.model_setup),
+    `<section id="anonymous"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
     sources.length === 0 ? "" : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0 ? "" : `<div class="srows">${sources.map((source) => renderSetupRow(source, view2, blocked)).join(`
 `)}</div>`
@@ -127272,7 +128520,7 @@ function renderDashboardKeysPage(view2, options) {
     crumb: W.keys.title,
     meta: dashboardCheckedLabel(view2.generated_at, options?.now ?? new Date),
     body,
-    styles: [MODEL_SETUP_CSS],
+    styles: [MODEL_SETUP_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
     options
   });
 }
@@ -127406,7 +128654,9 @@ var init_local = __esm(() => {
   init_source_dashboard();
   init_agents();
   init_components();
+  init_vocabulary();
   init_model_setup2();
+  init_outside_help();
   init_vocabulary();
   CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
   CONNECTOR_PROMPT = [
@@ -127708,15 +128958,16 @@ function renderPrivateAnswersBody(options) {
   } else if (options?.privateAnswers?.available !== true) {
     parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
-    parts.push(renderAsk());
+    parts.push(`<div class="paasks">${renderAsk(false, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
     parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date));
     script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
-  parts.push(renderAnonymous(options, csrfToken));
+  if (!localSession || options?.privateAnswers?.available !== true)
+    parts.push(`<div class="paasks">${renderAsk(true, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
   return `<div class="privacy pa" data-private-answers>${parts.join("")}</div>${script2}`;
 }
-function renderAsk() {
-  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</h3><form class="paask" data-pa-ask>` + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form></section>`;
+function renderAsk(disabled2 = false, basePath) {
+  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privateIntro)}</p><form class="paask" data-pa-ask>` + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000"${disabled2 ? " disabled" : ""} placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled2 ? " disabled" : ""}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form><p class="pnote"><a href="${escapeHtml2(dashboardLocalPageHref("keys", readToken(basePath)))}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels)}</a></p></section>`;
 }
 function renderWaiting(waiting, now) {
   const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
@@ -127731,7 +128982,7 @@ function renderWaiting(waiting, now) {
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
     const status = state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
-    const from = [question.from, when, status].filter(Boolean).join(" · ");
+    const from = [question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
     return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
@@ -127742,23 +128993,9 @@ function renderWaiting(waiting, now) {
 }
 function renderAnonymous(options, csrfToken) {
   const status = options?.outsideHelp;
-  let body;
-  let sum2 = DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousSum;
-  if (csrfToken === undefined) {
-    body = `<div class="outside"><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p></div>`;
-  } else if (!status) {
-    body = `<div class="outside" data-outside-unavailable><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unavailable)}</p></div>`;
-  } else {
-    const row = DASHBOARD_OUTSIDE_HELP_COPY.row[summaryOf(status).state];
-    sum2 = `${DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousSum} · ${row.replace(/^[^:]*:\s*/, "")}`;
-    body = renderOutsideHelpCard(status, {
-      csrfToken,
-      localSession: options?.outsideHelpLocalSession === true,
-      untitled: true,
-      ...options?.basePath === undefined ? {} : { basePath: options.basePath }
-    });
-  }
-  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>` + `<summary><h3 class="paanon-title">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3><span class="paanon-sum">${escapeHtml2(sum2)}</span></summary>` + `<div class="paanon-body">${body}</div></details>`;
+  const ready = status && summaryOf(status).state === "on" && csrfToken !== undefined && options?.outsideHelpLocalSession === true;
+  const models = `${dashboardLocalPageHref("keys", readToken(options?.basePath))}#anonymous`;
+  return `<section class="pasection" id="anonymous" data-pa-anonymous aria-labelledby="anonymous-heading"><h3 class="sect" id="anonymous-heading">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousAsk)}</h3>` + `<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousIntro)}</p><form class="paask" data-pa-ask data-pa-path="anonymous">` + `<textarea aria-labelledby="anonymous-heading" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPlaceholder)}"${ready ? "" : " disabled"}></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary"${ready ? "" : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form>` + `<p class="pnote">${ready ? "" : escapeHtml2(status ? DASHBOARD_OUTSIDE_HELP_COPY.row[summaryOf(status).state] : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp) + " "}<a href="${escapeHtml2(models)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels)}</a></p></section>`;
 }
 function privateAnswersClientScript(input) {
   const config2 = {
@@ -127770,6 +129007,9 @@ function privateAnswersClientScript(input) {
     copy: {
       answering: DASHBOARD_PRIVATE_ANSWERS_COPY.answering,
       sources: DASHBOARD_PRIVATE_ANSWERS_COPY.sources,
+      sent: DASHBOARD_PRIVATE_ANSWERS_COPY.sent,
+      privatePath: DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath,
+      anonymousPath: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath,
       open: DASHBOARD_PRIVATE_ANSWERS_COPY.open,
       leftOut: DASHBOARD_PRIVATE_ANSWERS_COPY.leftOut,
       unanswered: DASHBOARD_PRIVATE_ANSWERS_COPY.unanswered,
@@ -127796,7 +129036,7 @@ function privateAnswersClientScript(input) {
   function openAnonymous() {
     if (window.location.hash !== '#' + config.fragment) return;
     var section = document.getElementById(config.fragment);
-    if (section) { section.open = true; if (section.scrollIntoView) section.scrollIntoView({ block: 'start' }); }
+    if (section) { if (section.scrollIntoView) section.scrollIntoView({ block: 'start' }); }
   }
   openAnonymous();
   window.addEventListener('hashchange', openAnonymous);
@@ -127882,6 +129122,7 @@ function privateAnswersClientScript(input) {
         box.textContent = String(result.answer || '');
       }
       card.appendChild(box);
+      if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
@@ -127921,8 +129162,7 @@ function privateAnswersClientScript(input) {
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
-  var ask = root.querySelector('form[data-pa-ask]');
-  if (ask) {
+  root.querySelectorAll('form[data-pa-ask]').forEach(function (ask) {
     ask.addEventListener('submit', async function (event) {
       event.preventDefault();
       var field = ask.querySelector('textarea[name="question"]');
@@ -127932,12 +129172,13 @@ function privateAnswersClientScript(input) {
       if (!question || !out) return;
       if (button) button.disabled = true;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: 'ask', question: question });
+      var outcome = await send({ action: ask.getAttribute('data-pa-path') === 'anonymous' ? 'ask_anonymous' : 'ask', question: question });
       if (button) button.disabled = false;
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
       render(out, outcome.result, question);
+      await poll();
     });
-  }
+  });
   var selected = null;
   var readVersion = 0;
   var seen = {};
@@ -128047,7 +129288,7 @@ function privateAnswersClientScript(input) {
       }
       var state = q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
-      row.querySelector('.pafrom').textContent = ' · ' + [q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
+      row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
       list.appendChild(row);
     });
     empty();
@@ -128065,13 +129306,14 @@ function privateAnswersClientScript(input) {
 })();`;
 }
 var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
-.pa { width: 100%; min-width: 0; max-width: min(760px, 100%); }
+.pa { width: 100%; min-width: 0; max-width: min(1040px, 100%); }
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
 .pa .pasection > .sect { margin: 0 0 12px; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
 .pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
+.pa .pasent { white-space: pre-wrap; }
 .pa .paanswer:not(.md) { white-space: pre-wrap; }
 .pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer table { table-layout: fixed; display: table; }
@@ -128101,15 +129343,13 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa details.paanon { margin-top: 28px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.pa details.paanon > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
-.pa details.paanon > summary::-webkit-details-marker { display: none; }
-.pa details.paanon > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
-.pa details.paanon[open] > summary::before { content: '\\25BE'; }
-.pa details.paanon > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.pa .paanon-title { margin: 0; font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
-.pa .paanon-sum { color: var(--t3); font-size: var(--fs-body); }
-.pa .paanon-body { padding: 0 0 16px; }
+.pa .paasks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 0 32px; }
+.pa .paasks .pasection { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; }
+.pa .paasks .pnote { margin: 0 0 12px; }
+.pa .paasks .pasection > .pnote:last-child { margin: 8px 0 0; }
+.pa .paasks .paask { margin: auto 0 0; }
+.pa .paasks .paout { flex-basis: 100%; }
+@media (max-width: 640px) { .pa .paasks { grid-template-columns: minmax(0, 1fr); } }
 `;
 var init_private_answers = __esm(() => {
   init_components();
@@ -128262,7 +129502,7 @@ var init_request_peer = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac4, randomBytes as randomBytes23, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createHmac as createHmac4, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -128282,7 +129522,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = createHmac4("sha256", options.sessionSecret?.trim() || randomBytes23(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
+  const sessionSecret = createHmac4("sha256", options.sessionSecret?.trim() || randomBytes24(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -128701,7 +129941,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes23(24).toString("base64url"),
+    nonce: randomBytes24(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(sessionSecret, origin),
     grade
@@ -129064,7 +130304,7 @@ function applySourceDispositionEdits(document2, edits, options = {}) {
   const originalIds = new Set(document2.rules.map((rule) => rule.id));
   const touchedIds = new Set;
   const applied = [];
-  const refused = [];
+  const refused2 = [];
   const enforcesPaths = !options.enforceable || options.enforceable.includes("path_prefix");
   const ruleAppliesHere = (rule) => sourceExclusionRuleAppliesToSource(rule, source);
   if (!enforcesPaths) {
@@ -129086,7 +130326,7 @@ function applySourceDispositionEdits(document2, edits, options = {}) {
     const explicit = explicitPrefixes(matcher);
     const path = normalizeSourceExclusionPath(edit.path);
     if (path === undefined) {
-      refused.push({
+      refused2.push({
         path: edit.path,
         state: edit.state,
         code: "path_unevaluable",
@@ -129101,7 +130341,7 @@ function applySourceDispositionEdits(document2, edits, options = {}) {
     const ancestorPath = nearestExplicitAncestor(normalizedSegmentsFor(path), explicit);
     if (edit.state === "ingest") {
       if (ancestorState !== "ingest") {
-        refused.push({
+        refused2.push({
           path,
           state: edit.state,
           code: "inherited_state_not_editable",
@@ -129114,7 +130354,7 @@ function applySourceDispositionEdits(document2, edits, options = {}) {
           applied.push({ path, state: edit.state, action: "unchanged" });
           continue;
         }
-        refused.push({
+        refused2.push({
           path,
           state: edit.state,
           code: "criterion_not_editable_by_path",
@@ -129135,7 +130375,7 @@ function applySourceDispositionEdits(document2, edits, options = {}) {
     }
     const mode = sourceDispositionRuleMode(edit.state);
     if (edit.state === "metadata_only" && ancestorState === "exclude") {
-      refused.push({
+      refused2.push({
         path,
         state: edit.state,
         code: "inherited_state_not_editable",
@@ -129177,7 +130417,7 @@ function applySourceDispositionEdits(document2, edits, options = {}) {
     rules: { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules: next },
     changed: applied.some((entry) => entry.action !== "unchanged"),
     applied,
-    refused,
+    refused: refused2,
     untouched_rule_ids: [...originalIds].filter((id) => nextIds.has(id) && !touchedIds.has(id)).sort()
   };
 }
@@ -129277,7 +130517,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync28, copyFileSync as copyFileSync2, existsSync as existsSync61, lstatSync as lstatSync34, mkdirSync as mkdirSync47, readFileSync as readFileSync65 } from "node:fs";
+import { chmodSync as chmodSync28, copyFileSync as copyFileSync2, existsSync as existsSync61, lstatSync as lstatSync35, mkdirSync as mkdirSync47, readFileSync as readFileSync65 } from "node:fs";
 import { dirname as dirname70 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
@@ -129333,7 +130573,7 @@ function writeSourceIngestionExclusionsFile(options) {
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
   if (existsSync61(path)) {
-    const stat7 = lstatSync34(path);
+    const stat7 = lstatSync35(path);
     if (stat7.isSymbolicLink() || !stat7.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
     }
@@ -129613,7 +130853,7 @@ function safeDetail(value2) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash70, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash70, randomBytes as randomBytes25, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync66, statSync as statSync29 } from "node:fs";
 import { homedir as homedir58 } from "node:os";
 import { join as join100, resolve as resolve14 } from "node:path";
@@ -129801,7 +131041,7 @@ function createEmailSourceWorker(options = {}) {
               let releaseTicket;
               if (caller?.surface !== "remote") {
                 pruneReleaseTickets();
-                releaseTicket = randomBytes24(32).toString("base64url");
+                releaseTicket = randomBytes25(32).toString("base64url");
                 releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60000, manifests: manifests.manifests });
                 while (releaseTickets.size > 256)
                   releaseTickets.delete(releaseTickets.keys().next().value);
@@ -130149,7 +131389,13 @@ function createEmailSourceWorker(options = {}) {
             return html2(renderDashboardLocalPage("keys", {
               url,
               view: view2,
-              options: { ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {} }
+              options: {
+                ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
+                ...controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => {
+                  return;
+                }) } : {}
+              }
             }));
           }
         }
@@ -130168,9 +131414,9 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceDashboard?.panelTools) {
             throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "The dashboard panel is not configured.");
           }
-          const record4 = await parseObjectBody(request);
-          const name = typeof record4.name === "string" ? record4.name : "";
-          const args = record4.arguments === undefined ? {} : record4.arguments;
+          const record5 = await parseObjectBody(request);
+          const name = typeof record5.name === "string" ? record5.name : "";
+          const args = record5.arguments === undefined ? {} : record5.arguments;
           if (!args || typeof args !== "object" || Array.isArray(args)) {
             throw new EmailSourceWorkerError(400, "invalid_request", "arguments must be an object.");
           }
@@ -130287,18 +131533,18 @@ function createEmailSourceWorker(options = {}) {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record4 = await parseObjectBody(request);
-            const source = parseDashboardOAuthSource(record4.source);
-            if (record4.handback !== "relay" && record4.handback !== "computer")
+            const record5 = await parseObjectBody(request);
+            const source = parseDashboardOAuthSource(record5.source);
+            if (record5.handback !== "relay" && record5.handback !== "computer")
               assertDashboardModelsReady();
             const secretStore = dashboardSecretStore(sourceDashboard);
             const registry2 = readDashboardRegistry(sourceDashboard.registryPath);
             assertDashboardAccountCardinality(registry2, source);
             const clientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
-            const submittedClientId = asOptionalString(record4.client_id);
-            const handback = record4.handback === "relay" ? sourceDashboard.oauthHandback?.() : undefined;
-            const computerHandback = record4.handback === "computer";
-            if (record4.handback !== undefined && !handback && !computerHandback) {
+            const submittedClientId = asOptionalString(record5.client_id);
+            const handback = record5.handback === "relay" ? sourceDashboard.oauthHandback?.() : undefined;
+            const computerHandback = record5.handback === "computer";
+            if (record5.handback !== undefined && !handback && !computerHandback) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This sign-in cannot return through the relay on this install.");
             }
             const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
@@ -130316,7 +131562,7 @@ function createEmailSourceWorker(options = {}) {
             if (!clientId) {
               throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
             }
-            const rawClientSecret = asOptionalString(record4.client_secret);
+            const rawClientSecret = asOptionalString(record5.client_secret);
             const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
             const clientSecret = publisher && dashboardGoogleOAuthSource(source) ? undefined : await dashboardOAuthClientSecret(source, secretStore, submittedClientSecret, clientId);
             if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
@@ -130387,8 +131633,8 @@ function createEmailSourceWorker(options = {}) {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record4 = await parseObjectBody(request);
-            const source = parseDashboardOAuthSource(record4.source);
+            const record5 = await parseObjectBody(request);
+            const source = parseDashboardOAuthSource(record5.source);
             const cancelled = dashboardOAuthAttempts.delete(source);
             return json({
               ok: true,
@@ -130415,8 +131661,8 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceDashboard?.privateAnswers) {
             throw new EmailSourceWorkerError(501, "private_answers_not_supported", "Private answers are not available in this worker.");
           }
-          const record4 = await parseObjectBody(request);
-          const outcome = await sourceDashboard.privateAnswers.handle(record4, dashboardPanelOpener(request));
+          const record5 = await parseObjectBody(request);
+          const outcome = await sourceDashboard.privateAnswers.handle(record5, dashboardPanelOpener(request));
           return new Response(JSON.stringify(outcome.body), {
             status: outcome.status,
             headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
@@ -130429,9 +131675,9 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceDashboard?.consult) {
             throw new EmailSourceWorkerError(501, "consult_not_supported", "This worker does not support outside help.");
           }
-          const record4 = await parseObjectBody(request);
+          const record5 = await parseObjectBody(request);
           const backend = sourceDashboard.consult;
-          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record4) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record4) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record4) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record4) : url.pathname === "/dashboard/consult/tools/install" ? await backend.installTools(record4) : url.pathname === "/dashboard/consult/writer" ? await backend.saveWriter(record4) : url.pathname === "/dashboard/consult/writer/test" ? await backend.testWriter(record4) : url.pathname === "/dashboard/consult/standard" ? await backend.saveStandard(record4) : await backend.abandon(record4);
+          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record5) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record5) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record5) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record5) : url.pathname === "/dashboard/consult/tools/install" ? await backend.installTools(record5) : url.pathname === "/dashboard/consult/writer" ? await backend.saveWriter(record5) : url.pathname === "/dashboard/consult/writer/test" ? await backend.testWriter(record5) : url.pathname === "/dashboard/consult/standard" ? await backend.saveStandard(record5) : await backend.abandon(record5);
           if (!outcome.ok) {
             return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...outcome.revision !== undefined ? { revision: outcome.revision } : {} }, outcome.httpStatus);
           }
@@ -130447,13 +131693,13 @@ function createEmailSourceWorker(options = {}) {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record4 = await parseObjectBody(request);
-            const source = parseDashboardApiKeySource(record4.source);
+            const record5 = await parseObjectBody(request);
+            const source = parseDashboardApiKeySource(record5.source);
             if (source === "readwise") {
               assertDashboardModelsReady();
               assertDashboardAccountCardinality(readConnectedHandleRegistry(sourceDashboard.registryPath ?? defaultHandleRegistryPath()), source);
             }
-            const apiKey = asOptionalString(record4.api_key);
+            const apiKey = asOptionalString(record5.api_key);
             if (!apiKey)
               throw new EmailSourceWorkerError(400, "invalid_request", "api_key is required.");
             if (source === "gemini" || source === "venice" && sourceDashboard.connectModelKey) {
@@ -130509,8 +131755,8 @@ function createEmailSourceWorker(options = {}) {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record4 = await parseObjectBody(request);
-            const source = parseDashboardSyncSource(record4.source);
+            const record5 = await parseObjectBody(request);
+            const source = parseDashboardSyncSource(record5.source);
             assertDashboardSourceMayRead(source, sourceDashboard, dashboardDisconnectedSources);
             const schedulerSourceId = dashboardSchedulerSourceId(source);
             const key2 = schedulerSourceId ?? source;
@@ -130550,7 +131796,7 @@ function createEmailSourceWorker(options = {}) {
               }));
             }).catch((error2) => {
               const failureKind = manualSyncFailureKind(error2);
-              const failureRef = failureKind === "unknown" ? randomBytes24(8).toString("hex") : undefined;
+              const failureRef = failureKind === "unknown" ? randomBytes25(8).toString("hex") : undefined;
               if (failureRef || !(error2 instanceof EmailSourceWorkerError) && !(error2 instanceof OperationError)) {
                 logSourceWorkerInternalError(request, error2, failureRef);
               }
@@ -130572,9 +131818,9 @@ function createEmailSourceWorker(options = {}) {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record4 = await parseObjectBody(request);
-            const sourceId = parseDashboardDisconnectSource(record4.source_id);
-            if (record4.acknowledge !== true) {
+            const record5 = await parseObjectBody(request);
+            const sourceId = parseDashboardDisconnectSource(record5.source_id);
+            if (record5.acknowledge !== true) {
               throw new EmailSourceWorkerError(400, "disconnect_confirmation_required", "Confirm that Disconnect retains indexed data and developer-app registration and does not revoke provider-side access.");
             }
             if (sourceScheduler && !sourceDashboard.refreshSchedulerSources) {
@@ -130656,9 +131902,9 @@ function createEmailSourceWorker(options = {}) {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record4 = await parseObjectBody(request);
-            const sourceId = parseDashboardUnpairSource(record4.source_id);
-            if (record4.acknowledge !== true) {
+            const record5 = await parseObjectBody(request);
+            const sourceId = parseDashboardUnpairSource(record5.source_id);
+            if (record5.acknowledge !== true) {
               throw new EmailSourceWorkerError(400, "unpair_confirmation_required", "Confirm that Unpair removes only this computer's pairing session, retains indexed and captured data, and does not remove the linked device at the provider.");
             }
             if (sourceScheduler && !sourceDashboard.refreshSchedulerSources) {
@@ -130766,15 +132012,15 @@ function createEmailSourceWorker(options = {}) {
                 ...failedSteps.includes("connected_handle") ? [] : ["connected_handle"]
               ];
               const reconciledRead = readReconciledUnpairedSources(registryPath);
-              const reconciledOthers = (reconciledRead.status === "ok" ? reconciledRead.records : []).filter((record5) => !selectedSourceIds.has(record5.source_id));
+              const reconciledOthers = (reconciledRead.status === "ok" ? reconciledRead.records : []).filter((record6) => !selectedSourceIds.has(record6.source_id));
               recordUnpairedSources([
-                ...reconciledOthers.map((record5) => ({
-                  source_id: record5.source_id,
-                  state: record5.state,
-                  ...record5.unremoved_paths ? { unremoved_paths: record5.unremoved_paths } : {},
-                  ...record5.failed_steps ? { failed_steps: record5.failed_steps } : {},
+                ...reconciledOthers.map((record6) => ({
+                  source_id: record6.source_id,
+                  state: record6.state,
+                  ...record6.unremoved_paths ? { unremoved_paths: record6.unremoved_paths } : {},
+                  ...record6.failed_steps ? { failed_steps: record6.failed_steps } : {},
                   discharged: {
-                    paths: (existingRecord.status === "ok" ? existingRecord.records.find((prior) => prior.source_id === record5.source_id)?.unremoved_paths ?? [] : []).filter((path) => !(record5.unremoved_paths ?? []).includes(path))
+                    paths: (existingRecord.status === "ok" ? existingRecord.records.find((prior) => prior.source_id === record6.source_id)?.unremoved_paths ?? [] : []).filter((path) => !(record6.unremoved_paths ?? []).includes(path))
                   }
                 })),
                 ...[...selectedSourceIds].map((unpairedSource) => ({
@@ -130815,8 +132061,8 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/embedding-priority") {
-          const record4 = await parseObjectBody(request);
-          const on = asOptionalBoolean(record4.on);
+          const record5 = await parseObjectBody(request);
+          const on = asOptionalBoolean(record5.on);
           if (on === undefined) {
             throw new EmailSourceWorkerError(400, "invalid_request", "on must be true or false.");
           }
@@ -130838,9 +132084,9 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/x-bookmarks/content/recover`) {
-          const record4 = await parseObjectBody(request);
-          const execute = asOptionalBoolean(record4.execute);
-          const limit = asOptionalNumber(record4.limit);
+          const record5 = await parseObjectBody(request);
+          const execute = asOptionalBoolean(record5.execute);
+          const limit = asOptionalNumber(record5.limit);
           const contentRecovery = currentXBookmarksRuntime()?.contentRecovery;
           if (!contentRecovery) {
             throw new EmailSourceWorkerError(501, "x_bookmarks_content_recovery_not_supported", "Private source worker does not support X bookmark content recovery.");
@@ -130853,8 +132099,8 @@ function createEmailSourceWorker(options = {}) {
           return json(result);
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/sync`) {
-          const record4 = await parseObjectBody(request);
-          const corpusId = canonicalRequestCorpusId(record4);
+          const record5 = await parseObjectBody(request);
+          const corpusId = canonicalRequestCorpusId(record5);
           if (!corpusId) {
             throw new EmailSourceWorkerError(400, "invalid_request", "corpus_id is required for source sync.");
           }
@@ -130867,7 +132113,7 @@ function createEmailSourceWorker(options = {}) {
             return json(result);
           }
           if (corpusId === READWISE_LIBRARY_CORPUS_ID) {
-            const mode = asOptionalString(record4.mode);
+            const mode = asOptionalString(record5.mode);
             if (mode !== undefined && mode !== "connector_store") {
               throw new EmailSourceWorkerError(400, "invalid_request", "mode must be connector_store for Readwise sync.");
             }
@@ -130880,7 +132126,7 @@ function createEmailSourceWorker(options = {}) {
             return json(result);
           }
           if (corpusId === X_BOOKMARKS_CORPUS_ID) {
-            const mode = asOptionalString(record4.mode) ?? "reconcile";
+            const mode = asOptionalString(record5.mode) ?? "reconcile";
             if (mode !== "head" && mode !== "reconcile" && mode !== "window_diagnostic") {
               throw new EmailSourceWorkerError(400, "invalid_request", "mode must be head, reconcile, or window_diagnostic for X bookmarks sync.");
             }
@@ -130920,16 +132166,16 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/extract`) {
           const runner = requireFileExtractionRunner(fileExtraction);
-          const record4 = await parseObjectBody(request);
-          const lane = parseFileExtractionLaneRecord(record4, filesAliasLane, runner);
+          const record5 = await parseObjectBody(request);
+          const lane = parseFileExtractionLaneRecord(record5, filesAliasLane, runner);
           const result = await runner.run({
             ...lane,
-            ...optionalNumberField(record4.limit, "limit", "limit"),
-            ...optionalNumberField(record4.lease_seconds, "lease_seconds", "leaseSeconds"),
-            ...optionalStringField(record4.extractor_kind, "extractorKind"),
-            ...optionalStringField(record4.extractor_version, "extractorVersion"),
-            ...asOptionalStringArray(record4.provider_item_ids, "provider_item_ids") !== undefined ? { providerItemIds: asOptionalStringArray(record4.provider_item_ids, "provider_item_ids") } : {},
-            ...record4.reclassify === false ? { reclassify: false } : {}
+            ...optionalNumberField(record5.limit, "limit", "limit"),
+            ...optionalNumberField(record5.lease_seconds, "lease_seconds", "leaseSeconds"),
+            ...optionalStringField(record5.extractor_kind, "extractorKind"),
+            ...optionalStringField(record5.extractor_version, "extractorVersion"),
+            ...asOptionalStringArray(record5.provider_item_ids, "provider_item_ids") !== undefined ? { providerItemIds: asOptionalStringArray(record5.provider_item_ids, "provider_item_ids") } : {},
+            ...record5.reclassify === false ? { reclassify: false } : {}
           });
           const body = fileExtractionRunBody(result);
           assertNoRawEmailFields(body);
@@ -130937,18 +132183,18 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/plan`) {
           const runner = requireFileExtractionRunner(fileExtraction);
-          const record4 = await parseObjectBody(request);
-          const lane = parseFileExtractionLaneRecord(record4, filesAliasLane, runner);
+          const record5 = await parseObjectBody(request);
+          const lane = parseFileExtractionLaneRecord(record5, filesAliasLane, runner);
           const result = await runner.plan({
             ...lane,
-            limit: asOptionalNumber(record4.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
-            ...optionalStringField(record4.cursor, "cursor"),
-            ...optionalStringField(record4.extractor_kind, "extractorKind"),
-            ...asOptionalStringArray(record4.mime_types, "mime_types") !== undefined ? { mimeTypes: asOptionalStringArray(record4.mime_types, "mime_types") } : {},
-            ...optionalNumberField(record4.priority, "priority", "priority"),
-            ...optionalNumberField(record4.max_bytes_per_file, "max_bytes_per_file", "maxBytesPerFile"),
-            ...record4.policy_decision !== undefined ? { policyDecision: parseExtractionPolicyDecision(record4.policy_decision) } : {},
-            ...record4.force === true ? { force: true } : {}
+            limit: asOptionalNumber(record5.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
+            ...optionalStringField(record5.cursor, "cursor"),
+            ...optionalStringField(record5.extractor_kind, "extractorKind"),
+            ...asOptionalStringArray(record5.mime_types, "mime_types") !== undefined ? { mimeTypes: asOptionalStringArray(record5.mime_types, "mime_types") } : {},
+            ...optionalNumberField(record5.priority, "priority", "priority"),
+            ...optionalNumberField(record5.max_bytes_per_file, "max_bytes_per_file", "maxBytesPerFile"),
+            ...record5.policy_decision !== undefined ? { policyDecision: parseExtractionPolicyDecision(record5.policy_decision) } : {},
+            ...record5.force === true ? { force: true } : {}
           });
           const body = fileExtractionPlanBody(result);
           assertNoRawEmailFields(body);
@@ -130956,14 +132202,14 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/transcribe`) {
           const runner = requireFileExtractionRunner(fileExtraction);
-          const record4 = await parseObjectBody(request);
-          const lane = parseFileExtractionLaneRecord(record4, filesAliasLane, runner);
+          const record5 = await parseObjectBody(request);
+          const lane = parseFileExtractionLaneRecord(record5, filesAliasLane, runner);
           const result = await runner.plan({
             ...lane,
-            limit: asOptionalNumber(record4.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
-            extractorKind: asOptionalString(record4.extractor_kind) ?? TRANSCRIPTION_EXTRACTOR_KIND,
-            ...optionalStringField(record4.cursor, "cursor"),
-            ...optionalNumberField(record4.max_bytes_per_file, "max_bytes_per_file", "maxBytesPerFile")
+            limit: asOptionalNumber(record5.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
+            extractorKind: asOptionalString(record5.extractor_kind) ?? TRANSCRIPTION_EXTRACTOR_KIND,
+            ...optionalStringField(record5.cursor, "cursor"),
+            ...optionalNumberField(record5.max_bytes_per_file, "max_bytes_per_file", "maxBytesPerFile")
           });
           const body = fileExtractionPlanBody(result);
           assertNoRawEmailFields(body);
@@ -130971,18 +132217,18 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/recycle-leases`) {
           const runner = requireFileExtractionRunner(fileExtraction);
-          const record4 = await parseObjectBody(request);
-          const lane = parseFileExtractionLaneRecord(record4, filesAliasLane, runner);
-          const extractorKindPrefix = asOptionalString(record4.extractor_kind_prefix);
+          const record5 = await parseObjectBody(request);
+          const lane = parseFileExtractionLaneRecord(record5, filesAliasLane, runner);
+          const extractorKindPrefix = asOptionalString(record5.extractor_kind_prefix);
           if (!extractorKindPrefix) {
             throw new EmailSourceWorkerError(400, "invalid_request", "extractor_kind_prefix is required for a lease recycle.");
           }
           const result = runner.recycleLeases({
             ...lane,
             extractorKindPrefix,
-            ...optionalNumberField(record4.limit, "limit", "limit"),
-            ...record4.stale_only === true ? { staleOnly: true } : {},
-            ...record4.dry_run === true ? { dryRun: true } : {}
+            ...optionalNumberField(record5.limit, "limit", "limit"),
+            ...record5.stale_only === true ? { staleOnly: true } : {},
+            ...record5.dry_run === true ? { dryRun: true } : {}
           });
           assertNoRawEmailFields(result);
           return json({
@@ -130997,14 +132243,14 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/janitor-requeue`) {
           const runner = requireFileExtractionRunner(fileExtraction);
-          const record4 = await parseObjectBody(request);
-          const lane = parseFileExtractionLaneRecord(record4, filesAliasLane, runner);
-          const mode = asOptionalString(record4.mode) ?? "terminal_reclassification";
-          if (mode === "terminal_reclassification" && record4.last_error_kind === undefined) {
+          const record5 = await parseObjectBody(request);
+          const lane = parseFileExtractionLaneRecord(record5, filesAliasLane, runner);
+          const mode = asOptionalString(record5.mode) ?? "terminal_reclassification";
+          if (mode === "terminal_reclassification" && record5.last_error_kind === undefined) {
             const result2 = runner.reclassifyTerminal({
               ...lane,
-              ...optionalNumberField(record4.limit, "limit", "limit"),
-              ...record4.dry_run === true ? { dryRun: true } : {}
+              ...optionalNumberField(record5.limit, "limit", "limit"),
+              ...record5.dry_run === true ? { dryRun: true } : {}
             });
             const body = fileExtractionReclassificationBody(result2);
             assertNoRawEmailFields(body);
@@ -131013,7 +132259,7 @@ function createEmailSourceWorker(options = {}) {
           if (mode !== "expired_retryable" && mode !== "terminal_reclassification") {
             throw new EmailSourceWorkerError(400, "invalid_request", "mode must be expired_retryable or terminal_reclassification when provided.");
           }
-          const reason = asOptionalString(record4.reason);
+          const reason = asOptionalString(record5.reason);
           if (!reason) {
             throw new EmailSourceWorkerError(400, "invalid_request", "reason is required for a janitor requeue.");
           }
@@ -131021,15 +132267,15 @@ function createEmailSourceWorker(options = {}) {
             ...lane,
             mode,
             reason,
-            ...optionalStringField(record4.extractor_kind, "extractorKind"),
-            ...optionalStringField(record4.extractor_kind_prefix, "extractorKindPrefix"),
-            ...optionalStringField(record4.last_error_kind, "lastErrorKind"),
-            ...optionalStringField(record4.target_extractor_kind, "targetExtractorKind"),
-            ...optionalStringField(record4.target_extractor_version, "targetExtractorVersion"),
-            ...optionalNumberField(record4.escalation_budget, "escalation_budget", "escalationBudget"),
-            ...optionalNumberField(record4.limit, "limit", "limit"),
-            ...record4.dry_run === true ? { dryRun: true } : {},
-            ...record4.allow_network_terminal_requeue_after_prior_janitor === true ? { allowNetworkTerminalRequeueAfterPriorJanitor: true } : {}
+            ...optionalStringField(record5.extractor_kind, "extractorKind"),
+            ...optionalStringField(record5.extractor_kind_prefix, "extractorKindPrefix"),
+            ...optionalStringField(record5.last_error_kind, "lastErrorKind"),
+            ...optionalStringField(record5.target_extractor_kind, "targetExtractorKind"),
+            ...optionalStringField(record5.target_extractor_version, "targetExtractorVersion"),
+            ...optionalNumberField(record5.escalation_budget, "escalation_budget", "escalationBudget"),
+            ...optionalNumberField(record5.limit, "limit", "limit"),
+            ...record5.dry_run === true ? { dryRun: true } : {},
+            ...record5.allow_network_terminal_requeue_after_prior_janitor === true ? { allowNetworkTerminalRequeueAfterPriorJanitor: true } : {}
           });
           assertNoRawEmailFields(result);
           return json({
@@ -131051,13 +132297,13 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/extract-pdfs`) {
           const runner = requireFileExtractionRunner(fileExtraction);
-          const record4 = await parseObjectBody(request);
-          const maxSeconds = Math.min(Math.max(1, Math.floor(asOptionalNumber(record4.max_seconds, "max_seconds") ?? 240)), 900);
+          const record5 = await parseObjectBody(request);
+          const maxSeconds = Math.min(Math.max(1, Math.floor(asOptionalNumber(record5.max_seconds, "max_seconds") ?? 240)), 900);
           const lanes = await drainPdfExtraction({
             runner,
             lanes: pdfExtractionLanes2?.() ?? [],
             ...pdfExtractionLaneScopeApproved ? { laneScopeApproved: pdfExtractionLaneScopeApproved } : {},
-            requeue: record4.requeue === true,
+            requeue: record5.requeue === true,
             deadlineMs: Date.now() + maxSeconds * 1000,
             extractorKind: TEXT_EXTRACTOR_KIND
           });
@@ -131083,8 +132329,8 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/files/status`) {
           const runner = requireFileExtractionRunner(fileExtraction);
-          const record4 = await parseObjectBody(request);
-          const lane = parseFileExtractionLaneRecord(record4, filesAliasLane, runner);
+          const record5 = await parseObjectBody(request);
+          const lane = parseFileExtractionLaneRecord(record5, filesAliasLane, runner);
           const counts = runner.counts(lane);
           const body = {
             kind: "file_extraction_status",
@@ -131110,16 +132356,16 @@ function createEmailSourceWorker(options = {}) {
           return json(result);
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/search`) {
-          const record4 = await parseObjectBody(request);
-          assertSourceIndexSearchQuery(record4.query);
-          const corpusId = canonicalRequestCorpusId(record4);
+          const record5 = await parseObjectBody(request);
+          assertSourceIndexSearchQuery(record5.query);
+          const corpusId = canonicalRequestCorpusId(record5);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
             const searchConnectorStore = async (store) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false)
                 return;
-              const searchRequest2 = parseConnectorStoreIndexSearchRequestRecord(store === connectorStore ? record4 : { ...record4, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
+              const searchRequest2 = parseConnectorStoreIndexSearchRequestRecord(store === connectorStore ? record5 : { ...record5, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
               const retrievalMode = searchRequest2.retrievalMode ?? (searchEmbeddingProvider && store.hasEmbeddings(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
@@ -131165,7 +132411,7 @@ function createEmailSourceWorker(options = {}) {
               throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source is unavailable until its folder scope is approved for the connected account.");
             }
             const searchRequest = primary.searchRequest;
-            const siblings = record4.all_tiers === false || record4.trust_domain !== undefined ? [] : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? []).flatMap((siblingCorpusId) => {
+            const siblings = record5.all_tiers === false || record5.trust_domain !== undefined ? [] : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? []).flatMap((siblingCorpusId) => {
               const sibling = connectorStoresByCorpusId.get(siblingCorpusId);
               return sibling && sibling !== connectorStore ? [sibling] : [];
             });
@@ -131252,8 +132498,8 @@ function createEmailSourceWorker(options = {}) {
           throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/embed`) {
-          const record4 = await parseObjectBody(request);
-          const corpusId = canonicalRequestCorpusId(record4);
+          const record5 = await parseObjectBody(request);
+          const corpusId = canonicalRequestCorpusId(record5);
           if (!corpusId) {
             throw new EmailSourceWorkerError(400, "invalid_request", "corpus_id must name a configured connector-store corpus.");
           }
@@ -131270,8 +132516,8 @@ function createEmailSourceWorker(options = {}) {
             if (!embeddingProvider) {
               throw new EmailSourceWorkerError(501, "source_index_embedding_not_configured", `Private source worker does not have an embedding provider configured for ${connectorStore.corpusId}.`);
             }
-            const modelId = asOptionalString(record4.model_id);
-            const maxPendingChunks = asOptionalNumber(record4.max_pending_chunks);
+            const modelId = asOptionalString(record5.model_id);
+            const maxPendingChunks = asOptionalNumber(record5.max_pending_chunks);
             let result;
             try {
               result = await connectorStore.embedChunks({
@@ -131608,9 +132854,9 @@ async function emitSourceAnswerLatencyRecords(input) {
     recordSourceAnswerLatencyFailure(input.log, error2);
   }
 }
-async function recordSourceAnswerLatencyBestEffort(log, record4) {
+async function recordSourceAnswerLatencyBestEffort(log, record5) {
   try {
-    await log.record(record4);
+    await log.record(record5);
   } catch (error2) {
     recordSourceAnswerLatencyFailure(log, error2);
   }
@@ -131683,23 +132929,23 @@ function sleep4(ms) {
   return new Promise((resolve15) => setTimeout(resolve15, ms));
 }
 async function parseConsultAskRequest(request) {
-  const record4 = await parseObjectBody(request);
-  if (typeof record4.question !== "string" || record4.question.trim().length === 0) {
+  const record5 = await parseObjectBody(request);
+  if (typeof record5.question !== "string" || record5.question.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "question must be a non-empty string.");
   }
-  const level = asOptionalString(record4.level);
+  const level = asOptionalString(record5.level);
   if (level !== undefined && level !== "strict" && level !== "standard") {
     throw new EmailSourceWorkerError(400, "invalid_request", 'level must be "strict" or "standard".');
   }
-  const cleanup = asOptionalString(record4.cleanup);
+  const cleanup = asOptionalString(record5.cleanup);
   if (cleanup !== undefined && cleanup !== "as_written" && cleanup !== "light_cleanup" && cleanup !== "custom") {
     throw new EmailSourceWorkerError(400, "invalid_request", 'cleanup must be "as_written", "light_cleanup" or "custom".');
   }
-  const remember = asOptionalBoolean(record4.remember);
-  const model = asOptionalString(record4.model);
-  const caller = parseRequestCaller(record4, request);
+  const remember = asOptionalBoolean(record5.remember);
+  const model = asOptionalString(record5.model);
+  const caller = parseRequestCaller(record5, request);
   return {
-    question: record4.question,
+    question: record5.question,
     ...level !== undefined ? { level } : {},
     ...cleanup !== undefined ? { cleanup } : {},
     ...remember !== undefined ? { remember } : {},
@@ -131707,8 +132953,8 @@ async function parseConsultAskRequest(request) {
     ...caller ? { caller } : {}
   };
 }
-function parseRequestCaller(record4, request) {
-  const callerParse = parseOperationCallerWire(record4.caller);
+function parseRequestCaller(record5, request) {
+  const callerParse = parseOperationCallerWire(record5.caller);
   if (!callerParse.ok) {
     throw new EmailSourceWorkerError(400, "invalid_request", callerParse.message);
   }
@@ -131719,14 +132965,14 @@ function parseRequestCaller(record4, request) {
   return caller;
 }
 async function parseSourceIndexAnswerRequest(request) {
-  const record4 = await parseObjectBody(request);
-  if (typeof record4.question !== "string" || record4.question.trim().length === 0) {
+  const record5 = await parseObjectBody(request);
+  if (typeof record5.question !== "string" || record5.question.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "question must be a non-empty string.");
   }
-  const query = asOptionalString(record4.query);
-  const account = asOptionalString(record4.account);
-  const corpusId = asOptionalString(record4.corpus_id);
-  const corpusIds = asOptionalStringArray(record4.corpus_ids, "corpus_ids");
+  const query = asOptionalString(record5.query);
+  const account = asOptionalString(record5.account);
+  const corpusId = asOptionalString(record5.corpus_id);
+  const corpusIds = asOptionalStringArray(record5.corpus_ids, "corpus_ids");
   if (corpusId !== undefined && !/^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i.test(corpusId)) {
     throw new EmailSourceWorkerError(400, "invalid_request", "corpus_id must be a dotted corpus identifier when provided.");
   }
@@ -131737,13 +132983,13 @@ async function parseSourceIndexAnswerRequest(request) {
       }
     }
   }
-  const approvedScopeKey = asOptionalString(record4.approved_scope_key);
-  const chatScope = asOptionalString(record4.chat_scope) ?? asOptionalString(record4.chat_title) ?? asOptionalString(record4.chat_title_hint);
-  const conversationId = asOptionalString(record4.conversation_id);
-  const senderId = asOptionalString(record4.sender_id);
-  const senderLabel = asOptionalString(record4.sender_label);
-  const authoredAfter = asOptionalString(record4.authored_after);
-  const authoredBefore = asOptionalString(record4.authored_before);
+  const approvedScopeKey = asOptionalString(record5.approved_scope_key);
+  const chatScope = asOptionalString(record5.chat_scope) ?? asOptionalString(record5.chat_title) ?? asOptionalString(record5.chat_title_hint);
+  const conversationId = asOptionalString(record5.conversation_id);
+  const senderId = asOptionalString(record5.sender_id);
+  const senderLabel = asOptionalString(record5.sender_label);
+  const authoredAfter = asOptionalString(record5.authored_after);
+  const authoredBefore = asOptionalString(record5.authored_before);
   try {
     normalizeConnectorStoreSearchFilters({
       ...conversationId ? { conversationId } : {},
@@ -131755,23 +133001,23 @@ async function parseSourceIndexAnswerRequest(request) {
   } catch (error2) {
     throw new EmailSourceWorkerError(400, "invalid_request", error2 instanceof Error ? error2.message : "Connector-store metadata filters are invalid.");
   }
-  const selectedItems = asOptionalSourceAnswerSelectedItems(record4.selected_items);
-  const retrievalMode = asOptionalRetrievalMode(record4.retrieval_mode);
-  const analystProvider = asOptionalSourceAnswerAnalystProvider(record4.analyst_provider);
-  const analystModel = asOptionalAnalystModel(record4.analyst_model, analystProvider);
-  const maxResults = asOptionalNumber(record4.max_results);
-  const includeSecureLocal = asOptionalBoolean(record4.include_secure_local);
-  const includeSecureLocalContent = asOptionalBoolean(record4.include_secure_local_content);
-  const includeInternal = asOptionalBoolean(record4.include_internal);
-  const includeInternalContent = asOptionalBoolean(record4.include_internal_content);
-  const internalContentMaxBytes = asOptionalNumber(record4.internal_content_max_bytes);
-  const timeoutMs = asOptionalNumber(record4.timeout_ms ?? record4.timeoutMs);
+  const selectedItems = asOptionalSourceAnswerSelectedItems(record5.selected_items);
+  const retrievalMode = asOptionalRetrievalMode(record5.retrieval_mode);
+  const analystProvider = asOptionalSourceAnswerAnalystProvider(record5.analyst_provider);
+  const analystModel = asOptionalAnalystModel(record5.analyst_model, analystProvider);
+  const maxResults = asOptionalNumber(record5.max_results);
+  const includeSecureLocal = asOptionalBoolean(record5.include_secure_local);
+  const includeSecureLocalContent = asOptionalBoolean(record5.include_secure_local_content);
+  const includeInternal = asOptionalBoolean(record5.include_internal);
+  const includeInternalContent = asOptionalBoolean(record5.include_internal_content);
+  const internalContentMaxBytes = asOptionalNumber(record5.internal_content_max_bytes);
+  const timeoutMs = asOptionalNumber(record5.timeout_ms ?? record5.timeoutMs);
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "timeout_ms must be a positive number when provided.");
   }
-  const caller = parseRequestCaller(record4, request);
+  const caller = parseRequestCaller(record5, request);
   return {
-    question: record4.question,
+    question: record5.question,
     ...query !== undefined ? { query } : {},
     ...account !== undefined ? { account } : {},
     ...corpusId !== undefined ? { corpus_id: corpusId } : {},
@@ -131798,41 +133044,41 @@ async function parseSourceIndexAnswerRequest(request) {
   };
 }
 async function parseSourceIndexStatusRequest(request, connectorStores = []) {
-  const record4 = request.method === "GET" ? recordFromSearchParams(new URL(request.url).searchParams) : await parseObjectBody(request);
-  const corpusId = canonicalRequestCorpusId(record4);
+  const record5 = request.method === "GET" ? recordFromSearchParams(new URL(request.url).searchParams) : await parseObjectBody(request);
+  const corpusId = canonicalRequestCorpusId(record5);
   const allowedCorpusIds = sourceIndexStatusCorpusIds(connectorStores);
   if (corpusId !== undefined && !allowedCorpusIds.includes(corpusId)) {
     throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${allowedCorpusIds.join(", ")} when provided (a documented input alias of one of those ids is also accepted).`);
   }
-  const account = asOptionalString(record4.account);
-  const approvedScopeKey = asOptionalString(record4.approved_scope_key);
-  const chatScope = asOptionalString(record4.chat_scope) ?? asOptionalString(record4.chat_title) ?? asOptionalString(record4.chat_title_hint);
-  const conversationId = asOptionalString(record4.conversation_id);
-  const includeSenderAggregation = asOptionalBoolean(record4.include_sender_aggregation);
-  const maxSenders = asOptionalNumber(record4.max_senders);
+  const account = asOptionalString(record5.account);
+  const approvedScopeKey = asOptionalString(record5.approved_scope_key);
+  const chatScope = asOptionalString(record5.chat_scope) ?? asOptionalString(record5.chat_title) ?? asOptionalString(record5.chat_title_hint);
+  const conversationId = asOptionalString(record5.conversation_id);
+  const includeSenderAggregation = asOptionalBoolean(record5.include_sender_aggregation);
+  const maxSenders = asOptionalNumber(record5.max_senders);
   if (maxSenders !== undefined && (!Number.isInteger(maxSenders) || maxSenders < 1 || maxSenders > 100)) {
     throw new EmailSourceWorkerError(400, "invalid_request", "max_senders must be an integer from 1 to 100 when provided.");
   }
   if (includeSenderAggregation === true && (!corpusId || !account || !conversationId)) {
     throw new EmailSourceWorkerError(400, "invalid_request", "include_sender_aggregation requires corpus_id, account, and conversation_id.");
   }
-  const includePrefixes = asOptionalStringArray(record4.include_path_prefixes, "include_path_prefixes");
-  const excludePrefixes = asOptionalStringArray(record4.exclude_path_prefixes, "exclude_path_prefixes");
-  const extractorKind = asOptionalString(record4.extractor_kind);
-  const extractorVersion = asOptionalString(record4.extractor_version);
-  const mimeTypes = asOptionalStringArray(record4.mime_types, "mime_types");
-  const mimeTypePrefixes = asOptionalStringArray(record4.mime_type_prefixes, "mime_type_prefixes");
-  const fileExtensions = asOptionalStringArray(record4.file_extensions, "file_extensions");
-  const requiredArtifactKind = asOptionalString(record4.required_artifact_kind);
-  const requiredArtifactWarning = asOptionalString(record4.required_artifact_warning);
-  const qaVerdicts = asOptionalStringArray(record4.qa_verdicts, "qa_verdicts");
-  const sourceExtractorKinds = asOptionalStringArray(record4.source_extractor_kinds, "source_extractor_kinds");
-  const sourceJobStatuses = asOptionalStringArray(record4.source_job_statuses, "source_job_statuses");
-  const includeReadinessLedger = asOptionalBoolean(record4.include_readiness_ledger);
-  const includeIngestionLedger = asOptionalBoolean(record4.include_ingestion_ledger);
-  const includeItems = asOptionalBoolean(record4.include_items);
-  const maxItems = asOptionalNumber(record4.max_items);
-  const query = asOptionalString(record4.query);
+  const includePrefixes = asOptionalStringArray(record5.include_path_prefixes, "include_path_prefixes");
+  const excludePrefixes = asOptionalStringArray(record5.exclude_path_prefixes, "exclude_path_prefixes");
+  const extractorKind = asOptionalString(record5.extractor_kind);
+  const extractorVersion = asOptionalString(record5.extractor_version);
+  const mimeTypes = asOptionalStringArray(record5.mime_types, "mime_types");
+  const mimeTypePrefixes = asOptionalStringArray(record5.mime_type_prefixes, "mime_type_prefixes");
+  const fileExtensions = asOptionalStringArray(record5.file_extensions, "file_extensions");
+  const requiredArtifactKind = asOptionalString(record5.required_artifact_kind);
+  const requiredArtifactWarning = asOptionalString(record5.required_artifact_warning);
+  const qaVerdicts = asOptionalStringArray(record5.qa_verdicts, "qa_verdicts");
+  const sourceExtractorKinds = asOptionalStringArray(record5.source_extractor_kinds, "source_extractor_kinds");
+  const sourceJobStatuses = asOptionalStringArray(record5.source_job_statuses, "source_job_statuses");
+  const includeReadinessLedger = asOptionalBoolean(record5.include_readiness_ledger);
+  const includeIngestionLedger = asOptionalBoolean(record5.include_ingestion_ledger);
+  const includeItems = asOptionalBoolean(record5.include_items);
+  const maxItems = asOptionalNumber(record5.max_items);
+  const query = asOptionalString(record5.query);
   const result = {};
   if (account !== undefined)
     result.account = account;
@@ -131885,16 +133131,16 @@ async function parseSourceIndexStatusRequest(request, connectorStores = []) {
   return result;
 }
 function recordFromSearchParams(params) {
-  const record4 = {};
+  const record5 = {};
   for (const [key2, value2] of params.entries()) {
     if (value2 === "true")
-      record4[key2] = true;
+      record5[key2] = true;
     else if (value2 === "false")
-      record4[key2] = false;
+      record5[key2] = false;
     else
-      record4[key2] = value2;
+      record5[key2] = value2;
   }
-  return record4;
+  return record5;
 }
 function xBookmarksLiveAdminResult(mode, result) {
   const allowedCountKeys = new Set([
@@ -132051,27 +133297,27 @@ function assertSourceIndexSearchQuery(value2) {
     throw new EmailSourceWorkerError(400, "invalid_request", "query must be a non-empty string.");
   }
 }
-function parseConnectorStoreIndexSearchRequestRecord(record4, store, defaultAccountScope, chatPrincipal, declaredPrincipal, capabilityRegistry = CONNECTOR_STORE_FILTER_CAPABILITIES) {
-  const corpusId = asOptionalString(record4.corpus_id);
+function parseConnectorStoreIndexSearchRequestRecord(record5, store, defaultAccountScope, chatPrincipal, declaredPrincipal, capabilityRegistry = CONNECTOR_STORE_FILTER_CAPABILITIES) {
+  const corpusId = asOptionalString(record5.corpus_id);
   if (corpusId !== store.corpusId) {
     throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be ${store.corpusId}.`);
   }
-  if (typeof record4.query !== "string" || record4.query.trim().length === 0) {
+  if (typeof record5.query !== "string" || record5.query.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "query must be a non-empty string.");
   }
-  const retrievalMode = asOptionalRetrievalMode(record4.retrieval_mode);
-  const maxResults = asOptionalNumber(record4.max_results);
-  const requestedAccountScope = asOptionalNarrowingString(record4, "account") ?? (defaultAccountScope?.trim() || undefined);
-  const requestedAccountScopeExact = asOptionalExactNarrowingString(record4, "account");
-  const conversationId = asOptionalNarrowingString(record4, "conversation_id");
-  const senderId = asOptionalNarrowingString(record4, "sender_id");
-  const senderLabel = asOptionalNarrowingString(record4, "sender_label");
-  const authoredAfter = asOptionalNarrowingString(record4, "authored_after");
-  const authoredBefore = asOptionalNarrowingString(record4, "authored_before");
-  const after = asOptionalNarrowingString(record4, "after");
-  const before = asOptionalNarrowingString(record4, "before");
-  asOptionalTrustDomainConsistency(record4, store.trustDomain);
-  const undeclaredFields = undeclaredConnectorStoreSearchRequestFields(record4);
+  const retrievalMode = asOptionalRetrievalMode(record5.retrieval_mode);
+  const maxResults = asOptionalNumber(record5.max_results);
+  const requestedAccountScope = asOptionalNarrowingString(record5, "account") ?? (defaultAccountScope?.trim() || undefined);
+  const requestedAccountScopeExact = asOptionalExactNarrowingString(record5, "account");
+  const conversationId = asOptionalNarrowingString(record5, "conversation_id");
+  const senderId = asOptionalNarrowingString(record5, "sender_id");
+  const senderLabel = asOptionalNarrowingString(record5, "sender_label");
+  const authoredAfter = asOptionalNarrowingString(record5, "authored_after");
+  const authoredBefore = asOptionalNarrowingString(record5, "authored_before");
+  const after = asOptionalNarrowingString(record5, "after");
+  const before = asOptionalNarrowingString(record5, "before");
+  asOptionalTrustDomainConsistency(record5, store.trustDomain);
+  const undeclaredFields = undeclaredConnectorStoreSearchRequestFields(record5);
   if (undeclaredFields.length > 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", `Connector-store search request contains undeclared ${undeclaredFields.length === 1 ? "property" : "properties"}: ${undeclaredFields.map((field) => `"${field}"`).join(", ")}. Remove ${undeclaredFields.length === 1 ? "it" : "them"} and retry.`);
   }
@@ -132079,7 +133325,7 @@ function parseConnectorStoreIndexSearchRequestRecord(record4, store, defaultAcco
     family: store.family,
     ...declaredPrincipal ? { provider: declaredPrincipal.provider } : {}
   });
-  const unsupportedFields = unsupportedConnectorStoreFilterFields(record4, familyCapabilities);
+  const unsupportedFields = unsupportedConnectorStoreFilterFields(record5, familyCapabilities);
   const unsupportedFolderFields = unsupportedFields.filter((field) => field === "folder_id" || field === "folder_name");
   if (unsupportedFolderFields.length > 0 && unsupportedFolderFields.length === unsupportedFields.length) {
     throw new EmailSourceWorkerError(400, "unsupported_filter", `Folder filters are not supported for connector-store family "${store.family}".`);
@@ -132098,11 +133344,11 @@ function parseConnectorStoreIndexSearchRequestRecord(record4, store, defaultAcco
   const chatScopeCodec = familyCapabilities?.chatScope;
   const approvedScopeCodec = familyCapabilities?.approvedScope;
   const resultProjectorCodec = familyCapabilities?.resultProjector;
-  const includeLocators = resultProjectorCodec ? asOptionalBoolean(record4.include_locators) : undefined;
-  const approvedScopeKey = approvedScopeCodec ? asOptionalExactNarrowingString(record4, "approved_scope_key") : undefined;
-  const chatScope = chatScopeCodec ? asOptionalExactNarrowingString(record4, "chat_scope") : undefined;
-  const folderId = asOptionalNarrowingString(record4, "folder_id");
-  const folderName = asOptionalNarrowingString(record4, "folder_name");
+  const includeLocators = resultProjectorCodec ? asOptionalBoolean(record5.include_locators) : undefined;
+  const approvedScopeKey = approvedScopeCodec ? asOptionalExactNarrowingString(record5, "approved_scope_key") : undefined;
+  const chatScope = chatScopeCodec ? asOptionalExactNarrowingString(record5, "chat_scope") : undefined;
+  const folderId = asOptionalNarrowingString(record5, "folder_id");
+  const folderName = asOptionalNarrowingString(record5, "folder_name");
   const resolvedAuthoredAfter = authoredAfter ?? after;
   const resolvedAuthoredBefore = authoredBefore ?? before;
   if (approvedScopeKey && !declaredPrincipal) {
@@ -132169,7 +133415,7 @@ function parseConnectorStoreIndexSearchRequestRecord(record4, store, defaultAcco
     throw new EmailSourceWorkerError(400, "invalid_request", error2 instanceof Error ? error2.message : "Connector-store metadata filters are invalid.");
   }
   return {
-    query: record4.query,
+    query: record5.query,
     maxResults: maxResults ?? 10,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...accountScope ? { accountScope } : {},
@@ -132208,21 +133454,21 @@ function sourceIndexStatusCorpusIds(connectorStores) {
   ];
 }
 async function parseDropboxSourceExportRequest(request) {
-  const record4 = await parseObjectBody(request);
-  const corpusId = asOptionalString(record4.corpus_id);
+  const record5 = await parseObjectBody(request);
+  const corpusId = asOptionalString(record5.corpus_id);
   if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
     throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
   }
-  const destinationRoot = asOptionalString(record4.destination_root);
+  const destinationRoot = asOptionalString(record5.destination_root);
   if (!destinationRoot) {
     throw new EmailSourceWorkerError(400, "invalid_request", "destination_root must be a non-empty Dropbox folder path.");
   }
-  if (!Array.isArray(record4.items) || record4.items.length === 0) {
+  if (!Array.isArray(record5.items) || record5.items.length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "items must be a non-empty array of export items.");
   }
-  const items = record4.items.map((item, index) => parseDropboxSourceExportItem(item, index));
-  const account = asOptionalString(record4.account);
-  const dryRun = asOptionalBoolean(record4.dry_run);
+  const items = record5.items.map((item, index) => parseDropboxSourceExportItem(item, index));
+  const account = asOptionalString(record5.account);
+  const dryRun = asOptionalBoolean(record5.dry_run);
   return {
     ...account !== undefined ? { account } : {},
     destination_root: destinationRoot,
@@ -132237,32 +133483,32 @@ function parseDropboxSourceExportItem(value2, index) {
   if (!value2 || typeof value2 !== "object" || Array.isArray(value2)) {
     throw new EmailSourceWorkerError(400, "invalid_request", `items.${index} must be a path string or an object with a path.`);
   }
-  const record4 = value2;
-  const path = asOptionalString(record4.path);
+  const record5 = value2;
+  const path = asOptionalString(record5.path);
   if (!path) {
     throw new EmailSourceWorkerError(400, "invalid_request", `items.${index}.path must be a non-empty string.`);
   }
-  const destSubfolder = asOptionalString(record4.dest_subfolder);
+  const destSubfolder = asOptionalString(record5.dest_subfolder);
   return {
     path,
     ...destSubfolder !== undefined ? { dest_subfolder: destSubfolder } : {}
   };
 }
 async function parseDropboxEvalShardExportRequest(request) {
-  const record4 = await parseObjectBody(request);
-  const corpusId = asOptionalString(record4.corpus_id);
+  const record5 = await parseObjectBody(request);
+  const corpusId = asOptionalString(record5.corpus_id);
   if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
     throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
   }
-  const approvedScopeKey = asOptionalString(record4.approved_scope_key);
-  const count = asOptionalNumber(record4.count);
-  const outDir = asOptionalString(record4.out_dir);
+  const approvedScopeKey = asOptionalString(record5.approved_scope_key);
+  const count = asOptionalNumber(record5.count);
+  const outDir = asOptionalString(record5.out_dir);
   if (!approvedScopeKey || count === undefined || !outDir) {
     throw new EmailSourceWorkerError(400, "invalid_request", "approved_scope_key, count, and out_dir are required for Dropbox eval shard export.");
   }
-  const account = asOptionalString(record4.account);
-  const dryRun = asOptionalBoolean(record4.dry_run);
-  const docTypes = asOptionalStringArray(record4.doc_types, "doc_types");
+  const account = asOptionalString(record5.account);
+  const dryRun = asOptionalBoolean(record5.dry_run);
+  const docTypes = asOptionalStringArray(record5.doc_types, "doc_types");
   return {
     ...account !== undefined ? { account } : {},
     approved_scope_key: approvedScopeKey,
@@ -132286,9 +133532,9 @@ function parseSourceDispositionsSave(body, sources) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new EmailSourceWorkerError(400, "invalid_request", `edits[${index}] must be an object.`);
     }
-    const record4 = entry;
-    const path = asOptionalString(record4.path);
-    const state = asOptionalString(record4.state);
+    const record5 = entry;
+    const path = asOptionalString(record5.path);
+    const state = asOptionalString(record5.state);
     if (!path) {
       throw new EmailSourceWorkerError(400, "invalid_request", `edits[${index}].path must be a non-empty string.`);
     }
@@ -132296,7 +133542,7 @@ function parseSourceDispositionsSave(body, sources) {
     if (!known) {
       throw new EmailSourceWorkerError(400, "invalid_request", `edits[${index}].state must be one of ${SOURCE_DISPOSITION_STATES.join(", ")}.`);
     }
-    const reason = asOptionalString(record4.reason);
+    const reason = asOptionalString(record5.reason);
     return { path, state: known, ...reason ? { reason } : {} };
   });
   if (edits.length === 0 && body.document === undefined) {
@@ -132320,13 +133566,13 @@ async function parseObjectBody(request) {
   }
   return body;
 }
-function canonicalRequestCorpusId(record4) {
-  const requestedCorpusId = asOptionalString(record4.corpus_id);
+function canonicalRequestCorpusId(record5) {
+  const requestedCorpusId = asOptionalString(record5.corpus_id);
   if (requestedCorpusId === undefined)
     return;
   const corpusId = canonicalSourceCorpusId(requestedCorpusId);
   if (corpusId !== requestedCorpusId)
-    record4.corpus_id = corpusId;
+    record5.corpus_id = corpusId;
   return corpusId;
 }
 function sourceSchedulerSourceIdForCorpus(corpusId) {
@@ -132359,23 +133605,23 @@ function requireFileExtractionRunner(runner) {
   }
   return runner;
 }
-function parseFileExtractionLaneRecord(record4, alias, runner) {
-  const corpusId = canonicalRequestCorpusId(record4) ?? alias?.corpusId;
+function parseFileExtractionLaneRecord(record5, alias, runner) {
+  const corpusId = canonicalRequestCorpusId(record5) ?? alias?.corpusId;
   if (corpusId === undefined) {
     throw new EmailSourceWorkerError(400, "invalid_request", "corpus_id is required for file extraction.");
   }
   if (!runner.corpusIds().includes(corpusId)) {
     throw new EmailSourceWorkerError(400, "invalid_request", "corpus_id must name a corpus the file-extraction factory serves.");
   }
-  const provider = asOptionalString(record4.provider) ?? alias?.provider;
+  const provider = asOptionalString(record5.provider) ?? alias?.provider;
   if (!provider) {
     throw new EmailSourceWorkerError(400, "invalid_request", "provider is required for file extraction.");
   }
-  const accountScope = asOptionalString(record4.account_scope) ?? asOptionalString(record4.account);
+  const accountScope = asOptionalString(record5.account_scope) ?? asOptionalString(record5.account);
   if (!accountScope) {
     throw new EmailSourceWorkerError(400, "invalid_request", "account is required for file extraction.");
   }
-  const approvedScopeKey = asOptionalString(record4.approved_scope_key);
+  const approvedScopeKey = asOptionalString(record5.approved_scope_key);
   if (!approvedScopeKey) {
     throw new EmailSourceWorkerError(400, "invalid_request", "approved_scope_key is required for file extraction.");
   }
@@ -132412,19 +133658,19 @@ function fileExtractionRunBody(result) {
     ...result.preflightErrorKind !== undefined ? { preflight_error_kind: result.preflightErrorKind } : {},
     consecutive_retryable_failures: result.consecutiveRetryableFailures,
     counts: result.counts,
-    records: result.records.map((record4) => ({
-      job_id: record4.jobId,
-      status: record4.status,
-      extractor_kind: record4.extractorKind,
-      extractor_version: record4.extractorVersion,
-      attempts: record4.attempts,
-      ...record4.errorKind !== undefined ? { error_kind: record4.errorKind } : {},
-      ...record4.nextRetryAt !== undefined ? { next_retry_at: record4.nextRetryAt } : {},
-      ...record4.chunksIndexed !== undefined ? { chunks_indexed: record4.chunksIndexed } : {},
-      ...record4.chunksAwaitingEmbedding !== undefined ? { chunks_awaiting_embedding: record4.chunksAwaitingEmbedding } : {},
-      ...record4.artifactsRecorded !== undefined ? { artifacts_recorded: record4.artifactsRecorded } : {},
-      ...record4.egressDestination !== undefined ? { egress_destination: record4.egressDestination } : {},
-      ...record4.leaseLost === true ? { lease_lost: true } : {}
+    records: result.records.map((record5) => ({
+      job_id: record5.jobId,
+      status: record5.status,
+      extractor_kind: record5.extractorKind,
+      extractor_version: record5.extractorVersion,
+      attempts: record5.attempts,
+      ...record5.errorKind !== undefined ? { error_kind: record5.errorKind } : {},
+      ...record5.nextRetryAt !== undefined ? { next_retry_at: record5.nextRetryAt } : {},
+      ...record5.chunksIndexed !== undefined ? { chunks_indexed: record5.chunksIndexed } : {},
+      ...record5.chunksAwaitingEmbedding !== undefined ? { chunks_awaiting_embedding: record5.chunksAwaitingEmbedding } : {},
+      ...record5.artifactsRecorded !== undefined ? { artifacts_recorded: record5.artifactsRecorded } : {},
+      ...record5.egressDestination !== undefined ? { egress_destination: record5.egressDestination } : {},
+      ...record5.leaseLost === true ? { lease_lost: true } : {}
     })),
     ...result.reclassification !== undefined ? { reclassification: fileExtractionReclassificationBody(result.reclassification) } : {},
     policy: {
@@ -132481,22 +133727,22 @@ function fileExtractionReclassificationBody(result) {
   };
 }
 async function parseSourceWatchCreateRequest(request) {
-  const record4 = await parseObjectBody(request);
-  assertOnlyRequestFields(record4, [
+  const record5 = await parseObjectBody(request);
+  assertOnlyRequestFields(record5, [
     "corpus_id",
     "query_text",
     "mode",
     "expires_at",
     "max_delivery_attempts"
   ]);
-  const corpusId = canonicalRequestCorpusId(record4);
-  const queryText = asOptionalString(record4.query_text);
-  const mode = asOptionalString(record4.mode);
+  const corpusId = canonicalRequestCorpusId(record5);
+  const queryText = asOptionalString(record5.query_text);
+  const mode = asOptionalString(record5.mode);
   if (!corpusId || !queryText || mode !== "one_shot" && mode !== "continuous") {
     throw new EmailSourceWorkerError(400, "invalid_request", "corpus_id, query_text, and a valid mode are required.");
   }
-  const expiresAt = asOptionalString(record4.expires_at);
-  const maxDeliveryAttempts = asOptionalNumber(record4.max_delivery_attempts, "max_delivery_attempts");
+  const expiresAt = asOptionalString(record5.expires_at);
+  const maxDeliveryAttempts = asOptionalNumber(record5.max_delivery_attempts, "max_delivery_attempts");
   return {
     corpusId,
     queryText,
@@ -132506,27 +133752,27 @@ async function parseSourceWatchCreateRequest(request) {
   };
 }
 async function parseSourceWatchesRequest(request) {
-  const record4 = await parseObjectBody(request);
-  assertOnlyRequestFields(record4, ["limit", "cursor"]);
-  const limit = asOptionalNumber(record4.limit, "limit");
-  const cursor = asOptionalString(record4.cursor);
+  const record5 = await parseObjectBody(request);
+  assertOnlyRequestFields(record5, ["limit", "cursor"]);
+  const limit = asOptionalNumber(record5.limit, "limit");
+  const cursor = asOptionalString(record5.cursor);
   return {
     ...limit !== undefined ? { limit } : {},
     ...cursor ? { cursor } : {}
   };
 }
 async function parseSourceWatchCancelRequest(request) {
-  const record4 = await parseObjectBody(request);
-  assertOnlyRequestFields(record4, ["watch_id", "reason"]);
-  const watchId = asOptionalString(record4.watch_id);
+  const record5 = await parseObjectBody(request);
+  assertOnlyRequestFields(record5, ["watch_id", "reason"]);
+  const watchId = asOptionalString(record5.watch_id);
   if (!watchId)
     throw new EmailSourceWorkerError(400, "invalid_request", "watch_id is required.");
-  const reason = asOptionalString(record4.reason);
+  const reason = asOptionalString(record5.reason);
   return { watchId, ...reason ? { reason } : {} };
 }
-function assertOnlyRequestFields(record4, allowed) {
+function assertOnlyRequestFields(record5, allowed) {
   const allowedFields = new Set(allowed);
-  const unsupported = Object.keys(record4).find((field) => !allowedFields.has(field));
+  const unsupported = Object.keys(record5).find((field) => !allowedFields.has(field));
   if (unsupported) {
     throw new EmailSourceWorkerError(400, "invalid_request", `Request field ${unsupported} is not supported.`);
   }
@@ -132544,28 +133790,28 @@ function sourceWatchNotSupported() {
 function asOptionalString(value2) {
   return typeof value2 === "string" && value2.trim().length > 0 ? value2 : undefined;
 }
-function asOptionalNarrowingString(record4, key2) {
-  if (!Object.prototype.hasOwnProperty.call(record4, key2))
+function asOptionalNarrowingString(record5, key2) {
+  if (!Object.prototype.hasOwnProperty.call(record5, key2))
     return;
-  const value2 = record4[key2];
+  const value2 = record5[key2];
   if (typeof value2 !== "string" || value2.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", `${key2} must be a non-empty string when provided.`);
   }
   return value2.trim();
 }
-function asOptionalTrustDomainConsistency(record4, expectedTrustDomain) {
-  if (!Object.prototype.hasOwnProperty.call(record4, "trust_domain"))
+function asOptionalTrustDomainConsistency(record5, expectedTrustDomain) {
+  if (!Object.prototype.hasOwnProperty.call(record5, "trust_domain"))
     return;
-  const value2 = record4.trust_domain;
+  const value2 = record5.trust_domain;
   if (typeof value2 !== "string" || value2 !== expectedTrustDomain) {
     throw new EmailSourceWorkerError(400, "invalid_request", "trust_domain does not exactly match the selected corpus trust domain.");
   }
   return value2;
 }
-function asOptionalExactNarrowingString(record4, key2) {
-  if (!Object.prototype.hasOwnProperty.call(record4, key2))
+function asOptionalExactNarrowingString(record5, key2) {
+  if (!Object.prototype.hasOwnProperty.call(record5, key2))
     return;
-  const value2 = record4[key2];
+  const value2 = record5[key2];
   if (typeof value2 !== "string" || value2.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", `${key2} must be a non-empty string when provided.`);
   }
@@ -132603,15 +133849,15 @@ function parseSourceScopeSelections(value2) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new EmailSourceWorkerError(400, "invalid_request", "Every scope selection must be an object.");
     }
-    const record4 = entry;
-    const key2 = asOptionalString(record4.key);
-    if (!key2 || !["ingest", "metadata_only", "exclude"].includes(String(record4.state))) {
+    const record5 = entry;
+    const key2 = asOptionalString(record5.key);
+    if (!key2 || !["ingest", "metadata_only", "exclude"].includes(String(record5.state))) {
       throw new EmailSourceWorkerError(400, "invalid_request", "Every scope selection requires a folder key and disposition.");
     }
-    const ancestorKeys = record4.ancestor_keys === undefined ? undefined : Array.isArray(record4.ancestor_keys) ? record4.ancestor_keys.map((ancestor) => asOptionalString(ancestor)).filter((ancestor) => Boolean(ancestor)) : undefined;
+    const ancestorKeys = record5.ancestor_keys === undefined ? undefined : Array.isArray(record5.ancestor_keys) ? record5.ancestor_keys.map((ancestor) => asOptionalString(ancestor)).filter((ancestor) => Boolean(ancestor)) : undefined;
     return {
       key: key2,
-      state: record4.state,
+      state: record5.state,
       ...ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}
     };
   });
@@ -132625,10 +133871,10 @@ function parseDashboardDisconnectSource(value2) {
 function dashboardUnpairObligations(existing, sourceIds) {
   if (existing.status !== "ok")
     return { paths: [], steps: [] };
-  const relevant = existing.records.filter((record4) => sourceIds.has(record4.source_id));
+  const relevant = existing.records.filter((record5) => sourceIds.has(record5.source_id));
   return {
-    paths: [...new Set(relevant.flatMap((record4) => record4.unremoved_paths ?? []))],
-    steps: [...new Set(relevant.flatMap((record4) => record4.failed_steps ?? []))]
+    paths: [...new Set(relevant.flatMap((record5) => record5.unremoved_paths ?? []))],
+    steps: [...new Set(relevant.flatMap((record5) => record5.failed_steps ?? []))]
   };
 }
 function parseDashboardUnpairSource(value2) {
@@ -132726,15 +133972,15 @@ function dashboardUnpairedSourceStates(unpaired, registryPath) {
     for (const sourceId of unpaired)
       records.set(sourceId, { source_id: sourceId, state: "unpaired" });
   } else {
-    for (const record4 of read.records) {
-      if (!isDashboardUnpairSourceId(record4.source_id))
+    for (const record5 of read.records) {
+      if (!isDashboardUnpairSourceId(record5.source_id))
         continue;
-      records.set(record4.source_id, record4);
+      records.set(record5.source_id, record5);
     }
   }
-  return [...records.values()].sort((a, b) => a.source_id.localeCompare(b.source_id)).map((record4) => ({
-    source_id: record4.source_id,
-    state: record4.state === "unpaired" ? "unpaired" : "unpair_incomplete"
+  return [...records.values()].sort((a, b) => a.source_id.localeCompare(b.source_id)).map((record5) => ({
+    source_id: record5.source_id,
+    state: record5.state === "unpaired" ? "unpaired" : "unpair_incomplete"
   }));
 }
 function createDashboardOAuthCallbackRateLimiter() {
@@ -133397,21 +134643,21 @@ function asOptionalSourceAnswerSelectedItems(value2) {
       throw new EmailSourceWorkerError(400, "invalid_request", `selected_items.${index} must not include source content field ${forbiddenPath}.`);
     }
     const selectedItem = initialRecord.selected_item;
-    const record4 = selectedItem && typeof selectedItem === "object" && !Array.isArray(selectedItem) ? selectedItem : initialRecord;
+    const record5 = selectedItem && typeof selectedItem === "object" && !Array.isArray(selectedItem) ? selectedItem : initialRecord;
     return {
-      corpus_id: requiredSelectedItemString2(record4.corpus_id, `selected_items.${index}.corpus_id`),
-      family: requiredSelectedItemString2(record4.family, `selected_items.${index}.family`),
-      provider: requiredSelectedItemString2(record4.provider, `selected_items.${index}.provider`),
-      account_scope: requiredSelectedItemString2(record4.account_scope, `selected_items.${index}.account_scope`),
-      provider_item_id: requiredSelectedItemString2(record4.provider_item_id, `selected_items.${index}.provider_item_id`),
-      local_item_id: requiredSelectedItemString2(record4.local_item_id, `selected_items.${index}.local_item_id`),
-      ...optionalSelectedItemString2(record4.provider_thread_id, "provider_thread_id"),
-      ...optionalSelectedItemString2(record4.provider_conversation_id, "provider_conversation_id"),
-      ...optionalSelectedItemString2(record4.provider_file_id, "provider_file_id"),
-      ...optionalSelectedItemString2(record4.source_version, "source_version"),
-      ...optionalSelectedItemString2(record4.conversation_label, "conversation_label"),
-      ...optionalSelectedItemString2(record4.author_label, "author_label"),
-      ...optionalSelectedItemString2(record4.authored_at, "authored_at")
+      corpus_id: requiredSelectedItemString2(record5.corpus_id, `selected_items.${index}.corpus_id`),
+      family: requiredSelectedItemString2(record5.family, `selected_items.${index}.family`),
+      provider: requiredSelectedItemString2(record5.provider, `selected_items.${index}.provider`),
+      account_scope: requiredSelectedItemString2(record5.account_scope, `selected_items.${index}.account_scope`),
+      provider_item_id: requiredSelectedItemString2(record5.provider_item_id, `selected_items.${index}.provider_item_id`),
+      local_item_id: requiredSelectedItemString2(record5.local_item_id, `selected_items.${index}.local_item_id`),
+      ...optionalSelectedItemString2(record5.provider_thread_id, "provider_thread_id"),
+      ...optionalSelectedItemString2(record5.provider_conversation_id, "provider_conversation_id"),
+      ...optionalSelectedItemString2(record5.provider_file_id, "provider_file_id"),
+      ...optionalSelectedItemString2(record5.source_version, "source_version"),
+      ...optionalSelectedItemString2(record5.conversation_label, "conversation_label"),
+      ...optionalSelectedItemString2(record5.author_label, "author_label"),
+      ...optionalSelectedItemString2(record5.authored_at, "authored_at")
     };
   });
 }
@@ -133557,8 +134803,8 @@ function corpusEmbeddingCanUseDegradedCredentials(embeddingPolicy) {
 function isSourceIndexStatusResult(value2) {
   if (!value2 || typeof value2 !== "object")
     return false;
-  const record4 = value2;
-  return record4.kind === "source_index_status" && Array.isArray(record4.corpora);
+  const record5 = value2;
+  return record5.kind === "source_index_status" && Array.isArray(record5.corpora);
 }
 function uniqueStrings2(values) {
   return [...new Set(values.map((value2) => value2.trim()).filter(Boolean))];
@@ -133813,8 +135059,8 @@ function parseAnthropicText(data2) {
   if (!Array.isArray(content))
     return "";
   return content.map((block) => {
-    const record4 = block && typeof block === "object" && !Array.isArray(block) ? block : undefined;
-    return record4?.type === "text" && typeof record4.text === "string" ? record4.text : "";
+    const record5 = block && typeof block === "object" && !Array.isArray(block) ? block : undefined;
+    return record5?.type === "text" && typeof record5.text === "string" ? record5.text : "";
   }).filter(Boolean).join(`
 `).trim();
 }
@@ -134057,11 +135303,11 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
           const state = states.get(tierLedgerIdentityKey(identity));
           if (!state)
             continue;
-          const { record: record4, copies } = state;
-          const tiers = [record4.metadataTier, record4.contentTier, record4.targetMetadataTier, record4.targetContentTier];
+          const { record: record5, copies } = state;
+          const tiers = [record5.metadataTier, record5.contentTier, record5.targetMetadataTier, record5.targetContentTier];
           verdicts[index] = {
             tier: tiers.includes("secrets") ? "secret" : tiers.includes("secure") ? "private" : "public_or_personal",
-            gone: record4.routed && !copies.some((copy) => copy.state === "current")
+            gone: record5.routed && !copies.some((copy) => copy.state === "current")
           };
         }
       }
@@ -137731,19 +138977,19 @@ class TierSnifferService {
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
-      const queued = set2.ledger.listMoving({ limit: budget }).filter((record4) => record4.routed && record4.targetMetadataTier !== null && record4.targetContentTier !== null && record4.targetMetadataTier !== "secrets" && record4.targetContentTier !== "secrets");
+      const queued = set2.ledger.listMoving({ limit: budget }).filter((record5) => record5.routed && record5.targetMetadataTier !== null && record5.targetContentTier !== null && record5.targetMetadataTier !== "secrets" && record5.targetContentTier !== "secrets");
       if (queued.length === 0)
         continue;
       if (!setEmbedsWithBuiltInOnly2(set2)) {
         report.notEligible += queued.length;
         continue;
       }
-      for (const record4 of queued) {
+      for (const record5 of queued) {
         if (budget === 0 || signal.aborted)
           break;
         budget -= 1;
-        const identity = recordIdentity(record4);
-        const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record4.generation}`;
+        const identity = recordIdentity(record5);
+        const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record5.generation}`;
         try {
           if (resumeVerifiedTierMove(set2, identity, {
             path: options.embeddingLedgerPath,
@@ -137755,7 +139001,7 @@ class TierSnifferService {
             this.moveFailures.delete(failureKey);
             continue;
           }
-          const sources = set2.ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record4.generation + 1);
+          const sources = set2.ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record5.generation + 1);
           const source = sources[0];
           const exported = source ? set2.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
           if (!exported)
@@ -137765,11 +139011,11 @@ class TierSnifferService {
           await moveTieredItem({
             set: set2,
             identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
-            target: { metadataTier: record4.targetMetadataTier, contentTier: record4.targetContentTier },
+            target: { metadataTier: record5.targetMetadataTier, contentTier: record5.targetContentTier },
             vectorIdentities: contentCopy ? matchingVectorIdentities(set2, contentCopy) : {},
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY },
             replaceOwnSupersededCopy: true,
-            expectedGeneration: record4.generation
+            expectedGeneration: record5.generation
           });
           report.moved += 1;
           this.moveFailures.delete(failureKey);
@@ -137793,11 +139039,11 @@ class TierSnifferService {
             continue;
           }
           try {
-            set2.ledger.recordMoveFailure(identity, { expectedGeneration: record4.generation });
+            set2.ledger.recordMoveFailure(identity, { expectedGeneration: record5.generation });
           } catch {}
           const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
           this.moveFailures.set(failureKey, firstFailedAt);
-          if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set2, record4, report)) {
+          if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set2, record5, report)) {
             this.moveFailures.delete(failureKey);
           }
         }
@@ -137808,9 +139054,9 @@ class TierSnifferService {
     }
     return report;
   }
-  settleStaleMove(set2, record4, report) {
+  settleStaleMove(set2, record5, report) {
     try {
-      set2.ledger.abandonMove(recordIdentity(record4), { expectedGeneration: record4.generation });
+      set2.ledger.abandonMove(recordIdentity(record5), { expectedGeneration: record5.generation });
       report.abandoned = (report.abandoned ?? 0) + 1;
       return true;
     } catch (error2) {
@@ -137820,12 +139066,12 @@ class TierSnifferService {
     }
   }
 }
-function recordIdentity(record4) {
+function recordIdentity(record5) {
   return {
-    provider: record4.provider,
-    accountScope: record4.accountScope,
-    providerItemId: record4.providerItemId,
-    ...record4.conversationKey ? { providerConversationId: record4.conversationKey } : {}
+    provider: record5.provider,
+    accountScope: record5.accountScope,
+    providerItemId: record5.providerItemId,
+    ...record5.conversationKey ? { providerConversationId: record5.conversationKey } : {}
   };
 }
 function isBuiltInLane(lane) {
@@ -139317,34 +140563,6 @@ var init_model_choice = __esm(() => {
   };
 });
 
-// src/workers/chatgpt/private-answer-contract.ts
-async function checkPrivateEvidence(guard, items) {
-  if (items.length === 0)
-    return [];
-  if (!guard)
-    return items.map(() => false);
-  let answer;
-  try {
-    answer = await guard(items);
-  } catch {
-    return items.map(() => false);
-  }
-  if (!Array.isArray(answer) || answer.length !== items.length)
-    return items.map(() => false);
-  return answer.map((value2) => value2 === true);
-}
-var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, PRIVATE_ANSWER_NONE_META, NoPrivateEvidenceError;
-var init_private_answer_contract = __esm(() => {
-  PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
-  PRIVATE_ANSWER_NONE_META = Object.freeze({ v: 1, count: 0, state: "none" });
-  NoPrivateEvidenceError = class NoPrivateEvidenceError extends Error {
-    constructor() {
-      super("no private evidence may be read");
-      this.name = "NoPrivateEvidenceError";
-    }
-  };
-});
-
 // src/workers/dashboard/chatgpt/private-answer.ts
 function chatgptPrivateAnswerProgram(config2) {
   const doc2 = document;
@@ -140629,7 +141847,7 @@ var init_consult_ask = __esm(() => {
     empty: "Type a question first.",
     tooLong: `Keep the question under ${CONSULT_ASK_MAX_CHARS.toLocaleString("en-US")} characters.`,
     settingsInvalid: "The anonymous answers settings file could not be read, so nothing was sent.",
-    off: `Not sent: anonymous answers are off. Turn them on in Private answers on your computer (${openPageUrl({ kind: "private_answers" })}), then ask again.`,
+    off: `Not sent: anonymous answers are off. Turn them on in Models on your computer (${openPageUrl({ kind: "fix", section: "models" })}), then ask again.`,
     declined: "Your model chose not to send anything.",
     writerFailed: "Your model could not prepare the question, so nothing was sent.",
     secret: "Not sent: the question looks like it contains a password, key or token.",
@@ -141925,10 +143143,10 @@ function copyFix(fix) {
   return out;
 }
 function copyFixArgs(args, allowed) {
-  const record4 = asRecord17(args) ?? {};
+  const record5 = asRecord17(args) ?? {};
   const out = {};
   for (const [name, values] of Object.entries(allowed)) {
-    const value2 = record4[name];
+    const value2 = record5[name];
     if (typeof value2 === "string" && values.has(value2))
       out[name] = value2;
   }
@@ -141984,36 +143202,36 @@ function privateMatchNote(match, contentPrivateMatches = 0, releasedEvidence2 = 
   return contentPrivateMatches > 0 ? PRIVATE_MATCH_NOTE : undefined;
 }
 function isAskAnonymouslyResult(raw) {
-  const record4 = asRecord17(raw);
-  return record4 !== undefined && typeof record4.ok === "boolean" && typeof record4.answer !== "string" && (record4.ok ? typeof record4.reply === "string" : typeof record4.message === "string");
+  const record5 = asRecord17(raw);
+  return record5 !== undefined && typeof record5.ok === "boolean" && typeof record5.answer !== "string" && (record5.ok ? typeof record5.reply === "string" : typeof record5.message === "string");
 }
 function askAnonymouslyToolResult(raw) {
-  const record4 = asRecord17(raw);
-  if (record4?.status === "working" && typeof record4.job_id === "string" && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record4.job_id)) {
+  const record5 = asRecord17(raw);
+  if (record5?.status === "working" && typeof record5.job_id === "string" && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record5.job_id)) {
     return {
       content: [{ type: "text", text: ASK_PENDING_TEXT }],
-      structuredContent: { status: "working", job_id: record4.job_id, next_tool: "source_answer_result" }
+      structuredContent: { status: "working", job_id: record5.job_id, next_tool: "source_answer_result" }
     };
   }
-  if (!record4 || typeof record4.ok !== "boolean") {
+  if (!record5 || typeof record5.ok !== "boolean") {
     return errorToolResult(new OperationError("email_error", "unexpected anonymous answer shape"));
   }
   const clean2 = (value2, max) => typeof value2 === "string" ? value2.replace(UNSAFE_CHARS2, "").slice(0, max) : undefined;
-  if (record4.ok) {
-    const reply = clean2(record4.reply, MAX_ANSWER2);
+  if (record5.ok) {
+    const reply = clean2(record5.reply, MAX_ANSWER2);
     if (reply === undefined)
       return errorToolResult(new OperationError("email_error", "unexpected anonymous answer shape"));
-    const level = record4.level === "strict" ? "strict" : "standard";
-    const rewritten = record4.rewritten === true;
-    const sent = clean2(record4.sent, MAX_ANSWER2);
-    const hidden = record4.networkIdentity === "hidden";
-    const visible = record4.networkIdentity === "visible";
-    const rawRoute = clean2(record4.route, 200);
-    const route = rawRoute !== undefined ? chatgptZkapiRouteLabel(rawRoute, record4.networkIdentity) : undefined;
+    const level = record5.level === "strict" ? "strict" : "standard";
+    const rewritten = record5.rewritten === true;
+    const sent = clean2(record5.sent, MAX_ANSWER2);
+    const hidden = record5.networkIdentity === "hidden";
+    const visible = record5.networkIdentity === "visible";
+    const rawRoute = clean2(record5.route, 200);
+    const route = rawRoute !== undefined ? chatgptZkapiRouteLabel(rawRoute, record5.networkIdentity) : undefined;
     const how = hidden ? "anonymously" : visible ? "through zkAPI with the network address visible (Tor is off on this route or was bypassed, so it was not anonymous)" : `through zkAPI with the network route not verified (the route reads: ${route ?? "not verified"})`;
     const note = rewritten ? `Asked ${how} at ${level === "strict" ? "Strict" : "Standard"}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.` : `Asked ${how} at Standard, as written.`;
-    const saveNote = clean2(record4.note, 1000);
-    const model = clean2(record4.model, 200);
+    const saveNote = clean2(record5.note, 1000);
+    const model = clean2(record5.model, 200);
     return {
       content: [{ type: "text", text: [reply, "", note, ...model ? [`Answered by ${model}.`] : [], ...saveNote ? [`Tell the user: ${saveNote}`] : []].join(`
 `) }],
@@ -142027,15 +143245,15 @@ function askAnonymouslyToolResult(raw) {
         level,
         rewritten,
         ...sent !== undefined ? { sent } : {},
-        ...typeof record4.cleanup === "string" ? { cleanup: record4.cleanup } : {},
-        ...record4.remembered === true ? { remembered: true } : {},
+        ...typeof record5.cleanup === "string" ? { cleanup: record5.cleanup } : {},
+        ...record5.remembered === true ? { remembered: true } : {},
         ...saveNote ? { note: saveNote } : {}
       }
     };
   }
-  const message2 = clean2(record4.message, 2000) ?? "Olympus could not ask anonymously.";
-  if (record4.code === "needs_choice") {
-    const options = asRecord17(record4.options);
+  const message2 = clean2(record5.message, 2000) ?? "Olympus could not ask anonymously.";
+  if (record5.code === "needs_choice") {
+    const options = asRecord17(record5.options);
     return {
       content: [{ type: "text", text: message2 }],
       structuredContent: {
@@ -142051,31 +143269,31 @@ function askAnonymouslyToolResult(raw) {
       }
     };
   }
-  const refusal3 = chatgptZkapiRefusal(typeof record4.code === "string" ? record4.code.replace(UNSAFE_CHARS2, "").slice(0, 64) : "refused", message2, record4.daemonCode);
+  const refusal3 = chatgptZkapiRefusal(typeof record5.code === "string" ? record5.code.replace(UNSAFE_CHARS2, "").slice(0, 64) : "refused", message2, record5.daemonCode);
   return {
     content: [{ type: "text", text: `Not answered: ${refusal3.message}` }],
     structuredContent: {
       status: "refused",
       code: refusal3.code,
-      ...(record4.outcome === "sent_failed" || record4.outcome === "unknown") && refusal3.code !== "balance_run_out" ? { outcome: record4.outcome, note: "The question had already left the user's computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user." } : {},
+      ...(record5.outcome === "sent_failed" || record5.outcome === "unknown") && refusal3.code !== "balance_run_out" ? { outcome: record5.outcome, note: "The question had already left the user's computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user." } : {},
       message: refusal3.message
     }
   };
 }
 function answerToolResult(raw, options = {}) {
-  const record4 = asRecord17(raw);
-  if (record4?.status === "working" && typeof record4.job_id === "string" && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record4.job_id)) {
+  const record5 = asRecord17(raw);
+  if (record5?.status === "working" && typeof record5.job_id === "string" && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record5.job_id)) {
     return {
       content: [{ type: "text", text: PENDING_TEXT }],
-      structuredContent: { status: "working", job_id: record4.job_id, next_tool: "source_answer_result" }
+      structuredContent: { status: "working", job_id: record5.job_id, next_tool: "source_answer_result" }
     };
   }
-  if (!record4 || typeof record4.answer !== "string") {
+  if (!record5 || typeof record5.answer !== "string") {
     return errorToolResult(new OperationError("source_index_error", "unexpected answer shape"));
   }
   let privateMatched = false;
   const citations = [];
-  for (const value2 of Array.isArray(record4.evidence) ? record4.evidence : []) {
+  for (const value2 of Array.isArray(record5.evidence) ? record5.evidence : []) {
     const evidence = asRecord17(value2);
     if (!evidence)
       continue;
@@ -142087,11 +143305,11 @@ function answerToolResult(raw, options = {}) {
     if (citation && citations.length < MAX_CITATIONS2)
       citations.push(citation);
   }
-  const synthesis = asRecord17(asRecord17(record4.audit)?.answer_synthesis);
+  const synthesis = asRecord17(asRecord17(record5.audit)?.answer_synthesis);
   const usedPrivate = synthesis?.private_context_used === true || typeof synthesis?.secure_local_items_consulted === "number" && synthesis.secure_local_items_consulted > 0;
   if (usedPrivate)
     privateMatched = true;
-  const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record4.answer.replace(UNSAFE_CHARS2, "").slice(0, MAX_ANSWER2);
+  const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record5.answer.replace(UNSAFE_CHARS2, "").slice(0, MAX_ANSWER2);
   const shownCitations = usedPrivate ? [] : citations;
   const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
@@ -142124,14 +143342,14 @@ function withPrivateAnswerOutcome(result) {
   return { ...result, _meta: { ...meta2, [PRIVATE_ANSWER_META_KEY]: { ...PRIVATE_ANSWER_NONE_META } } };
 }
 function searchToolResult(raw, options = {}) {
-  const record4 = asRecord17(raw);
-  if (!record4 || !Array.isArray(record4.evidence)) {
+  const record5 = asRecord17(raw);
+  if (!record5 || !Array.isArray(record5.evidence)) {
     return errorToolResult(new OperationError("source_index_error", "unexpected search shape"));
   }
   let privateMatched = false;
   let flagged = false;
   const evidence = [];
-  for (const value2 of record4.evidence) {
+  for (const value2 of record5.evidence) {
     const item = asRecord17(value2);
     if (!item)
       continue;
@@ -142158,7 +143376,7 @@ function searchToolResult(raw, options = {}) {
       flagged = true;
     evidence.push(entry);
   }
-  const coverageRecord = asRecord17(record4.coverage) ?? {};
+  const coverageRecord = asRecord17(record5.coverage) ?? {};
   const coverage = {
     searchedSources: whole(coverageRecord.searched_corpora),
     unreadableItems: whole(coverageRecord.unreadable_items),
@@ -142172,7 +143390,7 @@ function searchToolResult(raw, options = {}) {
   const notes = [];
   if (!panelActive && nothingRead && coverage.namesOnlyItems > 0)
     notes.push(namesOnlyCoverageNote(coverage.namesOnlyItems));
-  if (!panelActive && whole(record4.withheld) > 0)
+  if (!panelActive && whole(record5.withheld) > 0)
     notes.push(HELD_BACK_NOTE);
   if (flagged)
     notes.push(FLAGGED_NOTE);
@@ -143192,10 +144410,10 @@ function parseSelections(value2) {
   if (!Array.isArray(value2) || value2.length > 100)
     throw new ChatGptSurfaceError("invalid_params");
   return value2.map((entry) => {
-    const record4 = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? entry : {};
-    const key2 = requiredString6(record4.key);
-    const state = oneOf2(record4.state, ["ingest", "metadata_only", "exclude"]);
-    const ancestors = Array.isArray(record4.ancestor_keys) ? record4.ancestor_keys.filter((ancestor) => typeof ancestor === "string" && ancestor.length > 0 && ancestor.length <= 4096).slice(0, 64) : [];
+    const record5 = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? entry : {};
+    const key2 = requiredString6(record5.key);
+    const state = oneOf2(record5.state, ["ingest", "metadata_only", "exclude"]);
+    const ancestors = Array.isArray(record5.ancestor_keys) ? record5.ancestor_keys.filter((ancestor) => typeof ancestor === "string" && ancestor.length > 0 && ancestor.length <= 4096).slice(0, 64) : [];
     return { key: key2, state, ...ancestors.length > 0 ? { ancestor_keys: ancestors } : {} };
   });
 }
@@ -143772,12 +144990,12 @@ async function defaultPrivateMatchProbe(question, ctx) {
   ]);
 }
 function pendingJobId(raw) {
-  const record4 = typeof raw === "object" && raw !== null ? raw : undefined;
-  return record4?.status === "working" && typeof record4.job_id === "string" ? record4.job_id : undefined;
+  const record5 = typeof raw === "object" && raw !== null ? raw : undefined;
+  return record5?.status === "working" && typeof record5.job_id === "string" ? record5.job_id : undefined;
 }
 function isAnswered(raw) {
-  const record4 = typeof raw === "object" && raw !== null ? raw : undefined;
-  return typeof record4?.answer === "string";
+  const record5 = typeof raw === "object" && raw !== null ? raw : undefined;
+  return typeof record5?.answer === "string";
 }
 function privateMatchKey(caller, jobId) {
   return `${caller ?? ""}\x00${jobId}`;
@@ -151458,7 +152676,7 @@ function hiddenWithoutAnswerModel(listed) {
 }
 async function runSearch(args, options, authorized, signal) {
   const question = typeof args.question === "string" ? args.question.trim() : "";
-  if (!question || question.length > MAX_QUESTION_CHARS)
+  if (!question || question.length > MAX_QUESTION_CHARS2)
     return invalidParams("question");
   let limit;
   if (args.limit !== undefined) {
@@ -151495,7 +152713,7 @@ function invalidParams(param) {
 function errorResult(body) {
   return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
 }
-var MAX_QUESTION_CHARS = 2000, MAX_LIMIT = 48, REMOTE_SEARCH_TOOL;
+var MAX_QUESTION_CHARS2 = 2000, MAX_LIMIT = 48, REMOTE_SEARCH_TOOL;
 var init_remote_search = __esm(() => {
   init_operations();
   init_remote_result();
@@ -151518,7 +152736,7 @@ var init_remote_search = __esm(() => {
       properties: {
         question: {
           type: "string",
-          maxLength: MAX_QUESTION_CHARS,
+          maxLength: MAX_QUESTION_CHARS2,
           description: "What to look up in the user's own records, in plain words."
         },
         limit: { type: "integer", minimum: 1, maximum: MAX_LIMIT, description: "How many items to return (default 24)." }
@@ -151975,7 +153193,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash73, randomBytes as randomBytes25, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash73, randomBytes as randomBytes26, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -152098,8 +153316,8 @@ function createRemoteOAuthHandler(options) {
     }
     sweep();
     admitPending();
-    const requestId = randomBytes25(16).toString("hex");
-    const csrf = randomBytes25(32).toString("base64url");
+    const requestId = randomBytes26(16).toString("hex");
+    const csrf = randomBytes26(32).toString("base64url");
     const entry = {
       client,
       redirectUri,
@@ -152129,7 +153347,7 @@ function createRemoteOAuthHandler(options) {
   const issueCode = (requestId, entry, u) => {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = u.installId ? mintCredential("code", u.installId) : randomBytes25(32).toString("base64url");
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes26(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -152720,7 +153938,7 @@ var init_private_answer_crypto = __esm(() => {
 });
 
 // src/workers/chatgpt/private-answer-payload.ts
-function utf8Bytes2(text4) {
+function utf8Bytes3(text4) {
   return encoder.encode(text4).byteLength;
 }
 function wellFormed(text4) {
@@ -152768,15 +153986,15 @@ function httpsUrl2(value2) {
   return href;
 }
 function fitJsonString(text4, budget) {
-  if (utf8Bytes2(JSON.stringify(text4)) <= budget)
+  if (utf8Bytes3(JSON.stringify(text4)) <= budget)
     return { text: text4, cut: false };
-  const markBytes = utf8Bytes2(CUT_MARK);
+  const markBytes = utf8Bytes3(CUT_MARK);
   let room = budget - 2 - markBytes;
   if (room < 0)
     return { text: "", cut: true };
   let kept = "";
   for (const char of text4) {
-    const bytes = utf8Bytes2(JSON.stringify(char)) - 2;
+    const bytes = utf8Bytes3(JSON.stringify(char)) - 2;
     if (bytes > room)
       break;
     room -= bytes;
@@ -152793,12 +154011,12 @@ function preparePrivateAnswer(result) {
       break;
     if (typeof value2 !== "object" || value2 === null)
       continue;
-    const record4 = value2;
+    const record5 = value2;
     const citation = {};
-    const title = cleanTextField(record4.title, limits.citationTextUnits);
-    const source = cleanTextField(record4.source, limits.citationTextUnits);
-    const date4 = cleanTextField(record4.date, limits.dateUnits);
-    const url = httpsUrl2(record4.url);
+    const title = cleanTextField(record5.title, limits.citationTextUnits);
+    const source = cleanTextField(record5.source, limits.citationTextUnits);
+    const date4 = cleanTextField(record5.date, limits.dateUnits);
+    const url = httpsUrl2(record5.url);
     if (title)
       citation.title = title;
     if (source)
@@ -152809,7 +154027,7 @@ function preparePrivateAnswer(result) {
       citation.open = { kind: "web", url };
     if (Object.keys(citation).length > 0) {
       citations.push(citation);
-      localPaths.push(typeof record4.localPath === "string" && record4.localPath.startsWith("/") ? record4.localPath : undefined);
+      localPaths.push(typeof record5.localPath === "string" && record5.localPath.startsWith("/") ? record5.localPath : undefined);
     }
   }
   const unanswered = [];
@@ -152845,12 +154063,12 @@ function fitCitation(citation) {
     }
   }
   const budget = PRIVATE_ANSWER_BYTE_BUDGETS.citation;
-  const over = () => utf8Bytes2(JSON.stringify(out)) - budget;
+  const over = () => utf8Bytes3(JSON.stringify(out)) - budget;
   if (over() <= 0)
     return out;
   if (out.title) {
     const excess = over();
-    const fitted = fitJsonString(out.title, Math.max(0, utf8Bytes2(JSON.stringify(out.title)) - excess));
+    const fitted = fitJsonString(out.title, Math.max(0, utf8Bytes3(JSON.stringify(out.title)) - excess));
     if (fitted.text)
       out.title = fitted.text;
     else
@@ -152858,7 +154076,7 @@ function fitCitation(citation) {
   }
   if (over() > 0 && out.source) {
     const excess = over();
-    const fitted = fitJsonString(out.source, Math.max(0, utf8Bytes2(JSON.stringify(out.source)) - excess));
+    const fitted = fitJsonString(out.source, Math.max(0, utf8Bytes3(JSON.stringify(out.source)) - excess));
     if (fitted.text)
       out.source = fitted.text;
     else
@@ -152924,8 +154142,8 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_CLAIM_COLLECT_MS: () => PRIVATE_ANSWER_CLAIM_COLLECT_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
-import { randomBytes as randomBytes26, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
-import { lstatSync as lstatSync35 } from "node:fs";
+import { randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
+import { lstatSync as lstatSync36 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
   if (timing.outcome === "failed")
@@ -153084,7 +154302,7 @@ class PrivateAnswerJobs {
         break;
       this.drop(oldest);
     }
-    const id = `oly2p.${installId}.${randomBytes26(32).toString("base64url")}`;
+    const id = `oly2p.${installId}.${randomBytes27(32).toString("base64url")}`;
     const at = this.now();
     const job = {
       id,
@@ -153092,7 +154310,7 @@ class PrivateAnswerJobs {
       expiresAt: at + this.ttlMs,
       caller: input.caller,
       detail: input.detail === "full" ? "full" : "summary",
-      question: input.question.slice(0, MAX_QUESTION_CHARS2),
+      question: input.question.slice(0, MAX_QUESTION_CHARS3),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
       analysis: undefined,
@@ -153178,7 +154396,7 @@ class PrivateAnswerJobs {
       return gone();
     let isFile = false;
     try {
-      isFile = lstatSync35(path).isFile();
+      isFile = lstatSync36(path).isFile();
     } catch {
       isFile = false;
     }
@@ -153570,7 +154788,7 @@ class PrivateAnswerJobs {
         resolve15();
       abort.signal.addEventListener("abort", () => resolve15(), { once: true });
     });
-    const record4 = (analysis) => {
+    const record5 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
       timing.dropped = analysis.stats.dropped;
       timing.items = analysis.stats.items;
@@ -153617,13 +154835,13 @@ class PrivateAnswerJobs {
         await Promise.race([analysis.settled, stopped]);
         if (settled)
           return;
-        record4(analysis);
+        record5(analysis);
         const result = analysis.state === "done" ? analysis.result : undefined;
         const stillReadable = async () => result !== undefined && (await checkPrivateEvidence(this.options.eligible, result.usedItems)).every(Boolean);
         if (result && (!precomputed || stillEligible(result.usedKeys, current2)) && await stillReadable()) {
           if (settled)
             return;
-          const ack = randomBytes26(32).toString("base64url");
+          const ack = randomBytes27(32).toString("base64url");
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
           const outcome = { kind: "sealed", sealed };
@@ -153732,7 +154950,7 @@ class PrivateAnswerJobs {
       const path = localPaths[index];
       if (!path)
         return citation;
-      const token = randomBytes26(32).toString("base64url");
+      const token = randomBytes27(32).toString("base64url");
       opens.set(token, path);
       return { ...citation, open: { kind: "mac", token } };
     });
@@ -153775,12 +154993,12 @@ function usedKeys(evidence, used) {
   return keys;
 }
 function sourceItemIdentity(value2) {
-  const record4 = asRecord18(value2);
-  if (!record4)
+  const record5 = asRecord18(value2);
+  if (!record5)
     return;
   const kept = {};
   for (const key2 of SOURCE_ITEM_FIELDS) {
-    const field = record4[key2];
+    const field = record5[key2];
     if (typeof field === "string")
       kept[key2] = field;
   }
@@ -153862,21 +155080,21 @@ function createPrivateAnswerHandler(options) {
     } catch {
       return reply2({ status: 400, body: { status: "invalid" } });
     }
-    const record4 = typeof body === "object" && body !== null && !Array.isArray(body) ? body : undefined;
-    if (!record4 || record4.v !== 1)
+    const record5 = typeof body === "object" && body !== null && !Array.isArray(body) ? body : undefined;
+    if (!record5 || record5.v !== 1)
       return reply2({ status: 400, body: { status: "invalid" } });
     if (route.action === "ask")
-      return reply2(options.questions ? await options.questions.ask(jobId, record4) : { status: 410, body: { status: "gone" } });
+      return reply2(options.questions ? await options.questions.ask(jobId, record5) : { status: 410, body: { status: "gone" } });
     if (route.action === "another")
-      return reply2(options.questions ? await options.questions.another(jobId, record4.publicKey) : { status: 410, body: { status: "gone" } });
+      return reply2(options.questions ? await options.questions.another(jobId, record5.publicKey) : { status: 410, body: { status: "gone" } });
     if (options.questions?.has(jobId)) {
-      return reply2(route.action === "open" ? { status: 410, body: { status: "gone" } } : await options.questions.collect(jobId, record4.publicKey));
+      return reply2(route.action === "open" ? { status: 410, body: { status: "gone" } } : await options.questions.collect(jobId, record5.publicKey));
     }
     if (route.action === "open")
-      return reply2(await options.jobs.open(jobId, record4.open));
-    if (record4.ack !== undefined)
-      return reply2(await options.jobs.acknowledge(jobId, record4.publicKey, record4.ack));
-    return reply2(await options.jobs.claim(jobId, record4.publicKey));
+      return reply2(await options.jobs.open(jobId, record5.open));
+    if (record5.ack !== undefined)
+      return reply2(await options.jobs.acknowledge(jobId, record5.publicKey, record5.ack));
+    return reply2(await options.jobs.claim(jobId, record5.publicKey));
   };
 }
 function reply2(claim, extra = {}) {
@@ -153917,7 +155135,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_QUESTION_CHARS2 = 4000, OPEN_TOKEN_PATTERN, ACK_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, PRIVATE_ANSWER_CLAIM_COLLECT_MS, defaultAudit = (event) => {
+}, MAX_QUESTION_CHARS3 = 4000, OPEN_TOKEN_PATTERN, ACK_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, PRIVATE_ANSWER_CLAIM_COLLECT_MS, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 }, IDENTITY_FIELDS, SOURCE_ITEM_FIELDS;
 var init_private_answer_jobs = __esm(() => {
@@ -153959,7 +155177,7 @@ __export(exports_private_question_jobs, {
   PrivateQuestionJobs: () => PrivateQuestionJobs,
   PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS: () => PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS
 });
-import { randomBytes as randomBytes27 } from "node:crypto";
+import { randomBytes as randomBytes28 } from "node:crypto";
 function gone2() {
   return { status: 410, body: { status: "gone" } };
 }
@@ -153998,7 +155216,7 @@ class PrivateQuestionJobs {
     const engine = await generateEngineKeyPair();
     const at = this.now();
     const job = {
-      id: `oly2p.${installId}.${randomBytes27(32).toString("base64url")}`,
+      id: `oly2p.${installId}.${randomBytes28(32).toString("base64url")}`,
       createdAt: at,
       expiresAt: at + this.ttlMs,
       enginePrivateKey: engine.privateKey,
@@ -154183,21 +155401,21 @@ function parseQuestion(text5) {
   }
   if (typeof value2 !== "object" || value2 === null || Array.isArray(value2))
     return;
-  const record4 = value2;
-  if (record4.v !== 1)
+  const record5 = value2;
+  if (record5.v !== 1)
     return;
-  const question = typeof record4.question === "string" ? record4.question.trim() : "";
+  const question = typeof record5.question === "string" ? record5.question.trim() : "";
   if (!question || question.length > PRIVATE_QUESTION_MAX_CHARS || /\u0000/.test(question))
     return;
-  if (typeof record4.level !== "string" || !LEVELS.includes(record4.level))
+  if (typeof record5.level !== "string" || !LEVELS.includes(record5.level))
     return;
-  if (record4.cleanup !== undefined && (typeof record4.cleanup !== "string" || !CLEANUPS2.includes(record4.cleanup)))
+  if (record5.cleanup !== undefined && (typeof record5.cleanup !== "string" || !CLEANUPS2.includes(record5.cleanup)))
     return;
   return {
     v: 1,
     question,
-    level: record4.level,
-    ...record4.cleanup !== undefined ? { cleanup: record4.cleanup } : {}
+    level: record5.level,
+    ...record5.cleanup !== undefined ? { cleanup: record5.cleanup } : {}
   };
 }
 function resultOf(outcome) {
@@ -154240,1138 +155458,6 @@ var init_private_question_jobs = __esm(() => {
   };
   LEVELS = ["strict", "standard"];
   CLEANUPS2 = ["as_written", "light_cleanup", "custom"];
-});
-
-// src/workers/chatgpt/private-answer-model.ts
-var exports_private_answer_model = {};
-__export(exports_private_answer_model, {
-  withoutRepeatedSentences: () => withoutRepeatedSentences,
-  withoutRepeatedEntries: () => withoutRepeatedEntries,
-  withoutEvidenceMarkers: () => withoutEvidenceMarkers,
-  privateEvidenceItems: () => privateEvidenceItems,
-  privateEvidence: () => privateEvidence,
-  panelSelection: () => panelSelection,
-  panelItems: () => panelItems,
-  leadingCount: () => leadingCount,
-  embeddingPanelRelevance: () => embeddingPanelRelevance,
-  createBuiltInPrivateAnswerModel: () => createBuiltInPrivateAnswerModel,
-  citedVersionNote: () => citedVersionNote,
-  PANEL_ANSWER_LIMITS: () => PANEL_ANSWER_LIMITS
-});
-function createBuiltInPrivateAnswerModel(options) {
-  const { model } = options;
-  const limits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
-  return {
-    status() {
-      if (!model)
-        return { state: "no_model" };
-      if (options.available())
-        return { state: "ready" };
-      let status;
-      try {
-        status = model.status();
-      } catch {
-        return { state: "no_model" };
-      }
-      if (status.state === "downloading" || status.state === "verifying" || status.state === "loading") {
-        return { state: "model_downloading", ...Number.isFinite(status.percent) ? { percent: status.percent } : {} };
-      }
-      return { state: "no_model" };
-    },
-    async answerPrivately(question, evidence, signal, observe, request) {
-      const full = request?.detail === "full";
-      if (!model)
-        throw new Error("no private answer model");
-      const read = privateEvidence(evidence, limits.maxPassageChars);
-      let unreadable = read.unreadable;
-      const readableHits = new Set(read.sources);
-      const unreadableHits = evidence.filter((hit, index) => !readableHits.has(index) && hit.neighbour !== true);
-      const hitOf = (index) => evidence[read.sources[index]];
-      const admit = async (indexes) => {
-        const ok = await checkPrivateEvidence(options.eligible, indexes.map(hitOf));
-        return indexes.filter((_, position) => ok[position]);
-      };
-      let live = read.items.map((_, index) => index);
-      let scores;
-      if (options.relevance && live.length > 1) {
-        const offered = live;
-        let admitted;
-        let raw;
-        try {
-          raw = await options.relevance(question, async () => {
-            admitted = await admit(offered);
-            const kept = new Set(admitted);
-            return offered.map((index) => {
-              if (!kept.has(index))
-                return;
-              const item = read.items[index];
-              return { ...item.title ? { title: item.title } : {}, text: item.text };
-            });
-          }, signal);
-        } catch {
-          raw = undefined;
-        }
-        if (admitted)
-          live = admitted;
-        if (raw && raw.length === offered.length) {
-          const byIndex = new Map(offered.map((index, position) => [index, raw[position]]));
-          const kept = live.map((index) => byIndex.get(index));
-          scores = kept.every((score) => Number.isFinite(score)) ? kept : undefined;
-        }
-      }
-      const liveRead = {
-        items: live.map((index) => read.items[index]),
-        neighbours: live.map((index) => hitOf(index).neighbour === true)
-      };
-      const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
-      let picked = selection.items.map((position) => live[position]);
-      const deepItems = new Map;
-      if (options.readItem && picked.length > 0) {
-        picked = await admit(picked);
-        const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits.deepEvidenceChars : selection.leading ? limits.leadingEvidenceChars : limits.summaryEvidenceChars, options.readItem, signal);
-        const kept = deep.flatMap((item, position) => item ? [{ item, index: picked[position] }] : []);
-        picked = kept.map((entry) => entry.index);
-        for (const entry of kept)
-          deepItems.set(entry.index, entry.item);
-      }
-      const hadReadable = read.items.length > 0;
-      const readableMatch = read.sources.some((source) => evidence[source].neighbour !== true);
-      const siblings = unreadVersions(live, picked, (index) => read.items[index]);
-      let eligibleSiblings = [];
-      {
-        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
-        eligibleSiblings = siblings.filter((_, position) => ok[picked.length + position]);
-        picked = picked.filter((_, position) => ok[position]);
-        unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
-      }
-      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0))
-        throw new NoPrivateEvidenceError;
-      const items = picked.map((index) => deepItems.get(index) ?? read.items[index]);
-      try {
-        observe?.evidence?.({
-          items: items.length,
-          unreadable,
-          bytes: items.reduce((sum2, item) => sum2 + utf8Bytes3(item.text), 0),
-          used: [...picked, ...eligibleSiblings].map((index) => read.sources[index])
-        });
-      } catch {}
-      if (items.length === 0) {
-        if (unreadable === 0)
-          throw new Error("no private evidence");
-        return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
-      }
-      const prompted = picked.map(hitOf);
-      let revoked = false;
-      const guarded = {
-        name: model.name,
-        spec: model.spec,
-        prepare: () => model.prepare(),
-        status: () => model.status(),
-        stop: () => model.stop(),
-        async complete(modelRequest) {
-          const guard = async () => {
-            const ok = await checkPrivateEvidence(options.eligible, prompted);
-            if (!ok.every(Boolean)) {
-              revoked = true;
-              throw new NoPrivateEvidenceError;
-            }
-          };
-          return runWithLocalInferenceGuard(guard, async () => {
-            await guard();
-            return model.complete(modelRequest);
-          });
-        }
-      };
-      let result;
-      try {
-        result = await options.answer(question, items, {
-          model: guarded,
-          maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
-          maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
-          audit: limits.audit,
-          evidenceFormat: "compact",
-          ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
-          ...signal ? { signal } : {}
-        });
-      } catch (error2) {
-        if (revoked)
-          throw new NoPrivateEvidenceError;
-        throw error2;
-      }
-      if (revoked)
-        throw new NoPrivateEvidenceError;
-      const byId = new Map(items.map((item, position) => [item.id, { item, hit: hitOf(picked[position]) }]));
-      const citations = [];
-      const seen = new Set;
-      for (const citation of result.citations) {
-        if (seen.has(citation.id))
-          continue;
-        seen.add(citation.id);
-        const entry = byId.get(citation.id);
-        if (!entry)
-          continue;
-        const item = entry.item;
-        const title = citation.title ?? item?.title;
-        let links;
-        try {
-          links = entry?.hit && options.sourceLinks ? options.sourceLinks(entry.hit) : undefined;
-        } catch {
-          links = undefined;
-        }
-        citations.push({
-          ...title ? { title } : {},
-          ...item?.source ? { source: item.source } : {},
-          ...item?.date ? { date: item.date } : {},
-          ...links?.url ? { url: links.url } : {},
-          ...links?.localPath ? { localPath: links.localPath } : {}
-        });
-      }
-      const unanswered = withoutRepeatedEntries(result.unanswered);
-      if (unreadable > 0)
-        unanswered.push(unreadableNote(unreadable));
-      const answerText = withoutRepeatedSentences(withoutEvidenceMarkers(result.answer));
-      const versionNote = citedVersionNote([...picked, ...eligibleSiblings].map((index) => read.items[index]), result.citations.map((citation) => citation.id));
-      return {
-        answer: versionNote ? `${answerText} ${versionNote}` : answerText,
-        citations,
-        unanswered
-      };
-    },
-    async reset() {
-      await model?.stop();
-    }
-  };
-}
-function citedVersionNote(items, citedIds) {
-  const groups = evidenceVersionGroups(items.map(versionText));
-  const cited = new Set(citedIds);
-  for (const group of groups) {
-    const members = group.map((index) => items[index]);
-    const used = members.filter((item) => cited.has(item.id));
-    if (used.length === 0 || members.some((item) => !Number.isFinite(evidenceDateValue(item.date))))
-      continue;
-    const label = versionDateLabel(members.map((item) => item.date));
-    const newest = members[0];
-    if (used.includes(newest)) {
-      return `Several versions of ${quoteTitle(newest)} were found; this answer uses the newest, saved ${label(newest.date)}.`;
-    }
-    return `This answer uses an older version of ${quoteTitle(used[0])}, saved ${label(used[0].date)}; the newest version was saved ${label(newest.date)}.`;
-  }
-  return;
-}
-function versionText(item) {
-  return { text: item.text, ...item.date ? { date: item.date } : {}, ...item.family ? { family: item.family } : {} };
-}
-function unreadVersions(live, picked, itemAt) {
-  const chosen = new Set(picked);
-  const out = [];
-  for (const group of evidenceVersionGroups(live.map((index) => versionText(itemAt(index))))) {
-    const members = group.map((position) => live[position]);
-    if (!members.some((index) => chosen.has(index)))
-      continue;
-    for (const index of members)
-      if (!chosen.has(index))
-        out.push(index);
-  }
-  return out;
-}
-function quoteTitle(item) {
-  return item.title ? `“${item.title}”` : "this document";
-}
-function versionDateLabel(dates) {
-  const day = (date4) => new Date(Date.parse(date4)).toISOString().slice(0, 10);
-  const sameDay = new Set(dates.map(day)).size < dates.length;
-  return (date4) => {
-    const at = new Date(Date.parse(date4));
-    const text5 = at.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
-    return sameDay ? `${text5}, ${at.toISOString().slice(11, 16)} UTC` : text5;
-  };
-}
-function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
-  const items = [];
-  const sources = [];
-  let unreadable = 0;
-  hits.forEach((hit, index) => {
-    const provenance = record4(hit.provenance);
-    const sourceItem = record4(hit.sourceItem) ?? record4(provenance?.sourceItem);
-    const citation = record4(provenance?.citation);
-    const content = record4(hit.internalContent);
-    const title = string4(citation?.title) ?? string4(hit.title);
-    const chunks2 = Array.isArray(hit.chunks) ? hit.chunks.filter((chunk) => typeof chunk === "string" && chunk.trim() !== "").map((chunk) => chunk.trim()) : [];
-    const passage = (chunks2.length > 0 ? chunks2.join(`
-…
-`) : undefined) ?? string4(content?.passage) ?? string4(hit.excerpt) ?? string4(hit.text);
-    const text5 = passage?.slice(0, maxPassageChars);
-    if (!text5) {
-      unreadable += 1;
-      return;
-    }
-    const id = string4(sourceItem?.localItemId) ?? string4(sourceItem?.providerItemId) ?? `item-${index + 1}`;
-    const locator = string4(hit.locator) ?? string4(citation?.uri) ?? string4(content?.url);
-    const source = string4(citation?.sourceLabel) ?? string4(sourceItem?.provider);
-    const date4 = string4(citation?.authoredAt) ?? string4(content?.authoredAt) ?? string4(citation?.updatedAt);
-    const family = string4(sourceItem?.family);
-    sources.push(index);
-    items.push({
-      id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
-      text: text5,
-      ...title ? { title } : {},
-      ...locator ? { locator } : {},
-      ...source ? { source } : {},
-      ...date4 ? { date: date4 } : {},
-      ...family ? { family } : {}
-    });
-  });
-  return { items, unreadable, sources };
-}
-async function panelItems(question, read, limits, relevance, signal) {
-  return (await panelSelection(question, read, limits, relevance, signal)).items;
-}
-async function panelSelection(question, read, limits, relevance, signal) {
-  const max = Math.max(1, limits.maxItems);
-  const maxLeading = Math.max(0, Math.floor(limits.maxLeadingItems ?? 0));
-  const isNeighbour = (index) => read.neighbours?.[index] === true;
-  const all = read.items.map((_, index) => index);
-  const matches2 = all.filter((index) => !isNeighbour(index));
-  if (matches2.length === 0)
-    return { items: [], leading: false };
-  if (all.length === 1)
-    return { items: all, leading: maxLeading > 0 };
-  let scores;
-  if (relevance) {
-    try {
-      scores = await relevance(question, async () => read.items.map((item) => ({ ...item.title ? { title: item.title } : {}, text: item.text })), signal);
-    } catch {
-      scores = undefined;
-    }
-  }
-  const versions2 = evidenceVersions(read.items.map(versionText));
-  const groupOf = new Map;
-  for (const group of versions2.groups) {
-    for (const member of group)
-      groupOf.set(member, group);
-  }
-  const units = (ranked2) => {
-    const placed = new Set;
-    const copies = new Set;
-    const out = [];
-    for (const index of ranked2) {
-      if (placed.has(index) || copies.has(index))
-        continue;
-      const unit = [index];
-      const group = groupOf.get(index);
-      if (group) {
-        const newest = group[0];
-        if (newest !== index && !placed.has(newest))
-          unit.push(newest);
-        for (const member of group) {
-          if (!unit.includes(member) && unit.some((kept) => versions2.similarity(kept, member) >= EVIDENCE_COPY_SIMILARITY))
-            copies.add(member);
-        }
-      }
-      for (const member of unit)
-        placed.add(member);
-      out.push(unit);
-    }
-    return out;
-  };
-  const flatten = (picked2) => {
-    const items = [];
-    for (const unit of picked2) {
-      const room = max - items.length;
-      if (room <= 0)
-        break;
-      items.push(...unit.length <= room ? unit : unit.slice(-room));
-    }
-    return items;
-  };
-  if (!scores || scores.length !== all.length || scores.some((score) => !Number.isFinite(score))) {
-    const items = flatten(units(matches2).slice(0, max));
-    return { items, leading: matches2.length === 1 && items.length === 1 && maxLeading > 0 };
-  }
-  const bestMatch = Math.max(...matches2.map((index) => scores[index]));
-  const order = all.filter((index) => !isNeighbour(index) || scores[index] >= bestMatch);
-  const ranked = units([...order].sort((a, b) => scores[b] - scores[a] || a - b));
-  const unitScore = (unit) => scores[unit[0]];
-  const floor = unitScore(ranked[0]) - Math.max(0, limits.relevanceMargin);
-  const picked = ranked.filter((unit) => unitScore(unit) >= floor).slice(0, max);
-  const leading = leadingCount(ranked.map(unitScore), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
-  return leading > 0 ? { items: flatten(picked.slice(0, leading)), leading: true } : { items: flatten(picked), leading: false };
-}
-function leadingCount(sorted, maxLeading, gap) {
-  let best = 0;
-  let bestDrop = Number.NEGATIVE_INFINITY;
-  for (let k = 1;k <= Math.min(maxLeading, sorted.length); k += 1) {
-    const drop = k < sorted.length ? sorted[k - 1] - sorted[k] : Number.POSITIVE_INFINITY;
-    const spread = sorted[0] - sorted[k - 1];
-    if (drop >= gap && drop >= spread && drop > bestDrop) {
-      best = k;
-      bestDrop = drop;
-    }
-  }
-  return best;
-}
-async function readInDepth(question, items, hits, budget, readItem, signal) {
-  const read = async (index, maxChars) => {
-    let chunks2;
-    try {
-      chunks2 = await readItem(hits[index], { question, maxChars }, signal);
-    } catch (error2) {
-      return error2 instanceof SourceModelPolicyDeniedError ? { kind: "refused" } : { kind: "failed" };
-    }
-    if (chunks2 === undefined)
-      return { kind: "refused" };
-    const text5 = chunks2.map((chunk) => chunk.trim()).filter(Boolean).join(`
-…
-`);
-    return text5 ? { kind: "text", text: text5.slice(0, maxChars) } : { kind: "failed" };
-  };
-  const whole2 = await Promise.all(items.map((_, index) => read(index, budget)));
-  const sizes = whole2.map((entry, index) => entry.kind === "text" ? entry.text.length : items[index].text.length);
-  const share = new Array(items.length).fill(0);
-  const byLength = sizes.map((size, index) => ({ size, index })).filter(({ index }) => whole2[index].kind !== "refused").sort((a, b) => a.size - b.size);
-  let remaining = budget;
-  byLength.forEach(({ size, index }, position) => {
-    const fair = Math.floor(remaining / (byLength.length - position));
-    share[index] = Math.min(size, fair);
-    remaining -= share[index];
-  });
-  return Promise.all(items.map(async (item, index) => {
-    const first = whole2[index];
-    if (first.kind === "refused")
-      return;
-    if (first.kind === "failed")
-      return item;
-    let text5 = first.text;
-    if (text5.length > share[index]) {
-      const again = await read(index, share[index]);
-      if (again.kind === "refused")
-        return;
-      text5 = again.kind === "text" ? again.text : text5.slice(0, share[index]);
-    }
-    return text5.length > item.text.length ? { ...item, text: text5 } : item;
-  }));
-}
-function embeddingPanelRelevance(provider) {
-  return async (question, items, signal) => {
-    const model = provider();
-    if (!model || model.backend !== "local")
-      return;
-    const [query] = await model.embed([{ text: question }], { taskType: "RETRIEVAL_QUERY" });
-    if (signal?.aborted || !query)
-      return;
-    const offered = await items();
-    const present = offered.flatMap((item, index) => item ? [{ index, item }] : []);
-    if (present.length === 0)
-      return;
-    const named = present.filter((entry) => entry.item.title?.trim());
-    const [titles, texts] = await Promise.all([
-      named.length > 0 ? model.embed(named.map((entry) => ({ text: entry.item.title.trim() })), { taskType: "RETRIEVAL_DOCUMENT" }) : Promise.resolve([]),
-      model.embed(present.map(({ item }) => {
-        const head = item.text.slice(0, RELEVANCE_TEXT_CHARS);
-        return { text: item.title ? `${item.title}
-${head}` : head };
-      }), { taskType: "RETRIEVAL_DOCUMENT" })
-    ]);
-    if (texts.length !== present.length || titles.length !== named.length)
-      return;
-    const titleScore = new Map(named.map((entry, position) => [entry.index, cosine(query, titles[position])]));
-    const textScore = new Map(present.map((entry, position) => [entry.index, cosine(query, texts[position])]));
-    return offered.map((_, index) => {
-      const text5 = textScore.get(index);
-      if (text5 === undefined)
-        return Number.NaN;
-      const title = titleScore.get(index);
-      return title === undefined ? text5 : TITLE_WEIGHT * title + (1 - TITLE_WEIGHT) * text5;
-    });
-  };
-}
-function cosine(a, b) {
-  if (a.length === 0 || a.length !== b.length)
-    return Number.NaN;
-  let dot2 = 0;
-  let left = 0;
-  let right = 0;
-  for (let index = 0;index < a.length; index += 1) {
-    dot2 += a[index] * b[index];
-    left += a[index] * a[index];
-    right += b[index] * b[index];
-  }
-  return left > 0 && right > 0 ? dot2 / Math.sqrt(left * right) : Number.NaN;
-}
-function privateEvidenceItems(hits) {
-  return privateEvidence(hits).items;
-}
-function withoutEvidenceMarkers(answer) {
-  return answer.replace(/\s*\[\d{1,2}(?:\s*[,;–-]\s*\d{1,2})*\]/g, "").trim();
-}
-function withoutRepeatedSentences(answer) {
-  const lines = [];
-  let changed = false;
-  let previous;
-  for (const line of answer.split(`
-`)) {
-    if (!line.trim() || !isProseLine(line)) {
-      previous = undefined;
-      lines.push(line);
-      continue;
-    }
-    const sentences = sentencesOf(line.trim());
-    const kept = sentences.filter((sentence) => {
-      const key2 = repeatKey(sentence);
-      if (key2 !== undefined && key2 === previous)
-        return false;
-      previous = key2;
-      return true;
-    });
-    if (kept.length === sentences.length) {
-      lines.push(line);
-      continue;
-    }
-    changed = true;
-    if (kept.length > 0)
-      lines.push(`${/^\s*/.exec(line)[0]}${kept.join(" ")}`);
-  }
-  return changed ? lines.join(`
-`).trim() : answer;
-}
-function isProseLine(line) {
-  const text5 = line.trim();
-  if (/^#{1,6}\s/u.test(text5))
-    return false;
-  if (/^(?:[-*+•]|\d{1,3}[.)])\s+/u.test(text5))
-    return false;
-  if (text5.startsWith("|"))
-    return false;
-  if (/^(?:\*\*|__)[^*_]+(?:\*\*|__):?$/u.test(text5))
-    return false;
-  if (text5.endsWith(":") && wordCount(text5) <= 8)
-    return false;
-  return true;
-}
-function withoutRepeatedEntries(entries) {
-  const seen = new Set;
-  return entries.filter((entry) => {
-    const key2 = repeatKey(entry);
-    if (key2 === undefined)
-      return true;
-    if (seen.has(key2))
-      return false;
-    seen.add(key2);
-    return true;
-  });
-}
-function sentencesOf(line) {
-  const out = [];
-  let carry = "";
-  for (const piece of line.split(/(?<=[.!?])\s+(?=\S)/u)) {
-    const sentence = carry ? `${carry} ${piece}` : piece;
-    if (wordCount(piece) <= 1 && /[.!?]$/u.test(piece)) {
-      carry = sentence;
-      continue;
-    }
-    carry = "";
-    out.push(sentence);
-  }
-  if (carry)
-    out.push(carry);
-  return out;
-}
-function wordCount(text5) {
-  return text5.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
-}
-function repeatKey(sentence) {
-  if (wordCount(sentence) < MIN_REPEAT_WORDS)
-    return;
-  return sentence.normalize("NFKC").toLowerCase().replace(/\s+([,.;:!?])/gu, "$1").replace(/[\s.,;:!?…]+$/u, "").replace(/\s+/gu, " ").trim();
-}
-function unreadableNote(count2) {
-  return count2 === 1 ? "1 matching private item has no readable text on this computer, so it was not read." : `${count2} matching private items have no readable text on this computer, so they were not read.`;
-}
-function unreadableAnswer(count2) {
-  return count2 === 1 ? "The matching private item has no readable text on this computer, so there is no private answer." : `None of the ${count2} matching private items has readable text on this computer, so there is no private answer.`;
-}
-function utf8Bytes3(text5) {
-  return Buffer.byteLength(text5, "utf8");
-}
-function record4(value2) {
-  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
-}
-function string4(value2) {
-  return typeof value2 === "string" && value2.trim() ? value2.trim() : undefined;
-}
-var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
-var init_private_answer_model = __esm(() => {
-  init_answer_activity();
-  init_source_model_policy();
-  init_evidence_versions();
-  init_private_answer_contract();
-  PANEL_ANSWER_LIMITS = {
-    maxItems: 4,
-    relevanceMargin: 0.04,
-    maxPassageChars: 2400,
-    maxPromptBytes: 11000,
-    maxAnswerChars: 2000,
-    audit: false,
-    maxLeadingItems: 2,
-    leadGap: 0.03,
-    leadingEvidenceChars: 5000,
-    summaryEvidenceChars: 8000,
-    deepEvidenceChars: 7000,
-    deepPromptBytes: 11500,
-    deepAnswerChars: 2700
-  };
-});
-
-// src/workers/source-index/local-answer.ts
-function localAnswerRequest(question, selectors = {}) {
-  const { retrieval_mode: mode, selected_items: selected, ...rest } = selectors;
-  return {
-    ...rest,
-    ...selected?.length ? { selected_items: selected } : {},
-    question,
-    retrieval_mode: mode === "keyword" ? "keyword" : "hybrid",
-    include_internal: true,
-    include_internal_content: true,
-    include_secure_local: true,
-    include_secure_local_content: true,
-    max_results: LOCAL_MAX_RESULTS
-  };
-}
-async function answerOnThisComputer(input, options) {
-  const question = input.question.trim();
-  if (!question)
-    return { status: "failed" };
-  const status = options.model.status();
-  if (status.state === "no_model")
-    return { status: "no_model" };
-  if (status.state === "model_downloading") {
-    return { status: "model_downloading", ...typeof status.percent === "number" ? { percent: status.percent } : {} };
-  }
-  const request = localAnswerRequest(question, input.selectors);
-  const lanes = options.lanes(request);
-  const corpusIds = sourceAnswerCorpusIds(request);
-  const selectedItems = selectedEvidenceItemsFromRequest(request);
-  const explicitQuery = request.query?.trim();
-  const detail = await buildEvidencePackDetailed({
-    question,
-    ...explicitQuery ? { searchQuery: explicitQuery } : {},
-    ...selectedItems.length > 0 ? { selectedItems } : {},
-    maxResults: LOCAL_MAX_RESULTS,
-    searchContext: {
-      allowedTrustDomains: LOCAL_TRUST_DOMAINS,
-      allowCloudQueries: false,
-      ...corpusIds ? { allowedCorpusIds: corpusIds } : {}
-    },
-    ...corpusIds ? { corpusIds } : {},
-    registry: lanes.registry,
-    adapters: lanes.adapters,
-    contentProviders: lanes.contentProviders,
-    maxCharsPerCandidate: LOCAL_MAX_CHARS_PER_CANDIDATE,
-    evidenceByteBudget: LOCAL_EVIDENCE_BYTE_BUDGET,
-    ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
-    ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
-  });
-  assertEvidencePackModelEligible(detail.pack);
-  const leftOut = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, options.sourceName);
-  const skip = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []]);
-  const candidates = detail.pack.candidates.flatMap((candidate, index) => {
-    const corpusId = detail.candidateCorpusIds[index] ?? "";
-    if (skip.has(index) || !corpusId || !LOCAL_TRUST_DOMAINS.includes(candidate.trustDomain))
-      return [];
-    return [{ ...candidate, corpusId }];
-  });
-  if (candidates.length === 0)
-    return { status: "not_found", leftOut };
-  let used;
-  let result;
-  try {
-    result = await options.model.answerPrivately(question, candidates, input.signal, {
-      evidence: (stats) => {
-        used = stats.used;
-      }
-    }, { detail: input.detail === "full" ? "full" : "summary" });
-  } catch (error2) {
-    if (error2 instanceof NoPrivateEvidenceError)
-      return { status: "failed" };
-    return { status: "failed" };
-  }
-  const read = (used ?? candidates.map((_, index) => index)).map((index) => candidates[index]).filter((item) => item !== undefined);
-  if (read.length > 0) {
-    let ok;
-    try {
-      ok = await options.eligible(read);
-    } catch {
-      ok = read.map(() => false);
-    }
-    if (ok.length !== read.length || !ok.every((value2) => value2 === true))
-      return { status: "changed" };
-  }
-  return {
-    status: "answered",
-    answer: result.answer,
-    citations: result.citations,
-    unanswered: result.unanswered ?? [],
-    leftOut,
-    read
-  };
-}
-function leftOutSources(skipped2, excluded, sourceName) {
-  const names = new Set;
-  for (const skip of skipped2) {
-    if (IN_SCOPE_SKIPS.has(skip.reason))
-      continue;
-    if (skip.reason === "no_adapter" && excluded?.has(skip.corpusId))
-      continue;
-    let name;
-    try {
-      name = sourceName?.(skip.corpusId);
-    } catch {
-      name = undefined;
-    }
-    names.add(name ?? "One source");
-  }
-  return [...names].sort();
-}
-async function checkLocalEvidenceItems(input) {
-  if (input.items.length === 0)
-    return [];
-  let lanes;
-  try {
-    lanes = input.lanes(localAnswerRequest("eligibility", { retrieval_mode: "keyword" }));
-  } catch (error2) {
-    if (input.throwOnUnavailable)
-      throw error2;
-    return input.items.map(() => false);
-  }
-  return Promise.all(input.items.map(async (item) => {
-    try {
-      const corpusId = typeof item.corpusId === "string" ? item.corpusId : undefined;
-      const provenance = item.provenance;
-      const trustDomain = item.trustDomain;
-      if (!corpusId || !provenance?.sourceItem?.localItemId || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain))
-        return false;
-      if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
-        return false;
-      const provider = lanes.contentProviders[corpusId];
-      if (!provider)
-        return false;
-      if (typeof provider.contentServable === "function") {
-        return provider.contentServable({ provenance, trustDomain }) === true;
-      }
-      const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
-      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
-        return false;
-      if (content.sensitivity.trustDomain !== trustDomain)
-        return false;
-      if (content.sensitivity.trustTier === "S5")
-        return false;
-      assertModelTrustTierAllowed(content.sensitivity.trustTier);
-      return true;
-    } catch (error2) {
-      if (input.throwOnUnavailable)
-        throw error2;
-      return false;
-    }
-  }));
-}
-async function readLocalEvidenceItem(input) {
-  const corpusId = typeof input.item.corpusId === "string" ? input.item.corpusId : undefined;
-  const provenance = input.item.provenance;
-  const trustDomain = input.item.trustDomain;
-  if (!corpusId || !provenance?.sourceItem || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain))
-    return;
-  const lanes = input.lanes(localAnswerRequest(input.question));
-  if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
-    return;
-  const provider = lanes.contentProviders[corpusId];
-  if (!provider)
-    return;
-  const content = await provider.fetchLocalContent({
-    provenance,
-    trustDomain,
-    maxChars: Math.max(1, Math.floor(input.maxChars)),
-    query: input.question,
-    maxPassages: LOCAL_DEPTH_MAX_PASSAGES
-  });
-  if (!content || content.namesOnly || content.contentPrivate)
-    return;
-  return content.chunks;
-}
-var LOCAL_TRUST_DOMAINS, LOCAL_MAX_RESULTS = 16, LOCAL_MAX_CHARS_PER_CANDIDATE = 3000, LOCAL_EVIDENCE_BYTE_BUDGET = 24000, LOCAL_DEPTH_MAX_PASSAGES = 24, IN_SCOPE_SKIPS;
-var init_local_answer = __esm(() => {
-  init_evidence_pack();
-  init_source_model_policy();
-  init_private_answer_contract();
-  init_analyst_answer();
-  init_embeddings();
-  LOCAL_TRUST_DOMAINS = ["internal", "secure_local"];
-  IN_SCOPE_SKIPS = new Set(["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"]);
-});
-
-// src/workers/email-source/local-private-answers.ts
-var exports_local_private_answers = {};
-__export(exports_local_private_answers, {
-  inboxEvidenceIdentity: () => inboxEvidenceIdentity,
-  createLocalPrivateAnswers: () => createLocalPrivateAnswers,
-  createLocalAnswerPath: () => createLocalAnswerPath,
-  LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH
-});
-import { lstatSync as lstatSync36 } from "node:fs";
-import { randomBytes as randomBytes28 } from "node:crypto";
-function createLocalAnswerPath(options) {
-  const lanes = (request) => options.lanes(request, "built_in_only");
-  const eligible = async (items) => {
-    const served = await checkLocalEvidenceItems({ lanes, items, throwOnUnavailable: true });
-    const inputs = items.map((item) => {
-      const provenance = item.provenance;
-      const identity = provenance?.sourceItem;
-      return {
-        corpusId: typeof item.corpusId === "string" ? item.corpusId : "",
-        provider: identity?.provider ?? "",
-        accountScope: identity?.accountScope ?? "",
-        providerItemId: identity?.providerItemId ?? "",
-        ...identity?.providerConversationId ? { providerConversationId: identity.providerConversationId } : {},
-        privateAtAnswer: item.trustDomain === "secure_local" || item.trustTier === "S4" || item.trustTier === "S5"
-      };
-    });
-    const verdicts = options.releaseCheck.inputs(inputs);
-    if (verdicts.length !== inputs.length || verdicts.some((v) => v.tier === "unknown"))
-      throw new Error("Eligibility unavailable");
-    const posture = options.releaseCheck.secureDerivativeDefault();
-    const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: true } }], { inputs: () => verdicts, secureDerivativeDefault: () => posture });
-    return reason ? items.map(() => false) : served;
-  };
-  const model = createBuiltInPrivateAnswerModel({
-    model: options.model,
-    eligible,
-    available: options.available,
-    answer: answerPrivately,
-    relevance: embeddingPanelRelevance(options.relevanceEmbedding),
-    readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
-    ...options.sourceLinks ? { sourceLinks: options.sourceLinks } : {},
-    ...options.limits ? { limits: options.limits } : {}
-  });
-  return {
-    eligible,
-    answer: (input) => answerOnThisComputer(input, {
-      lanes,
-      model,
-      eligible,
-      ...options.sourceName ? { sourceName: options.sourceName } : {}
-    })
-  };
-}
-function refused(status, code, message2) {
-  return { status, body: { ok: false, error: { code, message: message2 } } };
-}
-function inboxEvidenceIdentity(item) {
-  const out = {};
-  for (const key2 of ["corpusId", "trustDomain", "trustTier", "tier"]) {
-    if (typeof item[key2] === "string")
-      out[key2] = item[key2];
-  }
-  const provenance = item.provenance;
-  const source = provenance?.sourceItem;
-  if (source) {
-    const kept = {};
-    for (const key2 of ["family", "localItemId", ...TIER_LEDGER_IDENTITY_FIELDS]) {
-      if (typeof source[key2] === "string")
-        kept[key2] = source[key2];
-    }
-    out.provenance = { sourceItem: kept };
-  }
-  return out;
-}
-function createLocalPrivateAnswers(options) {
-  const now = options.now ?? Date.now;
-  const opens = new Map;
-  let running = false;
-  let closed = false;
-  let pass;
-  let timer;
-  let unsubscribe;
-  const abort = new AbortController;
-  const store = () => {
-    try {
-      return options.store();
-    } catch {
-      return;
-    }
-  };
-  const refOf = (q) => ({ id: q.id, generation: q.generation, connectionId: q.connectionId });
-  const active = (q) => {
-    try {
-      return !closed && (!options.isActive || options.isActive(q.connectionId));
-    } catch {
-      return false;
-    }
-  };
-  const hidden = (q) => q.surface === "chatgpt" && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
-  const current2 = (q) => {
-    const fresh2 = store()?.get(q.id);
-    return fresh2 && fresh2.generation === q.generation && active(fresh2) && !hidden(fresh2) ? fresh2 : undefined;
-  };
-  const eligible = async (read) => {
-    try {
-      const ok = options.eligible ? await options.eligible(read) : read.map(() => false);
-      if (ok.length !== read.length)
-        return "unknown";
-      return ok.every((value2) => value2 === true) ? "eligible" : "ineligible";
-    } catch {
-      return "unknown";
-    }
-  };
-  const sweep = () => {
-    for (const [id, entry] of opens)
-      if (entry.expiresAt <= now())
-        opens.delete(id);
-    while (opens.size > MAX_TOKENS2)
-      opens.delete(opens.keys().next().value);
-  };
-  const answerFor = async (input, background = false) => {
-    try {
-      return await (background ? options.backgroundAnswer ?? options.answer : options.answer)(input);
-    } catch {
-      return { status: "failed" };
-    }
-  };
-  const wake = () => {
-    if (!closed)
-      api2.tick().catch(() => {
-        return;
-      });
-  };
-  const invalidate = (q) => {
-    store()?.invalidate?.(refOf(q));
-    for (const [id, entry] of opens)
-      if (entry.ref?.id === q.id)
-        opens.delete(id);
-    wake();
-  };
-  const answerBody = (result, session, q) => {
-    if (result.status !== "answered")
-      return { status: result.status, ..."leftOut" in result ? { left_out: result.leftOut } : {} };
-    sweep();
-    const citations = result.citations.map((citation) => {
-      const view2 = {
-        ...citation.title ? { title: citation.title } : {},
-        ...citation.source ? { source: citation.source } : {},
-        ...citation.date ? { date: citation.date } : {}
-      };
-      const path = citation.localPath && options.openFile ? citation.localPath : undefined;
-      const url = !path && citation.url?.startsWith("https://") && options.openUrl ? citation.url : undefined;
-      if (path || url) {
-        const id = randomBytes28(24).toString("base64url");
-        opens.set(id, { session, ...path ? { path } : { url }, read: result.read.map(inboxEvidenceIdentity), expiresAt: now() + TOKEN_TTL_MS, ...q ? { ref: refOf(q) } : {} });
-        view2.open = id;
-      }
-      return view2;
-    });
-    return { status: "answered", answer: result.answer, citations, unanswered: result.unanswered, left_out: result.leftOut };
-  };
-  const api2 = {
-    start() {
-      if (timer || closed)
-        return;
-      unsubscribe = store()?.subscribe?.(wake);
-      timer = setInterval(wake, 1000);
-      timer.unref?.();
-      wake();
-    },
-    tick() {
-      if (pass)
-        return pass;
-      if (closed || options.interactiveBusy?.() || options.backgroundBusy?.())
-        return Promise.resolve();
-      pass = (async () => {
-        const currentStore = store();
-        if (!currentStore)
-          return;
-        if (options.isActive)
-          currentStore.reconcileConnections?.(options.isActive);
-        for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
-          if (closed || options.interactiveBusy?.() || options.backgroundBusy?.())
-            break;
-          if (q.hasResult || q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
-            continue;
-          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q)))
-            continue;
-          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
-          if (!current2(q))
-            continue;
-          if (result.status === "answered" && await eligible(result.read) === "eligible" || result.status === "not_found") {
-            if (!current2(q))
-              continue;
-            const saved = result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
-            if (!currentStore.saveAnswer?.(refOf(q), saved))
-              currentStore.retry?.(refOf(q));
-          } else
-            currentStore.retry?.(refOf(q));
-        }
-      })().catch(() => {
-        return;
-      }).finally(() => {
-        pass = undefined;
-      });
-      return pass;
-    },
-    close() {
-      closed = true;
-      abort.abort();
-      if (timer)
-        clearInterval(timer);
-      unsubscribe?.();
-      opens.clear();
-    },
-    waiting() {
-      try {
-        const listed = store()?.list({ includeResults: false });
-        if (!listed)
-          return;
-        return { questions: listed.questions.filter((q) => active(q) && !hidden(q)).map((q) => ({
-          id: q.id,
-          question: q.question,
-          from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === "chatgpt" ? "ChatGPT" : "An agent"),
-          askedAt: q.askedAt,
-          unchecked: q.state === "unchecked",
-          unread: !q.seen,
-          state: q.hasResult || q.result ? "answered" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering",
-          ...q.answeredAt ? { answeredAt: q.answeredAt } : {}
-        })), olderRemoved: listed.olderRemoved };
-      } catch {
-        return;
-      }
-    },
-    waitingCount() {
-      return api2.waiting()?.questions.filter((q) => q.unread && q.state === "answered").length ?? 0;
-    },
-    async handle(body, session) {
-      const action = body.action;
-      if (action === "list")
-        return { status: 200, body: { ok: true, ...api2.waiting() } };
-      if (action === "ask") {
-        const question = typeof body.question === "string" ? body.question.trim() : "";
-        if (!question || question.length > MAX_QUESTION_CHARS3)
-          return refused(400, "invalid_params", "Type a question first.");
-        if (running)
-          return refused(429, "busy", "Olympus is answering another question. Try again in a moment.");
-        running = true;
-        try {
-          const result = await answerFor({ question, detail: body.detail === "full" ? "full" : "summary" });
-          if (result.status === "answered") {
-            const check = await eligible(result.read);
-            if (check !== "eligible")
-              return { status: 200, body: { ok: true, status: check === "unknown" ? "check_unavailable" : "changed" } };
-          }
-          return { status: 200, body: { ok: true, ...answerBody(result, session) } };
-        } finally {
-          running = false;
-        }
-      }
-      if (action === "read") {
-        const q = typeof body.id === "string" ? store()?.get(body.id) : undefined;
-        if (!q || !current2(q))
-          return refused(410, "gone", "That answer was deleted");
-        if (!q.result)
-          return { status: 200, body: { ok: true, status: q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering" } };
-        const check = await eligible(q.result.read);
-        if (check === "unknown")
-          return { status: 200, body: { ok: true, status: "check_unavailable" } };
-        if (check === "ineligible" || !current2(q)) {
-          invalidate(q);
-          return { status: 200, body: { ok: true, status: "answering" } };
-        }
-        return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
-      }
-      if (action === "seen") {
-        const q = typeof body.id === "string" ? store()?.get(body.id) : undefined;
-        const marked = !!q && q.generation === body.generation && !!current2(q) && store()?.markRead?.(refOf(q)) === true;
-        return { status: 200, body: { ok: true, status: marked ? "read" : "kept" } };
-      }
-      if (action === "delete" || action === "delete_all") {
-        try {
-          const removed = action === "delete_all" ? store()?.dismissAll() ?? 0 : typeof body.id === "string" && store()?.dismiss(body.id) ? 1 : 0;
-          if (action === "delete_all")
-            opens.clear();
-          else
-            for (const [id, entry] of opens)
-              if (entry.ref?.id === body.id)
-                opens.delete(id);
-          return { status: 200, body: { ok: true, status: "deleted", removed } };
-        } catch {
-          return refused(503, "unavailable", "Private answers cannot be changed right now.");
-        }
-      }
-      if (action === "open") {
-        sweep();
-        const id = typeof body.token === "string" && TOKEN_PATTERN3.test(body.token) ? body.token : "";
-        const entry = opens.get(id);
-        if (!entry || entry.session !== session)
-          return refused(410, "gone", "This source cannot be opened from this session.");
-        let checkUnavailable = false;
-        const allowed = async () => {
-          sweep();
-          if (!entry || entry.session !== session || opens.get(id) !== entry)
-            return false;
-          if (entry.ref) {
-            const q = store()?.get(entry.ref.id);
-            if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
-              return false;
-          }
-          const check = await eligible(entry.read);
-          if (check === "unknown")
-            checkUnavailable = true;
-          if (check !== "eligible")
-            return false;
-          sweep();
-          if (opens.get(id) !== entry)
-            return false;
-          if (entry.ref) {
-            const q = store()?.get(entry.ref.id);
-            if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
-              return false;
-          }
-          return true;
-        };
-        if (!entry || !await allowed()) {
-          if (checkUnavailable)
-            return refused(503, "check_unavailable", "Couldn't check this answer right now");
-          if (entry?.ref) {
-            const q = store()?.get(entry.ref.id);
-            if (q)
-              invalidate(q);
-          }
-          opens.delete(id);
-          return refused(410, "gone", "This source changed. The answer is being written again.");
-        }
-        try {
-          if (entry.path && options.openFile && lstatSync36(entry.path).isFile())
-            await options.openFile(entry.path, allowed);
-          else if (entry.url && options.openUrl)
-            await options.openUrl(entry.url, allowed);
-          else
-            return refused(410, "gone", "This file is no longer on this computer.");
-        } catch {
-          return refused(500, "failed", "The source could not be opened.");
-        }
-        return { status: 200, body: { ok: true, status: "opened" } };
-      }
-      return refused(400, "invalid_params", "Unknown action.");
-    }
-  };
-  return api2;
-}
-var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS3 = 2000, TOKEN_PATTERN3;
-var init_local_private_answers = __esm(() => {
-  init_tier_ledger();
-  init_release_manifest();
-  init_waiting_private_questions();
-  init_analyst_built_in();
-  init_private_answer_model();
-  init_local_answer();
-  TOKEN_TTL_MS = 30 * 60000;
-  TOKEN_PATTERN3 = /^[A-Za-z0-9_-]{32,64}$/;
 });
 
 // src/core/remote-private-part.ts
@@ -160018,7 +160104,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
     sourceAnswerReleaseCheck: createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow"),
-    consultAsk: ({ caller, ...input }, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
+    consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
+      store: waitingQuestionStore,
+      connectionId: caller?.connection_id ?? `@local:${caller?.display_name ?? "An agent"}`,
+      ask: askAnonymouslyNow
+    }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
     ...unreadableFiles ? {
@@ -160165,6 +160255,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   dashboardAgentStore = remoteConnections;
   const { openWaitingPrivateQuestionStore: openWaitingPrivateQuestionStore2, waitingPrivateQuestionsDbPath: waitingPrivateQuestionsDbPath2 } = await Promise.resolve().then(() => (init_waiting_private_questions(), exports_waiting_private_questions));
   const connectionActive = (connectionId) => {
+    if (connectionId.startsWith("@local:"))
+      return true;
     const connections = remoteConnections();
     if (!connections)
       throw new Error("remote connection store unavailable");
@@ -160285,6 +160377,18 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     }
   });
   let askAnonymouslyNow;
+  const localAnonymousAsk = (input) => {
+    const read = readConsultSettings2();
+    return askWithAnonymousInbox({
+      ...input,
+      level: consultAskLevelFromSettings2(read.state === "valid" ? read.settings.level : DEFAULT_CONSULT_SETTINGS2.level)
+    }, {
+      store: waitingQuestionStore,
+      connectionId: "@local:You",
+      local: true,
+      ask: (request) => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp })
+    });
+  };
   let zkapiDailyLimitNow;
   let chatgptModelProblem;
   const privateAnswers = new PrivateAnswerJobs2({
@@ -160329,6 +160433,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       sourceName
     });
     localPrivateAnswers = createLocalPrivateAnswers2({
+      localConnectionId: "@local:You",
+      anonymousAsk: localAnonymousAsk,
       answer: (input) => answerActivity.run(() => local.answer(input)),
       backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), "background")),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
@@ -160336,7 +160442,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
       isActive: connectionActive,
       store: waitingQuestionStore,
-      connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      connectionName: (connectionId) => connectionId.startsWith("@local:") ? connectionId.slice(7) : remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
       ...openCitedFile ? {
         openFile: openCitedFile,
@@ -160348,17 +160454,28 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       } : {}
     });
     localPrivateAnswers.start();
+  } else {
+    const { createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
+    localPrivateAnswers = createLocalPrivateAnswers2({
+      store: waitingQuestionStore,
+      isActive: connectionActive,
+      connectionName: (id) => id.startsWith("@local:") ? id.slice(7) : remoteConnections()?.list().find((c) => c.id === id)?.displayName,
+      answer: async () => ({ status: "no_model" }),
+      eligible: async (items) => items.map(() => false),
+      anonymousAsk: localAnonymousAsk
+    });
+    localPrivateAnswers.start();
   }
   const privateQuestions = new PrivateQuestionJobs2({
     installId: () => remotePublicUrls()?.installId,
-    ask: (input) => askAnonymouslyNow ? askAnonymouslyNow({
+    ask: (input) => askAnonymouslyNow ? askWithAnonymousInbox({
       question: input.question,
       level: input.level,
       ...input.cleanup !== undefined ? { cleanup: input.cleanup } : {},
       callerProvider: "openai",
       signal: input.signal,
       stillAuthorized: input.stillAuthorized
-    }) : Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." }),
+    }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: "@local:ChatGPT", ask: askAnonymouslyNow }) : Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." }),
     choice: () => {
       const read = readConsultSettings2();
       const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS2;
@@ -161425,6 +161542,8 @@ function googleFilePage(locator) {
 }
 var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
+  init_vocabulary();
+  init_local_private_answers();
   init_update_check();
   init_open_targets();
   init_linux_owner_bridge();

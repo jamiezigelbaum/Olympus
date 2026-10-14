@@ -2,11 +2,9 @@
  * Private answers: the computer's own page for questions answered only here
  * (design docs/design/background-agents.md, sections A and B, and
  * "Dashboard changes" 1 and 2). It replaced the Anonymous answers page in the
- * local nav; that page's card now sits beneath, collapsed, as outside help.
+ * local nav. Private and anonymous asks have parallel panels; setup is in Models.
  *
- * Top to bottom: Ask privately; the questions waiting for this computer
- * (question · connection · when, Delete, the answer in place);
- * Anonymous answers (zkAPI), collapsed.
+ * Two ask panels, then the local inbox (path · connection · when).
  *
  * Everything that reads or answers is held to a local control session: the
  * worker renders the waiting list only for one, and its one POST route
@@ -16,7 +14,7 @@
 import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } from '../components.ts';
 import { chatgptMarkdownRender, CHATGPT_MARKDOWN_CSS } from '../chatgpt/markdown.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
-import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard, summaryOf } from '../outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS, summaryOf } from '../outside-help.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
@@ -30,13 +28,14 @@ export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous';
 const POST_PATH = '/dashboard/private-answers';
 
 const PRIVATE_ANSWERS_CSS = `
-.pa { width: 100%; min-width: 0; max-width: min(760px, 100%); }
+.pa { width: 100%; min-width: 0; max-width: min(1040px, 100%); }
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
 .pa .pasection > .sect { margin: 0 0 12px; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
 .pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
+.pa .pasent { white-space: pre-wrap; }
 .pa .paanswer:not(.md) { white-space: pre-wrap; }
 .pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer table { table-layout: fixed; display: table; }
@@ -66,15 +65,13 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa details.paanon { margin-top: 28px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.pa details.paanon > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
-.pa details.paanon > summary::-webkit-details-marker { display: none; }
-.pa details.paanon > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
-.pa details.paanon[open] > summary::before { content: '\\25BE'; }
-.pa details.paanon > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.pa .paanon-title { margin: 0; font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
-.pa .paanon-sum { color: var(--t3); font-size: var(--fs-body); }
-.pa .paanon-body { padding: 0 0 16px; }
+.pa .paasks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 0 32px; }
+.pa .paasks .pasection { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; }
+.pa .paasks .pnote { margin: 0 0 12px; }
+.pa .paasks .pasection > .pnote:last-child { margin: 8px 0 0; }
+.pa .paasks .paask { margin: auto 0 0; }
+.pa .paasks .paout { flex-basis: 100%; }
+@media (max-width: 640px) { .pa .paasks { grid-template-columns: minmax(0, 1fr); } }
 `;
 
 export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions): string {
@@ -117,19 +114,19 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
   } else if (options?.privateAnswers?.available !== true) {
     parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
-    parts.push(renderAsk());
+    parts.push(`<div class="paasks">${renderAsk(false, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
     parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date()));
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
-  parts.push(renderAnonymous(options, csrfToken));
+  if (!localSession || options?.privateAnswers?.available !== true) parts.push(`<div class="paasks">${renderAsk(true, options?.basePath)}${renderAnonymous(options, csrfToken)}</div>`);
   return `<div class="privacy pa" data-private-answers>${parts.join('')}</div>${script}`;
 }
 
-function renderAsk(): string {
-  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml(W.askLabel)}</h3><form class="paask" data-pa-ask>`
-    + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"></textarea>`
-    + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(W.ask)}</button></div>`
-    + `<div class="paout" data-pa-out aria-live="polite"></div></form></section>`;
+function renderAsk(disabled = false, basePath?: string): string {
+  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml(W.askLabel)}</h3><p class="pnote">${escapeHtml(W.privateIntro)}</p><form class="paask" data-pa-ask>`
+    + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000"${disabled ? ' disabled' : ''} placeholder="${escapeHtml(W.askPlaceholder)}"></textarea>`
+    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled ? ' disabled' : ''}>${escapeHtml(W.ask)}</button></div>`
+    + `<div class="paout" data-pa-out aria-live="polite"></div></form><p class="pnote"><a href="${escapeHtml(dashboardLocalPageHref('keys', readToken(basePath)))}">${escapeHtml(W.goToModels)}</a></p></section>`;
 }
 
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
@@ -145,7 +142,7 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
     const state = question.state ?? (question.unchecked ? 'unchecked' : 'answering');
     const status = state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
-    const from = [question.from, when, status].filter(Boolean).join(' · ');
+    const from = [question.path === 'anonymous' ? W.anonymousPath : W.privatePath, question.from, when, status].filter(Boolean).join(' · ');
     return `<li class="srow nodot${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
       + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom"> · ${escapeHtml(from)}</span></button></div>`
       + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(W.delete)}</button></div>`
@@ -158,29 +155,17 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
   return parts.join('') + '</section>';
 }
 
-/** Anonymous answers (zkAPI): outside help, collapsed beneath, never fed by waiting questions. */
+/** The same ask structure; setup remains in Models even when outside help is off. */
 function renderAnonymous(options: DashboardPageOptions | undefined, csrfToken: string | undefined): string {
   const status = options?.outsideHelp;
-  let body: string;
-  let sum: string = W.anonymousSum;
-  if (csrfToken === undefined) {
-    body = `<div class="outside"><p class="pnote">${escapeHtml(OH.intro)}</p></div>`;
-  } else if (!status) {
-    body = `<div class="outside" data-outside-unavailable><p class="pnote">${escapeHtml(OH.unavailable)}</p></div>`;
-  } else {
-    // "Outside help · off · not set up": the card's own row words, without its name.
-    const row: string = OH.row[summaryOf(status).state];
-    sum = `${W.anonymousSum} · ${row.replace(/^[^:]*:\s*/, '')}`;
-    body = renderOutsideHelpCard(status, {
-      csrfToken,
-      localSession: options?.outsideHelpLocalSession === true,
-      untitled: true,
-      ...(options?.basePath === undefined ? {} : { basePath: options.basePath }),
-    });
-  }
-  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>`
-    + `<summary><h3 class="paanon-title">${escapeHtml(W.anonymousTitle)}</h3><span class="paanon-sum">${escapeHtml(sum)}</span></summary>`
-    + `<div class="paanon-body">${body}</div></details>`;
+  const ready = status && summaryOf(status).state === 'on' && csrfToken !== undefined && options?.outsideHelpLocalSession === true;
+  const models = `${dashboardLocalPageHref('keys', readToken(options?.basePath))}#anonymous`;
+  return `<section class="pasection" id="anonymous" data-pa-anonymous aria-labelledby="anonymous-heading"><h3 class="sect" id="anonymous-heading">${escapeHtml(W.anonymousAsk)}</h3>`
+    + `<p class="pnote">${escapeHtml(W.anonymousIntro)}</p><form class="paask" data-pa-ask data-pa-path="anonymous">`
+    + `<textarea aria-labelledby="anonymous-heading" name="question" maxlength="2000" placeholder="${escapeHtml(W.anonymousPlaceholder)}"${ready ? '' : ' disabled'}></textarea>`
+    + `<div class="pbuttons"><button type="submit" class="btn primary"${ready ? '' : ' disabled'}>${escapeHtml(W.ask)}</button></div>`
+    + `<div class="paout" data-pa-out aria-live="polite"></div></form>`
+    + `<p class="pnote">${ready ? '' : escapeHtml(status ? OH.row[summaryOf(status).state] : W.anonymousNotSetUp) + ' ' }<a href="${escapeHtml(models)}">${escapeHtml(W.goToModels)}</a></p></section>`;
 }
 
 /**
@@ -198,6 +183,9 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     copy: {
       answering: W.answering,
       sources: W.sources,
+      sent: W.sent,
+      privatePath: W.privatePath,
+      anonymousPath: W.anonymousPath,
       open: W.open,
       leftOut: W.leftOut,
       unanswered: W.unanswered,
@@ -224,7 +212,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
   function openAnonymous() {
     if (window.location.hash !== '#' + config.fragment) return;
     var section = document.getElementById(config.fragment);
-    if (section) { section.open = true; if (section.scrollIntoView) section.scrollIntoView({ block: 'start' }); }
+    if (section) { if (section.scrollIntoView) section.scrollIntoView({ block: 'start' }); }
   }
   openAnonymous();
   window.addEventListener('hashchange', openAnonymous);
@@ -310,6 +298,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         box.textContent = String(result.answer || '');
       }
       card.appendChild(box);
+      if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
@@ -349,8 +338,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
-  var ask = root.querySelector('form[data-pa-ask]');
-  if (ask) {
+  root.querySelectorAll('form[data-pa-ask]').forEach(function (ask) {
     ask.addEventListener('submit', async function (event) {
       event.preventDefault();
       var field = ask.querySelector('textarea[name="question"]');
@@ -360,12 +348,13 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (!question || !out) return;
       if (button) button.disabled = true;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: 'ask', question: question });
+      var outcome = await send({ action: ask.getAttribute('data-pa-path') === 'anonymous' ? 'ask_anonymous' : 'ask', question: question });
       if (button) button.disabled = false;
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
       render(out, outcome.result, question);
+      await poll();
     });
-  }
+  });
   var selected = null;
   var readVersion = 0;
   var seen = {};
@@ -475,7 +464,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       }
       var state = q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
-      row.querySelector('.pafrom').textContent = ' · ' + [q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
+      row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
       list.appendChild(row);
     });
     empty();

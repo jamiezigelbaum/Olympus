@@ -727,10 +727,19 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
   };
 }
 
+/** Invented consult readiness, with no daemon or network calls. */
+export function previewOutsideHelp(on: boolean): import('../src/workers/dashboard/outside-help.ts').DashboardOutsideHelpStatus {
+  return {
+    settings: { state: on ? 'on' : 'off', revision: 1, languages: ['en'], domains: { units: true, countries: true, places: true, technical: true, medicines: true, medicineBrands: true }, strict: false, level: 'unnamed' },
+    route: on ? { state: 'configured', profileId: 'preview', model: 'outside/model', policyWritable: true, secretRef: 'env:PREVIEW_ONLY', acknowledgements: { version: 1, accepted: [], complete: true }, readiness: { ready: true, blockers: [], daemonFound: true, torMode: 'per_consult', torFound: true, apiKeyConfigured: true, expiry: { state: 'unknown' }, requestsToday: { count: 0 }, spendToday: { reservedUsd: 0 }, fences: [], routeLabel: 'preview' } } : { state: 'not_configured', policyWritable: true },
+    languages: [{ language: 'en', pack: 'preview', state: 'verified', installed: true }], restartPending: false,
+  };
+}
+
 /** Synthetic inbox questions: never anyone's source text. */
 const PREVIEW_WAITING = [
   { id: 'wq_preview_1', question: 'What did the landlord say about the deposit?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 50 * 60_000).toISOString(), unchecked: false, state: 'answered', unread: true, answeredAt: new Date(NOW.getTime() - 49 * 60_000).toISOString() },
-  { id: 'wq_preview_2', question: 'When is my next dentist appointment?', from: 'Grok Bot', askedAt: new Date(NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false, state: 'answered', unread: false, answeredAt: new Date(NOW.getTime() - 119 * 60_000).toISOString() },
+  { path: 'anonymous', id: 'wq_preview_2', question: 'What are general tenant deposit rules?', from: 'Grok Bot', askedAt: new Date(NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false, state: 'answered', unread: false, answeredAt: new Date(NOW.getTime() - 119 * 60_000).toISOString() },
   { id: 'wq_preview_3', question: 'Which flight did I book for March?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 26 * 3_600_000).toISOString(), unchecked: false, state: 'answering', unread: false },
 ] as const;
 const previewDeleted = new Set<string>();
@@ -766,7 +775,7 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
   }
   const question = listed.questions.find((item) => item.id === body.id);
   if (!question) return Response.json({ ok: false, error: { code: 'gone', message: 'That answer was deleted' } }, { status: 410 });
-  if (body.action === 'read') return Response.json(question.state === 'answered' ? answered : { ok: true, status: question.state });
+  if (body.action === 'read') return Response.json(question.state === 'answered' ? { ...answered, ...('path' in question && question.path === 'anonymous' ? { sent: question.question, answer: '**Outside help · preview only.** Deposit rules depend on the tenancy and location. Check the applicable public guidance.', citations: [], unanswered: [], left_out: [] } : {}) } : { ok: true, status: question.state });
   if (body.action === 'seen') {
     previewSeen.add(question.id);
     return Response.json({ ok: true, status: 'seen' });
@@ -795,7 +804,8 @@ function withCookies(response: Response, cookies: readonly string[]): Response {
   return response;
 }
 
-function html(body: string, csp?: string): Response {
+function html(body: string, csp?: string, theme?: string | null): Response {
+  if (theme === 'light' || theme === 'dark') body = body.replaceAll('@media (prefers-color-scheme: light)', theme === 'light' ? '@media all' : '@media not all');
   return new Response(body, {
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8', ...(csp ? { 'content-security-policy': csp } : {}) },
@@ -886,9 +896,10 @@ if (import.meta.main) {
           agents: previewAgentsView(url.searchParams.get('agents')),
           // The pretend session is a local one, so Private answers shows its list.
           outsideHelpLocalSession: unlocked,
+          outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
           privateAnswers: { available: true, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount) } : {}) },
         },
-      })), cookies);
+      }), undefined, url.searchParams.get('theme')), cookies);
     }
     const named = url.pathname.replace(/^\//, '');
     if ((DASHBOARD_PREVIEW_STATES as readonly string[]).includes(named)) {

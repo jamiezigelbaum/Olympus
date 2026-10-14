@@ -1,3 +1,5 @@
+import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
+import { askWithAnonymousInbox } from './local-private-answers.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
@@ -4465,8 +4467,10 @@ export async function main(): Promise<void> {
       () => secureDerivativeDefault ?? 'allow',
     ),
     // Bound late: the consult block below sets askAnonymouslyNow.
-    consultAsk: ({ caller, ...input }, signal) => (askAnonymouslyNow
-      ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal })
+    consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
+      ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
+        store: waitingQuestionStore, connectionId: caller?.connection_id ?? `@local:${caller?.display_name ?? 'An agent'}`, ask: askAnonymouslyNow,
+      })
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
@@ -4664,6 +4668,7 @@ export async function main(): Promise<void> {
   // re-check pass.
   const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
   const connectionActive = (connectionId: string): boolean => {
+    if (connectionId.startsWith('@local:')) return true;
     const connections = remoteConnections();
     if (!connections) throw new Error('remote connection store unavailable');
     return connections.list().some((connection) => connection.id === connectionId && connection.revokedAt === null);
@@ -4832,6 +4837,16 @@ export async function main(): Promise<void> {
   // "Ask anonymously" (the ask_anonymously agent tool: the only way a
   // question goes to zkAPI), wired inside the consult block below.
   let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
+  const localAnonymousAsk = (input: import('../../core/consult-ask.ts').ConsultAskInput) => {
+    const read = readConsultSettings();
+    return askWithAnonymousInbox({
+      ...input,
+      level: consultAskLevelFromSettings(read.state === 'valid' ? read.settings.level : DEFAULT_CONSULT_SETTINGS.level),
+    }, {
+      store: waitingQuestionStore, connectionId: '@local:You', local: true,
+      ask: request => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: 'transport_unavailable', message: PRIVATE_ANSWERS_COPY.anonymousNotSetUp }),
+    });
+  };
   // The zkAPI route's daily limit (a demo grant's private questions need one set), wired inside the consult block below.
   let zkapiDailyLimitNow: (() => import('../../core/consult-transport-zkapi.ts').ZkapiDailyLimitState) | undefined;
   // The last time the ChatGPT model was missing from the live zkAPI listing (for the card); cleared by a reply.
@@ -4893,6 +4908,8 @@ export async function main(): Promise<void> {
       sourceName,
     });
     localPrivateAnswers = createLocalPrivateAnswers({
+      localConnectionId: '@local:You',
+      anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.
       answer: (input) => answerActivity.run(() => local.answer(input)),
       backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background')),
@@ -4901,7 +4918,7 @@ export async function main(): Promise<void> {
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
       isActive: connectionActive,
       store: waitingQuestionStore,
-      connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      connectionName: (connectionId) => connectionId.startsWith('@local:') ? connectionId.slice(7) : remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
       ...(openCitedFile ? {
         openFile: openCitedFile,
@@ -4912,6 +4929,16 @@ export async function main(): Promise<void> {
       } : {}),
     });
     localPrivateAnswers.start();
+  } else {
+    const { createLocalPrivateAnswers } = await import('./local-private-answers.ts');
+    localPrivateAnswers = createLocalPrivateAnswers({
+      store: waitingQuestionStore, isActive: connectionActive,
+      connectionName: (id) => id.startsWith('@local:') ? id.slice(7) : remoteConnections()?.list().find(c => c.id === id)?.displayName,
+      answer: async () => ({ status: 'no_model' }),
+      eligible: async items => items.map(() => false),
+      anonymousAsk: localAnonymousAsk,
+    });
+    localPrivateAnswers.start();
   }
   // The private question panel's jobs (chatgpt/private-question-jobs.ts):
   // the sealed question runs the same ask lane as the ask_anonymously tool,
@@ -4919,14 +4946,14 @@ export async function main(): Promise<void> {
   const privateQuestions = new PrivateQuestionJobs({
     installId: () => remotePublicUrls()?.installId,
     ask: (input) => (askAnonymouslyNow
-      ? askAnonymouslyNow({
+      ? askWithAnonymousInbox({
         question: input.question,
         level: input.level,
         ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
         callerProvider: 'openai',
         signal: input.signal,
         stillAuthorized: input.stillAuthorized,
-      })
+      }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: '@local:ChatGPT', ask: askAnonymouslyNow })
       : Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' })),
     // The panel's default choice: the dashboard's saved level and Standard preparation (consult.json, read at every open).
     choice: () => {

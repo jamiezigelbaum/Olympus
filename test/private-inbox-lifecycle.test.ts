@@ -15,29 +15,29 @@ function fixture() {
   const options = { homeDir: join(dir, 'home'), env: { OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: join(dir, 'custom-private-state', 'remote-connections.sqlite') } };
   return { dir, path, options };
 }
-function save(path: string, corpusId: string, question = 'Example?') {
+function save(path: string, corpusId: string, question = 'Example?', pathKind: 'private' | 'anonymous' = 'private') {
   const store = openWaitingPrivateQuestionStore(path);
-  const ref = store.record(store.ticket('example-agent'), { question, surface: 'remote', state: 'waiting' })!;
-  const result: StoredPrivateAnswer = { status: 'answered', answer: 'PRIVATE_INBOX_LIFECYCLE_SENTINEL', citations: [], unanswered: [], leftOut: [], read: [{ corpusId }] };
+  const ref = store.record(store.ticket('example-agent'), { question, surface: 'remote', state: 'waiting', path: pathKind })!;
+  const result: StoredPrivateAnswer = { status: 'answered', answer: pathKind === 'anonymous' ? 'ANONYMOUS_INBOX_LIFECYCLE_SENTINEL' : 'PRIVATE_INBOX_LIFECYCLE_SENTINEL', citations: [], unanswered: [], leftOut: [], read: [{ corpusId }] };
   store.saveAnswer(ref, result); store.close(); return ref;
 }
 function files(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? files(join(dir, entry.name)) : [join(dir, entry.name)]);
 }
 test('data delete --all removes retained answer state, including an overridden private directory', () => {
-  const f = fixture(); save(f.path, 'secure_local.example.files');
+  const f = fixture(); save(f.path, 'secure_local.example.files'); save(f.path, '', 'Exact outside question', 'anonymous');
   const dry = deleteOlympusData({ all: true, dryRun: true, ...f.options });
   expect(dry.removed).toContain(f.path); expect(existsSync(f.path)).toBe(true);
   const deleted = deleteOlympusData({ all: true, ...f.options });
   expect(deleted.removed).toContain(f.path); expect(existsSync(f.path)).toBe(false);
 });
 test('export omits the inbox answer bytes and names it as skipped', () => {
-  const f = fixture(); save(f.path, 'secure_local.example.files');
+  const f = fixture(); save(f.path, 'secure_local.example.files'); save(f.path, '', 'Exact outside question', 'anonymous');
   const out = join(f.dir, 'export');
   const exported = exportOlympusData({ destination: out, ...f.options });
   expect(exported.skipped).toContain(f.path);
   expect(files(out).some(path => path.endsWith('waiting-private-questions.sqlite'))).toBe(false);
-  for (const path of files(out)) expect(readFileSync(path).includes(Buffer.from('PRIVATE_INBOX_LIFECYCLE_SENTINEL'))).toBe(false);
+  for (const path of files(out)) { expect(readFileSync(path).includes(Buffer.from('PRIVATE_INBOX_LIFECYCLE_SENTINEL'))).toBe(false); expect(readFileSync(path).includes(Buffer.from('ANONYMOUS_INBOX_LIFECYCLE_SENTINEL'))).toBe(false); }
 });
 test('source deletion removes answers depending on that source and pending work, preserving unrelated answers', () => {
   const f = fixture();

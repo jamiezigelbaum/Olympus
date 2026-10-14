@@ -146,8 +146,7 @@ read scope are refused. Revoking a connection deletes all of its rows and
 bumps its recording ticket generation, exactly as before. data delete --all
 removes answers and sidecars. --source deletes answers depending on that
 source's corpora, unmapped dependencies, and all pending questions, whose dependencies are not known;
-this also fences a pending answer completing after deletion. Direct Ask
-privately questions and ChatGPT panel answers are not copied into this inbox.
+this also fences a pending answer completing after deletion. Questions typed into Ask privately also stay in this inbox after the local eligibility check. ChatGPT panel answers are not copied into it. Anonymous dashboard asks and agent tool asks are retained with the exact question sent after the writer, labeled Anonymous and who asked; sealed ChatGPT anonymous panel answers are never duplicated. They share the inbox storage quotas, local control boundary, delete-all and export exclusions. Anonymous agent attempts have a separate five-per-hour budget per connection; human asks do not consume automatic-answer slots. Anonymous reservations keep a fixed placeholder instead of the original wording. The local private box retains multibyte questions within its existing 2,000-character limit. Anonymous asks have no source retrieval or attached source citations; they use the existing writer and outbound gate.
 
 **The model's note**, host-neutral: “Your answer is in Olympus on your
 computer.” Followed by **Open answer**, using the existing open-on-computer
@@ -261,7 +260,7 @@ same-provider exclusion can't be applied.
    newest first and unread in bold; click opens the full Markdown answer with
    a bold question, sources and left-out beneath. Only Delete and Delete all
    (one confirmation), no Answer or Dismiss. Deep links open and scroll the
-   named row. Anonymous answers stays collapsed underneath. Light/dark and
+   named row. Ask privately and Ask anonymously sit side by side above the inbox (stacked on phones). Anonymous setup, balance, switch and writer checks live in Models on the Keys settings page. Light/dark and
    390/1280-wide proof includes unread, opened list/bold and Answering… rows.
 3. **Agents page, Connect an agent:** ChatGPT, Grok, Muse, Other, each with
    its own short steps; the choice sets the provider (D).
@@ -311,7 +310,7 @@ the applicable pipeline evals (`docs/ENGINEERING_PROCESS.md`).
 
 - **Round 1, revision 1: rework.** Adopted: full-result serialization and
   `secret_locations` (C); one bit, not a count; waiting records persisted at
-  match time (A); local-only Ask privately (B); no question history; provider
+  match time (A); local-only Ask privately (B); local inbox history until deletion; provider
   pinned or owner-chosen and checked on the resolved model (D); no
   per-install OAuth path; offline lists per surface; one page instead of two.
   Superseded by the owner's decision: removing summaries for non-ChatGPT

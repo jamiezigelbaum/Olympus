@@ -709,6 +709,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       applyWriteCapability();
       return;
     }
+    // Anonymous model settings have their own controller. A refreshed document
+    // rebinds it; inert body replacement would leave those controls disconnected.
+    if (query('[data-outside-help]')) { options.navigate(options.returnUrl); return; }
     const openSheets = queryAll<HTMLElement>('.sheet.on').map((sheet) => sheet.id);
     const open = new Set(queryAll<HTMLDetailsElement>('details[open]').map((node) =>
       node.dataset.pollKey || node.querySelector('summary')?.textContent?.trim() || ''));

@@ -15,13 +15,13 @@
 // - The Needs you count reaches only the computer's control session, never
 //   the Gateway bearer or ChatGPT, and ChatGPT's dashboard text is unchanged.
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
@@ -1057,7 +1057,7 @@ describe('the Private answers page', () => {
       citations: [{ title: 'Lease', source: 'Dropbox' }], left_out: ['Gmail'],
     } }));
     expect([...page.document.querySelectorAll('.pa h3')].map((node) => node.textContent)).toEqual([
-      'Ask privately', 'Private inbox', 'Anonymous answers',
+      'Ask privately', 'Ask anonymously', 'Private inbox',
     ]);
     const field = page.document.querySelector('textarea')!;
     (field as unknown as { value: string }).value = 'When do I renew?';
@@ -1196,13 +1196,13 @@ describe('the Private answers page', () => {
     expect(missing.posts.length).toBe(0);
   });
 
-  test('the old address\'s fragment opens Anonymous answers, labeled as outside help, collapsed otherwise', () => {
-    const plain = renderAndRun(() => ({ status: 500, body: {} }));
-    const section = plain.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT) as unknown as { open: boolean; textContent: string };
-    expect(section.open).toBe(false);
-    expect(section.textContent).toContain('Outside help');
-    const moved = renderAndRun(() => ({ status: 500, body: {} }), `http://127.0.0.1:8010/dashboard?private-answers#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`);
-    expect((moved.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT) as unknown as { open: boolean }).open).toBe(true);
+  test('the old fragment lands on the always-visible anonymous panel with a Models link', () => {
+    const page = renderAndRun(() => ({ status: 500, body: {} }));
+    const section = page.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT)!;
+    expect(section.tagName).toBe('SECTION');
+    expect(section.textContent).toContain('Ask anonymously');
+    expect(section.querySelector('a')!.getAttribute('href')).toContain('?keys#anonymous');
+    expect(page.document.querySelectorAll('.paasks .pasection .paask textarea').length).toBe(2);
   });
   test('the inbox renders temporary eligibility and queued states plainly without acknowledging an answer', async () => {
     for (const [status, words] of [['check_unavailable', "Couldn't check this answer right now"], ['queued', 'Queued on this computer.']] as const) {
@@ -1310,4 +1310,134 @@ test('REVIEW R5 transient failure during auto-answer stores a permanent not_foun
   await controller.tick();
   expect(first.result).toBeUndefined();
   expect(first.attempts).toBe(1);
+});
+
+// Anonymous replies share the local-only store, never its remote status surface.
+describe('anonymous answers in the local inbox', () => {
+  async function fixture() {
+    const dir = mkdtempSync(join(tmpdir(), 'anonymous-inbox-'));
+    const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting-private-questions.sqlite'));
+    cleanups.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+    const local = createLocalPrivateAnswers({ store: () => store, connectionName: () => 'Grok Bot', eligible: async items => items.map(() => true), answer: async () => ({ status: 'failed' }) });
+    const { askWithAnonymousInbox } = await import('../src/workers/email-source/local-private-answers.ts');
+    const result = { ok: true as const, sent: 'What are general tenant deposit rules?', reply: 'LOCAL_ONLY_ANONYMOUS_REPLY', route: 'anonymous', networkIdentity: 'not_verified' as const, level: 'standard' as const, cleanup: 'light_cleanup' as const, rewritten: true, remembered: false, model: 'outside/model' };
+    return { store, local, result, askWithAnonymousInbox, ask: (run = async () => result) => askWithAnonymousInbox({ question: 'My identifying original question' }, { store: () => store, connectionId: 'grok', ask: run }) };
+  }
+  test('keeps the exact sent question, path and agent; reads, marks seen and deletes locally', async () => {
+    const f = await fixture();
+    expect((await f.ask()).ok).toBe(true);
+    const q = f.local.waiting()!.questions[0]!;
+    expect(q).toMatchObject({ path: 'anonymous', from: 'Grok Bot', question: f.result.sent, unread: true, state: 'answered' });
+    expect(JSON.stringify(q)).not.toContain(f.result.reply);
+    expect(JSON.stringify(q)).not.toContain('identifying original');
+    expect((await f.local.handle({ action: 'read', id: q.id }, 'local')).body).toMatchObject({ answer: f.result.reply, sent: f.result.sent, citations: [] });
+    await f.local.handle({ action: 'seen', id: q.id, generation: f.store.get(q.id)!.generation }, 'local');
+    expect(f.local.waiting()!.questions[0]!.unread).toBe(false);
+    await f.local.handle({ action: 'delete_all' }, 'local');
+    expect(f.store.list().questions).toEqual([]);
+  });
+  test('delete-all and revocation fence a late outside reply; failures leave no pending work', async () => {
+    const f = await fixture();
+    await f.ask(async () => { f.store.dismissAll(); return f.result; });
+    expect(f.store.list().questions).toEqual([]);
+    await f.ask(async () => { f.store.revokeConnection('grok'); return f.result; });
+    expect(f.store.list().questions).toEqual([]);
+    await f.ask(async () => { throw new Error('sensitive transport detail'); });
+    expect(f.store.list().questions).toEqual([]);
+  });
+  test('ChatGPT panel delivery returns its reply without touching the inbox', async () => {
+    const f = await fixture();
+    const result = await f.askWithAnonymousInbox({ question: 'Sealed question' }, { deliveredToPanel: true, store: () => { throw new Error('panel must not open the inbox'); }, connectionId: 'chatgpt', ask: async () => f.result });
+    expect(result).toEqual(f.result);
+    expect(f.store.list().questions).toEqual([]);
+  });
+  test('stored replies and sent text cannot be read by bearer, launch, dash reader or remote POST', async () => {
+    const f = await fixture(); await f.ask();
+    const fetcher = worker(f.local);
+    const bearer = await bearerSession(fetcher);
+    const launch = await launchSession(fetcher);
+    const q = f.store.list().questions[0]!;
+    for (const headers of [{ Authorization: `Bearer ${TOKEN}` }, { Cookie: bearer.cookie }, { Cookie: launch.cookie }]) {
+      const output = await (await page(fetcher, headers)).text();
+      expect(output).not.toContain(f.result.reply); expect(output).not.toContain(f.result.sent);
+      const response = await fetcher(post({ action: 'read', id: q.id }, { ...headers, Origin: ORIGIN, 'X-Olympus-CSRF': bearer.csrf }));
+      expect(response.status).not.toBe(200);
+      expect(await response.text()).not.toContain(f.result.reply);
+    }
+    const dash = await (await page(fetcher, { Authorization: `Bearer ${TOKEN}` }, 'private-answers&token=dash_fake')).text();
+    expect(dash).not.toContain(f.result.reply); expect(dash).not.toContain(f.result.sent);
+    const local = await localSession(fetcher);
+    expect(await (await page(fetcher, { Cookie: local.cookie })).text()).toContain(f.result.sent);
+    expect((await fetcher(post({ action: 'read', id: q.id }, { Cookie: local.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': local.csrf }))).status).toBe(200);
+  });
+  test('Ask privately keeps its immediate answer and a locally protected inbox row', async () => {
+    const f = await fixture();
+    const local = createLocalPrivateAnswers({ localConnectionId: '@local:You', store: () => f.store, connectionName: () => 'You', eligible: async () => [], answer: async () => ({ status: 'answered', answer: 'Private local reply', citations: [], unanswered: [], leftOut: [], read: [] }) });
+    expect((await local.handle({ action: 'ask', question: 'Local question?' }, 'local')).body.answer).toBe('Private local reply');
+    expect(local.waiting()!.questions[0]).toMatchObject({ path: 'private', from: 'You', question: 'Local question?' });
+    await local.handle({ action: 'ask', question: 'Local question?' }, 'local');
+    expect(local.waiting()!.questions).toHaveLength(2);
+  });
+  test('reply text, sent text and transport errors never reach logs', async () => {
+    const f = await fixture();
+    const logs = ['log', 'info', 'warn', 'error', 'debug'].map(method => spyOn(console, method as 'log').mockImplementation(() => {}));
+    try {
+      await f.ask();
+      const failed = await f.ask(async () => { throw new Error(f.result.reply + f.result.sent); });
+      expect(failed.ok).toBe(false);
+      expect(JSON.stringify(failed)).not.toContain(f.result.reply);
+      for (const log of logs) expect(log.mock.calls).toEqual([]);
+    } finally { logs.forEach(log => log.mockRestore()); }
+  });
+  test('long anonymous questions reach the core; their original wording never enters the reservation', async () => {
+    const f = await fixture();
+    const question = 'ORIGINAL_ANONYMOUS_NOT_ON_DISK' + 'x'.repeat(3860);
+    const result = await f.askWithAnonymousInbox({ question }, { store: () => f.store, connectionId: 'grok', ask: async input => {
+      expect(input.question).toBe(question);
+      expect(f.store.list().questions[0]!.question).toBe('Anonymous question pending');
+      expect(readFileSync(f.store.dbPath).includes(Buffer.from('ORIGINAL_ANONYMOUS_NOT_ON_DISK'))).toBe(false);
+      return f.result;
+    } });
+    expect(result.ok).toBe(true);
+    expect(f.local.waiting()!.questions[0]!.question).toBe(f.result.sent);
+  });
+  test('human private and anonymous asks, including refusals, do not consume automatic-answer budgets', async () => {
+    const f = await fixture();
+    const local = createLocalPrivateAnswers({ localConnectionId: '@local:You', store: () => f.store, eligible: async () => [],
+      answer: async () => ({ status: 'answered', answer: 'Local reply', citations: [], unanswered: [], leftOut: [], read: [] }),
+      anonymousAsk: input => f.askWithAnonymousInbox(input, { local: true, store: () => f.store, connectionId: '@local:You', ask: async request => request.question === 'off' ? { ok: false, code: 'anonymous_answers_off', message: 'Off' } : f.result }),
+    });
+    expect((await local.handle({ action: 'ask_anonymous', question: 'off' }, 'local')).status).toBe(400);
+    const cjk = '界'.repeat(1000);
+    for (let i = 0; i < 6; i++) {
+      expect((await local.handle({ action: 'ask', question: cjk }, 'local')).body.answer).toBe('Local reply');
+      expect((await local.handle({ action: 'ask_anonymous', question: 'Outside?' }, 'local')).body.answer).toBe(f.result.reply);
+    }
+    expect(local.waiting()!.questions.filter(q => q.path === 'private')).toHaveLength(6);
+    expect(local.waiting()!.questions.some(q => q.question === cjk)).toBe(true);
+    const ref = f.store.record(f.store.ticket('@local:You'), { question: 'Auto?', state: 'waiting', surface: 'remote' })!;
+    expect(f.store.reserveAutoAnswer(ref)).toBe(true);
+  });
+  test('anonymous agent rate limits and Private automatic budgets are independent in both directions', async () => {
+    const f = await fixture();
+    for (let i = 0; i < 5; i++) {
+      const ref = f.store.record(f.store.ticket('grok'), { question: `Private ${i}`, surface: 'remote', state: 'waiting' })!;
+      expect(f.store.reserveAutoAnswer(ref)).toBe(true);
+    }
+    for (let i = 0; i < 5; i++) expect((await f.ask()).ok).toBe(true);
+    expect((await f.ask()).ok).toBe(false);
+    const g = await fixture();
+    for (let i = 0; i < 5; i++) expect((await g.ask()).ok).toBe(true);
+    for (let i = 0; i < 5; i++) {
+      const ref = g.store.record(g.store.ticket('grok'), { question: `Private ${i}`, surface: 'remote', state: 'waiting' })!;
+      expect(g.store.reserveAutoAnswer(ref)).toBe(true);
+    }
+  });
+  test('the inbox rate limit refuses a sixth send without calling outside help', async () => {
+    const f = await fixture();
+    let sends = 0;
+    for (let i = 0; i < 6; i++) await f.ask(async () => { sends++; return f.result; });
+    expect(sends).toBe(5);
+    expect(f.store.list().questions.length).toBe(5);
+  });
 });

@@ -1,3 +1,4 @@
+import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts';
 /**
  * Local Private answers inbox and Ask privately. HTTP admits only a local
  * control session, never dash_ readers, ChatGPT widgets or Gateway read scope.
@@ -42,6 +43,7 @@ const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,64}$/;
 
 /** One waiting question as the page lists it. Only to a local control session. */
 export interface WaitingQuestionView {
+  path?: 'private' | 'anonymous';
   id: string;
   question: string;
   /** Who asked: the connection's name ("ChatGPT", "Grok Bot"). */
@@ -64,6 +66,9 @@ export interface LocalCitationView {
 }
 
 export interface LocalPrivateAnswersOptions {
+  /** The computer's own ask identity; omitted by read-only/test adapters. */
+  localConnectionId?: string;
+  anonymousAsk?: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>;
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
   store: () => Pick<WaitingQuestionStore, 'list' | 'get' | 'dismiss' | 'dismissAll' | 'acknowledge'> & Partial<WaitingQuestionStore> | undefined;
   /** A connection's display name, by id; undefined when unknown. */
@@ -274,15 +279,15 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     },
     tick() {
       if (pass) return pass;
-      if (closed || options.interactiveBusy?.() || options.backgroundBusy?.()) return Promise.resolve();
+      if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) return Promise.resolve();
       pass = (async () => {
         const currentStore = store();
         if (!currentStore) return;
         if (options.isActive) currentStore.reconcileConnections?.(options.isActive);
         // Oldest first avoids starving a retry behind a busy connection.
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
-          if (closed || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
-          if (q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
+          if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
+          if (q.path === 'anonymous' || q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
           if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) continue;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
           if (!current(q)) continue;
@@ -308,8 +313,8 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       try {
         const listed = store()?.list({ includeResults: false });
         if (!listed) return undefined;
-        return { questions: listed.questions.filter(q => active(q) && !hidden(q)).map(q => ({
-          id: q.id, question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
+        return { questions: listed.questions.filter(q => active(q) && !hidden(q) && (q.path !== 'anonymous' || q.hasResult || q.result)).map(q => ({
+          id: q.id, path: q.path ?? 'private', question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
           askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen,
           state: q.hasResult || q.result ? 'answered' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
           ...(q.answeredAt ? { answeredAt: q.answeredAt } : {}),
@@ -320,18 +325,40 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     async handle(body, session) {
       const action = body.action;
       if (action === 'list') return { status: 200, body: { ok: true, ...api.waiting() } };
+      if (action === 'ask_anonymous') {
+        if (!options.anonymousAsk) return refused(503, 'unavailable', W.anonymousNotSetUp);
+        const result = await options.anonymousAsk({ question: typeof body.question === 'string' ? body.question : '' });
+        return result.ok
+          ? { status: 200, body: { ok: true, status: 'answered', answer: result.reply, sent: result.sent, citations: [] } }
+          : refused(400, result.code, result.message);
+      }
       if (action === 'ask') {
         const question = typeof body.question === 'string' ? body.question.trim() : '';
         if (!question || question.length > MAX_QUESTION_CHARS) return refused(400, 'invalid_params', 'Type a question first.');
         if (running) return refused(429, 'busy', 'Olympus is answering another question. Try again in a moment.');
         running = true;
         try {
-          const result = await answerFor({ question, detail: body.detail === 'full' ? 'full' : 'summary' });
-          if (result.status === 'answered') {
-            const check = await eligible(result.read);
-            if (check !== 'eligible') return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
+          const currentStore = store();
+          const ticket = options.localConnectionId && currentStore?.ticket?.(options.localConnectionId);
+          const ref = ticket && currentStore?.record?.(ticket, { question, surface: 'remote', state: 'waiting', retainEachAsk: true, detail: body.detail === 'full' ? 'full' : 'summary' });
+          if (options.localConnectionId && !ref) {
+            if (ref) currentStore?.acknowledge(ref);
+            return refused(429, 'unavailable', W.inboxUnavailable);
           }
-          return { status: 200, body: { ok: true, ...answerBody(result, session) } };
+          let retained = false;
+          try {
+            const result = await answerFor({ question, detail: body.detail === 'full' ? 'full' : 'summary' });
+            if (result.status === 'answered') {
+              const check = await eligible(result.read);
+              if (check !== 'eligible') return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
+            }
+            if (ref && (result.status === 'answered' || result.status === 'not_found')) {
+              retained = currentStore?.saveAnswer?.(ref, result.status === 'answered'
+                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
+                : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
+            }
+            return { status: 200, body: { ok: true, ...answerBody(result, session) } };
+          } finally { if (ref && !retained) currentStore?.acknowledge(ref); }
         } finally { running = false; }
       }
       if (action === 'read') {
@@ -344,7 +371,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           invalidate(q);
           return { status: 200, body: { ok: true, status: 'answering' } };
         }
-        return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
+        return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q), ...(q.path === 'anonymous' ? { sent: q.question } : {}) } };
       }
       if (action === 'seen') {
         const q = typeof body.id === 'string' ? store()?.get(body.id) : undefined;
@@ -402,4 +429,33 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     },
   };
   return api;
+}
+
+/** Only the local inbox receives this copy. Sealed ChatGPT panels bypass it.
+ * Reserve before sending: delete/revoke during the paid call cannot resurrect a row.
+ * Anonymous questions have no retrieval context, source identities or citations. */
+export async function askWithAnonymousInbox(
+  input: import('../../core/consult-ask.ts').ConsultAskInput,
+  options: { deliveredToPanel?: boolean; local?: boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
+): Promise<import('../../core/consult-ask.ts').ConsultAskResult> {
+  if (options.deliveredToPanel) return options.ask(input);
+  if (typeof input.question !== 'string' || !input.question.trim()) return { ok: false, code: 'transport_unavailable', message: 'Type a question first.' };
+  const store = options.store();
+  const ref = store?.record(store.ticket(options.connectionId), { question: W.anonymousPending, surface: 'remote', state: 'waiting', path: 'anonymous' });
+  if (!store || !ref) return { ok: false, code: 'transport_unavailable', message: W.inboxBeforeSend };
+  if (!options.local && !store.reserveAutoAnswer(ref, 'anonymous')) {
+    store.acknowledge(ref);
+    return { ok: false, code: 'transport_unavailable', message: W.anonymousRateLimit };
+  }
+  try {
+    const result = await options.ask(input);
+    if (result.ok) {
+      if (!store.saveAnswer(ref, { status: 'answered', answer: result.reply, citations: [], unanswered: [], leftOut: [], read: [] }, result.sent)) store.acknowledge(ref);
+    }
+    else store.acknowledge(ref);
+    return result;
+  } catch {
+    store.acknowledge(ref);
+    return { ok: false, code: 'transport_unavailable', message: W.anonymousFailed };
+  }
 }

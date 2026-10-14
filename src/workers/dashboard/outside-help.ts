@@ -4,7 +4,7 @@
  * card's facts come from the worker's adapter (email-source/dashboard-consult.ts)
  * as content-free codes and counts; this module holds the shapes, the words
  * and the inert markup. The page is served only to a reader holding the
- * local dashboard's control session (pages/private-answers.ts): the native
+ * local dashboard's control session (Models on pages/local.ts): the native
  * OpenClaw and ChatGPT surfaces get one sentence, never the controls.
  *
  * Content-free by construction: no question, reply, key or daemon
@@ -156,7 +156,7 @@ export interface DashboardOutsideHelpStatus {
 
 /**
  * The old Anonymous answers page's query flag. The card now sits under
- * Private answers (pages/private-answers.ts); this address redirects there.
+ * the anonymous ask panel; this address redirects there.
  */
 export const DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = 'outside-help';
 
@@ -259,7 +259,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   // No dispatch without confinement; a missing launcher still offers installation.
   const unavailable = summary.state === 'unavailable';
   const parts: string[] = [];
-  // Under the Private answers page's own "Anonymous answers" heading, no second title.
+  // Under Models' own "Anonymous answers" heading, no second title.
   if (input.untitled !== true) parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
   if (canUnlock && (on || !unavailable || status.confinementInstallRequired)) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>`
