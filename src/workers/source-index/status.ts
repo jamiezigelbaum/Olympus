@@ -145,7 +145,7 @@ export interface SourceIndexCorpusStatusBase {
   last_refresh?: SourceIndexLastRefresh;
   retrieval?: {
     declared_mode: string;
-    servable_mode: 'keyword' | 'hybrid';
+    servable_mode: 'keyword' | 'hybrid' | 'metadata_only';
     state: 'ready' | 'degraded';
     reason?: string;
     model_id?: string;
@@ -310,6 +310,11 @@ export type SourceIndexStatusRetrievalAvailability =
  */
 export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
 
+/** A live names-only policy is a status fact, not a content retrieval mode. */
+type StatusCorpusDefinition = Omit<SourceIndexCorpusDefinition, 'activationMode'> & {
+  activationMode: SourceIndexCorpusDefinition['activationMode'] | 'metadata_only';
+};
+
 export function createSourceIndexStatusHandler(
   options: SourceIndexStatusHandlerOptions = {},
 ): SourceIndexStatusHandler {
@@ -335,8 +340,8 @@ export function createSourceIndexStatusHandler(
         const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
         const embeddingDisabled = policy !== undefined
           && (!policy.embeddingProfile || policy.activationMode === 'metadata_only' || policy.activationMode === 'lexical_only');
-        const corpus = embeddingDisabled
-          ? { ...declaredCorpus, embeddingPolicy: 'disabled' as const, activationMode: 'lexical_only' as const }
+        const corpus: StatusCorpusDefinition = embeddingDisabled
+          ? { ...declaredCorpus, embeddingPolicy: 'disabled', activationMode: policy?.activationMode === 'metadata_only' ? 'metadata_only' : 'lexical_only' }
           : declaredCorpus;
         const store = storesByCorpusId.get(corpus.corpusId);
         const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
@@ -515,7 +520,7 @@ function secretLocationCount(store: LocalConnectorStore): number | undefined {
 }
 
 function connectorStoreStatus(
-  corpus: SourceIndexCorpusDefinition,
+  corpus: StatusCorpusDefinition,
   status: ConnectorStoreStatus,
   readinessCounts?: Record<string, number>,
   extractionThroughput?: ContentExtractionThroughputSignal,
@@ -597,7 +602,7 @@ function connectorStoreStatus(
 }
 
 function configuredCorpusStatus(
-  corpus: SourceIndexCorpusDefinition,
+  corpus: StatusCorpusDefinition,
 ): SourceIndexConfiguredCorpusStatus {
   return {
     ...baseStatus(corpus),
@@ -606,7 +611,7 @@ function configuredCorpusStatus(
   };
 }
 
-function baseStatus(corpus: SourceIndexCorpusDefinition): SourceIndexCorpusStatusBase {
+function baseStatus(corpus: StatusCorpusDefinition): SourceIndexCorpusStatusBase {
   return {
     corpus_id: corpus.corpusId,
     family: corpus.family,
@@ -621,14 +626,23 @@ function baseStatus(corpus: SourceIndexCorpusDefinition): SourceIndexCorpusStatu
 }
 
 function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
-  corpus: SourceIndexCorpusDefinition,
+  corpus: StatusCorpusDefinition,
   status: T,
   hybridAvailability: SourceIndexHybridAvailability | undefined,
 ): T {
-  const retrieval = assessSourceIndexRetrievalState({
-    declaredMode: corpus.activationMode,
-    ...(hybridAvailability ? { hybridAvailability } : {}),
-  });
+  // Names-only policy has no content retrieval, even when old vectors remain
+  // or a local embedding provider is available. Exemption is not keyword readiness.
+  const retrieval = corpus.activationMode === 'metadata_only'
+    ? {
+      declaredMode: 'metadata_only' as const,
+      servableMode: 'metadata_only' as const,
+      health: 'ready' as const,
+      reason: undefined, modelId: undefined, embeddingEpoch: undefined, backend: undefined,
+    }
+    : assessSourceIndexRetrievalState({
+      declaredMode: corpus.activationMode,
+      ...(hybridAvailability ? { hybridAvailability } : {}),
+    });
   const counts = status.configured ? status.counts : undefined;
   const chunks = counts?.chunks ?? 0;
   const noCurrentArtifacts = retrieval.reason === 'no_current_embedding_artifacts';

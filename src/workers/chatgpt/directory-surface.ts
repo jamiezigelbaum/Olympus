@@ -46,12 +46,12 @@ import {
 } from '../../../connect-relay/server/directory/approved.ts';
 import { isDirectoryTool } from '../../../connect-relay/shared/directory-tools.ts';
 import type { OperationContext } from '../../core/operations.ts';
-import { DASHBOARD_RESOURCE_URI } from './dashboard-contract.ts';
+import { DASHBOARD_RESOURCE_URI, type DashboardViewModelV1 } from './dashboard-contract.ts';
 import { matchesResourceUri } from './dashboard-resource.ts';
 import { callChatGptTool, createChatGptMcpServer, listChatGptTools, type ChatGptSurfaceOptions } from './mcp-surface.ts';
 import { PRIVATE_ANSWER_RESOURCE_URI } from './private-answer-contract.ts';
 import { PRIVATE_QUESTION_RESOURCE_URI } from './private-question-contract.ts';
-import { ChatGptSurfaceError, errorToolResult, type ChatGptToolResult } from './response-builder.ts';
+import { ChatGptSurfaceError, dashboardForApprovedPage, errorToolResult, type ChatGptToolResult } from './response-builder.ts';
 
 /** The submitted tool definitions, by name. */
 const APPROVED_TOOL_BY_NAME: ReadonlyMap<string, (typeof APPROVED_TOOLS)[number]> = new Map(APPROVED_TOOLS.map((tool) => [tool.name, tool]));
@@ -74,8 +74,14 @@ function approvedPage(uri: unknown): (typeof APPROVED_PAGES)[number] | undefined
   return typeof uri === 'string' ? APPROVED_PAGES.find((page) => matchesResourceUri(uri, page.base)) : undefined;
 }
 
-/** A result's `_meta` naming a UI resource names the submitted page; everything else is unchanged. */
+/** Name the submitted page and adapt its dashboard's unmeasured progress vocabulary. */
 export function withApprovedPages(result: ChatGptToolResult): ChatGptToolResult {
+  // Dashboard calls inherit their page URI from tools/list; the result itself
+  // need not carry UI metadata. Identify the allowlisted dashboard payload.
+  const structured = result.structuredContent;
+  if (structured?.v === 1 && Array.isArray(structured.sources)) {
+    result = { ...result, structuredContent: dashboardForApprovedPage(structured as unknown as DashboardViewModelV1) as unknown as Record<string, unknown> };
+  }
   const meta = result._meta;
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return result;
   const next: Record<string, unknown> = { ...meta };

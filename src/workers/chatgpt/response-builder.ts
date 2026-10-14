@@ -162,6 +162,27 @@ export function dashboardToolResult(view: DashboardViewModelV1): ChatGptToolResu
   };
 }
 
+/**
+ * The submitted dashboard predates unmeasured progress. Its ordinary detail
+ * line can show the stage honestly; its progress blocks always invent a bar.
+ * Only the directory response adapter calls this, after the allowlisted copy.
+ */
+export function dashboardForApprovedPage(view: DashboardViewModelV1): DashboardViewModelV1 {
+  const sources = view.sources.map((source) => {
+    const progress = source.progress;
+    if (!progress || (finite(progress.done) && finite(progress.percent))) return source;
+    const { progress: _progress, ...row } = source;
+    const stage = { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing', done: 'Done' }[progress.stage];
+    const detail = `${stage} · progress not measured${progress.stalled ? ' · paused' : ''}`;
+    // A real stall already renders a label with no bar at total=0. Keep its
+    // reason and See why evidence; do not invent a stall for active work.
+    const { done: _done, percent: _percent, ...stall } = progress;
+    return { ...row, detail, ...(progress.stalled ? { progress: { ...stall, total: 0 } } : {}) };
+  });
+  const { progress, ...rest } = view;
+  return { ...rest, sources, ...(progress && finite(progress.percent) && finite(progress.itemsLeft) ? { progress } : {}) };
+}
+
 /** Explicit, field-by-field copy of the v1 contract. */
 export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardViewModelV1 {
   const state = CONNECTION_STATES.has(view.connection?.state) ? view.connection.state : 'installing';

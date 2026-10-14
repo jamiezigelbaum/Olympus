@@ -72016,7 +72016,7 @@ function createSourceIndexStatusHandler(options = {}) {
       const statuses = corpora.map((declaredCorpus) => {
         const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
         const embeddingDisabled = policy !== undefined && (!policy.embeddingProfile || policy.activationMode === "metadata_only" || policy.activationMode === "lexical_only");
-        const corpus = embeddingDisabled ? { ...declaredCorpus, embeddingPolicy: "disabled", activationMode: "lexical_only" } : declaredCorpus;
+        const corpus = embeddingDisabled ? { ...declaredCorpus, embeddingPolicy: "disabled", activationMode: policy?.activationMode === "metadata_only" ? "metadata_only" : "lexical_only" } : declaredCorpus;
         const store = storesByCorpusId.get(corpus.corpusId);
         const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
         const maxAgeMs = normalizedStatusCacheMaxAge(request.readiness_ledger_max_age_ms);
@@ -72222,7 +72222,15 @@ function baseStatus(corpus) {
   };
 }
 function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
-  const retrieval = assessSourceIndexRetrievalState({
+  const retrieval = corpus.activationMode === "metadata_only" ? {
+    declaredMode: "metadata_only",
+    servableMode: "metadata_only",
+    health: "ready",
+    reason: undefined,
+    modelId: undefined,
+    embeddingEpoch: undefined,
+    backend: undefined
+  } : assessSourceIndexRetrievalState({
     declaredMode: corpus.activationMode,
     ...hybridAvailability ? { hybridAvailability } : {}
   });
@@ -136714,10 +136722,12 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
     const summary = dashboardWorkingSummary(scrubbed);
     const exemptTotal = scrubbed.coverage.embedding_eligible_items === undefined ? 0 : Math.max(0, (summary?.in_scope_items ?? 0) - scrubbed.coverage.embedding_eligible_items);
     const exemptRead = Math.min(exemptTotal, scrubbed.coverage.embedding_not_required_read_items ?? 0);
+    const exemptUnreadable = Math.min(exemptTotal - exemptRead, Math.max(0, (scrubbed.coverage.unreadable_items ?? 0) - (scrubbed.coverage.embedding_unreadable_items ?? 0)));
+    const exemptReadable = exemptTotal - exemptUnreadable;
     const delta = phases.find((phase) => phase.id === "embedding")?.scope === "delta";
     counts.searchable = {
       done: counts.indexing.done + (delta ? 0 : exemptRead),
-      total: counts.indexing.total + (delta ? exemptTotal - exemptRead : exemptTotal)
+      total: counts.indexing.total + (delta ? exemptReadable - exemptRead : exemptReadable)
     };
   } else if (counts.reading && !embeddingApplies)
     counts.searchable = counts.reading;
@@ -139918,6 +139928,20 @@ function dashboardToolResult(view2) {
     content: [{ type: "text", text: dashboardSummary(structured) }],
     structuredContent: structured
   };
+}
+function dashboardForApprovedPage(view2) {
+  const sources = view2.sources.map((source) => {
+    const progress2 = source.progress;
+    if (!progress2 || finite2(progress2.done) && finite2(progress2.percent))
+      return source;
+    const { progress: _progress, ...row } = source;
+    const stage = { listing: "Finding items", reading: "Reading", indexing: "Indexing", done: "Done" }[progress2.stage];
+    const detail = `${stage} · progress not measured${progress2.stalled ? " · paused" : ""}`;
+    const { done: _done, percent: _percent, ...stall } = progress2;
+    return { ...row, detail, ...progress2.stalled ? { progress: { ...stall, total: 0 } } : {} };
+  });
+  const { progress, ...rest } = view2;
+  return { ...rest, sources, ...progress && finite2(progress.percent) && finite2(progress.itemsLeft) ? { progress } : {} };
 }
 function copyDashboardViewModel(view2) {
   const state = CONNECTION_STATES.has(view2.connection?.state) ? view2.connection.state : "installing";
@@ -149547,6 +149571,10 @@ function approvedPage(uri) {
   return typeof uri === "string" ? APPROVED_PAGES.find((page2) => matchesResourceUri(uri, page2.base)) : undefined;
 }
 function withApprovedPages(result) {
+  const structured = result.structuredContent;
+  if (structured?.v === 1 && Array.isArray(structured.sources)) {
+    result = { ...result, structuredContent: dashboardForApprovedPage(structured) };
+  }
   const meta2 = result._meta;
   if (typeof meta2 !== "object" || meta2 === null || Array.isArray(meta2))
     return result;

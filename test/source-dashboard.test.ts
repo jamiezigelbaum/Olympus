@@ -101,6 +101,29 @@ describe('multi-source source dashboard', () => {
     expect(stalled.progress).toMatchObject({ itemsLeft: 2, stalled: true });
   });
 
+  test.each([false, true])('exempt unreadables are problems, not embedding backlog (delta: %s)', (delta) => {
+    const status = fixtureStatus();
+    const internal = status.corpora[0]!;
+    if (!internal.configured) throw new Error('fixture');
+    internal.counts = { indexed_items: 10, items_with_text: 10, items_embedded: 9, chunks: 10, embedded_chunks: 9, sync_runs: 1, tombstoned_items: 0 };
+    internal.embedding_parity = { required: true, chunks: 10, embedded_chunks: 9, missing_chunks: 1, refresh_needed: true };
+    internal.last_refresh = { sync_run_id: 'policy-test', status: 'completed', completed_at: '2026-07-02T11:00:00.000Z', items_seen: 20, items_indexed: 20 };
+    status.corpora = [internal, { ...internal, corpus_id: 'secure_local.email.private', trust_domain: 'secure_local',
+      activation_mode: 'lexical_only', embedding_policy: 'disabled',
+      counts: { indexed_items: 10, items_with_text: 9, extraction_items_unreadable: 1, chunks: 9, embedded_chunks: 0, sync_runs: 1, tombstoned_items: 0 },
+      embedding_parity: { required: false, chunks: 9, embedded_chunks: 0, missing_chunks: 0, refresh_needed: false } }];
+    const now = new Date('2026-07-02T12:00:00.000Z');
+    const view = buildSourceDashboardViewModel({ sourceIndexStatus: status, sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: { version: 1, handles: [gmailHandle('gmail.personal')] }, now });
+    const source = view.sources.find(source => source.source_id === 'gmail.email')!;
+    expect(source.coverage).toMatchObject({ unreadable_items: 1, embedding_unreadable_items: 0, embedding_not_required_read_items: 9 });
+    if (delta) source.movement = { ...source.movement, extraction_settled_value: 19, embedding_settled_value: 9 };
+    expect(dashboardSourceProgress(source, { now }).phases.find(phase => phase.id === 'embedding')?.scope).toBe(delta ? 'delta' : 'corpus');
+    const panel = buildChatGptDashboardViewModel(view, { now });
+    expect(panel.progress).toMatchObject({ itemsLeft: 1, percent: delta ? 0 : 94.7 });
+    expect(panel.sources.find(source => source.id === 'gmail.email')?.unreadable?.count).toBe(1);
+  });
+
   test('a card\'s trust domain is the domain of the corpus it reports on', () => {
     // The Gmail card read trust_domain "secure_local" over corpus_id
     // "internal.email" on a no-sensitive posture: the definition carried a

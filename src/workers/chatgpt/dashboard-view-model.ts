@@ -685,13 +685,18 @@ function measuredSourceProgress(
     const exemptTotal = scrubbed.coverage.embedding_eligible_items === undefined
       ? 0 : Math.max(0, (summary?.in_scope_items ?? 0) - scrubbed.coverage.embedding_eligible_items);
     const exemptRead = Math.min(exemptTotal, scrubbed.coverage.embedding_not_required_read_items ?? 0);
+    // Aggregation carries total unreadables and the eligible subset separately.
+    // Their difference is terminal exempt work: a problem, never reading debt.
+    const exemptUnreadable = Math.min(exemptTotal - exemptRead, Math.max(0,
+      (scrubbed.coverage.unreadable_items ?? 0) - (scrubbed.coverage.embedding_unreadable_items ?? 0)));
+    const exemptReadable = exemptTotal - exemptUnreadable;
     const delta = phases.find((phase) => phase.id === 'embedding')?.scope === 'delta';
     // A phase's delta and another phase's corpus total are different
     // populations. Only unfinished exempt reading belongs in an embedding
     // delta; completed exempt items must never inflate its numerator.
     counts.searchable = {
       done: counts.indexing.done + (delta ? 0 : exemptRead),
-      total: counts.indexing.total + (delta ? exemptTotal - exemptRead : exemptTotal),
+      total: counts.indexing.total + (delta ? exemptReadable - exemptRead : exemptReadable),
     };
   }
   else if (counts.reading && !embeddingApplies) counts.searchable = counts.reading;
