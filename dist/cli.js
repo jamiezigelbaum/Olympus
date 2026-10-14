@@ -25652,6 +25652,17 @@ function sourceIndexFtsQuery(query, options = {}) {
   const exact = queryInitialisms(query);
   return terms.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : suffix}`).join(" OR ");
 }
+function sourceIndexTopicTokens(query) {
+  const foreignStopwords = foreignQueryStopwords(query, FTS_QUERY_STOPWORDS);
+  const tokens = [];
+  for (const match of query.matchAll(TOKEN_PATTERN2)) {
+    const raw = match[0]?.trim().toLowerCase();
+    if (!raw || FTS_QUERY_STOPWORDS.has(raw) || foreignStopwords.has(raw) && !/^[\p{Lu}]{2,}$/u.test(match[0]))
+      continue;
+    tokens.push(raw);
+  }
+  return tokens;
+}
 function sourceIndexFtsTerms(query) {
   const seen = new Set;
   const terms = [];
@@ -29474,7 +29485,8 @@ function createConnectorStoreCorpusAdapter(options) {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.hasEmbeddings(embeddingProvider.modelId);
-    const keywordLane = connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, hybrid ? { prefix: false, locate: false } : { locate: false });
+    const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    const keywordLane = relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions), options.localKeywordFallback, ftsOptions);
     const rows = [...keywordLane.rows];
     let semanticOnly = 0;
     let incomplete = false;
@@ -29700,7 +29712,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
   const complete = new Set;
   for (const concepts of [plain.concepts, content.concepts]) {
     for (const [id, matched] of concepts.matched)
-      if (matched >= concepts.total)
+      if (!ftsOptions.relaxed && matched >= concepts.total)
         complete.add(id);
   }
   const seen = new Set;
@@ -29719,7 +29731,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId))
   ];
-  const baseline = keywordExpansionDisabled() ? undefined : withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions));
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions));
   const enriched = new Map(ordered.map((row) => [row.sourceItem.localItemId, row]));
   const allRows = baseline ? [
     ...baseline.allRows.map((row) => complete.has(row.sourceItem.localItemId) ? enriched.get(row.sourceItem.localItemId) ?? row : row),
@@ -29739,23 +29751,11 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []])
   };
 }
-function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled) {
+function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled, ftsOptions = {}) {
   if (!enabled || strict.rows.length > 0)
     return strict;
-  const relaxed = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { relaxed: true });
-  const allRows = relaxed.rows;
-  return {
-    rows: allRows.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
-    allRows,
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
-      saturated: relaxed.saturated
-    },
-    matchedItemIds: new Set(allRows.map((row) => row.sourceItem.localItemId)),
-    completeItemIds: new Set
-  };
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true });
+  return { ...relaxed, completeItemIds: new Set };
 }
 function connectorStoreRowHasContent(row) {
   return row.chunk !== undefined || row.contentMatched === true;
@@ -31564,8 +31564,7 @@ function toFtsQuery(query, options = {}) {
 }
 function toRelaxedLocalFtsQuery(query) {
   const terms = new Set;
-  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    const term = match[0];
+  for (const term of sourceIndexTopicTokens(query)) {
     if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term))
       continue;
     terms.add(term);
@@ -47163,7 +47162,7 @@ async function searchPrivateEvidence(input) {
     include_secure_local_content: true,
     max_results: maxResults
   };
-  const lanes = input.lanes(request);
+  const lanes = input.lanes(request, "private_search");
   const build = async (adapters) => {
     const detail = await buildEvidencePackDetailed({
       question,
@@ -47221,7 +47220,7 @@ async function probePrivateMatch(input) {
       include_secure_local: true,
       include_secure_local_content: false
     };
-    const lanes = input.lanes(request);
+    const lanes = input.lanes(request, "private_search");
     const corpusIds = sourceAnswerCorpusIds(request);
     const excluded = lanes.excludedCorpusIds ?? new Set;
     const gate = (hits) => lanes.visibilityGate ? lanes.visibilityGate(hits) : hits;
@@ -133525,13 +133524,13 @@ var init_query_planner = __esm(() => {
 
 // src/workers/email-source/source-answer-lanes.ts
 function createSourceAnswerLanes(deps) {
-  return (request, embedding) => {
+  return (request, mode) => {
     const searchScopes = new Map;
     const requestEmbeddings = new Map;
     const requestEmbedding = (store) => {
       if (!requestEmbeddings.has(store.corpusId)) {
         const configured = deps.embeddingProvider(store);
-        const provider = embedding === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
+        const provider = mode === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
         requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
       }
       return requestEmbeddings.get(store.corpusId);
@@ -133559,7 +133558,7 @@ function createSourceAnswerLanes(deps) {
       return createConnectorStoreCorpusAdapter({
         store,
         retrievalMode: request.retrieval_mode ?? "keyword",
-        localKeywordFallback: embedding === "built_in_only",
+        localKeywordFallback: mode === "built_in_only" || mode === "private_search" && store.trustDomain === "secure_local",
         ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
         ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
         ...filters ? { filters } : {},

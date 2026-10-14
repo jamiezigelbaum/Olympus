@@ -16088,6 +16088,17 @@ function sourceIndexFtsQuery(query, options = {}) {
   const exact = queryInitialisms(query);
   return terms.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : suffix}`).join(" OR ");
 }
+function sourceIndexTopicTokens(query) {
+  const foreignStopwords = foreignQueryStopwords(query, FTS_QUERY_STOPWORDS);
+  const tokens = [];
+  for (const match of query.matchAll(TOKEN_PATTERN)) {
+    const raw = match[0]?.trim().toLowerCase();
+    if (!raw || FTS_QUERY_STOPWORDS.has(raw) || foreignStopwords.has(raw) && !/^[\p{Lu}]{2,}$/u.test(match[0]))
+      continue;
+    tokens.push(raw);
+  }
+  return tokens;
+}
 function sourceIndexFtsTerms(query) {
   const seen = new Set;
   const terms = [];
@@ -20358,8 +20369,7 @@ function toFtsQuery(query, options = {}) {
 }
 function toRelaxedLocalFtsQuery(query) {
   const terms = new Set;
-  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    const term = match[0];
+  for (const term of sourceIndexTopicTokens(query)) {
     if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term))
       continue;
     terms.add(term);

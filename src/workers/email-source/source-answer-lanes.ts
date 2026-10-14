@@ -4,12 +4,13 @@
 // every answer through this one factory, and so do the tests that prove what
 // an answer on this computer reaches.
 //
-// `embedding: 'built_in_only'` builds the same lanes for answers on this
+// `built_in_only` builds the same lanes for answers on this
 // computer alone (source-index/local-answer.ts): the vector lanes and passage
 // ranking keep only the built-in embedding model, and only as a model this
 // process already holds (`localEmbedding`), so nothing can install, download
-// or start a model; otherwise they fall back to keyword search. No model or
-// epoch changes.
+// or start a model; otherwise they fall back to keyword search.
+// `private_search` keeps the configured meaning lane and enables the bounded
+// keyword retry only for Private stores. Neither mode changes a model or epoch.
 
 import type { ClassificationCoverageNote, SecretLocationNote } from '../../core/evidence-pack.ts';
 import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
@@ -29,7 +30,7 @@ import {
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
 
-export type SourceAnswerLaneEmbedding = 'built_in_only';
+export type SourceAnswerLaneMode = 'built_in_only' | 'private_search';
 
 /** The owner's read scope for a store, as server.ts decides it. */
 export type SourceAnswerReadScope =
@@ -75,11 +76,11 @@ export interface SourceAnswerLaneDependencies {
   heldItems?: (corpusId: string) => number;
 }
 
-/** The lanes for one request; `embedding` narrows them to this computer's built-in model. */
+/** Trusted modes: local answers narrow embeddings; private search enables the keyword retry. */
 export function createSourceAnswerLanes(
   deps: SourceAnswerLaneDependencies,
-): (request: SourceIndexAnswerRequest, embedding?: SourceAnswerLaneEmbedding) => AnalystAnswerLanes {
-  return (request, embedding) => {
+): (request: SourceIndexAnswerRequest, mode?: SourceAnswerLaneMode) => AnalystAnswerLanes {
+  return (request, mode) => {
     // The scope each corpus is searched under in THIS request, so the
     // Secret locations released beside the answer are confined to it.
     const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
@@ -89,7 +90,7 @@ export function createSourceAnswerLanes(
     const requestEmbedding = (store: LocalConnectorStore): SourceEmbeddingProvider | undefined => {
       if (!requestEmbeddings.has(store.corpusId)) {
         const configured = deps.embeddingProvider(store);
-        const provider = embedding === 'built_in_only'
+        const provider = mode === 'built_in_only'
           ? builtInEmbeddingOnly(configured, deps.localEmbedding)
           : configured;
         requestEmbeddings.set(
@@ -131,9 +132,8 @@ export function createSourceAnswerLanes(
       return createConnectorStoreCorpusAdapter({
         store,
         retrievalMode: request.retrieval_mode ?? 'keyword',
-        // This internal argument is set by createLocalAnswerPath only. Cloud
-        // tool/HTTP request fields cannot enable the local keyword retry.
-        localKeywordFallback: embedding === 'built_in_only',
+        // Trusted local/private consumers only; never a tool/HTTP request field.
+        localKeywordFallback: mode === 'built_in_only' || (mode === 'private_search' && store.trustDomain === 'secure_local'),
         ...(semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {}),
         ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
         ...(filters ? { filters } : {}),
