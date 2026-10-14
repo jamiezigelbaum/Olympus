@@ -1,3 +1,4 @@
+import { FileLeaseBusyError, withFileLeaseSync } from './file-lease.ts';
 import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
@@ -544,6 +545,19 @@ function priorEngineUsesLegacySettings(layout: LinuxEngineLayout, receiptState =
  // An installed receipt with no generation marker cannot prove modern readers.
  return receiptState==='installed';
 }
+function isLegacyConsultSidecar(name: string): boolean { return name==='consult.json.lock'||name==='consult.json.lock.commit'; }
+function withLegacyConsultLease<T>(layout: LinuxEngineLayout, run:()=>T): T {
+ const files=legacyLinuxSettings(layout);
+ if(!files.some(name=>name==='consult.json'||isLegacyConsultSidecar(name)))return run();
+ try {
+  // Share the writer's stale-owner reclamation and compare-and-commit guard.
+  // Holding the guard prevents takeover while the synchronous upgrade runs.
+  return withFileLeaseSync(join(layout.home,'.olympus/consult.json'),lease=>lease.commit(run),{acquireTimeoutMs:100,pollIntervalMs:10});
+ } catch(error){
+  if(error instanceof FileLeaseBusyError)throw new Error('Finish saving Olympus settings, then retry the upgrade. A settings writer is still running; nothing was migrated.');
+  throw error;
+ }
+}
 /** Refuse path overrides before stopping: never silently strand an owner's policy. */
 function assertLegacySettingOverrides(layout: LinuxEngineLayout, env: Record<string,string|undefined>): void {
  const files=legacyLinuxSettings(layout);
@@ -559,7 +573,7 @@ function assertLegacySettingOverrides(layout: LinuxEngineLayout, env: Record<str
  }
 }
 function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
- const files=legacyLinuxSettings(layout);
+ const files=legacyLinuxSettings(layout).filter(name=>!isLegacyConsultSidecar(name));
  if(priorEngineUsesLegacySettings(layout)){
   for(const name of LEGACY_LINUX_POLICY_FILES){const target=legacySettingTarget(layout,name);assertLinuxManagedPath(target);
    if(lstatSync(target,{throwIfNoEntry:false}))throw new Error(`Legacy-reader settings conflict at ${target}; nothing was migrated.`);}
@@ -791,7 +805,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
  const sourceUnit=renderEngineSystemdUnit(l,source), exec=options.exec ?? linuxEngineExec;
  const base={ok:true as const,label:SYSTEMD_ENGINE_UNIT,plist_path:l.unitPath,config_path:l.configPath,worker_env_path:l.workerEnvPath,
  log_path:paths.logPath,error_log_path:paths.errorLogPath,program:source,warnings:[] as string[],plist:sourceUnit};
- return locked(l,()=>{
+ return locked(l,()=>withLegacyConsultLease(l,()=>{
   preflightSystemdEngine(l,exec,options.uid);
   preflightLinuxDesktopEntry(l);
   for (const path of unitLinkCandidates(l)) assertLinuxManagedPath(dirname(path),process.getuid!(),'directory');
@@ -877,7 +891,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    catch(recoveryError) { throw new Error(`Linux install failed (${String(error)}), and recovery failed (${String(recoveryError)}). The durable journal was retained.`); }
    throw error;
   }
- });
+ }));
 }
 
 function previousProgram(layout: LinuxEngineLayout): EngineProgram | undefined {

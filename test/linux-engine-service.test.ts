@@ -341,3 +341,14 @@ for (const [key,name] of [['OLYMPUS_TIER_RULES_PATH','tier-rules.json'],['OLYMPU
  expect(existsSync(join(legacy,file))).toBe(true);
  expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
 },15_000);
+
+for(const live of [false,true])test(`legacy consult lease ${live?'refuses a live writer':'reclaims abandoned sidecars'}`,()=>{
+ const l=layout();publishLinuxEngineReceipt(l);const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
+ writeFileSync(join(legacy,'consult.json'),'{}',{mode:0o600});
+ const record={version:1,token:'synthetic',pid:live?process.pid:2147483647,acquiredAt:new Date().toISOString()};
+ for(const suffix of ['.lock','.lock.commit'])writeFileSync(join(legacy,'consult.json'+suffix),JSON.stringify(record),{mode:0o600});
+ let linked=false;const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);if(command==='loginctl')return good('yes');if(args.includes('--version'))return good('systemd 256');if(args.includes('--property=Version'))return good('256');if(args.includes('olympus-worker.service'))return good('LoadState=not-found');if(args.includes('show'))return good(linked?`LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\nMainPID=0\nFragmentPath=${l.unitPath}`:'LoadState=not-found');if(args.includes('link'))linked=true;return good();};
+ const run=()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)});
+ if(live){expect(run).toThrow('Finish saving Olympus settings');expect(calls.some(args=>args.includes('stop'))).toBe(false);}
+ else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult.json'),'utf8')).toBe('{}');for(const suffix of ['.lock','.lock.commit'])expect(existsSync(join(legacy,'consult.json'+suffix))).toBe(false);}
+},15_000);

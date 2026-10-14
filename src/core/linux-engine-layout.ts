@@ -159,7 +159,7 @@ export const LEGACY_LINUX_POLICY_FILES = ['privacy.json', 'tier-rules.json', 'co
 export function isLegacyLinuxSetting(name: string): boolean {
   const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
   if (temporary) return isLegacyLinuxSetting(temporary[1]!);
-  return ['privacy.json', 'tier-rules.json', 'consult.json', 'sovereignty.json',
+  return ['privacy.json', 'tier-rules.json', 'consult.json', 'consult.json.lock', 'consult.json.lock.commit', 'sovereignty.json',
     'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json',
     'consult/vocabulary/manifest.json', 'consult/vocabulary/de-hunspell.txt.gz', 'consult/vocabulary/it-hunspell.txt.gz'].includes(name)
     || /^consult\/vocabulary\/[a-z]{2}(?:[.]txt[.]gz|[.]LICENSE[.]txt)$/.test(name)
