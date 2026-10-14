@@ -17,8 +17,9 @@
  * that call, so the analyst handler's `recordReleaseManifest` lands in the
  * call's sink. A handed-off answer runs in its own per-job sink, which the job
  * keeps; the call that collects the job adopts it. A pipeline run outside any
- * sink (stdio MCP, native OpenClaw, the ChatGPT surface, a plain HTTP caller)
- * records nothing, so their behaviour is unchanged.
+ * sink records nothing. ChatGPT opens a sink at its release boundary; the
+ * worker keeps content-free manifests behind opaque tickets for stdio's
+ * trusted local transport and delayed collection.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 
@@ -100,4 +101,59 @@ export function recordReleaseManifest(manifest: ReleaseManifest): void {
 /** Copies `from`'s manifests into `into` (a collecting call adopting its job's). */
 export function adoptReleaseManifests(into: ReleaseManifestSink, from: ReleaseManifestSink): void {
   into.manifests.push(...from.manifests);
+}
+
+/** A stale Personal answer never inherits permission to disclose newly Private text. */
+export const ANSWER_BECAME_PRIVATE = 'Olympus withheld this answer because an item became Private.';
+export const ANSWER_RELEASE_UNVERIFIED = 'Olympus withheld this answer because its current privacy classification could not be verified.';
+
+/** Shared with remote output: explicit consent or today's posture permits a Private derivative. */
+export function privateInputReleaseAllowed(
+  input: ReleaseInput,
+  verdict: ReleaseInputVerdict,
+  constraints: ReleaseConstraints,
+  postureNow: 'allow' | 'approval',
+): boolean {
+  const privateNow = verdict.tier === 'private' || (verdict.tier === 'legacy' && input.privateAtAnswer);
+  return !privateNow || constraints.includeSecureLocalContent || postureNow === 'allow';
+}
+
+export function answerReleaseWithheldReason(
+  manifests: readonly ReleaseManifest[],
+  check: ReleaseCheck,
+  ceiling: 'personal' | 'private' = 'private',
+): string | undefined {
+  if (manifests.length === 0) return ANSWER_RELEASE_UNVERIFIED;
+  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
+  const inputs = entries.map(({ input }) => input);
+  try {
+    const verdicts = check.inputs(inputs);
+    if (verdicts.length !== inputs.length) return ANSWER_RELEASE_UNVERIFIED;
+    const postureNow = check.secureDerivativeDefault();
+    for (const [index, verdict] of verdicts.entries()) {
+      if (verdict.tier === 'unknown' || verdict.gone) return ANSWER_RELEASE_UNVERIFIED;
+      if (verdict.tier === 'secret') return ANSWER_RELEASE_UNVERIFIED;
+      const { input, constraints } = entries[index]!;
+      if (verdict.tier === 'private' && (ceiling === 'personal' || !input.privateAtAnswer)) return ANSWER_BECAME_PRIVATE;
+      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
+        return 'Olympus withheld this answer because current settings require approval for Private content.';
+      }
+    }
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+  return undefined;
+}
+
+// Only local, content-free refusals are trusted here; a serialized worker result cannot forge membership.
+const withheldAnswers = new WeakSet<object>();
+
+export function isWithheldSourceAnswer(result: object): boolean {
+  return withheldAnswers.has(result);
+}
+
+export function withheldSourceAnswer(reason: string): { answer: string; evidence: never[] } {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
 }

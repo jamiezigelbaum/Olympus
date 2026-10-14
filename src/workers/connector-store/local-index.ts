@@ -838,6 +838,10 @@ export class ConnectorStoreMetadataOnlyViolationError extends Error {
  * worker responsive and preserves the active item until the maintenance pass
  * can prove an unambiguous identity.
  */
+class ConnectorStoreTierWriteRefusedError extends Error {
+  constructor() { super('The current tier ledger does not authorize this store write.'); }
+}
+
 /**
  * A store a tiered store set routed copies into, read or written without that
  * set's ledger (missing, replaced, or unreadable). Visibility cannot be judged,
@@ -3841,17 +3845,49 @@ export class LocalConnectorStore {
     return stripped;
   }
 
+  /** Lightweight purge proof; no text, vectors or owners are exported. */
+  copyContentState(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): {
+    chunks: number; vectors: number; versions: number; currentText: boolean; names: boolean;
+  } | undefined {
+    const row = this.db.query(`SELECT
+      (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
+      (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
+      (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
+      NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version) AS current_text,
+      (i.title IS NOT NULL OR i.locator_uri IS NOT NULL OR i.search_text IS NOT NULL) AS names
+      FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`)
+      .get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as {
+        chunks: number; vectors: number; versions: number; current_text: number; names: number;
+      } | null;
+    return row ? { chunks: row.chunks, vectors: row.vectors, versions: row.versions,
+      currentText: row.current_text === 1, names: row.names === 1 } : undefined;
+  }
+
+  /** Keep a verified destination stable while another SQLite file is purged. */
+  withItemCopyWriteFence<T>(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    work: () => T,
+  ): T {
+    return this.db.transaction(() => {
+      this.db.query(`UPDATE items SET item_pk = item_pk
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`)
+        .run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      return work();
+    })();
+  }
+
   /**
    * Strip the kept text of a names-only copy (the owner-approved tier
-   * migration purge): its chunks, their FTS rows and every vector go; the item
+   * migration purge): its chunks, their FTS rows, text versions and every vector go; the item
    * row (its names) stays. Returns the chunks removed. The caller has checked
    * the tier ledger says this copy serves names only.
    */
   stripCopyContent(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    options: { keepMetadata?: boolean } = {},
   ): number {
     try {
-      return this.stripCopyContentHeld(identity);
+      return this.stripCopyContentHeld(identity, options);
     } finally {
       this.releaseUnreferencedChunkMedia();
     }
@@ -3859,12 +3895,12 @@ export class LocalConnectorStore {
 
   private stripCopyContentHeld(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    options: { keepMetadata?: boolean } = {},
   ): number {
     return this.db.transaction((): number => {
       const row = this.db.query(`
         SELECT item_pk FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-          AND tombstoned = 0
       `).get(
         identity.provider,
         identity.accountScope,
@@ -3873,9 +3909,14 @@ export class LocalConnectorStore {
       ) as { item_pk: number } | null;
       if (!row) return 0;
       const count = (this.db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?').get(row.item_pk) as { n: number }).n;
-      if (count === 0) return 0;
+      this.db.query('DELETE FROM item_text_versions WHERE item_pk = ?').run(row.item_pk);
       this.db.query('DELETE FROM chunk_embeddings WHERE item_pk = ?').run(row.item_pk);
       this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
+      if (options.keepMetadata === false) {
+        this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+      }
       this.refreshFtsForItem(row.item_pk);
       return count;
     })();
@@ -5280,6 +5321,9 @@ export class LocalConnectorStore {
       seenIdentities.add(key);
     }
 
+    // Opening a ledger can settle its schema/holds: do that before acquiring
+    // the source writer, then only read the captured ledger under the lock.
+    const tierLedgerForWrite = this.visibilityLedger();
     const summary = this.db.transaction((): ConnectorStoreRepresentationRestoreSummary => {
       const syncRunId = `connector-representation-restore-${randomUUID()}`;
       const startedAt = this.now().toISOString();
@@ -5312,6 +5356,11 @@ export class LocalConnectorStore {
 
       for (const record of options.items) {
         const item = record.item;
+        if (!this.tierWriteAllowed(item.identity, 'content', tierLedgerForWrite)) {
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
         // Restore re-admits an item's chunks after extraction, so it is a
         // second front door. It is closed the same way and before the identity
         // lookup: an excluded item is counted and skipped rather than raising
@@ -5478,7 +5527,7 @@ export class LocalConnectorStore {
         restoredProviderItemIds: restoredProviderItemIds.sort(),
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
-    })();
+    }).immediate();
     // References are taken once the content is committed: a rolled-back
     // restore leaves no marker behind. The extraction's own staging hold
     // keeps the file until then.
@@ -7246,18 +7295,26 @@ export class LocalConnectorStore {
           const sourceScopeObservation = options?.sourceScopeObservation
             ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage))
             : undefined;
-          const upsert = this.upsertItemWithOwner(
-            itemForStorage,
-            sensitivity,
-            connector.id,
-            ownershipKind,
-            syncRunId,
-            options?.ownerObservation ?? 'provider_listing',
-            deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
-            false,
-            deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
-            sourceScopeObservation,
-          );
+          let upsert: { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean };
+          try {
+            upsert = this.upsertItemWithOwner(
+              itemForStorage,
+              sensitivity,
+              connector.id,
+              ownershipKind,
+              syncRunId,
+              options?.ownerObservation ?? 'provider_listing',
+              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              false,
+              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              sourceScopeObservation,
+              routedLayer && routedLayer !== 'metadata' ? 'content' : undefined,
+            );
+          } catch (error) {
+            if (!(error instanceof ConnectorStoreTierWriteRefusedError)) throw error;
+            itemsRejected += 1;
+            continue;
+          }
           itemsIndexed += 1;
           let itemChanged = upsert.contentChanged;
 
@@ -7652,6 +7709,33 @@ export class LocalConnectorStore {
     };
   }
 
+  /** Read only under this store's writer lock: an earlier writer is purged,
+   * and a writer after a hide/purge cannot repopulate a lower copy. */
+  private tierWriteAllowed(identity: SourceItemIdentity, layer: TierSearchLayer, ledger: TierLedger | undefined): boolean {
+    try {
+      const binding = this.tierSetBinding();
+      if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId)) return false;
+      if (!ledger) return true;
+      const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
+      if (!state || !state.record.routed) return true;
+      const { record, copies } = state;
+      if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;
+      const here = copies.find((copy) => copy.corpusId === this.corpusId
+        && (copy.state === 'current' || (copy.state === 'staged' && record.state !== 'moving' && !record.contentRead && copy.generation === record.generation)));
+      if (!here) return false;
+      // Content copies legitimately carry their names at the higher tier too.
+      if (layer === 'metadata') return true;
+      if (here.layers === 'content' || here.layers === 'both') return true;
+      // A first landing may widen an unread names copy at its already decided
+      // content tier. It may never widen a lower names-only copy after a raise.
+      const contentDomain = record.contentTier === 'public' ? 'public_safe'
+        : record.contentTier === 'private' ? 'internal' : 'secure_local';
+      return record.state !== 'moving' && !record.contentRead && contentDomain === this.trustDomain;
+    } catch {
+      return false;
+    }
+  }
+
   private upsertItemWithOwner(
     item: RawItem,
     sensitivity: SourceSensitivity,
@@ -7663,8 +7747,11 @@ export class LocalConnectorStore {
     preserveStoredSearchTextOwnedFacets = false,
     preserveStoredContentHash = false,
     sourceScopeObservation?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] },
+    requiredLayer: TierSearchLayer = textFromRawItem(item) === undefined ? 'metadata' : 'content',
   ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
+    const tierLedgerForWrite = this.visibilityLedger();
     return this.db.transaction(() => {
+      if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite)) throw new ConnectorStoreTierWriteRefusedError();
       const upsert = this.upsertItem(
         item,
         sensitivity,
@@ -7699,7 +7786,7 @@ export class LocalConnectorStore {
         `).get(upsert.itemPk) as { present?: number } | null)?.present;
       if (upsert.ftsMetadataChanged || missingScopeMetadataRow) this.refreshFtsForItem(upsert.itemPk);
       return upsert;
-    })();
+    }).immediate();
   }
 
   private tombstoneWindowRemovedItems(
@@ -8132,6 +8219,20 @@ export class LocalConnectorStore {
   }
 
   private indexItemText(
+    item: RawItem,
+    itemPk: number,
+    maxChunkChars: number,
+    text: string | undefined,
+    media?: ConnectorStoreChunkMedia,
+  ): { chunksIndexed: number; ftsContentChanged: boolean } {
+    const tierLedgerForWrite = this.visibilityLedger();
+    return this.db.transaction(() => {
+      if (!this.tierWriteAllowed(item.identity, 'content', tierLedgerForWrite)) return { chunksIndexed: 0, ftsContentChanged: false };
+      return this.indexItemTextHeld(item, itemPk, maxChunkChars, text, media);
+    }).immediate();
+  }
+
+  private indexItemTextHeld(
     item: RawItem,
     itemPk: number,
     maxChunkChars: number,
@@ -9812,10 +9913,20 @@ export class LocalConnectorStore {
     // real corpus, where duplicated and forwarded content is normal. Naming the
     // tiebreak here keeps the ranking identical to the ordered scan's and, more
     // importantly, makes it independent of whatever plan SQLite chooses.
-    const rankedItems = Array.from(bestByItem.entries())
+    // Validate in rank order after the scan's last yield. Only candidates
+    // needed to fill the result limit touch the live tier ledger; hidden
+    // winners are skipped so they cannot crowd out an eligible match.
+    const candidates = Array.from(bestByItem.entries())
       .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
-      .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0])
-      .slice(0, limit);
+      .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+    const rankedItems: typeof candidates = [];
+    let candidateOffset = 0;
+    while (rankedItems.length < limit && candidateOffset < candidates.length) {
+      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+      for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
+      candidateOffset += batch.length;
+    }
     const searchRows = this.searchRowsByItemPks(
       rankedItems.map(([itemPk]) => itemPk),
       selectedAccount,
@@ -9824,11 +9935,9 @@ export class LocalConnectorStore {
     const winnersByLocalItemId = new Map(
       rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]),
     );
-    const laneRows = this.tierVisibleRows(
-      searchRows,
-      (row) => row.sourceItem,
-      () => 'content',
-    ).flatMap((row) => {
+    // No await occurs between the live visibility check and hydration.
+    // Rechecking here would validate the same winners twice.
+    const laneRows = searchRows.flatMap((row) => {
       const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
       if (winner === undefined) return [];
       if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
@@ -9965,6 +10074,27 @@ export class LocalConnectorStore {
   }
 
   // Hydrates membrane-safe search rows for ranked item pks, preserving order.
+  // Exact item PKs avoid local-id aliases across providers/accounts. Batches
+  // keep candidate validation below SQLite's bind-variable ceiling.
+  private visibleVectorItemPks(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Set<number> {
+    const visible = new Set<number>();
+    const selectedFilters = connectorStoreFilterSql(filters);
+    for (let offset = 0; offset < itemPks.length; offset += 200) {
+      const batch = itemPks.slice(offset, offset + 200);
+      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
+        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`)
+        .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params) as Array<{
+          item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+        }>;
+      for (const row of this.tierVisibleRows(rows, row => ({
+        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      }), () => 'content')) visible.add(row.item_pk);
+    }
+    return visible;
+  }
+
   private searchRowsByItemPks(
     itemPks: number[],
     accountScope?: string,

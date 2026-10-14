@@ -9,7 +9,7 @@
 // Proven here: the dry run is read-only for stores and vectors and idempotent;
 // a stale plan is refused; unmoved items keep byte-identical vectors; moved
 // items have exactly one visible copy per layer; Public <-> Personal copies
-// vectors with zero provider calls; a raise hides first and keeps the cloud
+// vectors with zero provider calls; a raise hides first and removes lower
 // vectors; Secrets follow the one Secrets policy and a rollback never
 // re-exposes them; a crash resumes to exactly one
 // visible copy; the approved chunk budget stops a run; rollback embeds
@@ -519,17 +519,16 @@ describe('tier migration M2-M6', () => {
       const essay = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] === `${ACCOUNT}:essay`);
       expect(essay(afterLibrary.vectors)).toEqual(essay(beforeLibrary.vectors));
       expect(essay(afterLibrary.chunks)).toEqual(essay(beforeLibrary.chunks));
-      // Every existing vector in the legacy stores is still there, byte for byte
-      // (moved items' previous copies are kept, hidden) — except the Secret's:
-      // the one Secrets policy (tombstone_now, today's sync behavior) deleted
-      // its copy, as a sync would, and recorded the deletion.
+      // Lowered file copies retain vectors for rollback; the Secret's copy
+      // is deleted under tombstone_now. The library raise is checked below.
       const notKeys = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] !== `${ACCOUNT}:keys`);
       const keys = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] === `${ACCOUNT}:keys`);
       expect(notKeys(afterFiles.vectors)).toEqual(notKeys(beforeFiles.vectors));
       expect(keys(beforeFiles.vectors).length).toBeGreaterThan(0);
       expect(keys(afterFiles.vectors)).toEqual([]);
       expect(keys(afterFiles.chunks)).toEqual([]);
-      expect(afterLibrary.vectors).toEqual(beforeLibrary.vectors);
+      const notJournal = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] !== `${ACCOUNT}:journal`);
+      expect(notJournal(afterLibrary.vectors)).toEqual(notJournal(beforeLibrary.vectors));
       // No existing embedding authority was rebound.
       expect(afterFiles.authority).toEqual(beforeFiles.authority);
       expect(afterLibrary.authority).toEqual(beforeLibrary.authority);
@@ -542,10 +541,11 @@ describe('tier migration M2-M6', () => {
       expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'journal').content).toEqual([LIBRARY_CORPORA.secure_local]);
       expect(servedFrom(context, FILE_CORPORA, context.files, 'medical').content).toEqual([FILE_CORPORA.secure_local]);
 
-      // The raise kept the Personal copy's cloud vectors (hidden, unserved).
+      // A verified raise removes the Personal copy's content and cloud vectors.
       const journalVectors = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] === `${ACCOUNT}:journal`);
-      expect(journalVectors(afterLibrary.vectors).length).toBeGreaterThan(0);
-      expect(journalVectors(afterLibrary.vectors)).toEqual(journalVectors(beforeLibrary.vectors));
+      expect(journalVectors(beforeLibrary.vectors).length).toBeGreaterThan(0);
+      expect(journalVectors(afterLibrary.vectors)).toEqual([]);
+      expect(journalVectors(afterLibrary.chunks)).toEqual([]);
 
       // The destination's first embed is a first mint on its existing model: epoch 1, no invalidation.
       const personal = write.lanes[0]!.set.store('internal')!;
@@ -823,15 +823,14 @@ describe('tier migration M2-M6', () => {
     expect(library.moved).toBe(1);
     const beforePurge = snapshotStore(context.library.internal);
     const journal = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] === `${ACCOUNT}:journal`);
-    // The split raise left the journal's Private text and cloud vectors in its
-    // Personal names-only copy: unserved, and reported until a purge strips it.
-    expect(journal(beforePurge.chunks).length).toBeGreaterThan(0);
-    expect(journal(beforePurge.vectors).length).toBeGreaterThan(0);
+    // The split raise already stripped lower-tier content, retaining only names.
+    expect(journal(beforePurge.chunks)).toEqual([]);
+    expect(journal(beforePurge.vectors)).toEqual([]);
     const dry = await purgeTierMigration({ planId: plan.planId, approve: false, lanes: write.lanes, paths: context.paths });
     expect(dry.approved).toBe(false);
     expect(dry.copies).toBeGreaterThan(0);
-    expect(dry.namesOnlyCopies).toBe(1);
-    expect(dry.namesOnlyChunks).toEqual({ [LIBRARY_CORPORA.internal]: journal(beforePurge.chunks).length });
+    expect(dry.namesOnlyCopies).toBe(0);
+    expect(dry.namesOnlyChunks).toEqual({});
     expect(snapshotStore(context.library.internal)).toEqual(beforePurge);
     // The approval is bound to the dry run's counts.
     await expect(purgeTierMigration({ planId: plan.planId, approve: true, why: 'x', lanes: write.lanes, paths: context.paths }))
@@ -851,7 +850,7 @@ describe('tier migration M2-M6', () => {
         paths: context.paths,
       });
       expect(purged.approved).toBe(true);
-      expect(purged.namesOnlyCopies).toBe(1);
+      expect(purged.namesOnlyCopies).toBe(0);
       // The names-only copy keeps its names row; its kept text and vectors are gone.
       const after = snapshotStore(context.library.internal);
       expect(journal(after.items)).toEqual([expect.objectContaining({ tombstoned: 0 })]);
@@ -882,6 +881,39 @@ describe('tier migration M2-M6', () => {
       .rejects.toThrow(/purged/u);
   });
 
+  test('mixed rollback skips a purged raise and recovers counts after the final note fails', async () => {
+    const context = await rehearsal();
+    const read = lanes(context, 'read');
+    read.lanes[1]!.set.ledger.setOverride(identityOf('rehearsal-library', 'launch'), { kind: 'tier', tier: 'public' });
+    const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+    await approveTierMigration({ planId: plan.planId, lanes: read.lanes, inputs: context.inputs, paths: context.paths });
+    const write = lanes(context, 'write');
+    const run = await runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+      selector: 'source:rehearsal.library',
+    });
+    expect(run).toMatchObject({ moved: 2, secrets: 0 });
+    // A file used as the parent directory deterministically prevents writing
+    // the batch note, after the ordinary lowering has already rolled back.
+    await expect(rollbackTierMigrationBatch({ batchId: run.batchId, lanes: write.lanes,
+      paths: { ...context.paths, embeddingLedgerPath: join(context.paths.statePath, 'unavailable-ledger') },
+    })).rejects.toThrow();
+    expect(write.lanes[1]!.set.ledger.migrationProposals(plan.planId, { status: 'rolled_back', batchId: run.batchId })).toHaveLength(1);
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'journal').content).toEqual([LIBRARY_CORPORA.secure_local]);
+    const result = await rollbackTierMigrationBatch({ batchId: run.batchId, lanes: write.lanes, paths: context.paths });
+    expect(result).toMatchObject({ rolledBack: 1, skipped: 1, purgedKept: 1,
+      purgedKeptReason: 'already Private; its lower copy was removed' });
+    expect(await rollbackTierMigrationBatch({ batchId: run.batchId, lanes: write.lanes, paths: context.paths })).toEqual(result);
+    const batch = readTierMigrationState(context.paths.statePath).plans.find(candidate => candidate.planId === plan.planId)!.batches
+      .find(candidate => candidate.batchId === run.batchId);
+    expect(batch).toMatchObject({ state: 'rolled_back', rolledBack: 1, rollbackResult: { skipped: 1, purgedKept: 1 } });
+    const notes = (await readEmbeddingLedger(context.paths.embeddingLedgerPath)).entries.filter(entry => entry.entry_id === result.entryId);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.what).toContain('1 item(s) serve from their previous copies again');
+    expect(notes[0]?.what).toContain('already Private; its lower copy was removed');
+  });
+
   test('the CLI drives the same path over lane specs and prints content-free status', async () => {
     const context = await rehearsal();
     const cli = {
@@ -902,7 +934,17 @@ describe('tier migration M2-M6', () => {
     expect(JSON.stringify(status)).not.toContain('/Files');
     const ran = await runTierMigrateCommand(['run', '--plan', planId, '--batch', 'folder:/Files'], cli);
     expect(ran).toMatchObject({ kind: 'olympus_tier_migration_run', state: 'done', moved: 2, secrets: 1 });
-    expect(await runTierMigrateCommand(['rollback', '--batch', String(ran['batch_id'])], cli)).toMatchObject({ rolled_back: 2, secrets_kept: 1 });
+    const rollback = await runTierMigrateCommand(['rollback', '--batch', String(ran['batch_id'])], cli);
+    // Reopening the CLI must not mark a content-free metadata copy as purged.
+    expect(rollback).toMatchObject({ rolled_back: 2, skipped: 0, purged_kept: 0, secrets_kept: 1 });
+    expect(await runTierMigrateCommand(['rollback', '--batch', String(ran['batch_id'])], cli)).toEqual(rollback);
+    const batch = readTierMigrationState(context.paths.statePath).plans.find(candidate => candidate.planId === planId)!.batches
+      .find(candidate => candidate.batchId === ran['batch_id']);
+    expect(batch).toMatchObject({ state: 'rolled_back', rolledBack: 2, rollbackResult: { purgedKept: 0, skipped: 0 } });
+    const entries = (await readEmbeddingLedger(context.paths.embeddingLedgerPath)).entries
+      .filter(entry => entry.entry_id === rollback['entry_id']);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.what).toContain('2 item(s) serve from their previous copies again');
   });
 });
 
@@ -1002,7 +1044,7 @@ describe('tier migration status', () => {
       destinations: plan.totals.destinations.filter((destination) => destination.chunksToEmbed > 0)
         .map((destination) => ({ corpus_id: destination.corpusId, chunks_to_embed: destination.chunksToEmbed })),
     });
-    expect(plan.totals.namesOnlyKeptChunks).toBeGreaterThan(0);
+    expect(plan.totals.namesOnlyKeptChunks).toBe(0);
     expect(status.tier_migration?.names_only_kept_chunks).toBe(plan.totals.namesOnlyKeptChunks);
     const counts = (corpusId: string) => (status.corpora.find((corpus) => corpus.corpus_id === corpusId) as { counts: Record<string, number> }).counts;
     // Private files: therapy (text), medical (whole); the garden and keys copies are superseded (kept, uncounted).
@@ -1010,8 +1052,8 @@ describe('tier migration status', () => {
     expect(counts(FILE_CORPORA.secure_local)['superseded_chunks']).toBeGreaterThan(0);
     // Personal files: garden (whole) and therapy's names.
     expect(counts(FILE_CORPORA.internal)).toMatchObject({ indexed_items: 2 });
-    // The journal's split raise left its text in the Personal names-only copy: reported, never served.
-    expect(counts(LIBRARY_CORPORA.internal)['names_only_kept_chunks']).toBe(plan.totals.namesOnlyKeptChunks);
+    // The journal's split raise removed its lower text; no retained chunks are reported.
+    expect(counts(LIBRARY_CORPORA.internal)['names_only_kept_chunks'] ?? 0).toBe(0);
     expect(JSON.stringify(status.tier_migration)).not.toContain('/Files');
   });
 });

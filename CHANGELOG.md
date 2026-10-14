@@ -2,7 +2,8 @@
 
 ## 1.0.1 - unreleased
 
-- Private items can be found by meaning on your computer; standalone default-path installs with the shipped 1.0.0 Private retrieval block and built-in local profile switch automatically, preserving other settings. Gateway-pinned policies stay unchanged.
+- Private items can be found by meaning, on your computer only. Installs still on the 1.0.0 default privacy settings switch over automatically, keeping your other settings; privacy settings managed by OpenClaw stay as they are.
+- Fixed content and prepared answers remaining available after an item moves from Personal to Private.
 
 ## 1.0.0 - 2026-10-14
 

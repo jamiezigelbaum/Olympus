@@ -96,15 +96,21 @@ const BULK_REFUSAL = { answer_synthesis: { private_context_used: true, secure_lo
 
 describe('ChatGPT: recorded at the match, never from the private question panel', () => {
   function surface(jobs: PrivateAnswerJobs, probeCount = 2, answer: () => Promise<SourceIndexAnswerResult> = async () => answerResult()) {
-    const worker = createEmailSourceWorker({ sourceAnswer: { answer } });
+    // Synthetic answers read no source items; explicitly prove that empty read set.
+    const releaseCheck: ReleaseCheck = { inputs: () => [], secureDerivativeDefault: () => 'allow' };
+    const worker = createEmailSourceWorker({ sourceAnswer: { answer: async () => {
+      const result = await answer();
+      recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
+      return result;
+    } } });
     const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0 } });
-    const ctx = (connectionId = 'conn-chatgpt'): OperationContext => createInProcessOperationContext({
+    const ctx = (connectionId = 'conn-chatgpt'): OperationContext => ({ ...createInProcessOperationContext({
       config: CONFIG,
       sourceIndexReadEnabled: true,
       workerFetch: worker.fetch,
       caller: { surface: 'remote', connectionId, displayName: 'ChatGPT' },
       sourceAnswerJobs: registry,
-    });
+    }), releaseCheck });
     const options: ChatGptSurfaceOptions = {
       dashboardView: async () => ({}) as never,
       evidenceSearch: async () => ({ evidence: [], coverage: {} }),

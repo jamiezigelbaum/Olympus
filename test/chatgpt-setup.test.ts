@@ -1,3 +1,4 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // Setup from ChatGPT and retrieval-only search: the setup tools, the
 // one-time sign-in links, the model switch, olympus_search, and the privacy
 // boundary for each.
@@ -410,13 +411,13 @@ beforeEach(() => {
   const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
   const handler = createRemoteMcpHandler({
     connections: () => store,
-    makeOperationContext: (caller, signal) => createInProcessOperationContext({
+    makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({
       config,
       sourceIndexReadEnabled: true,
       workerFetch: worker.fetch,
       caller,
       signal,
-    }),
+    }), releaseCheck: scriptedSearchReleaseCheck }),
     chatgpt: {
       servesRequest: () => true,
       async privateMatchProbe() { return false; },
@@ -424,7 +425,7 @@ beforeEach(() => {
       setup: fakeBackend(backendState),
       async evidenceSearch(input) {
         searchCalls.push(input);
-        return searchResult();
+        return recordScriptedSearch(searchResult());
       },
       answerModelAvailable: () => answerModel,
     },
@@ -507,19 +508,19 @@ describe('olympus_model_set through the real setup backend', () => {
       port: 0,
       fetch: createRemoteMcpHandler({
         connections: () => store,
-        makeOperationContext: (caller, signal) => createInProcessOperationContext({
+        makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({
           config,
           sourceIndexReadEnabled: true,
           workerFetch: worker.fetch,
           caller,
           signal,
-        }),
+        }), releaseCheck: scriptedSearchReleaseCheck }),
         chatgpt: {
           servesRequest: () => true,
           async privateMatchProbe() { return false; },
           async dashboardView() { return emptyView(); },
           setup: realBackend,
-          async evidenceSearch() { return searchResult(); },
+          async evidenceSearch() { return recordScriptedSearch(searchResult()); },
           answerModelAvailable: () => false,
         },
       }),

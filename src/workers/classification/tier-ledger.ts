@@ -256,6 +256,14 @@ export class TierLedgerRaiseAbandonRefusedError extends Error {
 }
 
 /** A rollback never re-exposes a Secret: the ledger refuses to flip a Secrets row back. */
+/** Verified raises cannot restore a lower copy whose content was removed. */
+export class TierLedgerPurgedRollbackRefusedError extends Error {
+  constructor() {
+    super('already Private; its lower copy was removed');
+    this.name = 'TierLedgerPurgedRollbackRefusedError';
+  }
+}
+
 export class TierLedgerSecretsRollbackRefusedError extends Error {
   constructor(message = 'A Secrets row is never rolled back: its copies stay hidden until an approved purge.') {
     super(message);
@@ -1382,15 +1390,17 @@ export class TierLedger {
    * left alone the item would stay mid-move, out of search, for good. In ONE
    * write, and never lowering any layer without the owner's current word:
    *
+   * - A verified raise with no lowering layer keeps its receipt and completes
+   *   from the destination, including after the lower source was stripped.
    * - The move hid nothing: it is cancelled. The item stays where it is, at
    *   its recorded tiers; the move's staged copies are kept hidden.
    * - The move hid its sources (some layer rises): it is replanned from those
    *   sources toward, per layer, the more private of the recorded tier and
    *   the move's target. That lands no layer below either, so it needs no
-   *   owner authority; the sources stay hidden until it lands, and the old
-   *   move's staged copies are kept hidden, never a source.
+   *   owner authority; the sources stay hidden until it lands. A verified
+   *   move uses its destinations as sources, since the old copies may be empty.
    *
-   * Either way the generation is bumped, so the revoked move's own
+   * Replanning/cancellation bumps the generation, so the revoked move's own
    * `stageMove`/`completeMove` (compare-and-swap on the generation) can never
    * land, and the row goes back to the decision the override took it over
    * from (decider, reasons, open questions, whether its text was read), so
@@ -1408,6 +1418,23 @@ export class TierLedger {
     const targetContent = existing.targetContentTier;
     if (targetMetadata === null || targetContent === null || targetMetadata === 'secrets' || targetContent === 'secrets') return 'none';
     if (overrideAuthorizes(this.getOverride(identity), targetMetadata, targetContent)) return 'none';
+    const rawReceipt = this.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`);
+    const receipt = rawReceipt ? JSON.parse(rawReceipt) as {
+      generation: number; raise: boolean;
+      target: { metadataTier: TierKey; contentTier: TierKey };
+      placement: TierCopyPlan[];
+    } : undefined;
+    const verified = receipt?.generation === existing.generation && receipt.raise
+      && receipt.target.metadataTier === targetMetadata && receipt.target.contentTier === targetContent;
+    const override = this.getOverride(identity);
+    if (verified && tierRank(targetMetadata) >= tierRank(existing.metadataTier)
+      && tierRank(targetContent) >= tierRank(existing.contentTier)
+      && (override?.kind !== 'tier' || (tierRank(targetMetadata) >= tierRank(override.tier)
+        && tierRank(targetContent) >= tierRank(override.tier)))) {
+      // Revoking a safe raise cannot undo a verified copy or its destructive
+      // purge. Keep its receipt and staged destination so resume can finish it.
+      return 'none';
+    }
     const decidedAt = this.now().toISOString();
     const prior = this.decisionBeforeOverride(identity, existing);
     const staleFlip = existing.generation + 1;
@@ -1455,6 +1482,23 @@ export class TierLedger {
       UPDATE tier_items SET generation = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(staleFlip, ...idParams(identity));
+    if (verified) {
+      // A revoked mixed move must not lower a layer. Replan from its verified
+      // destinations: its old lower sources may already have been stripped.
+      for (const copy of receipt!.placement) {
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', layers = ?, superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(copy.layers, nextFlip, decidedAt, ...idParams(identity), copy.corpusId);
+      }
+      for (const copy of copies.filter(copy => !receipt!.placement.some(dest => dest.corpusId === copy.corpusId))) {
+        this.db.query(`
+          UPDATE tier_copies SET superseded_by_generation = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(staleFlip, ...idParams(identity), copy.corpusId);
+      }
+    }
+    this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
     this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
       ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
@@ -1540,6 +1584,24 @@ export class TierLedger {
     `).run(key, value);
   }
 
+  /** Small durable work receipts, without exporting any store content. */
+  metaEntries(prefix: string, options: { after?: string; limit?: number } = {}): Array<{ key: string; value: string }> {
+    return this.db.query('SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?')
+      .all(prefix, `${prefix}\uffff`, options.after ?? '', '', options.limit ?? -1) as Array<{ key: string; value: string }>;
+  }
+
+  /** Hold the ledger write lock across a synchronous cross-store cleanup.
+   * The generation check and deletions cannot race a new routing decision.
+   */
+  withGenerationFence<T>(identity: TierLedgerIdentity, generation: number, work: () => T): T {
+    return this.db.transaction(() => {
+      // Acquire the SQLite writer lock before reading the authority.
+      this.db.query("UPDATE tier_ledger_meta SET value = value WHERE key = 'ledger_id'").run();
+      if (this.getCurrent(identity)?.generation !== generation) throw new TierLedgerGenerationConflictError();
+      return work();
+    })();
+  }
+
   /**
    * Routed rows in key order after `after`, at most `limit`: a bounded page
    * for background passes that read every routed item (owner-rule sweeps).
@@ -1557,6 +1619,57 @@ export class TierLedger {
       LIMIT ?
     `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), limit);
     return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
+  /** Historical repair candidates only: indexed copy/identity/content probes. */
+  listLowerContentLeftovers(options: {
+    stores: Array<{ corpusId: string; dbPath: string; trustDomain: SourceTrustDomain }>;
+    after?: TierLedgerIdentity;
+    limit: number;
+  }): TierLedgerRecord[] {
+    const attached: string[] = [];
+    try {
+      const queries: string[] = [];
+      const params: string[] = [];
+      for (const store of options.stores) {
+        const alias = `purge_lower_${attached.length}`;
+        this.db.query(`ATTACH DATABASE ? AS ${alias}`).run(store.dbPath);
+        attached.push(alias);
+        const higher = store.trustDomain === 'public_safe' ? "('internal', 'secure_local')" : "('secure_local')";
+        const metadataAllowed = store.trustDomain === 'public_safe' ? "('public_safe')" : "('public_safe', 'internal')";
+        queries.push(`SELECT l.provider, l.account_scope, l.conversation_key, l.provider_item_id
+          FROM tier_copies l INDEXED BY tier_copies_corpus
+          JOIN ${alias}.items s ON s.provider = l.provider AND s.account_scope = l.account_scope
+            AND s.normalized_conversation = l.conversation_key AND s.provider_item_id = l.provider_item_id
+          WHERE l.corpus_id = ? AND s.tombstoned = 0
+            AND EXISTS (SELECT 1 FROM tier_copies h
+              WHERE h.provider = l.provider AND h.account_scope = l.account_scope
+                AND h.conversation_key = l.conversation_key AND h.provider_item_id = l.provider_item_id
+                AND h.copy_state = 'current' AND h.layers IN ('content', 'both') AND h.trust_domain IN ${higher})
+            AND (EXISTS (SELECT 1 FROM ${alias}.chunks c WHERE c.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.chunk_embeddings e WHERE e.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.item_text_versions v WHERE v.item_pk = s.item_pk)
+              OR ((s.title IS NOT NULL OR s.locator_uri IS NOT NULL OR s.search_text IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM tier_copies m
+                  WHERE m.provider = l.provider AND m.account_scope = l.account_scope
+                    AND m.conversation_key = l.conversation_key AND m.provider_item_id = l.provider_item_id
+                    AND m.copy_state = 'current' AND m.layers IN ('metadata', 'both')
+                    AND m.trust_domain IN ${metadataAllowed})))`);
+        params.push(store.corpusId);
+      }
+      if (!queries.length) return [];
+      const after = options.after ? idParams(options.after) : ['', '', '', ''];
+      const rows = this.db.query(`SELECT i.* FROM (${queries.join(' UNION ')}) candidates
+        JOIN tier_items i USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE i.routed = 1 AND i.state <> 'moving'
+          AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?)
+        ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`)
+        .all(...params, ...after, options.limit) as TierItemRow[];
+      return rows.map(recordFromRow);
+    } finally {
+      for (const alias of attached.reverse()) this.db.exec(`DETACH DATABASE ${alias}`);
+    }
   }
 
   /**
@@ -2455,6 +2568,9 @@ export class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (this.readMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`) === String(options.expectedGeneration)) {
+        throw new TierLedgerPurgedRollbackRefusedError();
+      }
       if (existing && (existing.contentTier === 'secrets' || existing.metadataTier === 'secrets')) {
         throw new TierLedgerSecretsRollbackRefusedError();
       }
@@ -2546,6 +2662,7 @@ export class TierLedger {
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
         `).run(now, ...idParams(identity));
       }
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
       const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL

@@ -1,3 +1,4 @@
+import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 import { engineBriefFromViewModel, parseEngineBrief } from '../src/core/engine-brief.ts';
 // ChatGPT MCP surface: the dashboard view-model producer, the MCP Apps
 // dashboard tool and resource, and the privacy boundary.
@@ -771,6 +772,11 @@ beforeEach(() => {
       async answer(request) {
         answerRequests.push(request as unknown as Record<string, unknown>);
         if (answerMode === 'throw') throw new Error(`answer failed at /Users/owner/${S('ERROR_PATH')}`);
+        // The scripted answer reads the Personal budget-plan item. The
+        // malicious Private citation below is never an analyst input; the
+        // response builder must still strip it, independently of this guard.
+        recordReleaseManifest({ inputs: [{ corpusId: S('EVIDENCE_CORPUS_2'), provider: 'google_drive', accountScope: 'test-account', providerItemId: S('ITEM_ID_2'), privateAtAnswer: false }],
+          constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
         return sentinelAnswer();
       },
     },
@@ -779,13 +785,16 @@ beforeEach(() => {
   const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
   const handler = createRemoteMcpHandler({
     connections: () => store,
-    makeOperationContext: (caller, signal) => createInProcessOperationContext({
+    makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({
       config,
       sourceIndexReadEnabled: true,
       workerFetch: worker.fetch,
       caller,
       signal,
-    }),
+    }), releaseCheck: {
+      inputs: (inputs) => inputs.map(() => ({ tier: 'public_or_personal' as const, gone: false })),
+      secureDerivativeDefault: () => 'allow' as const,
+    } }),
     chatgpt: {
       servesRequest: () => servesChatGpt,
       readOnlyFor: () => readOnlySurface,

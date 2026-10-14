@@ -21,12 +21,13 @@ import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 //   destination copies are written (Public <-> Personal vectors copied when the
 //   identity and input hash match; otherwise the destination's EXISTING model
 //   embeds them later, a first mint or a match, never a rebind), then the
-//   ledger flip, then the previous copies are superseded (kept, hidden). A
-//   raise hides first. A move to Secrets hides every copy and records the
+//   ledger flip, then the previous copies are superseded. A verified raise
+//   strips lower-tier content before completion; a raise hides first. A move to Secrets hides every copy and records the
 //   location; nothing is deleted. The run stops before the observed chunks or
 //   cost exceed the approved plan, and resumes after a crash with exactly one
 //   visible copy of every item.
-// - M5 rollback: a ledger flip back per batch; nothing is re-embedded.
+// - M5 rollback: a ledger flip back per batch; verified raises whose lower
+//   content was removed stay Private and are reported as skipped.
 // - M6 purge: superseded copies are deleted ONLY with a separate owner
 //   approval, and an invalidation entry records what was deleted, per corpus.
 //
@@ -70,6 +71,7 @@ import {
 } from './tier-classifier.ts';
 import {
   TierLedgerGenerationConflictError,
+  TierLedgerPurgedRollbackRefusedError,
   TierLedgerSecretsRollbackRefusedError,
   copyServingLayer,
   tierLedgerIdentityKey,
@@ -240,6 +242,7 @@ export interface TierMigrationBatchRecord {
   secrets: number;
   skipped: number;
   rolledBack: number;
+  rollbackResult?: Pick<TierMigrationRollbackResult, 'rolledBack' | 'skipped' | 'secretsKept' | 'purgedKept' | 'purgedKeptReason'>;
   chunksPlaced: number;
   vectorsCopied: number;
   chunksToEmbed: Record<string, number>;
@@ -906,10 +909,8 @@ function addPlanned(
   else if (placementRaises(from, placement)) totals.raises += 1;
   else if (placementIsLower(from, placement)) totals.lowers += 1;
   if (decision.state === 'pending') totals.pendingHeld += 1;
-  for (const copy of placement) {
-    const kept = from.find((source) => source.corpusId === copy.corpusId);
-    if (kept && kept.layers !== 'metadata' && copy.layers === 'metadata') totals.namesOnlyKeptChunks += item.chunks.length;
-  }
+  // A split raise strips lower-tier content after destination verification;
+  // names-only copies retain no chunks for a later manual purge.
 
   const fromTier = TIER_DISPLAY[domainTier(copyServingLayer(from, 'content')?.trustDomain ?? store.trustDomain)];
   const toNames = secrets ? 'Secrets' : TIER_DISPLAY[domainTier(copyServingLayer(placement, 'metadata')!.trustDomain)];
@@ -1126,10 +1127,10 @@ export async function approveTierMigration(options: TierMigrationApproveOptions)
       + `stored item(s) to their classified tiers. Estimated ${totals.chunksToEmbed} chunk(s) to embed in each destination `
       + `store's EXISTING model and ${totals.vectorsCopied} vector(s) copied, about $${totals.estimatedCostUsd.toFixed(2)} and `
       + `${Math.ceil(totals.estimatedMinutes)} minute(s) (estimates). No model, epoch or dimension changes and no rebind; `
-      + 'superseded copies and their vectors are kept, hidden, until a separately approved purge. '
+      + 'verified raises remove lower-tier content and vectors; other superseded copies stay hidden until a separately approved purge. '
       + `${totals.secrets} Secret(s) are settled by the Secrets policy (${secretsDisposition() === 'tombstone_now'
         ? 'copies tombstoned at once, as a sync does'
-        : 'copies hidden until an approved purge'}); ${totals.namesOnlyKeptChunks} chunk(s) stay held, unserved, in names-only copies until a purge strips them.`,
+        : 'copies hidden until an approved purge'}); names-only copies keep no lower-tier content after a verified raise.`,
     scope: { corpora: [...new Set([...totals.destinations.map((destination) => destination.corpusId), ...plan.lanes.flatMap((lane) => lane.corpora)])] },
     ...(options.why?.trim() ? { why: options.why.trim() } : {}),
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -1913,6 +1914,9 @@ export interface TierMigrationRollbackResult {
   skipped: number;
   /** Secrets outcomes left settled: a rollback never re-exposes a Secret. */
   secretsKept: number;
+  /** Included in skipped: verified raises whose lower content was removed. */
+  purgedKept: number;
+  purgedKeptReason?: string;
   entryId: string;
 }
 
@@ -1933,10 +1937,18 @@ export async function rollbackTierMigrationBatch(options: {
   if (plan.state === 'running' && plan.lock && processAlive(plan.lock.pid) && plan.lock.pid !== process.pid) {
     throw new OperationError('invalid_request', `Plan ${plan.planId} is running; stop it before rolling back.`);
   }
+  const entryId = `tier-migration-rollback:${batch.batchId}`;
+  if (batch.state === 'rolled_back' && batch.rollbackResult) {
+    return { planId: plan.planId, batchId: batch.batchId, ...batch.rollbackResult, entryId };
+  }
   let rolledBack = 0;
   let skipped = 0;
   let secretsKept = 0;
+  let purgedKept = 0;
   for (const lane of options.lanes) {
+    // A crash may have committed per-item flips before the batch note/state.
+    // Those proposals already represent successful rollback work on retry.
+    rolledBack += lane.set.ledger.migrationProposals(plan.planId, { status: 'rolled_back', batchId: batch.batchId }).length;
     for (const proposal of lane.set.ledger.migrationProposals(plan.planId, { status: 'moved', batchId: batch.batchId })) {
       // A rollback never makes a Secret visible again, whatever the Secrets
       // policy did with its copies: it stays settled as Secrets.
@@ -1966,18 +1978,25 @@ export async function rollbackTierMigrationBatch(options: {
           secretsKept += 1;
           continue;
         }
+        if (error instanceof TierLedgerPurgedRollbackRefusedError) {
+          purgedKept += 1;
+          skipped += 1;
+          continue;
+        }
         throw error;
       }
     }
   }
-  const entryId = `tier-migration-rollback:${batch.batchId}`;
+  const purgedKeptReason = purgedKept > 0 ? 'already Private; its lower copy was removed' : undefined;
+  const rollbackResult = { rolledBack, skipped, secretsKept, purgedKept, ...(purgedKeptReason ? { purgedKeptReason } : {}) };
   await appendEmbeddingLedgerEntryOnce(options.paths.embeddingLedgerPath, {
     entry_id: entryId,
     recorded_at: now().toISOString(),
     kind: 'note',
     what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) `
-      + `serve from their previous copies again${skipped > 0 ? ` (${skipped} left alone because a later sync changed them)` : ''}`
-      + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ''}. `
+      + `serve from their previous copies again${skipped > purgedKept ? ` (${skipped - purgedKept} left alone because a later sync changed them)` : ''}`
+      + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ''}`
+      + `${purgedKept > 0 ? `; ${purgedKept} item(s) skipped: ${purgedKeptReason}` : ''}. `
       + 'Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.',
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
@@ -1986,8 +2005,9 @@ export async function rollbackTierMigrationBatch(options: {
     const entry = record.batches.find((candidate) => candidate.batchId === batch.batchId)!;
     entry.state = 'rolled_back';
     entry.rolledBack = rolledBack;
+    entry.rollbackResult = rollbackResult;
   });
-  return { planId: plan.planId, batchId: batch.batchId, rolledBack, skipped, secretsKept, entryId };
+  return { planId: plan.planId, batchId: batch.batchId, ...rollbackResult, entryId };
 }
 
 // ---- M6: purge -----------------------------------------------------------------------------

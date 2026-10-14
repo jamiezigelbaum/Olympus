@@ -1,3 +1,4 @@
+import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReason, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
 /**
  * The MCP surface ChatGPT reaches through the relay: Olympus's search and
  * answer tools, the dashboard tool and its MCP Apps resource, and the setup
@@ -434,7 +435,25 @@ export async function callChatGptTool(
   signal?: AbortSignal,
   detachedContext?: () => OperationContext,
 ): Promise<ChatGptToolResult> {
-  const result = await runChatGptTool(name, args, ctx, options, signal, detachedContext);
+  const manifests = createReleaseManifestSink();
+  const result = await runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, signal, detachedContext));
+  // The Private probe may finish after evidence hydration. Recheck again
+  // after that await, immediately before the tool result leaves the surface.
+  if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
+      && result.structuredContent.evidence.length > 0) {
+    const reason = ctx.releaseCheck
+      ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
+      : ANSWER_RELEASE_UNVERIFIED;
+    if (reason) return searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] });
+  }
+  if ((name === 'source_answer' || name === 'source_answer_result')
+      && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
+      && !(result.structuredContent && 'anonymous' in result.structuredContent)) {
+    const reason = ctx.releaseCheck
+      ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
+      : ANSWER_RELEASE_UNVERIFIED;
+    if (reason) return withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason)));
+  }
   return PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result;
 }
 

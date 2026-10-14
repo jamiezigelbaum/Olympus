@@ -1,3 +1,4 @@
+import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
 // `runSnifferPass` over every connector store, continuously while work remains.
 // It yields only to actual inference using the same local model
@@ -703,7 +704,9 @@ export class TierSnifferService {
               return [copy.corpusId, domain ? set.store(domain) : undefined] as const;
             }));
             if ([...stores.values()].some(store => !store)) return false;
-            const remaining = [...stores.values()].map(store => store!.exportItemCopy(question)).find(Boolean);
+            const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+            const serving = copyServingLayer(ordered, question.pass) ?? copyServingLayer(ordered, 'content');
+            const remaining = serving ? stores.get(serving.corpusId)?.exportItemCopy(question) : undefined;
             if (!locations?.get(question)?.findingKinds.includes('sniffer_secret_refusal')) {
               if (!locations || !remaining) return false;
               // Reuse settlement's screened, location-only receipt builder;
@@ -871,6 +874,9 @@ export class TierSnifferService {
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
+      void set.repairLowerContent({ ...(this.options.autoMoves ? {
+        embeddingLedger: { path: this.options.autoMoves.embeddingLedgerPath, approvedBy: 'system-automatic' as const, why: AUTO_MOVE_WHY },
+      } : {}) });
       try {
         const report = sweepOwnerRuleRaises({ set });
         if (report.raised > 0 || report.secrets > 0) {
@@ -1028,6 +1034,14 @@ export class TierSnifferService {
         const identity = recordIdentity(record);
         const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
         try {
+          if (resumeVerifiedTierMove(set, identity, {
+            path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY,
+          })) {
+            await flushTierMoveNotes(set.ledger);
+            report.moved += 1;
+            this.moveFailures.delete(failureKey);
+            continue;
+          }
           // A raise (a re-judged item now held) hid its copies first: they
           // are the move's sources all the same.
           const sources = set.ledger.copies(identity).filter((copy) => copy.state === 'current'

@@ -4,6 +4,9 @@
 // search is reading it is withheld. Codex gpt-6-astra review of PR #300,
 // 2026-10-12, reproduced exactly this with a paused content read.
 
+import { readFileSync } from 'node:fs';
+import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
+import type { OperationContext } from '../src/core/operations.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import type { ReleaseCheck } from '../src/core/release-manifest.ts';
@@ -111,4 +114,65 @@ describe('remote search: tiers reread before release', () => {
     const raw = await searchReleasedEvidence({ lanes: lane.lanes, question: 'violet turnips garden', releaseCheck: unknown });
     expect(raw.evidence).toEqual([]);
   });
+});
+
+// Exercise the ChatGPT tool boundary with the production search function.
+test('ChatGPT olympus_search withholds an item moved after hydration', async () => {
+  const lane = await gardenLane();
+  const release = lane.hold();
+  const searching = callChatGptTool('olympus_search', { question: 'violet turnips garden' }, { releaseCheck: lane.releaseCheck } as OperationContext, {
+    dashboardView: async () => { throw new Error('unused'); },
+    evidenceSearch: input => searchReleasedEvidence({ lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck }),
+  });
+  await lane.readStarted;
+  await moveTieredItem({ set: lane.fixture.set, identity: identityOf('garden'), target: { metadataTier: 'private', contentTier: 'secure' } });
+  release();
+  expect(JSON.stringify(await searching)).not.toContain(SENTENCE);
+  // This composition-root regression prevents ChatGPT losing the final check
+  // while the shared search implementation still passes its own tests.
+  const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+  const chatgpt = server.slice(server.indexOf('const chatgptEvidenceSearch'), server.indexOf('const remoteEvidenceSearch'));
+  expect(chatgpt).toContain('releaseCheck: remoteReleaseCheck');
+});
+
+test('ChatGPT rechecks search after a delayed Private probe, before serializing Personal evidence', async () => {
+  const lane = await gardenLane();
+  let searchDone!: () => void;
+  const searched = new Promise<void>((resolve) => { searchDone = resolve; });
+  let releaseProbe!: () => void;
+  const probeWait = new Promise<void>((resolve) => { releaseProbe = resolve; });
+  let hydratedEvidence: unknown;
+  const searching = callChatGptTool('olympus_search', { question: 'violet turnips garden' }, { releaseCheck: lane.releaseCheck } as OperationContext, {
+    dashboardView: async () => { throw new Error('unused'); },
+    async evidenceSearch(input) {
+      const raw = await searchReleasedEvidence({ lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck });
+      hydratedEvidence = raw.evidence;
+      searchDone();
+      return raw;
+    },
+    async privateMatchProbe() {
+      await probeWait;
+      return { count: 0, evidence: [] };
+    },
+  });
+  await searched;
+  // Proves the search's own final check has already released the Personal
+  // content; only the later surface check can close this race.
+  expect(JSON.stringify(hydratedEvidence)).toContain(SENTENCE);
+  await moveTieredItem({ set: lane.fixture.set, identity: identityOf('garden'), target: { metadataTier: 'private', contentTier: 'secure' } });
+  releaseProbe();
+  const result = await searching;
+  expect(JSON.stringify(result)).not.toContain(SENTENCE);
+  expect(JSON.stringify(result)).not.toContain('garden-notes');
+  expect(result.structuredContent?.evidence).toEqual([]);
+});
+
+test('ChatGPT final search check leaves unchanged Personal evidence readable', async () => {
+  const lane = await gardenLane();
+  const result = await callChatGptTool('olympus_search', { question: 'violet turnips garden' }, { releaseCheck: lane.releaseCheck } as OperationContext, {
+    dashboardView: async () => { throw new Error('unused'); },
+    evidenceSearch: input => searchReleasedEvidence({ lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck }),
+    privateMatchProbe: async () => ({ count: 0, evidence: [] }),
+  });
+  expect(JSON.stringify(result)).toContain(SENTENCE);
 });

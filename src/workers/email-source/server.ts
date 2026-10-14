@@ -3382,6 +3382,10 @@ export async function main(): Promise<void> {
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       return createAnalystSourceIndexAnswerHandler({
         analyst: defaultLocalAnalyst,
+        releaseCheck: createReleaseTierCheck(
+          () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+          () => secureDerivativeDefault ?? 'allow',
+        ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
@@ -4453,6 +4457,10 @@ export async function main(): Promise<void> {
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
+    sourceAnswerReleaseCheck: createReleaseTierCheck(
+      () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+      () => secureDerivativeDefault ?? 'allow',
+    ),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal })
@@ -5209,6 +5217,7 @@ export async function main(): Promise<void> {
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
+          releaseCheck: remoteReleaseCheck,
         });
       }
     : undefined;
