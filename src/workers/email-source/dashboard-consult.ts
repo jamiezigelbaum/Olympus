@@ -233,7 +233,7 @@ const MESSAGES = {
   turnedOff: 'Anonymous answers are off. No question is sent.',
   routeSavedRestart: 'Saved. Olympus is restarting its worker to apply the change; this page will refresh.',
   routeSavedNoRestart: 'Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.',
-  routeAdded: 'The zkAPI route is added. Put the daemon\'s API key in the worker environment file, then finish the steps below.',
+  routeAdded: 'The zkAPI route is added. Finish the steps below.',
   recovered: 'Recovered: the held request settled and consults can run again.',
   recoveryIncomplete: 'The recovery session ran, but settlement was not confirmed. The request is still held; try again later.',
   recoveryFailed: 'The recovery session did not complete. The request is still held.',

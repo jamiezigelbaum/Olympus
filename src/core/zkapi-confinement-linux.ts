@@ -121,10 +121,10 @@ export function linuxConfinementRemedy(code:string, sysctls:Record<string,string
   if(code==='landlock_unavailable') return 'Needs Linux 6.7 or newer with Landlock enabled.';
   if(['namespace_unavailable','loopback_unavailable'].includes(code)) {
     if(sysctls['/proc/sys/kernel/apparmor_restrict_unprivileged_userns']?.trim()==='1') return `One step needs an administrator. Ubuntu blocks the isolated network space used for private answers. These commands allow only an administrator-owned copy of the helper. This guidance has not been qualified on Ubuntu; answers remain unavailable until the checks pass.\n\nsudo install -D -m 0755 -o root -g root ${shellQuote(launcher)} /usr/local/libexec/olympus/zkapi-confine\nsudo tee /etc/apparmor.d/olympus-zkapi-confine >/dev/null <<'EOF'\nabi <abi/4.0>,\ninclude <tunables/global>\nprofile olympus-zkapi-confine /usr/local/libexec/olympus/zkapi-confine flags=(unconfined) {\n  userns,\n  include if exists <local/olympus-zkapi-confine>\n}\nEOF\nsudo apparmor_parser -r /etc/apparmor.d/olympus-zkapi-confine\n\nThen ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus-zkapi-confine && sudo rm /etc/apparmor.d/olympus-zkapi-confine /usr/local/libexec/olympus/zkapi-confine`;
-    for(const p of ['/proc/sys/user/max_user_namespaces','/proc/sys/kernel/unprivileged_userns_clone']) if(sysctls[p]?.trim()==='0') return `${p} is 0. Private answers are unavailable on this computer.`;
-    return 'This environment does not allow the required isolated network space. Private answers are unavailable on this computer.';
+    for(const p of ['/proc/sys/user/max_user_namespaces','/proc/sys/kernel/unprivileged_userns_clone']) if(sysctls[p]?.trim()==='0') return `${p} is 0. Anonymous answers are unavailable on this computer.`;
+    return 'This environment does not allow the required isolated network space. Anonymous answers are unavailable on this computer.';
   }
-  return 'The private-answer helper could not establish its protections. Private answers are unavailable on this computer.';
+  return 'The private-answer helper could not establish its protections. Anonymous answers are unavailable on this computer.';
 }
 
 // The archive pin authenticates this digest; checked again at every session.

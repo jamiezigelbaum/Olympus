@@ -799,6 +799,33 @@ function engineRoutes(): (request: Request) => Promise<Response> {
 }
 
 describe('the submitted pages render current results', () => {
+  test.each([false, true])('unknown progress renders honestly on the frozen dashboard (stalled: %s)', async (stalled) => {
+    dashboardView.sources = ['gmail.email', 'google_drive.docs'].map(id => card(id, {
+      coverage: { indexed_items: 11, content_ready_items: 11, embedded_items: 5, needs_review_items: 0 },
+      embedding_required: true,
+      ...(stalled ? { embedding_backlog: { chunks: 7, embedded_chunks: 5, missing_chunks: 2, refresh_needed: true } } : {}),
+    }));
+    const current = await call(connect('mcp'), 'olympus_dashboard');
+    expect(current.structuredContent!.sources[0].progress.stage).toBe('indexing');
+    expect(current.structuredContent!.sources[0].progress.percent).toBeUndefined();
+    expect(current.structuredContent!.progress).toBeDefined();
+    const result = await call(connect('directory'), 'olympus_dashboard');
+    const page = mountSubmitted(APPROVED_DASHBOARD_CONTENTS[0]!.text, 'app');
+    page.push(result);
+    await page.until(() => page.text().includes('Gmail'), 'the unmeasured sources');
+    expect(page.text()).toContain('Indexing · progress not measured');
+    expect(page.text()).not.toContain('Finding items');
+    expect(page.win.document.querySelectorAll('[role=progressbar]').length).toBe(0);
+    expect(page.text()).not.toContain('0%');
+    expect(result.structuredContent!.sources.every((source: any) => source.status === 'Working')).toBe(true);
+    if (stalled) {
+      expect(result.structuredContent!.sources[0].progress).toMatchObject({ stalled: true, total: 0 });
+      expect(page.text()).toContain('See why');
+    } else expect(result.structuredContent!.sources[0].progress).toBeUndefined();
+    expect(result.structuredContent!.progress).toBeUndefined();
+    expect(current.structuredContent!.sources[0].progress).toBeDefined();
+  });
+
   test('the dashboard shows the current dashboard result, and its Connect opens the sign-in the current surface returns', async () => {
     const signIn = `https://mcp.olympusplugin.ai/go/oly2g.${INSTALL_ID}.${'A'.repeat(43)}`;
     const expiresAt = new Date(Date.now() + 600_000).toISOString();

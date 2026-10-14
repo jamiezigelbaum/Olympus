@@ -131,6 +131,9 @@ export function createSourceAnswerLanes(
       return createConnectorStoreCorpusAdapter({
         store,
         retrievalMode: request.retrieval_mode ?? 'keyword',
+        // This internal argument is set by createLocalAnswerPath only. Cloud
+        // tool/HTTP request fields cannot enable the local keyword retry.
+        localKeywordFallback: embedding === 'built_in_only',
         ...(semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {}),
         ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
         ...(filters ? { filters } : {}),

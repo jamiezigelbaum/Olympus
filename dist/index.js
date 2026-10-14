@@ -8318,10 +8318,10 @@ sudo apparmor_parser -r /etc/apparmor.d/olympus-zkapi-confine
 Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus-zkapi-confine && sudo rm /etc/apparmor.d/olympus-zkapi-confine /usr/local/libexec/olympus/zkapi-confine`;
     for (const p of ["/proc/sys/user/max_user_namespaces", "/proc/sys/kernel/unprivileged_userns_clone"])
       if (sysctls[p]?.trim() === "0")
-        return `${p} is 0. Private answers are unavailable on this computer.`;
-    return "This environment does not allow the required isolated network space. Private answers are unavailable on this computer.";
+        return `${p} is 0. Anonymous answers are unavailable on this computer.`;
+    return "This environment does not allow the required isolated network space. Anonymous answers are unavailable on this computer.";
   }
-  return "The private-answer helper could not establish its protections. Private answers are unavailable on this computer.";
+  return "The private-answer helper could not establish its protections. Anonymous answers are unavailable on this computer.";
 }
 async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
@@ -16104,7 +16104,7 @@ var init_media_judge = __esm(() => {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
+var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -16222,6 +16222,49 @@ var init_local_index = __esm(() => {
     "source_scope_revision",
     "source_scope_folder_keys_json"
   ];
+  LOCAL_RELAXED_STOPWORDS = new Set([
+    "do",
+    "i",
+    "me",
+    "my",
+    "any",
+    "anyone",
+    "anything",
+    "what",
+    "who",
+    "is",
+    "are",
+    "the",
+    "a",
+    "an",
+    "to",
+    "of",
+    "in",
+    "on",
+    "for",
+    "about",
+    "does",
+    "did",
+    "and",
+    "or",
+    "not",
+    "have",
+    "has",
+    "was",
+    "were",
+    "with",
+    "this",
+    "that",
+    "can",
+    "could",
+    "would",
+    "should",
+    "please",
+    "how",
+    "when",
+    "where",
+    "why"
+  ]);
 });
 
 // src/workers/connector-store/principal.ts

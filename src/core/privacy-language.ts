@@ -10,5 +10,5 @@ export const PRIVACY_PRESET_LABELS = {
   'local-first': 'Local models with Venice fallback',
   'local-only': 'Local models',
   'private-cloud-only': 'Venice',
-  'no-sensitive': "Don't ingest Private data",
+  'no-sensitive': "Private kept local, keyword search only",
 } as const;

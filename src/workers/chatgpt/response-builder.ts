@@ -162,6 +162,27 @@ export function dashboardToolResult(view: DashboardViewModelV1): ChatGptToolResu
   };
 }
 
+/**
+ * The submitted dashboard predates unmeasured progress. Its ordinary detail
+ * line can show the stage honestly; its progress blocks always invent a bar.
+ * Only the directory response adapter calls this, after the allowlisted copy.
+ */
+export function dashboardForApprovedPage(view: DashboardViewModelV1): DashboardViewModelV1 {
+  const sources = view.sources.map((source) => {
+    const progress = source.progress;
+    if (!progress || (finite(progress.done) && finite(progress.percent))) return source;
+    const { progress: _progress, ...row } = source;
+    const stage = { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing', done: 'Done' }[progress.stage];
+    const detail = `${stage} · progress not measured${progress.stalled ? ' · paused' : ''}`;
+    // A real stall already renders a label with no bar at total=0. Keep its
+    // reason and See why evidence; do not invent a stall for active work.
+    const { done: _done, percent: _percent, ...stall } = progress;
+    return { ...row, detail, ...(progress.stalled ? { progress: { ...stall, total: 0 } } : {}) };
+  });
+  const { progress, ...rest } = view;
+  return { ...rest, sources, ...(progress && finite(progress.percent) && finite(progress.itemsLeft) ? { progress } : {}) };
+}
+
 /** Explicit, field-by-field copy of the v1 contract. */
 export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardViewModelV1 {
   const state = CONNECTION_STATES.has(view.connection?.state) ? view.connection.state : 'installing';
@@ -241,8 +262,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     out.progress = {
       unit: UNITS.has(progress.unit) ? progress.unit : 'items',
       phase: progress.phase === 'initial' ? 'initial' : 'refresh',
-      percent: percent(progress.percent),
-      itemsLeft: whole(progress.itemsLeft),
+      ...(finite(progress.percent) ? { percent: percent(progress.percent) } : {}),
+      ...(finite(progress.itemsLeft) ? { itemsLeft: whole(progress.itemsLeft) } : {}),
       ...(finite(progress.etaSeconds) ? { etaSeconds: whole(progress.etaSeconds) } : {}),
       stalled: progress.stalled === true,
       details: (progress.details ?? []).map((detail) => ({
@@ -359,9 +380,9 @@ function copySourceProgress(progress: SourceProgress): SourceProgress {
   return {
     stage: SOURCE_STAGES.has(progress.stage) ? progress.stage : 'listing',
     unit: UNITS.has(progress.unit) ? progress.unit : 'items',
-    done: whole(progress.done),
+    ...(finite(progress.done) ? { done: whole(progress.done) } : {}),
     total: whole(progress.total),
-    percent: percent(progress.percent),
+    ...(finite(progress.percent) ? { percent: percent(progress.percent) } : {}),
     stalled,
     ...(reason ? { stalledReason: reason } : {}),
     ...(stall ? { stall } : {}),
@@ -402,7 +423,7 @@ function dashboardSummary(view: DashboardViewModelV1): string {
   if (connected.length > 0) {
     parts.push(`Sources: ${connected.map((source) => `${source.label} (${source.status})`).join(', ')}.`);
   }
-  if (view.progress) parts.push(`Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
+  if (view.progress) parts.push(view.progress.percent === undefined ? 'Indexing progress is not measured.' : `Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
   if (view.needsYou.length > 0) parts.push(`Needs you: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, '')).join('; ')}.`);
   return parts.join(' ');
 }

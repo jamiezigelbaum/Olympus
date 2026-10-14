@@ -19,6 +19,13 @@ import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
+export const DASHBOARD_UPDATE_COPY = {
+  notice: (version: string) => `Olympus ${version} is available. To update, run this in Terminal:`,
+  copy: 'Copy command',
+  copied: 'Copied',
+  copyFailed: 'Select the command and copy it.',
+};
+
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
@@ -2621,6 +2628,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** No answer at all, usually because Olympus is restarting. */
   saveUnreachable: 'Olympus did not answer. If it is restarting, wait a moment and try again.',
   restarting: 'Restarting Olympus to apply it…',
+  restartRecovery: 'Olympus restarted to apply your change. Close this window and open Olympus again.',
+  staleWindow: 'This Olympus window is out of date, so your change was not saved. Close this window, open Olympus again, and make the change again.',
   locked: 'Open dashboard controls to see and change anonymous answers.',
   unlockIntro: 'Changes need a session opened here, not by an agent or the launch link.',
   unlock: 'Unlock on this computer',

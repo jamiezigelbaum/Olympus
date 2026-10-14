@@ -1,3 +1,4 @@
+import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
 import { linuxGraphicalSessionReadinessAsync } from '../../core/linux-desktop-opener.ts';
@@ -3480,6 +3481,7 @@ export async function main(): Promise<void> {
         .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
       connectorStores,
       connectorStoreStatusScope,
+      retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain as keyof typeof sovereigntyEngine.config.retrieval.trustDomains],
       retrievalAvailability,
       tierClassification: () => {
         const backlog = tierSnifferBacklog?.();
@@ -4330,7 +4332,12 @@ export async function main(): Promise<void> {
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
   const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
+  const updateChecker = createUpdateChecker({
+    runningVersion: runningOlympusVersion(), platform: process.platform,
+    env: process.env, fileEnv: () => readWorkerSetupEnv(),
+  });
   const worker = createEmailSourceWorker({
+    updateAvailable: () => updateChecker.available(),
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: agentApprovalHost,
     agentConnections: {
@@ -5311,6 +5318,7 @@ export async function main(): Promise<void> {
       } })
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  updateChecker.start();
   if (socketPath) {
     let ready = false;
     let probing = false;
@@ -5403,6 +5411,7 @@ export async function main(): Promise<void> {
   const shutdown = (signal: NodeJS.Signals): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
     if (desktopPoll) clearInterval(desktopPoll);

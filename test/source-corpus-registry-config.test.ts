@@ -421,7 +421,7 @@ describe('config-driven source corpus registry', () => {
       });
       const statusResult = await statusHandler.status({ corpus_id: corpusId });
       expect(statusResult.corpora[0]?.embedding_parity).toMatchObject({
-        required: false, chunks: 1, embedded_chunks: 0, missing_chunks: 1,
+        required: false, chunks: 1, embedded_chunks: 0, missing_chunks: 0, refresh_needed: false,
       });
       expect(statusResult.corpora).toEqual([expect.objectContaining({
         corpus_id: corpusId,

@@ -1,3 +1,4 @@
+import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 /**
  * /dashboard on the computer (phase 4, owner decision 2026-10-09): a small
  * host page around the one dashboard there is, the panel ChatGPT loads
@@ -29,6 +30,7 @@ import {
 import { dashboardHostBridge, type DashboardHostBridgeConfig } from './host-bridge.ts';
 import {
   DASHBOARD_HOST_GATE_COPY,
+  DASHBOARD_UPDATE_COPY,
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
 import {
@@ -93,6 +95,9 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
 }
 
 export interface ComputerHostPageInput {
+  updateAvailable?: UpdateAvailable | undefined;
+  /** The running worker platform; unsupported installers never render or poll. */
+  platform?: string;
   modelReadiness?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   /** The panel HTML, exactly as ChatGPT loads it (dashboard-resource.ts dashboardResourceHtml). */
   panelHtml: string;
@@ -128,6 +133,9 @@ const HOST_CSS = `
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
+.update p{margin:0 0 0.5rem}
+.update code{overflow-wrap:anywhere;white-space:pre-wrap}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
@@ -190,6 +198,8 @@ function hostProgram(input: {
   hasReadToken: boolean;
   toolsCallPath: string;
   words: typeof DASHBOARD_HOST_GATE_COPY;
+  updateWords: { notice: string; copied: string; copyFailed: string };
+  updateSupported: boolean;
 }, bridge: typeof dashboardHostBridge): void {
   const frame = document.getElementById('olympus-panel') as HTMLIFrameElement | null;
   if (!frame) return;
@@ -300,6 +310,37 @@ function hostProgram(input: {
       }
     });
   }
+  // Read only the local worker's cached result. A page opened before the
+  // delayed check still learns about it; this never triggers a site request.
+  if (input.updateSupported) {
+    const refreshUpdate = async () => {
+      try {
+        const response = await fetch('/v1/health', { cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(5_000) });
+        if (!response.ok) return;
+        const health = await response.json();
+        const version = health?.update_available?.version;
+        const notice = document.querySelector<HTMLElement>('[data-update-notice]');
+        const sentence = document.querySelector<HTMLElement>('[data-update-text]');
+        if (!notice || !sentence) return;
+        const valid = typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version);
+        sentence.textContent = valid ? input.updateWords.notice.replace('{version}', version) : '';
+        notice.hidden = !valid;
+      } catch { /* A failed local read is silent. */ }
+    };
+    void refreshUpdate();
+    window.setInterval(() => { void refreshUpdate(); }, 60_000);
+  }
+  const updateCopy = document.querySelector<HTMLButtonElement>('[data-update-copy]');
+  const updateCommand = document.getElementById('update-command');
+  const updateStatus = document.querySelector<HTMLElement>('[data-update-copy-status]');
+  if (updateCopy && updateCommand) {
+    updateCopy.addEventListener('click', () => {
+      const done = (words: string) => { if (updateStatus) updateStatus.textContent = words; };
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(updateCommand.textContent || '').then(() => done(input.updateWords.copied), () => done(input.updateWords.copyFailed));
+      } else done(input.updateWords.copyFailed);
+    });
+  }
   const form = document.querySelector<HTMLFormElement>('[data-gate-unlock]');
   if (form) {
     form.addEventListener('submit', (event) => {
@@ -336,6 +377,8 @@ function hostProgram(input: {
 }
 
 export function renderComputerHostPage(input: ComputerHostPageInput): string {
+  const installer = installerForPlatform(input.platform ?? 'darwin');
+  const update = installer ? input.updateAvailable : undefined;
   const token = input.readToken;
   const locked = input.csrfToken === undefined;
   const links: Record<string, string> = {};
@@ -363,6 +406,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     words: DASHBOARD_HOST_GATE_COPY,
+    updateSupported: installer !== undefined,
+    updateWords: { notice: DASHBOARD_UPDATE_COPY.notice('{version}'), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed },
   })}, ${dashboardHostBridge.toString()});`.replaceAll('</script', '<\\/script');
   return [
     '<!doctype html>',
@@ -374,6 +419,12 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     `<style>${HOST_CSS}</style>`,
     '</head>',
     `<body data-olympus-host="computer" data-locked="${locked ? 'true' : 'false'}">`,
+    ...(installer ? [
+      `<section class="update" data-update-notice${update ? '' : ' hidden'}><p data-update-text>${update ? text(DASHBOARD_UPDATE_COPY.notice(update.version)) : ''}</p>`
+      + `<p><code id="update-command">${text(installer.command)}</code> `
+      + `<button class="btn" type="button" data-update-copy>${text(DASHBOARD_UPDATE_COPY.copy)}</button> `
+      + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`,
+    ] : []),
     lockedGate(!locked),
     ...(input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map(model => `<p><strong>${text(model.name)} — ${text(model.state)}</strong>: ${text(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p>`).join('')}</details>`] : []),
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
