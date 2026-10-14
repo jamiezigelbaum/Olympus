@@ -1,4 +1,4 @@
-import { linuxOwnerConfigPath } from './owner-config-read.ts';
+import { defaultSovereigntyConfigPath } from './owner-config-read.ts';
 // Owner-declared settings for the zkAPI route used by anonymous answers
 // (design: docs/design/frontier-consult-lane.md, track Z).
 //
@@ -14,8 +14,6 @@ import { linuxOwnerConfigPath } from './owner-config-read.ts';
 import { readFileSync, statSync } from 'node:fs';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { OperationError } from './operation-error.ts';
 
 /** `zkapi-clientd` listens here unless its owner chose another loopback port. */
@@ -290,7 +288,7 @@ export function zkapiDaemonPortSet(): ReadonlySet<number> {
 export function sovereigntyPolicyPath(env: Record<string, string | undefined> = process.env): string {
   return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()
-    || (linuxOwnerConfigPath('sovereignty.json', env) ?? join(env.HOME?.trim() || homedir(), '.olympus', 'sovereignty.json'));
+    || defaultSovereigntyConfigPath(env);
 }
 
 /** The policy file that currently cannot be read, if any. */

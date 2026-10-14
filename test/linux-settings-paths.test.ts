@@ -83,3 +83,41 @@ test('a fresh unreceipted Linux user can read absent settings normally',()=>{
  const result=probe(env,`const {defaultPrivacyProfilePath,readPrivacyProfile}=await import('./src/workers/classification/privacy-profile.ts');readPrivacyProfile();console.log(JSON.stringify(defaultPrivacyProfilePath()));`);
  expect(result).toBe(join(home,'.olympus/privacy.json'));
 },15_000);
+
+for (const hosted of [false, true]) test(`unreceipted Linux ${hosted ? 'OpenClaw' : 'CLI'} blocks Private evidence after an XDG sovereignty edit`, () => {
+  const { home, env, layout } = fixture(); rmSync(layout.receiptPath);
+  const result = probe({ ...env, ...(hosted ? { OPENCLAW_STATE_DIR: join(home, '.openclaw') } : {}) }, `
+    delete process.env.OLYMPUS_SOVEREIGNTY_CONFIG;
+    const { writeSovereigntyConfigFile, defaultSovereigntyConfigPath, loadSovereigntyPreset, loadSovereigntyEngine } = await import('./src/core/sovereignty.ts');
+    const { sovereigntyPolicyPath, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, ZKAPI_RISK_ACKNOWLEDGEMENTS } = await import('./src/core/zkapi-consult-settings.ts');
+    const { runOwnConsultWriter } = await import('./src/core/consult-writer.ts');
+    const config = loadSovereigntyPreset('local-first');
+    writeSovereigntyConfigFile({ config }); loadSovereigntyEngine();
+    config.modelProfiles.synthetic = { provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult', baseUrl: 'http://127.0.0.1:41074/v1', model: 'synthetic', secretRef: 'env:SYNTHETIC_KEY', zkapi: { tor: 'off', acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: ZKAPI_RISK_ACKNOWLEDGEMENTS.map(x => x.id) } } };
+    writeSovereigntyConfigFile({ config, force: true });
+    let dispatched = 0;
+    const outcome = await runOwnConsultWriter({ question: 'What should I prepare for a trip?', answer: 'The synthetic itinerary covers three days.', gaps: [], evidence: ['SYNTHETIC_PRIVATE_EVIDENCE'] }, {
+      endpoint: { baseUrl: 'http://127.0.0.1:41074/v1', model: 'local-fixture' }, kill: new AbortController().signal, deadlineMs: 5000, level: 'unnamed',
+      fetchImpl: async () => { dispatched++; return Response.json({ choices: [{ message: { content: '{"questions":null}' } }] }); },
+    });
+    console.log(JSON.stringify({ writer: defaultSovereigntyConfigPath(), guard: sovereigntyPolicyPath(), dispatched, outcome }));
+  `);
+  expect(result.dispatched).toBe(0);
+  expect(result.outcome).toMatchObject({ kind: 'failed', reason: 'request_failed' });
+  expect(result.writer).toBe(layout.sovereigntyPath);
+  expect(result.guard).toBe(layout.sovereigntyPath);
+}, 15_000);
+
+for (const owned of [false, true]) test(`sovereignty readers and writers refuse unmigrated settings (receipt: ${owned})`, () => {
+  const { home, env, layout } = fixture(); if (!owned) rmSync(layout.receiptPath);
+  mkdirSync(join(home, '.olympus'), { mode: 0o700 });
+  const legacy = join(home, '.olympus/sovereignty.json'); writeFileSync(legacy, '{}', { mode: 0o600 });
+  const result = probe(env, `
+    delete process.env.OLYMPUS_SOVEREIGNTY_CONFIG;
+    const { defaultSovereigntyConfigPath, loadSovereigntyEngine, writeSovereigntyConfigFile, loadSovereigntyPreset } = await import('./src/core/sovereignty.ts');
+    const { sovereigntyPolicyPath } = await import('./src/core/zkapi-consult-settings.ts');
+    console.log(JSON.stringify([() => defaultSovereigntyConfigPath(), () => loadSovereigntyEngine(), () => writeSovereigntyConfigFile({config: loadSovereigntyPreset('local-first')}), () => sovereigntyPolicyPath()].map(run => {try {run(); return false;} catch (error) {return error.message.includes('migration');}})));
+  `);
+  expect(result).toEqual([true, true, true, true]);
+  expect(readFileSync(legacy, 'utf8')).toBe('{}'); expect(existsSync(layout.sovereigntyPath)).toBe(false);
+}, 15_000);

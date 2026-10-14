@@ -1,8 +1,8 @@
-import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { defaultSovereigntyConfigPath } from './owner-config-read.ts';
+export { defaultSovereigntyConfigPath } from './owner-config-read.ts';
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OperationError } from './operation-error.ts';
@@ -180,11 +180,6 @@ const TRUST_ORDER: Record<SovereigntyProfileTrust, number> = {
   encrypted_cloud: 2,
   standard_cloud: 1,
 };
-
-export function defaultSovereigntyConfigPath(env: Record<string, string | undefined> = process.env): string {
-  if (process.platform === 'linux') return resolveLinuxEngineLayout(env).sovereigntyPath;
-  return join(homedir(), '.olympus', 'sovereignty.json');
-}
 
 export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): SovereigntyEngine {
   const env = options.env ?? process.env;
