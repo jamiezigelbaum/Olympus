@@ -4,6 +4,7 @@ import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/em
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import {
   ITEMS_WITH_TEXT_COUNT_KEY,
+  UNREADABLE_ITEMS_COUNT_KEY,
   METADATA_ONLY_EXPECTED_COUNT_KEY,
 } from '../dashboard/answer-ready-coverage.ts';
 import {
@@ -240,6 +241,8 @@ export interface SourceIndexStatusHandler {
 }
 
 export interface SourceIndexStatusHandlerOptions {
+  /** Live, deduplicated unreadable population when the problem list is wired. */
+  unreadableCount?: (corpusId: string) => number;
   /**
    * The corpora status reports. A function is read on every request, so a
    * per-tier store a tier set creates at runtime (design
@@ -389,6 +392,9 @@ export function createSourceIndexStatusHandler(
             secretLocationCount(store),
           )
           : configuredCorpusStatus(corpus);
+        if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
+          status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
+        }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId
           ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope)
@@ -556,6 +562,12 @@ function connectorStoreStatus(
       // it to the gated ledger is what let an ungated status answer with no
       // per-item readiness at all.
       [ITEMS_WITH_TEXT_COUNT_KEY]: status.counts.itemsWithText,
+      ...((status.counts.contentElsewhereItems ?? 0) > 0 ? { content_elsewhere_items: status.counts.contentElsewhereItems! } : {}),
+      ...((status.counts.settledUnreadableItems ?? 0) > 0 ? {
+        settled_unreadable_items: status.counts.settledUnreadableItems!,
+        [UNREADABLE_ITEMS_COUNT_KEY]: (readinessCounts?.[UNREADABLE_ITEMS_COUNT_KEY] ?? 0)
+          + status.counts.settledUnreadableItems!,
+      } : {}),
       ...(status.counts.fullIngestionFiles === undefined
         ? {}
         : { scope_full_ingestion_files: status.counts.fullIngestionFiles }),
