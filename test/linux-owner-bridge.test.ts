@@ -1,11 +1,13 @@
-import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
+import { afterEach, expect, test, spyOn } from 'bun:test';
+import { mkdtempSync, readFileSync, rmSync, statSync, existsSync, chmodSync, writeFileSync, symlinkSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LinuxOwnerBridge, manageLinuxOwnerBridge, randomOwnerHostname } from '../src/core/linux-owner-bridge.ts';
 import { prepareWorkerSocket, bindWorkerSocket } from '../src/core/worker-transport.ts';
 import { openLinuxOwnerTicketFile } from '../src/core/linux-desktop-opener.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import { loadOrCreateDashboardSessionSecret } from '../src/core/dashboard-session-secret.ts';
 import { withRequestPeer } from '../src/core/request-peer.ts';
 
 const cleanup: (() => void)[] = [];
@@ -70,7 +72,7 @@ test('ticket is 0600, single use, expiring, bounded and never returned publicly'
   f.advance(60_001); expect((await f.bridge.handle(f.post('/owner-proof', { ticket: value }))).status).toBe(403);
 });
 
-test('no cookie, forged headers, stolen cross-port cookie and previous-instance cookie cannot read or approve', async () => {
+test('no cookie, forged headers, stolen cross-port cookie and another-runtime cookie cannot read or approve', async () => {
   const seen: Request[] = []; const f = fixture(async r => { seen.push(r); return new Response('private dashboard'); });
   const owner = await prove(f);
   for (const path of ['/dashboard', '/dashboard.json', '/connect/authorize', '/dashboard/control/session/local']) {
@@ -82,7 +84,7 @@ test('no cookie, forged headers, stolen cross-port cookie and previous-instance 
     }
   }
   expect(seen.length).toBe(0);
-  const second = new LinuxOwnerBridge(f.options); cleanup.push(() => second.close());
+  const second = fixture().bridge;
   const r = await second.handle(new Request(second.origin + '/dashboard', { headers: { Host: new URL(second.origin).host, Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof } }));
   expect(r.status).toBe(403);
   expect(await r.text()).toContain('<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>');
@@ -260,4 +262,114 @@ test('bridged pages keep every inline script the worker allowed, and the bootstr
     }
     expect(meta).not.toContain('frame-ancestors');
   }
+});
+
+const statePath = (f: ReturnType<typeof fixture>) => join(f.root, 'olympus', 'owner-bridge-sessions.json');
+function restart(f: ReturnType<typeof fixture>) {
+  f.bridge.close();
+  const bridge = new LinuxOwnerBridge(f.options);
+  cleanup.push(() => bridge.close());
+  return bridge;
+}
+
+test('worker restart retains origin and hashed owner sessions, never tickets or raw secrets', async () => {
+  const f = fixture(); const owner = await prove(f);
+  f.advance(10_001); await f.bridge.openTicket('/dashboard');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const text = readFileSync(statePath(f), 'utf8');
+  for (const value of [owner.cookie.split('=')[1]!, owner.proof, owner.ticket, ticket]) expect(text).not.toContain(value);
+  expect(text).not.toContain('ticket');
+  expect(statSync(statePath(f)).mode & 0o777).toBe(0o600);
+  const bridge = restart(f);
+  expect(bridge.origin).toBe(f.bridge.origin);
+  const headers = { Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof };
+  expect((await bridge.handle(f.request('/dashboard.json', { headers }))).status).toBe(200);
+  expect((await bridge.handle(f.request('/dashboard/control/save', { method: 'POST', headers: { ...headers, Origin: bridge.origin }, body: '{}' }))).status).toBe(200);
+  expect((await bridge.handle(f.post('/owner-proof', { ticket }))).status).toBe(403);
+  expect((await bridge.handle(f.request('/dashboard.json', { headers: { ...headers, 'X-Olympus-Owner-Proof': 'forged' } }))).status).toBe(403);
+});
+
+test('restart drops expired sessions without extending their lifetime; cap is fifteen', async () => {
+  const f = fixture(); const owners = [await prove(f)];
+  for (let i = 0; i < 15; i++) { f.advance(10_001); owners.push(await prove(f)); }
+  let bridge = restart(f);
+  expect(JSON.parse(readFileSync(statePath(f), 'utf8')).sessions).toHaveLength(15);
+  const read = (o: typeof owners[number]) => bridge.handle(f.request('/dashboard.json', { headers: { Cookie: o.cookie, 'X-Olympus-Owner-Proof': o.proof } }));
+  expect((await read(owners[0]!)).status).toBe(403);
+  expect((await read(owners.at(-1)!)).status).toBe(200);
+  bridge.close(); f.advance(12 * 60 * 60 * 1000);
+  bridge = new LinuxOwnerBridge(f.options); cleanup.push(() => bridge.close());
+  expect((await read(owners.at(-1)!)).status).toBe(403);
+  expect(JSON.parse(readFileSync(statePath(f), 'utf8')).sessions).toEqual([]);
+});
+
+for (const damage of ['malformed', 'digest', 'origin', '0644', 'symlink']) {
+  test(`restart rejects and deletes ${damage} session state, retaining today's refusal`, async () => {
+    const f = fixture(); const owner = await prove(f); f.bridge.close();
+    const path = statePath(f);
+    const state = JSON.parse(readFileSync(path, 'utf8'));
+    if (damage === 'malformed') writeFileSync(path, '{');
+    if (damage === 'digest') { state.sessions[0].cookieHash = 'forged'; writeFileSync(path, JSON.stringify(state)); }
+    if (damage === 'origin') { state.origin = 'http://evil.invalid:18010'; writeFileSync(path, JSON.stringify(state)); }
+    if (damage === '0644') chmodSync(path, 0o644);
+    if (damage === 'symlink') { rmSync(path); symlinkSync(join(f.root, 'foreign-target'), path); }
+    const bridge = new LinuxOwnerBridge(f.options); cleanup.push(() => bridge.close());
+    expect(existsSync(path)).toBe(false);
+    expect(bridge.origin).not.toBe(f.bridge.origin);
+    expect((await bridge.handle(f.request('/dashboard.json', { headers: { Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof } }))).status).toBe(421);
+    expect((await bridge.handle(new Request(bridge.origin + '/dashboard.json', { headers: { Host: new URL(bridge.origin).host, Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof } }))).status).toBe(403);
+  });
+}
+
+test('foreign-owned session state is deleted and cannot restore owner presence', async () => {
+  const f = fixture(); const owner = await prove(f); f.bridge.close();
+  // A synthetic persisted record makes this refusal test fail even on a
+  // bridge that has no persistence implementation yet.
+  writeFileSync(statePath(f), JSON.stringify({ version: 1, origin: f.bridge.origin, sessions: [{
+    cookieHash: new Bun.CryptoHasher('sha256').update(owner.cookie.split('=')[1]!).digest('hex'),
+    proofHash: new Bun.CryptoHasher('sha256').update(owner.proof).digest('hex'), expires: 100_000 + 12 * 60 * 60 * 1000,
+  }] }), { mode: 0o600 });
+  const fstat = fs.fstatSync;
+  const custody = spyOn(fs, 'fstatSync').mockImplementation(((...args: Parameters<typeof fs.fstatSync>) => new Proxy(fstat(...args), { get: (stat, key) => key === 'uid' ? process.getuid!() + 1 : Reflect.get(stat, key) })) as typeof fs.fstatSync);
+  let bridge!: LinuxOwnerBridge;
+  try { bridge = new LinuxOwnerBridge(f.options); } finally { custody.mockRestore(); }
+  cleanup.push(() => bridge.close());
+  expect(bridge.origin).not.toBe(f.bridge.origin); expect(existsSync(statePath(f))).toBe(false);
+});
+
+test('Linux dashboard cookie and CSRF survive bridge and worker auth-wrapper restart end to end', async () => {
+  const f = fixture();
+  const secretPath = join(f.root, 'dashboard-session.secret');
+  const worker = () => withRequestPeer(withWorkerBearerAuth(async r => Response.json({ csrf: r.headers.get('X-Olympus-Control-Session-CSRF') }), {
+    authToken: 'fixture-bearer', requireOwnerSocket: true, sessionSecret: loadOrCreateDashboardSessionSecret({ path: secretPath }).secret,
+  }), true);
+  let handler = worker();
+  f.options.fetchSocket = async r => handler(r, { requestIP: () => null });
+  const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => {
+    const r = await handler(new Request(f.bridge.entryOrigin + '/dashboard/control/session', { method: 'POST', headers: { Host: new URL(f.bridge.entryOrigin).host, Origin: f.bridge.entryOrigin, Authorization: 'Bearer fixture-bearer' } }), { requestIP: () => null });
+    expect(r.status).toBe(200); return r.headers.getSetCookie();
+  } });
+  cleanup.push(() => bridge.close());
+  const request = (path: string, init: RequestInit = {}) => new Request(bridge.origin + path, { ...init, headers: { Host: new URL(bridge.origin).host, ...Object.fromEntries(new Headers(init.headers)) } });
+  await bridge.openTicket('/dashboard');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const proved = await bridge.handle(request('/owner-proof', { method: 'POST', headers: { Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) }));
+  const proof = (await proved.json() as { proof: string }).proof;
+  const cookies = proved.headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
+  const headers = { Cookie: cookies, 'X-Olympus-Owner-Proof': proof };
+  const before = await bridge.handle(request('/dashboard', { headers }));
+  const csrf = (await before.json() as { csrf: string }).csrf; expect(csrf).toBeTruthy();
+  bridge.close(); handler = worker();
+  const next = new LinuxOwnerBridge(f.options); cleanup.push(() => next.close());
+  expect(next.origin).toBe(bridge.origin);
+  const after = await next.handle(request('/dashboard', { headers }));
+  expect(after.status).toBe(200); expect((await after.json() as { csrf: string }).csrf).toBe(csrf);
+  expect((await next.handle(request('/dashboard/control/session/lock', { method: 'POST', headers: { ...headers, Origin: next.origin, 'X-Olympus-CSRF': csrf } }))).status).toBe(200);
+});
+
+test('starting headless after a worker restart revokes the previous desktop epoch', async () => {
+  const f = fixture(); await prove(f); const origin = f.bridge.origin; f.bridge.close(); f.ready(false);
+  const manager = manageLinuxOwnerBridge({ ...f.options, platform: 'linux', listen: () => ({ stop() {} }) }); cleanup.push(() => manager.close());
+  expect(existsSync(statePath(f))).toBe(false);
+  f.ready(true); manager.refresh(); expect(manager.status().origin).not.toBe(origin);
 });

@@ -2,7 +2,8 @@
  * trusts headers as owner identity. Cookies need a separate origin-storage
  * proof because HTTP cookies are shared across ports. */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, openSync, writeFileSync, unlinkSync } from 'node:fs';
+import { closeSync, openSync, writeFileSync, unlinkSync, constants, fstatSync, lstatSync, readFileSync } from 'node:fs';
+import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { dirname, join } from 'node:path';
 import { validateWorkerSocket, type WorkerTransportOptions } from './worker-transport.ts';
 import { openLinuxOwnerTicketFile } from './linux-desktop-opener.ts';
@@ -44,7 +45,11 @@ function page(body: string, status = 200): Response {
     'Cross-Origin-Opener-Policy': 'same-origin', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
   } });
 }
-function refusal(status = 403): Response { return page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status); }
+function refusal(status = 403): Response {
+  const response = page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status);
+  response.headers.set('X-Olympus-Owner-Refused', '1');
+  return response;
+}
 function safeTarget(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 16_384 && value.startsWith('/') && !value.startsWith('//')
     && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith('/owner-') && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
@@ -141,10 +146,19 @@ export interface LinuxOwnerBridgeOptions {
   now?: () => number;
 }
 interface Ticket { value: string; target: string; path: string; expires: number }
-interface Session { cookie: string; proof: string; expires: number }
+interface Session { cookieHash: string; proofHash: string; expires: number }
+const SESSION_FILE = 'owner-bridge-sessions.json';
+const hashSecret = (value: string) => createHash('sha256').update(value).digest('hex');
+function equalHash(value: string | null | undefined, hash: string): boolean {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value)
+    && timingSafeEqual(Buffer.from(hashSecret(value), 'hex'), Buffer.from(hash, 'hex'));
+}
+function exactKeys(value: object, keys: string[]): boolean {
+  return Object.keys(value).sort().join(',') === keys.sort().join(',');
+}
 
 export class LinuxOwnerBridge {
-  readonly hostname = randomOwnerHostname();
+  readonly hostname: string;
   readonly origin: string;
   readonly entryOrigin: string;
   private ticket: Ticket | undefined;
@@ -154,12 +168,64 @@ export class LinuxOwnerBridge {
   private readonly now: () => number;
   private ticketTimer: ReturnType<typeof setTimeout> | undefined;
   constructor(private readonly options: LinuxOwnerBridgeOptions) {
-    this.origin = `http://${this.hostname}:${options.port}`;
-    this.entryOrigin = `http://127.0.0.1:${options.port}`;
     this.now = options.now ?? Date.now;
+    const restored = this.restoreSessions();
+    this.origin = restored?.origin ?? `http://${randomOwnerHostname()}:${options.port}`;
+    this.hostname = new URL(this.origin).hostname;
+    this.entryOrigin = `http://127.0.0.1:${options.port}`;
+    this.sessions = restored?.sessions.filter(s => s.expires > this.now()) ?? [];
+    if (restored) this.persistSessions();
+  }
+  private sessionPath(): string {
+    // Reuse the socket's complete ancestor, owner and private-mode checks.
+    if (validateWorkerSocket(this.options.transport) !== this.options.socketPath) throw new Error('Owner socket changed.');
+    return join(dirname(this.options.socketPath), SESSION_FILE);
+  }
+  private restoreSessions(): { origin: string; sessions: Session[] } | undefined {
+    let path: string;
+    try { path = this.sessionPath(); } catch { return undefined; }
+    let fd: number | undefined;
+    try {
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const stat = fstatSync(fd), named = lstatSync(path);
+      const uid = this.options.transport?.uid ?? process.getuid?.();
+      if (!stat.isFile() || stat.uid !== uid || (stat.mode & 0o7777) !== 0o600 || stat.nlink !== 1
+        || stat.size > 8192 || stat.dev !== named.dev || stat.ino !== named.ino) throw new Error('Unsafe session state.');
+      const state = JSON.parse(readFileSync(fd, 'utf8'));
+      if (!state || typeof state !== 'object' || !exactKeys(state, ['version', 'origin', 'sessions']) || state.version !== 1
+        || typeof state.origin !== 'string' || !new RegExp('^http://[a-z2-7]{25}[aeimquy4]\\.localhost:' + this.options.port + '$').test(state.origin)
+        || !Array.isArray(state.sessions) || state.sessions.length > 15) throw new Error('Malformed session state.');
+      for (const session of state.sessions) {
+        if (!session || typeof session !== 'object' || !exactKeys(session, ['cookieHash', 'proofHash', 'expires'])
+          || typeof session.cookieHash !== 'string' || !/^[a-f0-9]{64}$/.test(session.cookieHash)
+          || typeof session.proofHash !== 'string' || !/^[a-f0-9]{64}$/.test(session.proofHash)
+          || !Number.isSafeInteger(session.expires) || session.expires <= 0 || session.expires > this.now() + SESSION_MS) throw new Error('Malformed session.');
+      }
+      return state;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { try { unlinkSync(path); } catch {} }
+      return undefined;
+    } finally { if (fd !== undefined) closeSync(fd); }
+  }
+  private persistSessions(): void {
+    this.sessions = this.sessions.filter(s => s.expires > this.now()).slice(-15);
+    let path: string | undefined;
+    try {
+      path = this.sessionPath();
+      writePrivateFileAtomicSync(path, JSON.stringify({ version: 1, origin: this.origin, sessions: this.sessions }) + '\n');
+    } catch {
+      // Unwritable runtime state retains today's process-only behaviour; never
+      // restore an older snapshot after a failed publish of the current cap.
+      if (path) { try { unlinkSync(path); } catch {} }
+    }
   }
   private live(): boolean { return !this.closed && this.options.ready(); }
-  close(): void { this.closed = true; this.sessions = []; this.clearTicket(); }
+  close(revoke = false): void {
+    this.closed = true; this.sessions = []; this.clearTicket();
+    // A worker shutdown preserves fixed-expiry sessions. Desktop logout must
+    // revoke them, including the origin, before a later login can restore.
+    if (revoke) { try { unlinkSync(this.sessionPath()); } catch {} }
+  }
   private clearTicket(): void {
     if (this.ticketTimer) clearTimeout(this.ticketTimer);
     if (this.ticket) { try { unlinkSync(this.ticket.path); } catch {} }
@@ -214,10 +280,12 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
       let dashboardCookies: readonly string[];
       try { dashboardCookies = await this.options.establishDashboard?.() ?? []; } catch { return refusal(503); }
       if (!this.live()) return refusal(503);
-      const session = { cookie: secret(), proof: secret(), expires: this.now() + SESSION_MS };
-      this.sessions = [...this.sessions.filter(s => s.expires > this.now()).slice(-15), session];
-      const response = Response.json({ proof: session.proof, target: ticket.target }, { headers: {
-        'Set-Cookie': `${COOKIE}=${session.cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
+      const cookie = secret(), proof = secret();
+      const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
+      this.sessions = [...this.sessions.filter(s => s.expires > this.now()).slice(-14), session];
+      this.persistSessions();
+      const response = Response.json({ proof, target: ticket.target }, { headers: {
+        'Set-Cookie': `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
         'Cache-Control': 'no-store', 'Clear-Site-Data': '"cache"', 'Content-Security-Policy': CSP,
       } });
       for (const cookie of dashboardCookies) response.headers.append('Set-Cookie', cookie);
@@ -233,7 +301,8 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
     // Private control endpoint is NEVER forwarded from TCP, even by an owner.
     if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith('/owner-')) return refusal();
     const cookie = request.headers.get('cookie')?.split(';').map(v => v.trim()).find(v => v.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
-    const session = this.sessions.find(s => s.expires > this.now() && equal(cookie, s.cookie));
+    if (this.sessions.some(s => s.expires <= this.now())) this.persistSessions();
+    const session = this.sessions.find(s => equalHash(cookie, s.cookieHash));
     let proof = request.headers.get(PROOF_HEADER);
     let body: string | undefined;
     if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -243,7 +312,7 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
         proof ??= form.get(FORM_PROOF); form.delete(FORM_PROOF); body = form.toString();
       }
     }
-    if (!session || !equal(proof, session.proof)) {
+    if (!session || !equalHash(proof, session.proofHash)) {
       // Only top-level documents receive the content-free confirmation shell.
       if (request.method === 'GET' && !proof && (request.headers.get('accept') ?? '').includes('text/html')) return confirmation();
       return refusal();
@@ -302,10 +371,20 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
   let listener: { stop(closeActiveConnections?: boolean): unknown } | undefined;
   let status: DesktopBridgeStatus = { state: 'headless' };
   let closed = false;
-  const stop = () => { bridge?.close(); bridge = undefined; listener?.stop(true); listener = undefined; };
+  const stop = (revoke = false) => {
+    bridge?.close(revoke);
+    if (revoke && !bridge) {
+      // A worker can start after logout: no live instance exists to revoke
+      // the previous worker's saved desktop epoch.
+      try {
+        if (validateWorkerSocket(options.transport) === options.socketPath) unlinkSync(join(dirname(options.socketPath), SESSION_FILE));
+      } catch {}
+    }
+    bridge = undefined; listener?.stop(true); listener = undefined;
+  };
   const refresh = () => {
     if (closed) return;
-    if ((options.platform ?? process.platform) !== 'linux' || !options.ready()) { stop(); status = { state: 'headless' }; return; }
+    if ((options.platform ?? process.platform) !== 'linux' || !options.ready()) { stop(true); status = { state: 'headless' }; return; }
     if (bridge) return;
     const candidate = new LinuxOwnerBridge(options);
     try {
