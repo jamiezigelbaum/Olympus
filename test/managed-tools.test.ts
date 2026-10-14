@@ -1052,9 +1052,13 @@ describe('the install route', () => {
       env: { HOME: home },
     });
     const status = await adapter.status();
+    // Explicit paths still win, but must retain download availability so a
+    // missing Linux confinement launcher can be installed (activation design).
+    const platform = `${process.platform}-${process.arch}`;
+    const offered = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'].includes(platform);
     expect(status.tools!.tools).toEqual([
-      { tool: 'tor', label: 'Tor', source: 'configured_missing', path: '/nowhere/tor', version: MANAGED_TOOL_PINS.tor.version },
-      { tool: 'zkapi-clientd', label: 'zkAPI', source: 'configured', path: join(home, 'bin', 'zkapi-clientd'), version: ZK },
+      { tool: 'tor', label: 'Tor', source: 'configured_missing', path: '/nowhere/tor', version: MANAGED_TOOL_PINS.tor.version, offered: offered || platform === 'linux-ia32' },
+      { tool: 'zkapi-clientd', label: 'zkAPI', source: 'configured', path: join(home, 'bin', 'zkapi-clientd'), version: ZK, offered },
     ]);
   });
 
@@ -1141,9 +1145,11 @@ describe('the install route', () => {
     expect(daemonEntry(after)).toMatchObject({ source: 'olympus', executable: installed });
     const card = renderOutsideHelpCard(after, { csrfToken: 'c', localSession: true }).replaceAll('&#39;', "'").replaceAll('&lt;', '<').replaceAll('&gt;', '>');
     const quoted = `'${installed}'`;
-    for (const tail of ['config --usd N.', 'config --relay-url socks5://127.0.0.1:19050</li>', 'config --require-api-key</li>', 'config --api-key <key>.', 'config --key-reuse-window-seconds 0.']) {
+    for (const tail of ['config --usd N.', 'config --relay-url socks5://127.0.0.1:19050</li>', 'config --require-api-key</li>', 'config --api-key. Pipe its output directly into an owner-only file; never paste it into chat or logs.', 'config --key-reuse-window-seconds 0.']) {
       expect(card).toContain(`<li>Run: ${quoted} ${tail}`);
     }
+    expect(card).not.toContain('config --api-key <key>');
+    expect(card).toContain("Store that key where the route's key reference points (env:OLYMPUS_ZKAPI_API_KEY)");
     expect(card).not.toContain('<li>Run: zkapi-clientd ');
   });
 
