@@ -27503,7 +27503,7 @@ function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
           INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
           SELECT job_id FROM extraction_jobs
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-            AND (status = 'indexed'
+            AND (status IN ('indexed', 'leased')
               OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
         `).run(item.provider, item.accountScope, item.providerItemId);
       }
@@ -27519,7 +27519,11 @@ function artifactsTableExists(db) {
 function takeRestoredReread(db, jobId) {
   if (!rereadsTableExists(db))
     return false;
-  return db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
+  const job = db.query(`SELECT status, last_error_kind FROM extraction_jobs WHERE job_id = ?`).get(jobId);
+  if (job?.status === "leased")
+    return false;
+  const owed = db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
+  return owed && (job?.status === "indexed" || job?.status === "blocked_policy" && job.last_error_kind === "store_item_secrets");
 }
 function rereadsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
@@ -105482,8 +105486,9 @@ class LocalFileExtractionJobStore {
         const status = maxBytesPerFile !== undefined && ref.sizeBytes !== undefined && ref.sizeBytes > maxBytesPerFile ? "skipped_too_large" : "queued";
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
-        const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
-        const reread = existing !== undefined && existing !== null && status === "queued" && takeRestoredReread(this.db, existing.job_id);
+        const redacted = itemNameRedacted(this.db, ref);
+        const name = redacted ? null : ref.name ?? null;
+        const reread = !redacted && existing !== undefined && existing !== null && status === "queued" && takeRestoredReread(this.db, existing.job_id);
         const forceExisting = Boolean(existing) && (force || reread) && status === "queued";
         const reset = forceExisting ? 1 : 0;
         this.db.query(`
@@ -111073,6 +111078,7 @@ function createFileExtractionRunner(options) {
           localOnly = false;
         const outcome = await settleOneJob({
           job,
+          jobs,
           extractor,
           corpus,
           resolveSource: async () => {
@@ -111160,16 +111166,27 @@ async function settleOneJobHeld(input, staged) {
   }
   const checkEgress = async () => {
     const trustTier = extractor.egress === "approved_remote" ? await readTrustTier(corpus, job.ref) : undefined;
+    let policyDecision = job.policyDecision;
+    if (extractor.egress === "approved_remote") {
+      try {
+        const current2 = input.jobs.get(job.jobId);
+        if (!current2)
+          return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN };
+        policyDecision = current2.policyDecision;
+      } catch {
+        return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN };
+      }
+    }
     return evaluateExtractionEgress({
       egress: extractor.egress,
       ...corpus.egressPolicy ? { policy: corpus.egressPolicy } : {},
-      policyDecision: job.policyDecision,
+      policyDecision,
       ...trustTier !== undefined ? { trustTier } : {}
     });
   };
   const egress = await checkEgress();
   if (!egress.allowed) {
-    return { status: "blocked_policy", errorKind: egress.errorKind };
+    return egressRefusalOutcome(egress.errorKind);
   }
   let fetched;
   if (extractor.needsBytes) {
@@ -111242,7 +111259,7 @@ async function settleOneJobHeld(input, staged) {
       staged.media = output.media;
   } catch (error2) {
     if (error2 instanceof ExtractionEgressRefusedError) {
-      return { status: "blocked_policy", errorKind: error2.errorKind };
+      return egressRefusalOutcome(error2.errorKind);
     }
     if (isModelEndpointRedirectError(error2))
       return retryable(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT, error2);
@@ -111425,6 +111442,12 @@ function leaseHasExpired(leaseExpiresAt, at) {
   if (!Number.isFinite(expiry))
     return false;
   return at.getTime() > expiry;
+}
+function egressRefusalOutcome(errorKind) {
+  return {
+    status: errorKind === EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN || errorKind === EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN ? "failed_retryable" : "blocked_policy",
+    errorKind
+  };
 }
 async function readTrustTier(corpus, ref) {
   if (!corpus.trustTiers)
@@ -111639,7 +111662,7 @@ function refusesImageContent(corpus, ref) {
     return false;
   }
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_media_cache();
   init_operation_error();
@@ -112072,6 +112095,20 @@ function tieredExtractionView(set2, options = {}) {
         const located = store.activeLocalItemRow(localItemId);
         if (!located)
           continue;
+        if (set2.ledger.itemIsSecret(located.identity))
+          return "S5";
+        const override = set2.ledger.getOverride(located.identity);
+        const decision = set2.ledger.getCurrent(located.identity);
+        const tiers = [
+          decision?.metadataTier,
+          decision?.contentTier,
+          decision?.targetMetadataTier,
+          decision?.targetContentTier,
+          override?.kind === "tier" ? override.tier : undefined
+        ];
+        const decisionTier = tiers.includes("secure") ? "S4" : tiers.includes("private") ? "S3" : undefined;
+        if (decisionTier && (tier === undefined || TRUST_TIER_RANK[decisionTier] > TRUST_TIER_RANK[tier]))
+          tier = decisionTier;
         if (set2.ledger.isRouted(located.identity))
           routed = true;
         if (tier === undefined || TRUST_TIER_RANK[located.trustTier] > TRUST_TIER_RANK[tier])

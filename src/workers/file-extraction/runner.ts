@@ -136,6 +136,7 @@ export const EXTRACTION_EGRESS_REFUSED_DECISION = 'egress_policy_decision_forbid
 export const EXTRACTION_EGRESS_REFUSED_DEFERRED = 'egress_policy_default_deferred';
 export const EXTRACTION_EGRESS_REFUSED_TRUST_TIER = 'egress_policy_trust_tier';
 export const EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = 'egress_trust_tier_unknown';
+export const EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = 'egress_job_policy_unreadable';
 
 export const EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = 'consecutive_retryable_failures';
 export const EXTRACTION_PAUSE_HEALTH_PROBE = 'extractor_health_probe_failed';
@@ -860,6 +861,7 @@ export function createFileExtractionRunner(
         // here is the defect that stopped a live migration mid-run.
         const outcome = await settleOneJob({
           job,
+          jobs,
           extractor,
           corpus,
           resolveSource: async () => {
@@ -953,6 +955,7 @@ interface JobOutcome {
 }
 
 interface SettleOneJobInput {
+  jobs: LocalFileExtractionJobStore;
   job: LeasedExtractionJob;
   extractor: Extractor | undefined;
   corpus: ExtractionRunnerCorpus;
@@ -1008,16 +1011,28 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     const trustTier = extractor.egress === 'approved_remote'
       ? await readTrustTier(corpus, job.ref)
       : undefined;
+    // enqueue() can restamp policy without revoking the active lease. Never
+    // authorize a send with the decision captured when that lease was taken.
+    let policyDecision = job.policyDecision;
+    if (extractor.egress === 'approved_remote') {
+      try {
+        const current = input.jobs.get(job.jobId);
+        if (!current) return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN };
+        policyDecision = current.policyDecision;
+      } catch {
+        return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN };
+      }
+    }
     return evaluateExtractionEgress({
       egress: extractor.egress,
       ...(corpus.egressPolicy ? { policy: corpus.egressPolicy } : {}),
-      policyDecision: job.policyDecision,
+      policyDecision,
       ...(trustTier !== undefined ? { trustTier } : {}),
     });
   };
   const egress = await checkEgress();
   if (!egress.allowed) {
-    return { status: 'blocked_policy', errorKind: egress.errorKind };
+    return egressRefusalOutcome(egress.errorKind);
   }
 
   let fetched: FetchedBytes | undefined;
@@ -1098,7 +1113,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     if (output.status === 'indexed' && output.media) staged.media = output.media;
   } catch (error) {
     if (error instanceof ExtractionEgressRefusedError) {
-      return { status: 'blocked_policy', errorKind: error.errorKind };
+      return egressRefusalOutcome(error.errorKind);
     }
     // A redirecting model endpoint is a configuration fault, not this file's:
     // it keeps its own kind so the lane can say so, and the job waits for its
@@ -1361,6 +1376,14 @@ function leaseHasExpired(leaseExpiresAt: string, at: Date): boolean {
   const expiry = Date.parse(leaseExpiresAt);
   if (!Number.isFinite(expiry)) return false;
   return at.getTime() > expiry;
+}
+
+function egressRefusalOutcome(errorKind: string): JobOutcome {
+  return {
+    status: errorKind === EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN || errorKind === EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN
+      ? 'failed_retryable' : 'blocked_policy',
+    errorKind,
+  };
 }
 
 async function readTrustTier(

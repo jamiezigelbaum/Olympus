@@ -207,6 +207,18 @@ export function tieredExtractionView(
       for (const store of storesHoldingRow(localItemId)) {
         const located = store.activeLocalItemRow(localItemId);
         if (!located) continue;
+        // Stored copies can still carry their old tier after an owner ruling
+        // or a ledger flip. Read the authority even while those copies hide
+        // or wait to move; failures propagate to the runner's closed gate.
+        if (set.ledger.itemIsSecret(located.identity)) return 'S5';
+        const override = set.ledger.getOverride(located.identity);
+        const decision = set.ledger.getCurrent(located.identity);
+        const tiers = [decision?.metadataTier, decision?.contentTier,
+          decision?.targetMetadataTier, decision?.targetContentTier,
+          override?.kind === 'tier' ? override.tier : undefined];
+        const decisionTier = tiers.includes('secure') ? 'S4'
+          : tiers.includes('private') ? 'S3' : undefined;
+        if (decisionTier && (tier === undefined || TRUST_TIER_RANK[decisionTier] > TRUST_TIER_RANK[tier])) tier = decisionTier;
         if (set.ledger.isRouted(located.identity)) routed = true;
         if (tier === undefined || TRUST_TIER_RANK[located.trustTier] > TRUST_TIER_RANK[tier]) tier = located.trustTier;
       }

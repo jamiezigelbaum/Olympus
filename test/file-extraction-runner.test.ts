@@ -18,7 +18,7 @@
 //     unwired, every scanned PDF the OCR command refuses stays terminal for
 //     ever, and nothing in the type system would have noticed.
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1085,11 +1085,65 @@ describe('extraction egress gate: unreachable, not merely unconfigured', () => {
         const runner = createFileExtractionRunner({ jobs, registry, corpora: [corpus] });
         await runner.run({ ...LANE });
         expect(remoteCalls).toBe(0);
-        expect(jobs.get(queued.jobRefs[0]!.jobId)).toMatchObject({ status: 'blocked_policy', lastErrorKind:
+        expect(jobs.get(queued.jobRefs[0]!.jobId)).toMatchObject({ status: change === 'unreadable tier' ? 'failed_retryable' : 'blocked_policy', lastErrorKind:
           change === 'unreadable tier' ? 'egress_trust_tier_unknown'
             : change === 'revoked scope' ? 'source_scope_superseded'
               : change === 'revoked policy' ? 'egress_remote_not_permitted' : 'egress_policy_trust_tier' });
       } finally { jobs.close(); }
+    });
+  }
+
+  test('local extraction does not depend on remote live reads', async () => {
+    const jobs = jobStore();
+    const sink = recordingSink();
+    const extractor = fakeExtractor();
+    const id = jobs.enqueue({ refs: [ref(1)], extractorKind: extractor.kind,
+      extractorVersion: extractor.version, policyDecision: 'blocked_sensitive' }).jobRefs[0]!.jobId;
+    const unreadable = spyOn(jobs, 'get').mockImplementation(() => { throw new Error('remote policy read unavailable'); });
+    try {
+      const runner = createFileExtractionRunner({ jobs, registry: buildExtractorRegistry([extractor]), corpora: [{
+        corpusId: CORPUS_ID, trustDomain: 'internal', source: fakeSource(), sink,
+        trustTiers: { itemTrustTier: () => { throw new Error('remote tier read unavailable'); } },
+      }] });
+      await runner.run(LANE);
+      expect(unreadable).not.toHaveBeenCalled();
+      unreadable.mockRestore();
+      expect(jobs.get(id)?.status).toBe('indexed');
+      expect(sink.accepted).toHaveLength(1);
+    } finally { unreadable.mockRestore(); jobs.close(); }
+  });
+
+  for (const decision of ['blocked_sensitive', 'metadata_only', 'index_redacted', 'index_allowed', 'unreadable'] as const) {
+    test(`job policy restamped during OCR: ${decision}`, async () => {
+      const jobs = jobStore();
+      let calls = 0;
+      let readFailure: ReturnType<typeof spyOn> | undefined;
+      const kind = REMOTE_VLM_EXTRACTOR_KINDS[0];
+      const request = { refs: [ref(1, { mimeType: 'image/png' })], extractorKind: kind,
+        extractorVersion: 'venice-v1', policyDecision: 'index_allowed' as const };
+      const registry = createDefaultExtractorRegistry({ remote: {
+        client: { describe: async () => { calls++; return { text: 'ordinary image' }; } },
+        localReader: { extract: async () => {
+          if (decision === 'unreadable') readFailure = spyOn(jobs, 'get').mockImplementation(() => { throw new Error('database unavailable'); });
+          else jobs.enqueue({ ...request, policyDecision: decision });
+          return { status: 'metadata_only' };
+        } },
+      } });
+      request.extractorVersion = registry.get(kind)!.version;
+      try {
+        const id = jobs.enqueue(request).jobRefs[0]!.jobId;
+        const runner = createFileExtractionRunner({ jobs, registry, corpora: [{
+          corpusId: CORPUS_ID, trustDomain: 'internal', sink: recordingSink(),
+          source: fakeSource({ fetch: async () => ({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/png' }) }),
+          egressPolicy: { maxTrustTierForRemote: 'S3', allowDefaultDeferred: false },
+          trustTiers: { itemTrustTier: () => 'S3' },
+        }] });
+        await runner.run(LANE);
+        readFailure?.mockRestore();
+        expect(calls).toBe(decision === 'index_allowed' ? 1 : 0);
+        expect(jobs.get(id)?.status).toBe(decision === 'index_allowed' ? 'indexed'
+          : decision === 'unreadable' ? 'failed_retryable' : 'blocked_policy');
+      } finally { readFailure?.mockRestore(); jobs.close(); }
     });
   }
 
