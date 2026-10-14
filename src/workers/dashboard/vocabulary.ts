@@ -1026,6 +1026,9 @@ export function dashboardPhaseUnreadableWords(read: number, unreadable: number):
 export function dashboardUnreadableSentence(source: DashboardSourceCard): string | undefined {
   const phrase = dashboardUnreadablePhrase(source);
   if (!phrase) return undefined;
+  if ((source.coverage.settled_unreadable_items ?? 0) > 0) {
+    return `${phrase[0]!.toUpperCase()}${phrase.slice(1)}. Some items were kept Private without being read because their privacy checks were missing. See why lists the items; open them to check them, then use Sync now to try reading them again.`;
+  }
   const lead = `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged`
     + " or in a format Olympus can't read.";
   // Past the alarm share the row says Needs you, so this sentence must not say
@@ -1061,12 +1064,16 @@ export const DASHBOARD_UNREADABLE_NOTE_MANY =
  * a count per code (names travel beside it, never in a reason); the panel
  * holds these words.
  */
-export const DASHBOARD_UNREADABLE_REASON_CODES = ['damaged_or_unsupported'] as const;
+export const DASHBOARD_UNREADABLE_REASON_CODES = ['damaged_or_unsupported', 'privacy_check_missing'] as const;
 export type DashboardUnreadableReasonCode = (typeof DASHBOARD_UNREADABLE_REASON_CODES)[number];
 
 export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
   Record<DashboardUnreadableReasonCode, { one: string; other: string }>
 > = {
+  privacy_check_missing: {
+    one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
+    other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again.",
+  },
   damaged_or_unsupported: {
     one: "{count} file is damaged or in a format Olympus can't read",
     other: "{count} files are damaged or in a format Olympus can't read",
