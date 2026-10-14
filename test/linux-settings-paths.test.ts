@@ -61,3 +61,12 @@ for (const owned of [false, true]) test(`Linux refuses unmigrated privacy settin
   const tier = probe(env, `const { loadOwnerTierRules } = await import('./src/workers/classification/tier-rules.ts');try { loadOwnerTierRules({ allowMissing: true });console.log(false); } catch {console.log(true);}`);
   expect(tier).toBe(true);
 });
+
+test('migrated OAuth state resolves its legacy log reference without changing stored bytes',()=>{
+ const {home,env,layout}=fixture();const old=join(home,'.olympus/logs/dropbox.personal.2026-10-14T00-00-00Z.log');
+ const target=join(layout.configDir,'logs',old.split('/').pop()!);mkdirSync(join(layout.configDir,'logs'),{mode:0o700});writeFileSync(target,'synthetic',{mode:0o600});
+ mkdirSync(join(layout.configDir,'pending-oauth'),{mode:0o700});const path=join(layout.configDir,'pending-oauth/dropbox.personal.json');
+ const text=JSON.stringify({source:'dropbox',accountRole:'personal',status:'died',startedAt:'2026-10-14T00:00:00Z',expiresAt:'2026-10-14T01:00:00Z',logPath:old});writeFileSync(path,text,{mode:0o600});
+ const state=probe(env,`const {readDetachedOAuthState}=await import('./src/core/connect.ts');console.log(JSON.stringify(readDetachedOAuthState(${JSON.stringify(path)})));`);
+ expect(state.logPath).toBe(target);expect(readFileSync(path,'utf8')).toBe(text);
+},15_000);
