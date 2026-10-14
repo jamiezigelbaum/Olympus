@@ -119247,6 +119247,9 @@ function renderOutsideHelpCard(status, input) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
+  const missingRoute = !unavailable2 && route.state === "not_configured";
+  if (missingRoute)
+    parts.push(renderProblems(status, access));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
@@ -119257,7 +119260,8 @@ function renderOutsideHelpCard(status, input) {
     const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
     return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
   }
-  parts.push(renderProblems(status, access));
+  if (!missingRoute)
+    parts.push(renderProblems(status, access));
   if (route.state === "configured" && !route.acknowledgements.complete)
     parts.push(renderStatementsToAccept(access));
   const more = [];
@@ -125203,7 +125207,7 @@ var init_agents = __esm(() => {
       id: "chatgpt",
       label: "ChatGPT",
       method: "oauth",
-      add: "In ChatGPT, open Settings, then Apps, and turn on Developer mode under Advanced settings. Then create a connector, name it Olympus, choose OAuth, and paste this address as the URL:",
+      add: "In ChatGPT, open Plugins, choose +, then Add custom MCP server. Name it Olympus, choose OAuth, and paste this address as the URL (if you don't see Add custom MCP server, turn on Developer mode in Settings first):",
       approve: "Choose Create. An Olympus approval page opens.",
       approveViaRelay: "Choose Create. An Olympus page opens in this computer's browser asking to connect ChatGPT to Olympus: choose Connect. Do this in ChatGPT on this computer; the page opens only here.",
       instructionsWhere: "Paste this into a ChatGPT project's instructions, or into your custom instructions.",

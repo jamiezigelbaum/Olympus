@@ -269,6 +269,9 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
 
   // 1. One status line: the switch, and today's count.
   const access: Access = canEdit ? 'edit' : canUnlock ? 'unlock' : 'read';
+  // Adding the missing route is the prerequisite for turning answers on.
+  const missingRoute = !unavailable && route.state === 'not_configured';
+  if (missingRoute) parts.push(renderProblems(status, access));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
   if (unavailable) {
@@ -279,7 +282,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   }
 
   // 2. Problems: one line each, one button each.
-  parts.push(renderProblems(status, access));
+  if (!missingRoute) parts.push(renderProblems(status, access));
 
   // 3. The statements, in full only until accepted.
   if (route.state === 'configured' && !route.acknowledgements.complete) parts.push(renderStatementsToAccept(access));

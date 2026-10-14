@@ -82,7 +82,7 @@ const AGENTS: readonly AgentChoice[] = [
     id: 'chatgpt',
     label: 'ChatGPT',
     method: 'oauth',
-    add: 'In ChatGPT, open Settings, then Apps, and turn on Developer mode under Advanced settings. Then create a connector, name it Olympus, choose OAuth, and paste this address as the URL:',
+    add: 'In ChatGPT, open Plugins, choose +, then Add custom MCP server. Name it Olympus, choose OAuth, and paste this address as the URL (if you don\'t see Add custom MCP server, turn on Developer mode in Settings first):',
     approve: 'Choose Create. An Olympus approval page opens.',
     approveViaRelay: 'Choose Create. An Olympus page opens in this computer\'s browser asking to connect ChatGPT to Olympus: choose Connect. Do this in ChatGPT on this computer; the page opens only here.',
     instructionsWhere: 'Paste this into a ChatGPT project\'s instructions, or into your custom instructions.',

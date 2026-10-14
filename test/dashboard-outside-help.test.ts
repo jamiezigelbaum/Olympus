@@ -361,12 +361,16 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain(`data-outside-state="route_not_configured">${W.state.route_not_configured}<`);
     expect(html).toContain(`data-outside-form="add-route"`);
     expect(html).toContain(W.addRoute);
+    // The prerequisite comes before the disabled switch, with no duplicate box.
+    expect(html.indexOf('data-outside-form="add-route"')).toBeLessThan(html.indexOf('data-outside-form="enable"'));
+    expect(html.match(/data-outside-form="add-route"/g)?.length).toBe(1);
     expect(html).toContain(W.enableBlockedRoute);
     expect(html).toContain(`<button type="button" class="btn primary" disabled aria-disabled="true">${W.turnOn}</button>`);
     // The policy-not-a-file case cannot add it here: it says why, with the steps as its one button.
     const inline = page(status({ route: { state: 'not_configured', policyWritable: false } }));
     expect(inline).not.toContain('data-outside-form="add-route"');
     expect(inline).toContain(W.policyNotFile);
+    expect(inline.indexOf(W.policyNotFile)).toBeLessThan(inline.indexOf('data-outside-form="enable"'));
     expect(inline).toContain(`data-outside-open="steps">${W.showSteps}</button>`);
   });
 
