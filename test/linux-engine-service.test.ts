@@ -281,11 +281,11 @@ for (const failure of ['none', 'link', 'start', 'health', 'parent', 'replacement
  },20_000);
 }
 
-for (const failure of [false, true, 'edited', 'new-rule'] as const) test(`legacy privacy migration ${failure === 'new-rule' ? 'preserves newly created tier rules on recovery' : failure === 'edited' ? 'preserves later owner edits on recovery' : failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
+for (const failure of [false, true, 'edited', 'new-rule', 'first-rule'] as const) test(`legacy privacy migration ${failure === 'first-rule' ? 'preserves the first rule from a previously unused old engine' : failure === 'new-rule' ? 'preserves newly created tier rules on recovery' : failure === 'edited' ? 'preserves later owner edits on recovery' : failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
  const l=layout();publishLinuxEngineReceipt(l);
  const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
  let original=JSON.stringify({schemaVersion:1,description:'Synthetic health preference',rules:[],updatedAt:'2026-10-14T00:00:00Z'});
- writeFileSync(join(legacy,'privacy.json'),original,{mode:0o600});
+ if(failure!=='first-rule')writeFileSync(join(legacy,'privacy.json'),original,{mode:0o600});
  let linked=false,active=false,enabled=false;
  const exec:EngineExec=(command,args)=>{
   if(command==='systemctl'&&args[0]==='--version')return good('systemd 256');
@@ -298,14 +298,14 @@ for (const failure of [false, true, 'edited', 'new-rule'] as const) test(`legacy
  const options={platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home),consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true};
  const result=installEngine(options);
  const target=join(l.configDir,'privacy.json');
- expect(readFileSync(target,'utf8')).toBe(original);expect(statSync(target).mode&0o777).toBe(0o600);
+ if(failure!=='first-rule'){expect(readFileSync(target,'utf8')).toBe(original);expect(statSync(target).mode&0o777).toBe(0o600);}
  expect(existsSync(join(legacy,'privacy.json'))).toBe(false);
  const read=Bun.spawnSync([process.execPath,'-e',`const { readPrivacyProfile } = await import('./src/workers/classification/privacy-profile.ts');console.log(JSON.stringify(readPrivacyProfile()));`],{env:linuxEngineEnvironment(l),stdout:'pipe',stderr:'pipe'});
- expect(read.exitCode).toBe(0);expect(JSON.parse(read.stdout.toString()).description).toBe('Synthetic health preference');
- if(failure==='new-rule'){const {writePrivacyProfile}=await import('../src/workers/classification/privacy-profile.ts');writePrivacyProfile({description:'New rule',rules:[{kind:'sender',source_id:'gmail.email',value:'@example.test'}]},{env:linuxEngineEnvironment(l)});original=readFileSync(target,'utf8');}
+ if(failure!=='first-rule'){expect(read.exitCode).toBe(0);expect(JSON.parse(read.stdout.toString()).description).toBe('Synthetic health preference');}
+ if(failure==='new-rule'||failure==='first-rule'){const {writePrivacyProfile}=await import('../src/workers/classification/privacy-profile.ts');writePrivacyProfile({description:'New rule',rules:[{kind:'sender',source_id:'gmail.email',value:'@example.test'}]},{env:linuxEngineEnvironment(l)});original=readFileSync(target,'utf8');}
  if(failure==='edited'){original=JSON.stringify({schemaVersion:1,description:'Updated synthetic preference',rules:[]});writeFileSync(target,original,{mode:0o600});}
  await settleLinuxEngineInstall(options,{ok:!failure,expected_build:result.program.build??null,running_build:result.program.build??null,pid:42,worker:'ok',waited_ms:0});
- if(failure==='new-rule'){expect(existsSync(join(legacy,'tier-rules.json'))).toBe(true);expect(existsSync(join(l.configDir,'tier-rules.json'))).toBe(false);}
+ if(failure==='new-rule'||failure==='first-rule'){expect(existsSync(join(legacy,'tier-rules.json'))).toBe(true);expect(existsSync(join(l.configDir,'tier-rules.json'))).toBe(false);}
  if(failure){expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe(original);expect(existsSync(target)).toBe(false);}
  else{expect(readFileSync(target,'utf8')).toBe(original);expect(existsSync(legacy)).toBe(false);}
 },30_000);

@@ -537,8 +537,18 @@ function legacyOAuthWriterRunning(layout: LinuxEngineLayout, name: string): bool
  if(!Number.isSafeInteger(pid)||pid!<=0)throw new Error('A pending legacy sign-in has no writer identity. Back up its state before retrying the upgrade. Nothing was changed.');
  try { process.kill(pid!,0);return true; } catch(error) { if((error as NodeJS.ErrnoException).code==='ESRCH')return false;throw error; }
 }
+function priorEngineUsesLegacySettings(layout: LinuxEngineLayout, receiptState = readLinuxEngineReceipt(layout.receiptPath)?.installationState): boolean {
+ const prior=currentProgram(layout);
+ if(prior){const manifest=JSON.parse(readFileSync(join(prior.workingDirectory,'package.json'),'utf8'));return manifest.olympus?.linuxSettingsLayout!=='receipt-v1';}
+ // An installed receipt with no generation marker cannot prove modern readers.
+ return receiptState==='installed';
+}
 function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
  const files=legacyLinuxSettings(layout);
+ if(priorEngineUsesLegacySettings(layout)){
+  for(const name of LEGACY_LINUX_POLICY_FILES){const target=legacySettingTarget(layout,name);assertLinuxManagedPath(target);
+   if(lstatSync(target,{throwIfNoEntry:false}))throw new Error(`Legacy-reader settings conflict at ${target}; nothing was migrated.`);}
+ }
  for(const name of files){
   if(legacyOAuthWriterRunning(layout,name))throw new Error('Finish or cancel the running Olympus sign-in before upgrading. Nothing was changed.');
   const target=legacySettingTarget(layout,name);assertLinuxManagedPath(target);
@@ -547,7 +557,10 @@ function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
 }
 /** Called only after the old engine releases custody. Journal every byte before moving any. */
 function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
- const files=assertLegacySettingDestinations(layout); if(!files.length)return;
+ const files=assertLegacySettingDestinations(layout);
+ const receiptText=snapshotText(transaction.before.receipt);
+ const legacyReader=priorEngineUsesLegacySettings(layout,receiptText?JSON.parse(receiptText).installationState:undefined);
+ if(!files.length&&!legacyReader)return;
  const snapshots:Record<string,LinuxFileSnapshot>={};
  const tracked=[...files,...LEGACY_LINUX_POLICY_FILES.filter(name=>!files.includes(name)&&!existsSync(legacySettingTarget(layout,name)))];
  for(const [index,name] of tracked.entries()){
