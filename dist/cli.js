@@ -969,7 +969,7 @@ var init_source_corpus_registry = __esm(() => {
       provider: "google_drive",
       family: "file",
       trustDomain: "secure_local",
-      activationMode: "lexical_only",
+      activationMode: "hybrid_shadow",
       capabilities: ["answer", "status", "sync", "search"],
       description: "Secure-local Google Drive/Docs items raised by per-item sensitivity classification."
     },
