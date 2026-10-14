@@ -571,7 +571,7 @@ function assertLegacySettingDestinations(layout: LinuxEngineLayout): string[] {
  return files;
 }
 /** Called only after the old engine releases custody. Journal every byte before moving any. */
-function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
+function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction, options: EngineServiceOptions): void {
  const files=assertLegacySettingDestinations(layout);
  const receiptText=snapshotText(transaction.before.receipt);
  const legacyReader=priorEngineUsesLegacySettings(layout,receiptText?JSON.parse(receiptText).installationState:undefined);
@@ -592,13 +592,33 @@ function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInst
   const fd=openSync(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
   try { writeFileSync(fd,snapshotBytes(snapshots[name]!)!);fsyncSync(fd); } finally { closeSync(fd); }
   // link is an atomic no-replace publication on this filesystem, unlike copyFile.
-  linkSync(temporary,target);syncDirectorySync(dirname(target));removeFileDurablySync(temporary);removeFileDurablySync(source);
+  linkSync(temporary,target);syncDirectorySync(dirname(target));lifecycleCheckpoint(options,'legacy_setting_published');removeFileDurablySync(temporary);removeFileDurablySync(source);
  }
 }
 function legacyMigrationTemporary(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction, name: string): string {
  return `${legacySettingTarget(layout,name)}.${basename(transaction.backupDir)}.migration`;
 }
+function recoverLegacyMigrationTemporary(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction, name: string, original: LinuxFileSnapshot): void {
+ const temporary=legacyMigrationTemporary(layout,transaction,name),target=legacySettingTarget(layout,name);
+ assertLinuxManagedPath(temporary);
+ const temp=lstatSync(temporary,{throwIfNoEntry:false});
+ if(!temp)return;
+ assertLinuxManagedPath(target);
+ const published=lstatSync(target,{throwIfNoEntry:false});
+ if(published){
+  if(!published.isFile()||temp.dev!==published.dev||temp.ino!==published.ino||temp.nlink!==2||published.nlink!==2)
+   throw new Error(`Migration temporary identity changed at ${temporary}; retained for recovery.`);
+  // Publication is durable, but the process may have died before unlinking
+  // its temporary. Remove only that verified second link before hashFile.
+  removeFileDurablySync(temporary);
+  if(hashFile(target)!==original.sha256)throw new Error(`Migrated settings changed at ${target}; retained for recovery.`);
+ } else {
+  if(hashFile(temporary)!==original.sha256)throw new Error(`Migration temporary changed at ${temporary}; retained for recovery.`);
+  removeFileDurablySync(temporary);
+ }
+}
 function restoreLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
+ for(const [name,original] of Object.entries(transaction.legacySettings??{}))recoverLegacyMigrationTemporary(layout,transaction,name,original);
  // The engine has released custody. Preserve later owner edits in an immutable
  // second snapshot set before restoring any file. Replays use that same set.
  if(transaction.legacySettings && !transaction.legacyRestoreSettings){
@@ -820,7 +840,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    removeReleasedWorkerSocket(l,before,inspectSystemdEngine(l,exec),options);
    transaction.phase='activating'; writeInstallTransaction(l,transaction);
    lifecycleCheckpoint(options,'activating_published');
-   migrateLegacySettings(l,transaction);
+   migrateLegacySettings(l,transaction,options);
    selectLinuxSecretBackend({encryptedFilePath:l.secretsPath,keyFilePath:l.secretsKeyPath,backendFilePath:join(l.configDir,'secret-backend.json')},
     (options.env ?? process.env).OLYMPUS_SECRET_STORE_BACKEND?.trim() || 'auto');
    for(const path of [paths.logPath,paths.errorLogPath]) { assertLinuxManagedPath(path); if(!existsSync(path)) writePrivateFileAtomicSync(path,''); }

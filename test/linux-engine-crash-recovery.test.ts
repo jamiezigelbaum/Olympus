@@ -74,3 +74,14 @@ test.skipIf(process.platform!=='linux')('legacy recovery leaves unrelated deskto
  const receipt=JSON.parse(readFileSync(join(root,'config/olympus/install-receipt.json'),'utf8'));
  expect(receipt.machineArtifacts.some((item:any)=>[desktop,icon].includes(item.path))).toBe(false);
 });
+
+test.skipIf(process.platform!=='linux')('recovery removes the published migration hardlink before hashing, twice',()=>{
+ const root=mkdtempSync(join(tmpdir(),'linux-migration-crash-'));roots.push(root);
+ expect(run(root,'install').status).toBe(0);
+ const legacy=join(root,'home/.olympus');mkdirSync(legacy,{mode:0o700});writeFileSync(join(legacy,'privacy.json'),'synthetic',{mode:0o600});
+ const crashed=run(root,'install','legacy_setting_published','2.0.0');expect({status:crashed.status,signal:crashed.signal,stderr:crashed.stderr}).toMatchObject({status:null,signal:'SIGKILL'});
+ for(let pass=0;pass<2;pass++){const recovered=run(root,'recover');expect({pass,status:recovered.status,stderr:recovered.stderr}).toEqual({pass,status:0,stderr:''});}
+ expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe('synthetic');
+ expect(existsSync(join(root,'config/olympus/privacy.json'))).toBe(false);
+ expect(readdirSync(join(root,'config/olympus')).some(name=>name.endsWith('.migration'))).toBe(false);
+},30_000);
