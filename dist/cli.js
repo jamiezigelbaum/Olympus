@@ -32481,6 +32481,8 @@ var init_local_index = __esm(() => {
           if (strippedMedia)
             this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
         }
+        if (!namesOnly && options.sourceTextCurrent)
+          this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
         const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
         const provider = namesOnly ? undefined : options.vectorProvider;
@@ -32794,7 +32796,7 @@ var init_local_index = __esm(() => {
       return stripped;
     }
     copyContentState(identity) {
-      const row = this.db.query(`SELECT
+      const row = this.db.query(`SELECT i.source_version, i.content_hash, i.updated_at,
       (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
       (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
       (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
@@ -32806,7 +32808,10 @@ var init_local_index = __esm(() => {
         vectors: row.vectors,
         versions: row.versions,
         currentText: row.current_text === 1,
-        names: row.names === 1
+        names: row.names === 1,
+        sourceVersion: row.source_version,
+        contentHash: row.content_hash,
+        updatedAt: row.updated_at
       } : undefined;
     }
     withItemCopyWriteFence(identity, work) {
@@ -37661,6 +37666,27 @@ function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
 async function moveTieredItem(options) {
+  const target = options.decision ?? options.target;
+  if (target?.contentTier === "secrets" || target?.metadataTier === "secrets") {
+    const record = options.set.ledger.getCurrent(options.identity);
+    if (!record || !record.routed)
+      throw new Error("Only a routed item can move; adopt a legacy placement first.");
+    if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration)
+      throw new TierLedgerGenerationConflictError;
+    return moveToSecrets(options, record.generation);
+  }
+  const result = moveTieredItemNow(options);
+  await flushTierMoveNotes(options.set.ledger);
+  return result;
+}
+function promoteLowerTierContent(options, source) {
+  const record = options.set.ledger.getCurrent(options.identity);
+  if (!record || record.state === "moving" || record.contentTier !== "secure" || record.metadataTier === "secrets" || source.trustDomain === "secure_local") {
+    throw new TierMoveRefusedError("Only a settled Private placement can repair lower content.");
+  }
+  return moveTieredItemNow({ ...options, target: { metadataTier: record.metadataTier, contentTier: record.contentTier } }, source);
+}
+function moveTieredItemNow(options, repairSource) {
   const { set, identity, decision } = options;
   const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
   if (!target)
@@ -37674,7 +37700,7 @@ async function moveTieredItem(options) {
     throw new TierLedgerGenerationConflictError;
   }
   if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
-    return moveToSecrets(options, record.generation);
+    throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
   }
   const receiptKey = purgeReceiptKey(identity);
   const receiptToResume = readVerifiedMove(ledger, identity);
@@ -37683,7 +37709,6 @@ async function moveTieredItem(options) {
     if (receipt2.generation !== record.generation || receipt2.target.metadataTier !== target.metadataTier || receipt2.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
     const result2 = finishVerifiedMove(options, receipt2);
-    await flushTierMoveNotes(ledger);
     return result2;
   }
   const ownerOverride = !decision && record.decidedBy === "override";
@@ -37700,7 +37725,12 @@ async function moveTieredItem(options) {
   const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
   if (sources.length === 0)
     throw new Error("The item has no copy to move from.");
-  const raise = placementIsRaise(sources, placement.copies);
+  if (repairSource && !sources.some((copy) => copy.corpusId === repairSource.corpusId))
+    sources.push(repairSource);
+  if (repairSource && placement.copies.some((copy) => copy.trustDomain !== "secure_local" && !sources.some((source) => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
+    throw new TierMoveRefusedError("Repair cannot write a lower destination.");
+  }
+  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
   const exports = new Map;
   const exportFrom = (copy) => {
     if (!exports.has(copy.corpusId)) {
@@ -37709,7 +37739,7 @@ async function moveTieredItem(options) {
     }
     return exports.get(copy.corpusId);
   };
-  const contentSource = copyServingLayer(sources, "content");
+  const contentSource = repairSource ?? copyServingLayer(sources, "content");
   const contentDestination = copyServingLayer(placement.copies, "content");
   if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
     const exported = exportFrom(contentSource);
@@ -37783,7 +37813,7 @@ async function moveTieredItem(options) {
       }
       for (const planned of placement.copies) {
         const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
-        if (kept2 && layersCover(kept2.layers, planned.layers)) {
+        if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
           const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
           destinations.push({
             corpusId: planned.corpusId,
@@ -37798,7 +37828,7 @@ async function moveTieredItem(options) {
           continue;
         }
         const wantsContent = planned.layers !== "metadata";
-        const from = copyServingLayer(sources, wantsContent ? "content" : "metadata") ?? sources[0];
+        const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
         const exported = exportFrom(from);
         if (!exported)
           throw new Error("The source store no longer holds an active copy of the item.");
@@ -37810,6 +37840,7 @@ async function moveTieredItem(options) {
           trustTier: defaultStoreTrustTier(planned.trustDomain),
           syncConnectorId: TIER_MOVE_CONNECTOR_ID,
           layers: planned.layers,
+          ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
           ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
         });
         destinations.push({
@@ -37859,7 +37890,6 @@ async function moveTieredItem(options) {
   options.beforeFlip?.();
   options.afterVerified?.();
   const result = finishVerifiedMove(options, receipt);
-  await flushTierMoveNotes(ledger);
   return result;
 }
 function resumeVerifiedTierMove(set, identity, embeddingLedger) {
@@ -38169,18 +38199,68 @@ function purgeLowerTierContent(set, options = {}) {
       const destination = set.store(content.trustDomain);
       if (!destination || destination.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
         throw new Error("Destination unavailable.");
-      destination.withItemCopyWriteFence(identity, () => {
-        const proof = destination.copyContentState(identity);
-        for (const copy of lower) {
+      const purgedCopies = [];
+      const withLowerLocks = (index) => {
+        const copy = lower[index];
+        if (copy) {
           const store = set.store(copy.trustDomain);
           if (!store || store.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
             throw new Error("Lower store unavailable.");
-          store.withItemCopyWriteFence(identity, () => {
+          return store.withItemCopyWriteFence(identity, () => withLowerLocks(index + 1));
+        }
+        destination.withItemCopyWriteFence(identity, () => {
+          const proof = destination.copyContentState(identity);
+          const heldCopies = lower.flatMap((copy2) => {
+            const store = set.store(copy2.trustDomain);
             const held = store.copyContentState(identity);
-            const keepMetadata = !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain);
-            const hasBody = !!held && held.chunks + held.vectors + held.versions > 0;
-            if (!held || !hasBody && (keepMetadata || !held.names))
-              return;
+            return held ? [{ copy: copy2, store, held }] : [];
+          });
+          if (!proof)
+            throw new Error("Destination disappeared.");
+          let newest = { copy: content, held: proof };
+          for (const candidate of heldCopies) {
+            if (candidate.held.chunks === 0)
+              continue;
+            if (!proof.chunks || !proof.currentText)
+              throw new Error("Destination content is missing or stale.");
+            const order = compareContentVersions(candidate.held, newest.held);
+            if (order === undefined)
+              throw new Error("Copy freshness cannot be proven.");
+            if (order > 0)
+              newest = candidate;
+          }
+          for (const candidate of heldCopies) {
+            if (candidate.held.chunks === 0)
+              continue;
+            const order = compareContentVersions(newest.held, candidate.held);
+            if (order === undefined || order < 0)
+              throw new Error("Copy freshness cannot be proven.");
+          }
+          if (newest.copy.corpusId !== content.corpusId) {
+            if (!newest.held.currentText)
+              throw new Error("Lower content is stale.");
+            const payload2 = set.store(newest.copy.trustDomain).exportItemCopy(identity);
+            if (!payload2)
+              throw new Error("Lower content disappeared.");
+            options.beforeDelete?.();
+            set.ledger.withGenerationFence(identity, record.generation, () => {
+              promoteLowerTierContent({
+                set,
+                identity: payload2.identity,
+                expectedGeneration: record.generation,
+                embeddingLedger: note
+              }, newest.copy);
+            });
+            for (const { copy: copy2, held } of heldCopies) {
+              purgedCopies.push({ corpusId: copy2.corpusId, chunks: held.chunks });
+            }
+            return;
+          }
+          for (const { copy: copy2, store, held } of heldCopies) {
+            const keepMetadata = !!metadata && trustDomainRank(copy2.trustDomain) >= trustDomainRank(metadata.trustDomain);
+            const hasBody = held.chunks + held.vectors + held.versions > 0;
+            if (!hasBody && (keepMetadata || !held.names))
+              continue;
             if (hasBody && (!proof || proof.chunks === 0 || !proof.currentText))
               throw new Error("Destination content is missing or stale.");
             if (!proof)
@@ -38192,26 +38272,30 @@ function purgeLowerTierContent(set, options = {}) {
                 throw new Error("Placement changed.");
               const chunks = store.stripCopyContent(identity, { keepMetadata });
               set.ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(current2.generation));
-              const entryId = `tier-content-repair:${set.ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${current2.generation}:${copy.corpusId}`;
+              const entryId = `tier-content-repair:${set.ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${current2.generation}:${copy2.corpusId}`;
               set.ledger.writeMeta(`tier-move-note:${entryId}`, JSON.stringify({ path: note.path, entry: {
                 entry_id: entryId,
                 recorded_at: new Date().toISOString(),
                 kind: "note",
-                what: `Verified current content in ${content.corpusId}; removed ${chunks} lower-tier chunk(s), their vectors and text-version remnants from ${copy.corpusId}.`,
-                scope: { corpora: [content.corpusId, copy.corpusId], chunks: { [copy.corpusId]: chunks } },
+                what: `Verified current content in ${content.corpusId}; removed ${chunks} lower-tier chunk(s), their vectors and text-version remnants from ${copy2.corpusId}.`,
+                scope: { corpora: [content.corpusId, copy2.corpusId], chunks: { [copy2.corpusId]: chunks } },
                 approved_by: note.approvedBy,
                 ...note.why ? { why: note.why } : {},
                 status: "complete"
               } }));
-              report.purged++;
-              const count = counts.get(copy.corpusId) ?? { copies: 0, chunks: 0 };
-              count.copies++;
-              count.chunks += chunks;
-              counts.set(copy.corpusId, count);
+              purgedCopies.push({ corpusId: copy2.corpusId, chunks });
             });
-          });
-        }
-      });
+          }
+        });
+      };
+      withLowerLocks(0);
+      for (const { corpusId, chunks } of purgedCopies) {
+        report.purged++;
+        const count = counts.get(corpusId) ?? { copies: 0, chunks: 0 };
+        count.copies++;
+        count.chunks += chunks;
+        counts.set(corpusId, count);
+      }
     } catch {
       report.failed++;
     }
@@ -38235,6 +38319,15 @@ function purgeLowerTierContent(set, options = {}) {
   for (const [corpus, count] of counts)
     options.log?.(corpus, count.copies, count.chunks);
   return report;
+}
+function compareContentVersions(a, b) {
+  if (a.sourceVersion === b.sourceVersion && a.contentHash !== null && a.contentHash === b.contentHash)
+    return 0;
+  const aTime = a.updatedAt ? Date.parse(a.updatedAt) : NaN;
+  const bTime = b.updatedAt ? Date.parse(b.updatedAt) : NaN;
+  if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime)
+    return Math.sign(aTime - bTime);
+  return;
 }
 var CURSOR = "lower-content-purge-cursor-v2", DONE = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", LOWER_CONTENT_PURGE_BATCH = 200;
 var init_tier_content_purge = __esm(() => {
@@ -61639,12 +61732,11 @@ class EmailClient {
     const ticket = data2._release_ticket;
     delete data2._release_ticket;
     const result = parseSourceIndexAnswerResult(data2);
-    if (options.caller?.surface === "mcp") {
-      if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
-        sourceAnswerTickets.set(result, ticket);
-      return await this.revalidateSourceAnswer(result);
-    }
-    return result;
+    if (options.caller?.surface === "remote")
+      return result;
+    if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
+      sourceAnswerTickets.set(result, ticket);
+    return await this.revalidateSourceAnswer(result);
   }
   async revalidateSourceAnswer(result) {
     if (!result || typeof result !== "object" || typeof result.answer !== "string")
@@ -129248,7 +129340,7 @@ function createEmailSourceWorker(options = {}) {
                 recordReleaseManifest(manifest2);
               assertNoRawEmailFields(result);
               let releaseTicket;
-              if (caller?.surface === "mcp") {
+              if (caller?.surface !== "remote") {
                 pruneReleaseTickets();
                 releaseTicket = randomBytes24(32).toString("base64url");
                 releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60000, manifests: manifests.manifests });

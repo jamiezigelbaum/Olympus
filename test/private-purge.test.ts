@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -444,4 +445,61 @@ test('failed receipts rotate without starving a later valid receipt or historica
   expect(f.ledger.getCurrent(x.identity)?.state).toBe('current');
   expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
   expect(f.ledger.metaEntries('tier-move-verified:')).toHaveLength(205); // failed obligations retained
+});
+
+
+test.each(['equal', 'lower-newer', 'destination-newer', 'unknown', 'copy-failure', 'commit-failure'] as const)('historical repair compares source fingerprints before destruction (%s)', async variant => {
+  const x = await fixture(); const f = x.f;
+  const lower = f.stores.internal!;
+  const initial = lower.exportItemCopy(x.identity)!;
+  const old = { ...initial, columns: { ...initial.columns, updated_at: '2026-10-01T00:00:00Z' } };
+  lower.importItemCopy(old, { trustTier: 'S3', syncConnectorId: 'old', layers: 'both' });
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  const newerText = 'Newer synthetic source body must survive repair.';
+  const hash = createHash('sha256').update(newerText).digest('hex');
+  const newer = { ...old, identity: { ...old.identity, sourceVersion: 'opaque-next' },
+    columns: { ...old.columns, source_version: 'opaque-next', content_hash: hash,
+      updated_at: variant === 'unknown' ? null : '2026-10-02T00:00:00Z' },
+    chunks: [{ ...old.chunks[0]!, boundedText: newerText, contentHash: hash, embeddingInputHash: hash }], vectors: [], vectorAuthorities: [] };
+  lower.importItemCopy(['lower-newer', 'unknown', 'copy-failure', 'commit-failure'].includes(variant) ? newer : old,
+    { trustTier: 'S3', syncConnectorId: 'old-unfenced-write', layers: 'both' });
+  const destination = f.stores.secure_local!;
+  if (variant === 'destination-newer') destination.importItemCopy(newer, { trustTier: 'S4', syncConnectorId: 'current', layers: 'both', sourceTextCurrent: true });
+  if (variant === 'copy-failure') destination.importItemCopy = () => { throw new Error('disk full'); };
+  const fence = destination.withItemCopyWriteFence.bind(destination);
+  if (variant === 'commit-failure') {
+    let depth = 0;
+    destination.withItemCopyWriteFence = (identity, work) => {
+      const outermost = depth++ === 0;
+      try {
+        return fence(identity, () => {
+          const result = work();
+          // All nested move work finished, but Private has not committed yet.
+          if (outermost) throw new Error('Private commit failed');
+          return result;
+        });
+      } finally { depth--; }
+    };
+  }
+  // Repair must never re-import into Personal, even its names-only placement.
+  lower.importItemCopy = () => { throw new Error('repair wrote to Personal'); };
+  const report = purgeLowerTierContent(f.set, { embeddingLedger: { path: `${f.dir}/repair-notes.jsonl`, approvedBy: 'system-automatic' } });
+  if (variant === 'unknown' || variant === 'copy-failure' || variant === 'commit-failure') {
+    expect(report.failed).toBe(1);
+    expect(contentCounts(f.paths.internal).chunks).toBe(1);
+    expect(destination.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+    expect(f.ledger.getCurrent(x.identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    if (variant === 'commit-failure') {
+      expect(report.purged).toBe(0);
+      destination.withItemCopyWriteFence = fence;
+      expect(purgeLowerTierContent(f.set).failed).toBe(0);
+      expect(contentCounts(f.paths.internal)).toEqual(empty);
+      expect(destination.localContent(localId('mail'))?.chunks.join('')).toBe(newerText);
+    }
+  } else {
+    expect(report).toMatchObject({ purged: 1, failed: 0 });
+    expect(contentCounts(f.paths.internal)).toEqual(empty);
+    expect(destination.localContent(localId('mail'))?.chunks.join('')).toBe(variant === 'equal' ? body : newerText);
+    expect(f.ledger.getCurrent(x.identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+  }
 });

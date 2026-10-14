@@ -1,7 +1,8 @@
 // Upgrade repair: ledger identities are the work list, never scans of item rows.
 import { copyServingLayer, trustDomainRank, tierLedgerIdentityKey, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { resumeVerifiedTierMove, type TierMoveOptions } from './tier-move.ts';
+import { promoteLowerTierContent, resumeVerifiedTierMove, type TierMoveOptions } from './tier-move.ts';
+import type { LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 const CURSOR = 'lower-content-purge-cursor-v2';
@@ -73,18 +74,58 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
       if (!lower.length) continue;
       const destination = set.store(content.trustDomain);
       if (!destination || destination.tierSetBinding()?.ledgerId !== set.ledger.ledgerId()) throw new Error('Destination unavailable.');
-      destination.withItemCopyWriteFence(identity, () => {
-        // Query counts/version state once, under the destination lock. Never
-        // hold the ledger writer across exports or store-content proof reads.
-        const proof = destination.copyContentState(identity);
-        for (const copy of lower) {
+      const purgedCopies: Array<{ corpusId: string; chunks: number }> = [];
+      // Lower transactions must commit LAST. In particular a promoted Private
+      // body must be durable before any lower body can disappear on disk.
+      const withLowerLocks = (index: number): void => {
+        const copy = lower[index];
+        if (copy) {
           const store = set.store(copy.trustDomain);
           if (!store || store.tierSetBinding()?.ledgerId !== set.ledger.ledgerId()) throw new Error('Lower store unavailable.');
-          store.withItemCopyWriteFence(identity, () => {
+          return store.withItemCopyWriteFence(identity, () => withLowerLocks(index + 1));
+        }
+        destination.withItemCopyWriteFence(identity, () => {
+          // Proof reads precede the ledger writer, with every store held.
+          const proof = destination.copyContentState(identity);
+          const heldCopies = lower.flatMap(copy => {
+            const store = set.store(copy.trustDomain)!;
             const held = store.copyContentState(identity);
+            return held ? [{ copy, store, held }] : [];
+          });
+          if (!proof) throw new Error('Destination disappeared.');
+          let newest = { copy: content, held: proof };
+          for (const candidate of heldCopies) {
+            if (candidate.held.chunks === 0) continue;
+            if (!proof.chunks || !proof.currentText) throw new Error('Destination content is missing or stale.');
+            const order = compareContentVersions(candidate.held, newest.held);
+            if (order === undefined) throw new Error('Copy freshness cannot be proven.');
+            if (order > 0) newest = candidate;
+          }
+          // Check EVERY lower copy against the winner before the normal move
+          // purges them all. An opaque version is never ordered lexically.
+          for (const candidate of heldCopies) {
+            if (candidate.held.chunks === 0) continue;
+            const order = compareContentVersions(newest.held, candidate.held);
+            if (order === undefined || order < 0) throw new Error('Copy freshness cannot be proven.');
+          }
+          if (newest.copy.corpusId !== content.corpusId) {
+            if (!newest.held.currentText) throw new Error('Lower content is stale.');
+            const payload = set.store(newest.copy.trustDomain)!.exportItemCopy(identity);
+            if (!payload) throw new Error('Lower content disappeared.');
+            options.beforeDelete?.();
+            set.ledger.withGenerationFence(identity, record.generation, () => {
+              promoteLowerTierContent({ set, identity: payload.identity, expectedGeneration: record.generation,
+                embeddingLedger: note }, newest.copy);
+            });
+            for (const { copy, held } of heldCopies) {
+              purgedCopies.push({ corpusId: copy.corpusId, chunks: held.chunks });
+            }
+            return;
+          }
+          for (const { copy, store, held } of heldCopies) {
             const keepMetadata = !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain);
-            const hasBody = !!held && held.chunks + held.vectors + held.versions > 0;
-            if (!held || (!hasBody && (keepMetadata || !held.names))) return;
+            const hasBody = held.chunks + held.vectors + held.versions > 0;
+            if (!hasBody && (keepMetadata || !held.names)) continue;
             // A destination row alone is not a content receipt. Stale text or
             // an empty destination cannot authorize destruction of a body.
             if (hasBody && (!proof || proof.chunks === 0 || !proof.currentText)) throw new Error('Destination content is missing or stale.');
@@ -102,14 +143,18 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
                 scope: { corpora: [content.corpusId, copy.corpusId], chunks: { [copy.corpusId]: chunks } },
                 approved_by: note.approvedBy, ...(note.why ? { why: note.why } : {}), status: 'complete',
               } }));
-              report.purged++;
-              const count = counts.get(copy.corpusId) ?? { copies: 0, chunks: 0 };
-              count.copies++; count.chunks += chunks;
-              counts.set(copy.corpusId, count);
+              purgedCopies.push({ corpusId: copy.corpusId, chunks });
             });
-          });
-        }
-      });
+          }
+        });
+      };
+      withLowerLocks(0);
+      // Count only committed deletions, including when a store commit fails.
+      for (const { corpusId, chunks } of purgedCopies) {
+        report.purged++;
+        const count = counts.get(corpusId) ?? { copies: 0, chunks: 0 };
+        count.copies++; count.chunks += chunks; counts.set(corpusId, count);
+      }
     } catch { report.failed++; }
   }
   if (report.failed) set.ledger.writeMeta(FAILED, '1');
@@ -127,4 +172,16 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
   }
   for (const [corpus, count] of counts) options.log?.(corpus, count.copies, count.chunks);
   return report;
+}
+
+// Source update times can order different opaque versions; fetch/index times
+// cannot. Without an equal source fingerprint or a strict source-time order,
+// retain both bodies for a later repair rather than guessing which to destroy.
+type ContentState = NonNullable<ReturnType<LocalConnectorStore['copyContentState']>>;
+function compareContentVersions(a: ContentState, b: ContentState): number | undefined {
+  if (a.sourceVersion === b.sourceVersion && a.contentHash !== null && a.contentHash === b.contentHash) return 0;
+  const aTime = a.updatedAt ? Date.parse(a.updatedAt) : NaN;
+  const bTime = b.updatedAt ? Date.parse(b.updatedAt) : NaN;
+  if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) return Math.sign(aTime - bTime);
+  return undefined;
 }

@@ -329,7 +329,9 @@ describe('EmailClient', () => {
       config,
       new DirectHttpEmailTransport(async (input, init) => {
         requests.push(new Request(input, init));
+        if (String(input).endsWith('/source/answer/release')) return jsonResponse({ allowed: true });
         return jsonResponse({
+          _release_ticket: 'a'.repeat(43),
           answer: 'I found 1 safe source result with provenance.',
           evidence: [{
             corpus_id: 'internal.drive.docs',
@@ -546,7 +548,8 @@ describe('EmailClient', () => {
     for (const variant of variants) {
       const client = new EmailClient(
         config,
-        new DirectHttpEmailTransport(async () => jsonResponse(sourceAnswerPayload({
+        new DirectHttpEmailTransport(async (input) => String(input).endsWith('/source/answer/release')
+          ? jsonResponse({ allowed: true }) : jsonResponse(sourceAnswerPayload({
           self_heal: {
             attempted: true,
             outcome: variant.outcome,
@@ -1370,6 +1373,7 @@ function jsonResponse(value: unknown): Response {
 
 function sourceAnswerPayload(audit: { self_heal?: unknown } = {}) {
   return {
+    _release_ticket: 'a'.repeat(43),
     answer: 'Safe answer.',
     evidence: [],
     audit: {

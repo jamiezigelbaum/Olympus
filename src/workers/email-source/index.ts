@@ -1025,7 +1025,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               for (const manifest of manifests.manifests) recordReleaseManifest(manifest);
               assertNoRawEmailFields(result);
               let releaseTicket: string | undefined;
-              if (caller?.surface === 'mcp') {
+              if (caller?.surface !== 'remote') {
                 pruneReleaseTickets();
                 releaseTicket = randomBytes(32).toString('base64url');
                 releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests });

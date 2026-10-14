@@ -25,7 +25,7 @@ function mutableTier() {
   return { check, promote: () => { privateNow = true; } };
 }
 
-function pipeline(tier: ReturnType<typeof mutableTier>, promoteOnHydration = false, failFirst = false) {
+function pipeline(tier: ReturnType<typeof mutableTier>, promoteOnHydration = false, failFirst = false, promoteDuringInference = false) {
   let calls = 0;
   const identity = { family: 'email' as const, provider: 'gmail', accountScope: input.accountScope, providerItemId: input.providerItemId, localItemId: 'message-1' };
   const handler = createAnalystSourceIndexAnswerHandler({
@@ -33,6 +33,7 @@ function pipeline(tier: ReturnType<typeof mutableTier>, promoteOnHydration = fal
     analyst: { async analyze(pack) {
       calls++;
       if (failFirst && calls === 1) { tier.promote(); throw new Error('first leg failed'); }
+      if (promoteDuringInference) tier.promote();
       return { answer: SENTINEL, citations: [{ provenance: pack.candidates[0]!.provenance, claim: SENTINEL }], unanswered: [] };
     } },
     lanes: () => ({
@@ -58,6 +59,27 @@ test('unchanged Personal packs still dispatch and answer', async () => {
   const source = pipeline(mutableTier());
   expect((await source.handler.answer({ question: 'What is in the message?' })).answer).toBe(SENTINEL);
   expect(source.calls()).toBe(1);
+});
+
+test.each(['native', 'cli'] as const)('%s checks final release after promotion during inference, while unchanged Personal answers return', async surface => {
+  for (const promote of [false, true]) {
+    const tier = mutableTier();
+    tier.check.secureDerivativeDefault = () => 'approval';
+    const source = pipeline(tier, false, false, promote);
+    const worker = createEmailSourceWorker({ sourceAnswer: source.handler, sourceAnswerReleaseCheck: tier.check });
+    const config = defaultConfig();
+    config.email.enabled = true; config.sourceIndex.enabled = true;
+    const email = new EmailClient(config, new DirectHttpEmailTransport((url, init) => worker.fetch(new Request(url, init))));
+    try {
+      const result = await findOperationByName('source_answer')!.handler({ config, email, caller: { surface } } as OperationContext, { question: 'What is in the message?' });
+      expect(source.calls()).toBe(1); // the pre-inference guard allowed Personal
+      if (promote) {
+        expect(result).toEqual({ answer: 'Olympus withheld this answer because an item became Private.', evidence: [] });
+        expect(JSON.stringify(result)).not.toContain(SENTINEL);
+      } else expect((result as { answer: string }).answer).toBe(SENTINEL);
+      expect(JSON.stringify(result)).not.toContain('_release_ticket');
+    } finally { worker.close(); }
+  }
 });
 
 async function cachedJob(jobs: SourceAnswerJobRegistry, owner: string, result: unknown, manifest = false) {

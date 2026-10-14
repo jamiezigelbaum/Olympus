@@ -21275,6 +21275,8 @@ var init_local_index = __esm(() => {
           if (strippedMedia)
             this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
         }
+        if (!namesOnly && options.sourceTextCurrent)
+          this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
         const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
         const provider = namesOnly ? undefined : options.vectorProvider;
@@ -21588,7 +21590,7 @@ var init_local_index = __esm(() => {
       return stripped;
     }
     copyContentState(identity) {
-      const row = this.db.query(`SELECT
+      const row = this.db.query(`SELECT i.source_version, i.content_hash, i.updated_at,
       (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks,
       (SELECT COUNT(*) FROM chunk_embeddings e WHERE e.item_pk = i.item_pk) AS vectors,
       (SELECT COUNT(*) FROM item_text_versions v WHERE v.item_pk = i.item_pk) AS versions,
@@ -21600,7 +21602,10 @@ var init_local_index = __esm(() => {
         vectors: row.vectors,
         versions: row.versions,
         currentText: row.current_text === 1,
-        names: row.names === 1
+        names: row.names === 1,
+        sourceVersion: row.source_version,
+        contentHash: row.content_hash,
+        updatedAt: row.updated_at
       } : undefined;
     }
     withItemCopyWriteFence(identity, work) {
@@ -26449,6 +26454,20 @@ function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
 async function moveTieredItem(options) {
+  const target = options.decision ?? options.target;
+  if (target?.contentTier === "secrets" || target?.metadataTier === "secrets") {
+    const record = options.set.ledger.getCurrent(options.identity);
+    if (!record || !record.routed)
+      throw new Error("Only a routed item can move; adopt a legacy placement first.");
+    if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration)
+      throw new TierLedgerGenerationConflictError;
+    return moveToSecrets(options, record.generation);
+  }
+  const result = moveTieredItemNow(options);
+  await flushTierMoveNotes(options.set.ledger);
+  return result;
+}
+function moveTieredItemNow(options, repairSource) {
   const { set, identity, decision } = options;
   const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
   if (!target)
@@ -26462,7 +26481,7 @@ async function moveTieredItem(options) {
     throw new TierLedgerGenerationConflictError;
   }
   if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
-    return moveToSecrets(options, record.generation);
+    throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
   }
   const receiptKey = purgeReceiptKey(identity);
   const receiptToResume = readVerifiedMove(ledger, identity);
@@ -26471,7 +26490,6 @@ async function moveTieredItem(options) {
     if (receipt2.generation !== record.generation || receipt2.target.metadataTier !== target.metadataTier || receipt2.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
     const result2 = finishVerifiedMove(options, receipt2);
-    await flushTierMoveNotes(ledger);
     return result2;
   }
   const ownerOverride = !decision && record.decidedBy === "override";
@@ -26488,7 +26506,12 @@ async function moveTieredItem(options) {
   const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
   if (sources.length === 0)
     throw new Error("The item has no copy to move from.");
-  const raise = placementIsRaise(sources, placement.copies);
+  if (repairSource && !sources.some((copy) => copy.corpusId === repairSource.corpusId))
+    sources.push(repairSource);
+  if (repairSource && placement.copies.some((copy) => copy.trustDomain !== "secure_local" && !sources.some((source) => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
+    throw new TierMoveRefusedError("Repair cannot write a lower destination.");
+  }
+  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
   const exports = new Map;
   const exportFrom = (copy) => {
     if (!exports.has(copy.corpusId)) {
@@ -26497,7 +26520,7 @@ async function moveTieredItem(options) {
     }
     return exports.get(copy.corpusId);
   };
-  const contentSource = copyServingLayer(sources, "content");
+  const contentSource = repairSource ?? copyServingLayer(sources, "content");
   const contentDestination = copyServingLayer(placement.copies, "content");
   if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
     const exported = exportFrom(contentSource);
@@ -26571,7 +26594,7 @@ async function moveTieredItem(options) {
       }
       for (const planned of placement.copies) {
         const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
-        if (kept2 && layersCover(kept2.layers, planned.layers)) {
+        if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
           const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
           destinations.push({
             corpusId: planned.corpusId,
@@ -26586,7 +26609,7 @@ async function moveTieredItem(options) {
           continue;
         }
         const wantsContent = planned.layers !== "metadata";
-        const from = copyServingLayer(sources, wantsContent ? "content" : "metadata") ?? sources[0];
+        const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
         const exported = exportFrom(from);
         if (!exported)
           throw new Error("The source store no longer holds an active copy of the item.");
@@ -26598,6 +26621,7 @@ async function moveTieredItem(options) {
           trustTier: defaultStoreTrustTier(planned.trustDomain),
           syncConnectorId: TIER_MOVE_CONNECTOR_ID,
           layers: planned.layers,
+          ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
           ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
         });
         destinations.push({
@@ -26647,7 +26671,6 @@ async function moveTieredItem(options) {
   options.beforeFlip?.();
   options.afterVerified?.();
   const result = finishVerifiedMove(options, receipt);
-  await flushTierMoveNotes(ledger);
   return result;
 }
 function resumeVerifiedTierMove(set, identity, embeddingLedger) {

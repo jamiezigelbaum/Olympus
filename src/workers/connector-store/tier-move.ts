@@ -162,6 +162,32 @@ export interface TierMoveResult {
 }
 
 export async function moveTieredItem(options: TierMoveOptions): Promise<TierMoveResult> {
+  const target = options.decision ?? options.target;
+  if (target?.contentTier === 'secrets' || target?.metadataTier === 'secrets') {
+    const record = options.set.ledger.getCurrent(options.identity);
+    if (!record || !record.routed) throw new Error('Only a routed item can move; adopt a legacy placement first.');
+    if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) throw new TierLedgerGenerationConflictError();
+    return moveToSecrets(options, record.generation);
+  }
+  const result = moveTieredItemNow(options);
+  await flushTierMoveNotes(options.set.ledger);
+  return result;
+}
+
+/** Historical repair reuses the normal verified move, without writing any lower store. */
+export function promoteLowerTierContent(
+  options: Pick<TierMoveOptions, 'set' | 'identity' | 'expectedGeneration' | 'embeddingLedger'>,
+  source: TierCopy,
+): TierMoveResult {
+  const record = options.set.ledger.getCurrent(options.identity);
+  if (!record || record.state === 'moving' || record.contentTier !== 'secure'
+    || record.metadataTier === 'secrets' || source.trustDomain === 'secure_local') {
+    throw new TierMoveRefusedError('Only a settled Private placement can repair lower content.');
+  }
+  return moveTieredItemNow({ ...options, target: { metadataTier: record.metadataTier, contentTier: record.contentTier } }, source);
+}
+
+function moveTieredItemNow(options: TierMoveOptions, repairSource?: TierCopy): TierMoveResult {
   const { set, identity, decision } = options;
   const target = decision
     ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier }
@@ -177,7 +203,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   }
 
   if (target.contentTier === 'secrets' || target.metadataTier === 'secrets') {
-    return moveToSecrets(options, record.generation);
+    throw new TierMoveRefusedError('Secrets cannot use the content repair path.');
   }
 
   // Once verified, a retry must never import again from a possibly emptied
@@ -189,7 +215,6 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier
       || receipt.target.contentTier !== target.contentTier) throw new TierLedgerGenerationConflictError();
     const result = finishVerifiedMove(options, receipt);
-    await flushTierMoveNotes(ledger);
     return result;
   }
 
@@ -215,7 +240,12 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   const sources = ledger.copies(identity).filter((copy) => copy.state === 'current'
     || (copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration));
   if (sources.length === 0) throw new Error('The item has no copy to move from.');
-  const raise = placementIsRaise(sources, placement.copies);
+  if (repairSource && !sources.some(copy => copy.corpusId === repairSource.corpusId)) sources.push(repairSource);
+  if (repairSource && placement.copies.some(copy => copy.trustDomain !== 'secure_local'
+    && !sources.some(source => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
+    throw new TierMoveRefusedError('Repair cannot write a lower destination.');
+  }
+  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
   const exports = new Map<string, ConnectorStoreItemCopy | undefined>();
   const exportFrom = (copy: Pick<TierCopy, 'corpusId'>): ConnectorStoreItemCopy | undefined => {
     if (!exports.has(copy.corpusId)) {
@@ -224,7 +254,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     }
     return exports.get(copy.corpusId);
   };
-  const contentSource = copyServingLayer(sources, 'content');
+  const contentSource = repairSource ?? copyServingLayer(sources, 'content');
   const contentDestination = copyServingLayer(placement.copies, 'content');
   if (contentSource && contentDestination
     && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
@@ -313,7 +343,8 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
       }
       for (const planned of placement.copies) {
         const kept = sources.find((source) => source.corpusId === planned.corpusId);
-        if (kept && layersCover(kept.layers, planned.layers)) {
+        if (kept && layersCover(kept.layers, planned.layers)
+          && !(repairSource && planned.layers !== 'metadata')) {
           const keptChunks = planned.layers === 'metadata' ? 0 : (exportFrom(kept)?.chunks.length ?? 0);
           destinations.push({
             corpusId: planned.corpusId,
@@ -328,7 +359,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
           continue;
         }
         const wantsContent = planned.layers !== 'metadata';
-        const from = copyServingLayer(sources, wantsContent ? 'content' : 'metadata') ?? sources[0]!;
+        const from = (wantsContent ? contentSource : copyServingLayer(sources, 'metadata')) ?? sources[0]!;
         const exported = exportFrom(from);
         if (!exported) throw new Error('The source store no longer holds an active copy of the item.');
         const payload: ConnectorStoreItemCopy = wantsContent
@@ -341,6 +372,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
           trustTier: defaultStoreTrustTier(planned.trustDomain),
           syncConnectorId: TIER_MOVE_CONNECTOR_ID,
           layers: planned.layers,
+          ...(repairSource && wantsContent ? { sourceTextCurrent: true } : {}),
           ...(vectorIdentity ? { vectorProvider: vectorIdentity } : {}),
         });
         destinations.push({
@@ -386,7 +418,6 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   options.beforeFlip?.();
   options.afterVerified?.();
   const result = finishVerifiedMove(options, receipt);
-  await flushTierMoveNotes(ledger);
   return result;
 }
 
