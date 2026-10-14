@@ -15,7 +15,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=<name>  that preview state, in one load
 //   /dashboard?keys | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
-//   &waiting=0..9  how many private questions wait (default 2; remembered):
+//   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
 //                the Private answers list and the panel's Needs you line.
 //   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env
 //                picks the Agents fixture.
@@ -727,43 +727,61 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
   };
 }
 
-/** Pretend waiting questions for the Private answers page: invented, never anyone's. */
+/** Synthetic inbox questions: never anyone's source text. */
 const PREVIEW_WAITING = [
-  { id: 'wq_preview_1', question: 'What did the landlord say about the deposit?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false },
-  { id: 'wq_preview_2', question: 'When is my next dentist appointment?', from: 'Grok Bot', askedAt: new Date(NOW.getTime() - 26 * 3_600_000).toISOString(), unchecked: true },
-  { id: 'wq_preview_3', question: 'Which flight did I book for March?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 50 * 60_000).toISOString(), unchecked: false },
+  { id: 'wq_preview_1', question: 'What did the landlord say about the deposit?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 50 * 60_000).toISOString(), unchecked: false, state: 'answered', unread: true, answeredAt: new Date(NOW.getTime() - 49 * 60_000).toISOString() },
+  { id: 'wq_preview_2', question: 'When is my next dentist appointment?', from: 'Grok Bot', askedAt: new Date(NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false, state: 'answered', unread: false, answeredAt: new Date(NOW.getTime() - 119 * 60_000).toISOString() },
+  { id: 'wq_preview_3', question: 'Which flight did I book for March?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 26 * 3_600_000).toISOString(), unchecked: false, state: 'answering', unread: false },
 ] as const;
+const previewDeleted = new Set<string>();
+const previewSeen = new Set<string>();
 
 export function previewWaitingQuestions(count: number) {
   const questions = Array.from({ length: Math.max(0, count) }, (_, index) => {
     const base = PREVIEW_WAITING[index % PREVIEW_WAITING.length]!;
-    return index < PREVIEW_WAITING.length ? { ...base } : { ...base, id: `${base.id}_${index}` };
-  });
+    const id = index < PREVIEW_WAITING.length ? base.id : `${base.id}_${index}`;
+    return { ...base, id, unread: base.unread && !previewSeen.has(id) };
+  }).filter((question) => !previewDeleted.has(question.id));
   return { questions, olderRemoved: count > PREVIEW_WAITING.length };
 }
 
-/** The Private answers route, answered with an obviously pretend answer. Nothing is searched. */
-function previewPrivateAnswersAction(body: Record<string, unknown>): Response {
+/** The inbox's real client actions against synthetic, in-memory fixture state. */
+function previewPrivateAnswersAction(body: Record<string, unknown>, count: number): Response {
   const answered = {
     ok: true,
     status: 'answered',
-    answer: '**Preview only.** This answer would be written on this computer from your private things.\n\n- The answer stays here.\n- Sources appear beneath it.\n\nNothing was searched: there is no worker behind this page.',
-    citations: [{ title: 'Lease renewal.pdf', source: 'Dropbox', date: '2026-06-30' }],
-    unanswered: [],
+    generation: 1,
+    answer: '**Preview only.** This answer is synthetic. Nothing was searched.\n\n- The appointment is **Tuesday at 10:30**.\n- Bring the appointment confirmation.\n\nThe answer stays on this computer, with its sources beneath it.',
+    citations: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox', date: '2026-06-30', open: 'preview-source-open-token-00000000' }],
+    unanswered: ['The practice’s parking arrangements'],
     left_out: ['Gmail'],
   };
+  const listed = previewWaitingQuestions(count);
+  if (body.action === 'list') return Response.json({ ok: true, ...listed });
   if (body.action === 'ask') return Response.json(answered);
-  if (body.action === 'answer') return Response.json({ ...answered, ack: 'preview-ack-preview-ack-preview-ack-00' });
-  if (body.action === 'seen') return Response.json({ ok: true, status: 'cleared' });
-  if (body.action === 'dismiss') return Response.json({ ok: true, status: 'dismissed' });
-  if (body.action === 'dismiss_all') return Response.json({ ok: true, status: 'dismissed', removed: 0 });
-  return Response.json({ ok: false, error: { code: 'preview_only', message: 'Preview only: there is no worker behind this page, so this action cannot run here.' } }, { status: 501 });
+  if (body.action === 'open') return Response.json({ ok: true, status: 'opened' });
+  if (body.action === 'delete_all') {
+    listed.questions.forEach((question) => previewDeleted.add(question.id));
+    return Response.json({ ok: true, status: 'deleted', removed: listed.questions.length });
+  }
+  const question = listed.questions.find((item) => item.id === body.id);
+  if (!question) return Response.json({ ok: false, error: { code: 'gone', message: 'That answer was deleted' } }, { status: 410 });
+  if (body.action === 'read') return Response.json(question.state === 'answered' ? answered : { ok: true, status: question.state });
+  if (body.action === 'seen') {
+    previewSeen.add(question.id);
+    return Response.json({ ok: true, status: 'seen' });
+  }
+  if (body.action === 'delete') {
+    previewDeleted.add(question.id);
+    return Response.json({ ok: true, status: 'deleted' });
+  }
+  return Response.json({ ok: false, error: { code: 'preview_only', message: 'Preview only: this action is not available.' } }, { status: 501 });
 }
 
 function previewWaitingCount(request: Request, url: URL): number {
   const asked = url.searchParams.get('waiting') ?? /(?:^|;\s*)olympus_preview_waiting=([0-9])/.exec(request.headers.get('cookie') ?? '')?.[1];
-  const count = asked === undefined || asked === null ? 2 : Number(asked);
-  return Number.isInteger(count) && count >= 0 && count <= 9 ? count : 2;
+  const count = asked === undefined || asked === null ? 3 : Number(asked);
+  return Number.isInteger(count) && count >= 0 && count <= 9 ? count : 3;
 }
 
 function previewState(request: Request): string {
@@ -804,7 +822,7 @@ if (import.meta.main) {
     const waitingCount = previewWaitingCount(request, url);
     if (request.method === 'POST' && url.pathname === '/dashboard/private-answers') {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
-      return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>);
+      return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount);
     }
     if (request.method === 'POST' && url.pathname === '/dashboard/tools/call') {
       const body = await request.json().catch(() => ({})) as { name?: unknown };

@@ -87,6 +87,9 @@ export interface DashboardWaitingQuestion {
   from: string;
   askedAt: string;
   unchecked: boolean;
+  state?: 'answering' | 'retrying' | 'answered' | 'unchecked';
+  unread?: boolean;
+  answeredAt?: string;
 }
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';

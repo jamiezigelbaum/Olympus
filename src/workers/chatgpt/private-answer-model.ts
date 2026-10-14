@@ -24,6 +24,7 @@
  *   open token for it, private-answer-jobs.ts).
  * - reset: stops the model's server process (it restarts on the next answer).
  */
+import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type {
   AnswerPrivatelyOptions,
   BuiltInAnalystModel,
@@ -345,12 +346,17 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         status: () => model.status(),
         stop: () => model.stop(),
         async complete(modelRequest: AnalystModelRequest) {
-          const ok = await checkPrivateEvidence(options.eligible, prompted);
-          if (!ok.every(Boolean)) {
-            revoked = true;
-            throw new NoPrivateEvidenceError();
-          }
-          return model.complete(modelRequest);
+          const guard = async () => {
+            const ok = await checkPrivateEvidence(options.eligible, prompted);
+            if (!ok.every(Boolean)) {
+              revoked = true;
+              throw new NoPrivateEvidenceError();
+            }
+          };
+          return runWithLocalInferenceGuard(guard, async () => {
+            await guard();
+            return model.complete(modelRequest);
+          });
         },
       };
       let result: Awaited<ReturnType<typeof options.answer>>;

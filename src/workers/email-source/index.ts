@@ -541,12 +541,12 @@ export interface EmailSourceWorkerOptions {
     panelTools?: DashboardPanelTools;
     /**
      * Private answers on this computer (local-private-answers.ts): Ask
-     * privately, and the waiting questions with Answer and Dismiss. Its route
+     * privately, and the automatic private inbox with Delete. Its route
      * and the page's list are served only inside a local control session
      * (workers/http.ts). Absent: the page says it is unavailable and the route
      * answers 501.
      */
-    privateAnswers?: LocalPrivateAnswers;
+    privateAnswers?: Pick<LocalPrivateAnswers, 'waiting' | 'waitingCount' | 'handle'>;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**

@@ -16805,6 +16805,12 @@ var init_readwise = __esm(() => {
   init_live_control();
   init_live_sync();
 });
+// src/workers/answer-activity.ts
+var DEFAULT_ANSWER_LEASE_MS;
+var init_answer_activity = __esm(() => {
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+});
+
 // src/core/opsec.ts
 var init_opsec = __esm(() => {
   init_secret_patterns();
@@ -17197,6 +17203,7 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();
   init_evidence_pack();
@@ -18828,7 +18835,7 @@ function allOpenTargets() {
 }
 function openTargetPath(target) {
   if (target.kind === "private_answers")
-    return "private";
+    return target.answerId ? `private/${target.answerId}` : "private";
   if (target.kind === "connect")
     return `connect/${target.source}`;
   if (target.kind === "fix")
@@ -18840,11 +18847,14 @@ function openTargetPath(target) {
 function openTargetFromPath(path) {
   if (typeof path !== "string")
     return;
+  const answer = /^private\/([A-Za-z0-9_-]{22})$/.exec(path);
+  if (answer)
+    return { kind: "private_answers", answerId: answer[1] };
   return allOpenTargets().find((target) => openTargetPath(target) === path);
 }
 function openTargetToken(target) {
   if (target.kind === "private_answers")
-    return "page.private";
+    return target.answerId ? `page.private.${target.answerId}` : "page.private";
   if (target.kind === "connect")
     return `connect.${target.source}`;
   if (target.kind === "fix")
@@ -18855,7 +18865,7 @@ function openTargetToken(target) {
 }
 function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 function isKeysOpenTarget(target) {
   return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
@@ -18865,7 +18875,7 @@ function keysOpenTargetTokenPattern() {
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 function privateAnswersOpenTargetTokenPattern() {
-  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
+  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
 }
 function isPanelOpenTarget(target) {
   return target.kind === "unreadable";
@@ -19008,7 +19018,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
             window.location.replace(KEYS.test(open)
               ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PRIVATE.test(open) ? '/dashboard?private-answers' : '/dashboard');
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
           status.textContent = response.status === 403

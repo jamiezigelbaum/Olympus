@@ -5,7 +5,7 @@
  * local nav; that page's card now sits beneath, collapsed, as outside help.
  *
  * Top to bottom: Ask privately; the questions waiting for this computer
- * (question · who asked · when, Answer and Dismiss, the answer in place);
+ * (question · connection · when, Delete, the answer in place);
  * Anonymous answers (zkAPI), collapsed.
  *
  * Everything that reads or answers is held to a local control session: the
@@ -30,6 +30,9 @@ export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous';
 const POST_PATH = '/dashboard/private-answers';
 
 const PRIVATE_ANSWERS_CSS = `
+.pa { width: 100%; min-width: 0; max-width: min(760px, 100%); }
+.pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
+.pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
 .pa .pasection > .sect { margin: 0 0 12px; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
@@ -45,7 +48,10 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
 .pa .paout { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
-.pa .srow.answered .paq { font-weight: 600; }
+.pa .srow.unread .paq { font-weight: 700; }
+.pa .pa-read { display: block; width: 100%; min-width: 0; border: 0; padding: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
+.pa .smain { min-width: 0; }
+.pa .pa-read:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
 .pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .pa .paanswer p { margin: 0 0 10px; max-width: 72ch; overflow-wrap: anywhere; }
 .pa .paanswer p:last-child { margin-bottom: 0; }
@@ -80,8 +86,7 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     meta: '',
     body: renderPrivateAnswersBody(options),
     styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS],
-    // No shared controller and no poll: the page carries its own small
-    // script, and the answer appears in place.
+    // The local inbox carries its own small controller and visible-page poll.
   });
 }
 
@@ -133,26 +138,23 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(W.unavailable)}</p>`);
     return parts.join('') + '</section>';
   }
-  if (waiting.questions.length === 0) {
-    parts.push(`<p class="pnote" data-pa-none>${escapeHtml(W.noneWaiting)}</p>`);
-  } else {
-    parts.push(`<p class="pnote">${escapeHtml(W.waitingIntro)}</p>`);
-    const rows = waiting.questions.map((question) => {
-      const asked = Date.parse(question.askedAt);
-      const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
-      const from = [question.from, when, question.unchecked ? W.unchecked : ''].filter((part) => part !== '').join(' · ');
-      return `<li class="srow nodot" data-pa-question="${escapeHtml(question.id)}">`
-        + `<div class="smain"><div class="paq">${escapeHtml(question.question)}</div><div class="pafrom">${escapeHtml(from)}</div></div>`
-        + `<div class="sact"><button type="button" class="btn primary" data-pa-answer>${escapeHtml(W.answer)}</button>`
-        + `<button type="button" class="btn" data-pa-dismiss>${escapeHtml(W.dismiss)}</button></div>`
-        + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
-    });
-    parts.push(`<ul class="srows palist">${rows.join('')}</ul>`);
-    if (waiting.questions.length > 1) {
-      parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-dismiss-all>${escapeHtml(W.dismissAll)}</button></div>`);
-    }
-  }
-  if (waiting.olderRemoved) parts.push(`<p class="pnote hint" data-pa-older-removed>${escapeHtml(W.olderRemoved)}</p>`);
+  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? ' hidden' : ''}>${escapeHtml(W.noneWaiting)}</p>`);
+  parts.push(`<p class="pnote">${escapeHtml(W.waitingIntro)}</p>`);
+  const rows = [...waiting.questions].sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt)).map((question) => {
+    const asked = Date.parse(question.askedAt);
+    const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
+    const state = question.state ?? (question.unchecked ? 'unchecked' : 'answering');
+    const status = state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
+    const from = [question.from, when, status].filter(Boolean).join(' · ');
+    return `<li class="srow nodot${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
+      + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom"> · ${escapeHtml(from)}</span></button></div>`
+      + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(W.delete)}</button></div>`
+      + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+  });
+  parts.push(`<ul class="srows palist" data-pa-list>${rows.join('')}</ul>`);
+  parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? '' : ' hidden'}>${escapeHtml(W.deleteAll)}</button></div>`);
+  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? '' : ' hidden'}>${escapeHtml(W.olderRemoved)}</p>`);
+  parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join('') + '</section>';
 }
 
@@ -205,8 +207,11 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       changed: W.changed,
       failed: W.failed,
       unreachable: W.unreachable,
-      dismissed: W.dismissed,
-      dismissAllConfirm: W.dismissAllConfirm,
+      delete: W.delete,
+      deleteAllConfirm: W.deleteAllConfirm,
+      deleted: W.deleted,
+      retrying: W.retrying,
+      unchecked: W.unchecked,
     },
   };
   return `window.olympusMarkdown=(${chatgptMarkdownRender.toString()});
@@ -311,15 +316,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         citations.forEach(function (citation) {
           var item = el('li');
           var label = [citation.title, citation.source, citation.date].filter(function (part) { return typeof part === 'string' && part !== ''; }).join(' · ');
-          if (typeof citation.url === 'string' && /^https:\\/\\//.test(citation.url)) {
-            var link = el('a', '', label || citation.url);
-            link.href = citation.url;
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer';
-            item.appendChild(link);
-          } else {
-            item.appendChild(document.createTextNode(label));
-          }
+          item.appendChild(document.createTextNode(label));
           if (typeof citation.open === 'string') {
             var button = el('button', 'paopen', config.copy.open);
             button.type = 'button';
@@ -336,6 +333,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
+    } else if (status === 'answering' || status === 'retrying' || status === 'unchecked') {
+      card.appendChild(el('p', 'pamsg', status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
@@ -365,49 +364,129 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       render(out, outcome.result, question);
     });
   }
-  root.querySelectorAll('[data-pa-question]').forEach(function (row) {
+  var selected = null;
+  var readVersion = 0;
+  var seen = {};
+  var list = root.querySelector('[data-pa-list]');
+  function rows() { return Array.from(root.querySelectorAll('[data-pa-question]')); }
+  function findRow(id) { return rows().find(function (row) { return row.getAttribute('data-pa-question') === id; }); }
+  function missing() {
+    var note = root.querySelector('[data-pa-missing]');
+    if (note) { note.hidden = false; note.textContent = config.copy.deleted; }
+  }
+  async function read(row, quiet) {
     var id = row.getAttribute('data-pa-question');
+    selected = id;
+    var version = ++readVersion;
     var question = row.querySelector('.paq').textContent;
     var out = row.querySelector('[data-pa-out]');
-    var actions = row.querySelector('.sact');
-    var answer = row.querySelector('[data-pa-answer]');
-    var dismiss = row.querySelector('[data-pa-dismiss]');
-    function busy(on) {
-      if (answer) answer.disabled = on;
-      if (dismiss) dismiss.disabled = on;
-    }
-    if (answer) answer.addEventListener('click', async function () {
-      busy(true);
+    if (!quiet) {
+      rows().forEach(function (other) { if (other !== row) other.querySelector('[data-pa-out]').textContent = ''; });
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: 'answer', id: id });
-      if (!outcome.ok) {
-        message(out, errorText(outcome), true, question);
-        if (outcome.status === 410 && actions) actions.remove(); else busy(false);
-        return;
-      }
-      render(out, outcome.result, question);
-      if (outcome.result.status === 'answered') row.classList.add('answered');
-      // The answer is on screen: only now may the question be cleared.
-      if (typeof outcome.result.ack === 'string') {
-        var seen = await send({ action: 'seen', ack: outcome.result.ack });
-        if (seen.ok && seen.result.status === 'cleared' && actions) { actions.remove(); return; }
-      }
-      busy(false);
-    });
-    if (dismiss) dismiss.addEventListener('click', async function () {
-      busy(true);
-      var outcome = await send({ action: 'dismiss', id: id });
-      if (!outcome.ok) { message(out, errorText(outcome), true, question); busy(false); return; }
+    }
+    var outcome = await send({ action: 'read', id: id });
+    if (version !== readVersion || selected !== id || !row.isConnected) return;
+    if (!outcome.ok) {
+      message(out, outcome.status === 410 || outcome.status === 404 ? config.copy.deleted : errorText(outcome), true, question);
+      return;
+    }
+    render(out, outcome.result, question);
+    var generation = outcome.result.generation;
+    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
+      var ack = await send({ action: 'seen', id: id, generation: generation });
+      if (ack.ok) { seen[id] = generation; row.classList.remove('unread'); }
+    }
+  }
+  function bind(row) {
+    row.querySelector('[data-pa-read]').addEventListener('click', function () { read(row, false); });
+    row.querySelector('[data-pa-delete]').addEventListener('click', async function () {
+      var button = this;
+      button.disabled = true;
+      var id = row.getAttribute('data-pa-question');
+      var outcome = await send({ action: 'delete', id: id });
+      button.disabled = false;
+      if (!outcome.ok) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      if (selected === id) { selected = null; ++readVersion; }
       row.remove();
+      empty();
     });
-  });
-  var all = root.querySelector('[data-pa-dismiss-all]');
+  }
+  function empty() {
+    var count = rows().length;
+    var none = root.querySelector('[data-pa-none]');
+    var all = root.querySelector('[data-pa-delete-all]');
+    if (none) none.hidden = count !== 0;
+    if (all) all.hidden = count === 0;
+  }
+  rows().forEach(bind);
+  var all = root.querySelector('[data-pa-delete-all]');
   if (all) all.addEventListener('click', async function () {
-    if (!window.confirm(config.copy.dismissAllConfirm)) return;
+    if (!window.confirm(config.copy.deleteAllConfirm)) return;
     all.disabled = true;
-    var outcome = await send({ action: 'dismiss_all' });
-    if (outcome.ok) { window.location.reload(); return; }
+    var outcome = await send({ action: 'delete_all' });
     all.disabled = false;
+    if (outcome.ok) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
+    else {
+      var note = root.querySelector('[data-pa-missing]');
+      if (note) { note.hidden = false; note.textContent = errorText(outcome); }
+    }
   });
+  function openFragment() {
+    var id;
+    try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (_) { return; }
+    if (!id || id === config.fragment) return;
+    var row = findRow(id);
+    if (!row) { missing(); return; }
+    if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+    read(row, false);
+  }
+  openFragment();
+  window.addEventListener('hashchange', openFragment);
+  async function poll() {
+    if (document.hidden) return;
+    var outcome = await send({ action: 'list' });
+    if (!outcome.ok || !Array.isArray(outcome.result.questions) || !list) {
+      var openRow = selected && findRow(selected);
+      if (openRow) await read(openRow, true);
+      return;
+    }
+    var questions = outcome.result.questions.slice().sort(function (a, b) { return Date.parse(b.askedAt) - Date.parse(a.askedAt); });
+    rows().forEach(function (row) {
+      if (!questions.some(function (q) { return q.id === row.getAttribute('data-pa-question'); })) {
+        if (selected === row.getAttribute('data-pa-question')) { selected = null; ++readVersion; missing(); }
+        row.remove();
+      }
+    });
+    questions.forEach(function (q) {
+      var row = findRow(q.id);
+      if (!row) {
+        row = el('li', 'srow nodot'); row.id = q.id; row.setAttribute('data-pa-question', q.id);
+        var main = el('div', 'smain'); var link = el('button', 'pa-read'); link.type = 'button'; link.setAttribute('data-pa-read', '');
+        link.appendChild(el('span', 'paq')); link.appendChild(el('span', 'pafrom')); main.appendChild(link); row.appendChild(main);
+        var actions = el('div', 'sact'); var remove = el('button', 'btn', config.copy.delete); remove.type = 'button'; remove.setAttribute('data-pa-delete', ''); actions.appendChild(remove); row.appendChild(actions);
+        var out = el('div', 'paout'); out.setAttribute('data-pa-out', ''); out.setAttribute('aria-live', 'polite'); row.appendChild(out); bind(row);
+      }
+      row.classList.toggle('unread', q.unread === true);
+      row.querySelector('.paq').textContent = q.question;
+      if (selected === q.id && q.state !== 'answered') {
+        message(row.querySelector('[data-pa-out]'), q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
+      }
+      var state = q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var date = new Date(q.askedAt);
+      row.querySelector('.pafrom').textContent = ' · ' + [q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
+      list.appendChild(row);
+    });
+    empty();
+    var older = root.querySelector('[data-pa-older-removed]');
+    if (older) older.hidden = !outcome.result.olderRemoved;
+    var current = selected && findRow(selected);
+    if (current) await read(current, true);
+  }
+  // A selected answer is rechecked through read eligibility on each visible poll.
+  function schedule() {
+    if (typeof window.setTimeout !== 'function') return;
+    window.setTimeout(async function () { await poll(); schedule(); }, 5000);
+  }
+  schedule();
 })();`;
 }

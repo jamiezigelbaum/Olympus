@@ -38,6 +38,7 @@ import {
   resolveRemoteConnectionsDbPath,
 } from './core/remote-connections.ts';
 import {
+  openWaitingPrivateQuestionStore,
   WAITING_PRIVATE_QUESTIONS_STORE_ID,
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
@@ -78,6 +79,7 @@ import {
   whatsappPairingSessionPaths,
   whatsappStateDir as resolveWhatsAppStateDir,
 } from './core/pairing-session-paths.ts';
+import { createSourceCorpusRegistry } from './core/source-corpus-registry.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
@@ -676,6 +678,21 @@ export function deleteOlympusData(options: {
   // Before anything is removed: a database that will not open fails the
   // delete with every store still in place.
   const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
+  // Erase dependent private answers before the source bytes. Pending
+  // questions have no known dependency yet, so delete them too; their ids
+  // disappear and generation-fenced in-flight completions cannot reinsert.
+  if (selectedSource && options.dryRun !== true) {
+    const inboxPath = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(envForContext(options)));
+    if (existsSync(inboxPath)) {
+      const inbox = openWaitingPrivateQuestionStore(inboxPath);
+      try {
+        const registry = createSourceCorpusRegistry().list();
+        const corpora = registry.filter(c => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId)).map(c => c.corpusId);
+        const count = inbox.deleteForCorpora(corpora, registry.map(c => c.corpusId));
+        if (count > 0) removed.push(`${inboxPath} (private answers: ${count})`);
+      } finally { inbox.close(); }
+    }
+  }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);

@@ -46,7 +46,7 @@ export type OpenUnreadableSource = keyof typeof OPEN_UNREADABLE_SOURCES;
 
 export type OpenTarget =
   | { kind: 'dashboard' }
-  | { kind: 'private_answers' }
+  | { kind: 'private_answers'; answerId?: string }
   | { kind: 'connect'; source: OpenConnectSource }
   | { kind: 'fix'; section: OpenFixSection }
   | { kind: 'unreadable'; source: OpenUnreadableSource };
@@ -68,7 +68,7 @@ export function allOpenTargets(): OpenTarget[] {
 /** `dashboard`, `connect/x`, `fix/models`: the path after `olympus://open/` and `/open/`. */
 export function openTargetPath(target: OpenTarget): string {
   // The computer's Private answers page: a fixed address, never a question or a capability.
-  if (target.kind === 'private_answers') return 'private';
+  if (target.kind === 'private_answers') return target.answerId ? `private/${target.answerId}` : 'private';
   if (target.kind === 'connect') return `connect/${target.source}`;
   if (target.kind === 'fix') return `fix/${target.section}`;
   if (target.kind === 'unreadable') return `unreadable/${target.source}`;
@@ -78,6 +78,8 @@ export function openTargetPath(target: OpenTarget): string {
 /** The target a path names exactly (`connect/x`), or undefined: never a fallback. */
 export function openTargetFromPath(path: unknown): OpenTarget | undefined {
   if (typeof path !== 'string') return undefined;
+  const answer = /^private\/([A-Za-z0-9_-]{22})$/.exec(path);
+  if (answer) return { kind: 'private_answers', answerId: answer[1]! };
   return allOpenTargets().find((target) => openTargetPath(target) === path);
 }
 
@@ -107,6 +109,8 @@ export function parseOlympusOpenUrl(raw: unknown): (OpenTarget & { fallback?: tr
   // Printable ASCII only: no spaces, controls, quotes or non-ASCII look-alikes.
   if (!/^[\x21-\x7e]+$/.test(raw) || /["'`\\<>]/.test(raw)) return undefined;
   if (!raw.toLowerCase().startsWith(`${OLYMPUS_URL_SCHEME}:`)) return undefined;
+  const answer = /^olympus:\/\/open\/private\/([A-Za-z0-9_-]{22})\/?$/.exec(raw);
+  if (answer) return { kind: 'private_answers', answerId: answer[1]! };
   const match = /^olympus:\/\/open\/([a-z]+(?:\/[a-z]+)?)\/?$/.exec(raw);
   const path = match?.[1];
   if (path !== undefined) {
@@ -123,7 +127,7 @@ export function parseOlympusOpenUrl(raw: unknown): (OpenTarget & { fallback?: tr
  * for the plain dashboard.
  */
 export function openTargetToken(target: OpenTarget): string | undefined {
-  if (target.kind === 'private_answers') return 'page.private';
+  if (target.kind === 'private_answers') return target.answerId ? `page.private.${target.answerId}` : 'page.private';
   if (target.kind === 'connect') return `connect.${target.source}`;
   if (target.kind === 'fix') return `fix.${target.section}`;
   if (target.kind === 'unreadable') return `unreadable.${target.source}`;
@@ -133,7 +137,7 @@ export function openTargetToken(target: OpenTarget): string | undefined {
 /** The exact tokens, as one anchored pattern source, for the pages that must check one without importing this module. */
 export function openTargetTokenPattern(): string {
   const tokens = allOpenTargets().map(openTargetToken).filter((token): token is string => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
 }
 
 /**
@@ -155,7 +159,7 @@ export function keysOpenTargetTokenPattern(): string {
 
 /** The Private answers page's token, as one anchored pattern source (see openTargetTokenPattern). */
 export function privateAnswersOpenTargetTokenPattern(): string {
-  return `^${openTargetToken({ kind: 'private_answers' })!.replace('.', '\\.')}$`;
+  return '^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$';
 }
 
 /**

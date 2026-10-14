@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.0 - unreleased
+
+- Questions agents send that need your Private items are answered on your computer automatically; the agent links you to the answer in Olympus.
+
 ## 1.0.0 - 2026-10-14
 
 - ChatGPT connection steps now start in Plugins and explain when to turn on Developer mode.

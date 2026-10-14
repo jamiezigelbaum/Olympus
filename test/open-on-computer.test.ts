@@ -261,6 +261,15 @@ describe('the opening page carries only an allowlisted target', () => {
     expect(computerOpenTargets('http://127.0.0.1:8010').private).toBe('http://127.0.0.1:8010/dashboard?private-answers');
   });
 
+  test('an opaque private answer target lands on that inbox row, not a query or capability', async () => {
+    const ticket = 'A'.repeat(43);
+    const id = 'P'.repeat(22);
+    const landed = run(`#olympus_launch_ticket=${ticket}&olympus_open=page.private.${id}`);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(landed).toEqual([`/dashboard?private-answers#${id}`]);
+    expect(parseOlympusOpenUrl(`olympus://open/private/${id}`)).toEqual({ kind: 'private_answers', answerId: id });
+  });
+
   test('only a Keys target (Connect, a model fix) lands on Keys; a reconnect or connect fix lands on the dashboard', async () => {
     const ticket = 'A'.repeat(43);
     const models = run(`#olympus_launch_ticket=${ticket}&olympus_open=fix.models`);

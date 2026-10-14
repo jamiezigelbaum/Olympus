@@ -84,7 +84,7 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
   for (const target of allOpenTargets()) {
     const path = openTargetPath(target);
     if (target.kind === 'dashboard') out[path] = `${origin}${dashboardHomeHref(token)}`;
-    else if (target.kind === 'private_answers') out[path] = `${origin}${dashboardLocalPageHref('privateAnswers', token)}`;
+    else if (target.kind === 'private_answers') out[path] = `${origin}${dashboardLocalPageHref('privateAnswers', token)}${target.answerId ? '#' + target.answerId : ''}`;
     else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref('keys', token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     } else if (isPanelOpenTarget(target)) {

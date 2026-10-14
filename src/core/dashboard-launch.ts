@@ -253,7 +253,7 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
             window.location.replace(KEYS.test(open)
               ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PRIVATE.test(open) ? '/dashboard?private-answers' : '/dashboard');
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
           status.textContent = response.status === 403

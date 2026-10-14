@@ -353,11 +353,12 @@ describe('answers on this computer, with every outbound request denied', () => {
       request: { query: question, maxResults: 16, context: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false } } });
     expect(strict.hits).toEqual([]);
     const store = waitingStore();
-    const ref = store.record(store.ticket('conn-chatgpt'), { question, surface: 'chatgpt', state: 'waiting' })!;
-    const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => store });
+    const ref = store.record(store.ticket('conn-chatgpt'), { question, surface: 'remote', state: 'waiting' })!;
+    const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store });
     const network = denyNetwork();
     try {
-      for (const action of [{ action: 'ask', question }, { action: 'answer', id: ref.id }]) {
+      await controller.tick();
+      for (const action of [{ action: 'ask', question }, { action: 'read', id: ref.id }]) {
         const result = await controller.handle(action, 'session:owner');
         expect(result.body).toMatchObject({ ok: true, status: 'answered', answer: 'You owe Alex twenty euros.' });
       }
@@ -415,7 +416,7 @@ describe('answers on this computer, with every outbound request denied', () => {
     const embeddedBefore = local.builtIn.embedded.length;
     const cloudBefore = local.fixture.cloud.inputs.length;
     const network = denyNetwork();
-    const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => undefined });
+    const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => undefined });
     const outcome = await controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
     await backgroundSettled();
     network.restore();
@@ -443,11 +444,12 @@ describe('answers on this computer, with every outbound request denied', () => {
     const local = await localFixture();
     const installsBefore = local.builtIn.installs.length;
     const store = waitingStore();
-    const ref = store.record(store.ticket('conn-chatgpt'), { question: 'When does the orchard flat lease end?', surface: 'chatgpt', state: 'waiting' })!;
+    const ref = store.record(store.ticket('conn-chatgpt'), { question: 'When does the orchard flat lease end?', surface: 'remote', state: 'waiting' })!;
     const network = denyNetwork();
-    const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => store, connectionName: () => 'ChatGPT' });
-    const outcome = await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
-    const seen = await controller.handle({ action: 'seen', ack: outcome.body.ack }, 'session:owner');
+    const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store, connectionName: () => 'ChatGPT' });
+    await controller.tick();
+    const outcome = await controller.handle({ action: 'read', id: ref.id }, 'session:owner');
+    const seen = await controller.handle({ action: 'seen', id: ref.id, generation: outcome.body.generation }, 'session:owner');
     await backgroundSettled();
     network.restore();
 
@@ -455,20 +457,21 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect(local.builtIn.installs.length).toBe(installsBefore);
     expect(outcome.body).toMatchObject({ ok: true, status: 'answered' });
     expect(JSON.stringify(local.stub.requests)).toMatch(PRIVATE_SENTINEL);
-    expect(seen.body).toEqual({ ok: true, status: 'cleared' });
-    expect(store.list().questions).toEqual([]);
+    expect(seen.body).toEqual({ ok: true, status: 'read' });
+    expect(store.get(ref.id)?.seen).toBe(true);
   });
 
   for (const state of ['stale_ready_litert', 'stale_ready_onnx', 'damaged_runtime'] as const) {
     test(`the built-in model not loaded here (${state}): Ask and Answer search by keyword; nothing installs, downloads or starts`, async () => {
       const local = await localFixture({ embedding: state });
       const store = waitingStore();
-      const ref = store.record(store.ticket('conn-chatgpt'), { question: 'When does the orchard flat lease end?', surface: 'chatgpt', state: 'waiting' })!;
+      const ref = store.record(store.ticket('conn-chatgpt'), { question: 'When does the orchard flat lease end?', surface: 'remote', state: 'waiting' })!;
       const statusBefore = local.builtIn.provider.status();
       const network = denyNetwork();
-      const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => store, connectionName: () => 'ChatGPT' });
+      const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store, connectionName: () => 'ChatGPT' });
       const asked = await controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
-      const answered = await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
+      await controller.tick();
+      const answered = await controller.handle({ action: 'read', id: ref.id }, 'session:owner');
       await backgroundSettled();
       network.restore();
 
@@ -532,6 +535,21 @@ const OFFER_ANSWER = JSON.stringify({ answer: 'The price is €620,000 [1].', ci
 /** One item read: the newest version, with the draft as an unread other version. */
 const ONE_ITEM = { maxItems: 1, maxLeadingItems: 0 };
 const VERSION_NOTE = /Several versions of .* were found/;
+
+test('a stored inbox answer citing a real item moved to Secrets is never displayed', async () => {
+  const local = await localFixture({ specs: OFFER_SPECS, privateIds: OFFER_IDS, dates: OFFER_DATES, answer: OFFER_ANSWER, limits: ONE_ITEM, embedding: 'stale_ready_litert' });
+  const store = waitingStore();
+  const ref = store.record(store.ticket('conn-agent'), { question: 'What purchase price is in the offer for 14 Larch Court?', surface: 'remote', state: 'waiting' })!;
+  const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store });
+  await controller.tick();
+  expect(store.get(ref.id)?.result?.answer).toMatch(VERSION_NOTE);
+  await moveTieredItem({ set: local.fixture.set, identity: identityOf('offer-v1'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+  const read = await controller.handle({ action: 'read', id: ref.id }, 'session:owner');
+  expect(read.body).toEqual({ ok: true, status: 'answering' });
+  expect(read.body).not.toHaveProperty('answer');
+  expect(JSON.stringify(read.body)).not.toMatch(VERSION_NOTE);
+  controller.close();
+});
 
 describe('another version the answer\'s note names is checked again before anything is shown', () => {
   test('on this computer: a version re-tiered to Secrets while the answer is written withdraws it', async () => {
@@ -621,81 +639,7 @@ function scripted(result: LocalAnswerResult = {
   return { store, controller, asked };
 }
 
-describe('Answer and Dismiss on a waiting question', () => {
-  test('the acknowledgment clears the record it answered; a re-ask meanwhile (a newer generation) stays waiting', async () => {
-    const { store, controller } = scripted();
-    const first = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'chatgpt', state: 'waiting' })!;
-    const answered = await controller.handle({ action: 'answer', id: first.id }, 'session:owner');
-    expect(typeof answered.body.ack).toBe('string');
-    // The agent asks the same question again before the page says it was seen.
-    const again = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'chatgpt', state: 'waiting' })!;
-    expect(again.id).toBe(first.id);
-    expect(again.generation).toBeGreaterThan(first.generation);
-    const seen = await controller.handle({ action: 'seen', ack: answered.body.ack }, 'session:owner');
-    expect(seen.body).toEqual({ ok: true, status: 'kept' });
-    expect(store.list().questions.map((question) => question.id)).toEqual([first.id]);
-    // Answered again at the new generation: now it clears.
-    const second = await controller.handle({ action: 'answer', id: first.id }, 'session:owner');
-    expect((await controller.handle({ action: 'seen', ack: second.body.ack }, 'session:owner')).body).toEqual({ ok: true, status: 'cleared' });
-    expect(store.list().questions).toEqual([]);
-  });
-
-  test('an acknowledgment is spent once and only by the session it was given to', async () => {
-    const { store, controller } = scripted();
-    const ref = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'waiting' })!;
-    const answered = await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
-    expect((await controller.handle({ action: 'seen', ack: answered.body.ack }, 'session:other')).status).toBe(410);
-    expect(store.list().questions).toHaveLength(1);
-    expect((await controller.handle({ action: 'seen', ack: answered.body.ack }, 'session:owner')).body.status).toBe('cleared');
-    expect((await controller.handle({ action: 'seen', ack: answered.body.ack }, 'session:owner')).status).toBe(410);
-    expect((await controller.handle({ action: 'seen', ack: 'not-a-token' }, 'session:owner')).status).toBe(410);
-  });
-
-  test('an answer that could not be shown leaves the question waiting, with no acknowledgment', async () => {
-    for (const result of [{ status: 'failed' }, { status: 'changed' }, { status: 'no_model' }, { status: 'model_downloading', percent: 40 }] as LocalAnswerResult[]) {
-      const { store, controller } = scripted(result);
-      const ref = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'chatgpt', state: 'waiting' })!;
-      const outcome = await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
-      expect(outcome.body.ack).toBeUndefined();
-      expect(store.list().questions).toHaveLength(1);
-    }
-  });
-
-  test('"nothing here answers this" is an answer too: it may be marked seen', async () => {
-    const { store, controller } = scripted({ status: 'not_found', leftOut: ['Gmail'] });
-    const ref = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'chatgpt', state: 'waiting' })!;
-    const outcome = await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
-    expect(outcome.body).toMatchObject({ ok: true, status: 'not_found', left_out: ['Gmail'] });
-    expect((await controller.handle({ action: 'seen', ack: outcome.body.ack }, 'session:owner')).body.status).toBe('cleared');
-  });
-
-  test('Answer uses the question\'s own stored selectors and detail, never a wider search', async () => {
-    const { store, controller, asked } = scripted();
-    const ref = store.record(store.ticket('conn-a'), {
-      question: 'Where is the lease?',
-      surface: 'remote',
-      state: 'waiting',
-      detail: 'full',
-      selectors: { corpus_ids: ['secure_local.dropbox.files'], query: 'lease renewal' },
-    })!;
-    await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
-    expect(asked).toEqual([{ question: 'Where is the lease?', selectors: { corpus_ids: ['secure_local.dropbox.files'], query: 'lease renewal' }, detail: 'full' }]);
-  });
-
-  test('Dismiss removes one; Dismiss all removes every one; a gone question says so', async () => {
-    const { store, controller } = scripted();
-    const one = store.record(store.ticket('conn-a'), { question: 'One?', surface: 'chatgpt', state: 'waiting' })!;
-    store.record(store.ticket('conn-a'), { question: 'Two?', surface: 'chatgpt', state: 'waiting' });
-    store.record(store.ticket('conn-b'), { question: 'Three?', surface: 'remote', state: 'unchecked' });
-    expect(controller.waitingCount()).toBe(3);
-    expect((await controller.handle({ action: 'dismiss', id: one.id }, 'session:owner')).body).toEqual({ ok: true, status: 'dismissed' });
-    expect((await controller.handle({ action: 'dismiss', id: one.id }, 'session:owner')).body).toEqual({ ok: true, status: 'gone' });
-    expect((await controller.handle({ action: 'answer', id: one.id }, 'session:owner')).status).toBe(410);
-    expect(controller.waitingCount()).toBe(2);
-    expect((await controller.handle({ action: 'dismiss_all' }, 'session:owner')).body).toEqual({ ok: true, status: 'dismissed', removed: 2 });
-    expect(controller.waitingCount()).toBe(0);
-  });
-
+describe('the private inbox local session', () => {
   test('a question asked here is never recorded as waiting', async () => {
     const { store, controller } = scripted();
     await controller.handle({ action: 'ask', question: 'Where is the lease?' }, 'session:owner');
@@ -707,15 +651,16 @@ describe('Answer and Dismiss on a waiting question', () => {
   test('the list says who asked and when, without a connection id', () => {
     const store = waitingStore();
     store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'unchecked' });
-    store.record(store.ticket('conn-b'), { question: 'When is the dentist?', surface: 'chatgpt', state: 'waiting' });
+    store.record(store.ticket('conn-b'), { question: 'When is the dentist?', surface: 'remote', state: 'waiting' });
     const controller = createLocalPrivateAnswers({
       answer: async () => ({ status: 'failed' }),
       store: () => store,
       connectionName: (id) => (id === 'conn-a' ? 'Grok Bot' : undefined),
+      now: () => Date.now() + 31_000,
     });
     const listed = controller.waiting()!;
     expect(listed.questions.map(({ question, from, unchecked }) => ({ question, from, unchecked })).sort((a, b) => a.question.localeCompare(b.question))).toEqual([
-      { question: 'When is the dentist?', from: 'ChatGPT', unchecked: false },
+      { question: 'When is the dentist?', from: 'An agent', unchecked: false },
       { question: 'Where is the lease?', from: 'Grok Bot', unchecked: true },
     ]);
     expect(JSON.stringify(listed)).not.toContain('conn-');
@@ -852,7 +797,7 @@ function page(fetcher: Fetcher, headers: Record<string, string>, query = 'privat
 describe('the worker serves Private answers only inside a local control session', () => {
   test('the route: the Gateway bearer and every session it can mint are refused and nothing runs; a local session answers', async () => {
     const { store, controller } = scripted();
-    const ref = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'chatgpt', state: 'waiting' })!;
+    const ref = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'waiting' })!;
     const calls: string[] = [];
     const counted: LocalPrivateAnswers = {
       ...controller,
@@ -864,12 +809,20 @@ describe('the worker serves Private answers only inside a local control session'
     const fetcher = worker(counted);
     const bearerMinted = await bearerSession(fetcher);
     const launched = await launchSession(fetcher);
-    const body = { action: 'dismiss', id: ref.id };
+    const body = { action: 'delete', id: ref.id };
     expect((await fetcher(post(body, { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN }))).status).toBe(403);
     for (const session of [bearerMinted, launched]) {
       const refused = await fetcher(post(body, { Cookie: session.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': session.csrf }));
       expect(refused.status).toBe(403);
       expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('mac_dashboard_only');
+    }
+    // Deep-link locators carry no authority: every answer read/list uses the
+    // same local-only boundary, including widgets and dash_ read-only viewers.
+    for (const action of [{ action: 'read', id: ref.id }, { action: 'list' }]) {
+      expect((await fetcher(post(action, { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN }))).status).toBe(403);
+      expect((await fetcher(post(action, { Authorization: 'Bearer dash_reader', Origin: ORIGIN }))).status).toBe(401);
+      expect((await fetcher(post(action, { Origin: 'https://chatgpt.com' }))).status).toBe(401);
+      for (const session of [bearerMinted, launched]) expect((await fetcher(post(action, { Cookie: session.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': session.csrf }))).status).toBe(403);
     }
     // No session at all, or the wrong CSRF token.
     expect((await fetcher(post(body, { Origin: ORIGIN }))).status).toBe(401);
@@ -881,20 +834,20 @@ describe('the worker serves Private answers only inside a local control session'
     const ok = await fetcher(post(body, { Cookie: local.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': local.csrf }));
     expect(ok.status).toBe(200);
     expect(ok.headers.get('Cache-Control')).toBe('no-store');
-    expect(await ok.json()).toEqual({ ok: true, status: 'dismissed' });
-    expect(calls).toEqual(['dismiss']);
+    expect(await ok.json()).toEqual({ ok: true, status: 'deleted', removed: 1 });
+    expect(calls).toEqual(['delete']);
     expect(store.list().questions).toEqual([]);
   });
 
   test('the page lists waiting questions only for a local session', async () => {
     const { store, controller } = scripted();
-    store.record(store.ticket('conn-a'), { question: 'SENTINEL_WAITING_QUESTION where is the lease?', surface: 'chatgpt', state: 'waiting' });
+    store.record(store.ticket('conn-a'), { question: 'SENTINEL_WAITING_QUESTION where is the lease?', surface: 'remote', state: 'waiting' });
     const fetcher = worker(controller);
     const local = await localSession(fetcher);
     const unlocked = await (await page(fetcher, { Cookie: local.cookie })).text();
     expect(unlocked).toContain('SENTINEL_WAITING_QUESTION');
     expect(unlocked).toContain('data-pa-ask');
-    expect(unlocked).toContain('ChatGPT');
+    expect(unlocked).toContain('An agent');
 
     const bearerMinted = await bearerSession(fetcher);
     const offered = await (await page(fetcher, { Cookie: bearerMinted.cookie })).text();
@@ -1004,7 +957,7 @@ describe('the Private answers page', () => {
       privateAnswers: {
         available: true,
         waiting: {
-          questions: [{ id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: new Date(DASHBOARD_PREVIEW_NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false }],
+          questions: [{ id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: new Date(DASHBOARD_PREVIEW_NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false, state: 'answered', unread: true }],
           olderRemoved: true,
         },
       },
@@ -1022,10 +975,12 @@ describe('the Private answers page', () => {
       const reply = answer(parsed);
       return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, json: async () => reply.body };
     };
-    const pageWindow = { location: window.location, confirm: () => true, addEventListener: () => undefined };
+    const timers: Array<() => Promise<void>> = [];
+    let confirmations = 0;
+    const pageWindow = { location: window.location, confirm: () => { confirmations++; return true; }, addEventListener: () => undefined, setTimeout: (callback: () => Promise<void>) => { timers.push(callback); } };
     new Function('window', 'document', 'fetch', script)(pageWindow, document, fetchStub);
     if (!markdown) (pageWindow as { olympusMarkdown?: unknown }).olympusMarkdown = undefined;
-    return { html, document, posts, settle: () => new Promise((resolve) => setTimeout(resolve, 20)) };
+    return { html, document, posts, confirmations: () => confirmations, poll: async () => { await timers.shift()?.(); }, settle: () => new Promise((resolve) => setTimeout(resolve, 20)) };
   }
 
   test('Ask renders Markdown safely in a panel under its question, with ordered section headings', async () => {
@@ -1034,7 +989,7 @@ describe('the Private answers page', () => {
       citations: [{ title: 'Lease', source: 'Dropbox' }], left_out: ['Gmail'],
     } }));
     expect([...page.document.querySelectorAll('.pa h3')].map((node) => node.textContent)).toEqual([
-      'Ask privately', 'Questions waiting for you', 'Anonymous answers',
+      'Ask privately', 'Private inbox', 'Anonymous answers',
     ]);
     const field = page.document.querySelector('textarea')!;
     (field as unknown as { value: string }).value = 'When do I renew?';
@@ -1076,40 +1031,101 @@ describe('the Private answers page', () => {
     }
   });
 
-  test('lists the question, who asked and when; Answer shows the answer in place as text, then marks it seen', async () => {
-    const page = renderAndRun((body) => (body.action === 'answer'
-      ? { status: 200, body: { ok: true, status: 'answered', answer: 'It ends in May. <img src=x onerror=alert(1)>', citations: [{ title: 'Lease', source: 'Dropbox', url: 'https://www.dropbox.com/preview/lease.pdf' }, { title: 'Scan', open: 'B'.repeat(32) }], unanswered: [], left_out: ['Gmail'], ack: 'A'.repeat(32) } }
-      : { status: 200, body: { ok: true, status: 'cleared' } }));
-    expect(page.html).toContain('Where is the lease?');
-    expect(page.html).toContain('ChatGPT · 2h ago');
-    expect(page.html).toContain('data-pa-older-removed');
+  test('clicking an unread row reads the full answer, marks its generation seen and opens sources only with tokens', async () => {
+    const page = renderAndRun((body) => (body.action === 'read'
+      ? { status: 200, body: { ok: true, status: 'answered', generation: 2, answer: '**May**. <img src=x onerror=alert(1)>', citations: [{ title: 'Lease', source: 'Dropbox', url: 'https://www.dropbox.com/preview/lease.pdf', open: 'A'.repeat(32) }, { title: 'Scan', open: 'B'.repeat(32) }], unanswered: ['End date'], left_out: ['Gmail'] } }
+      : { status: 200, body: { ok: true, status: 'seen' } }));
     const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
-    (row.querySelector('[data-pa-answer]') as unknown as { click(): void }).click();
+    expect(row.classList.contains('unread')).toBe(true);
+    expect(row.textContent).toContain('Where is the lease?');
+    expect(row.textContent).toContain('ChatGPT · 2h ago');
+    expect(row.querySelector('[data-pa-answer], [data-pa-dismiss]')).toBeNull();
+    (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
     await page.settle();
-    expect(page.posts.map((post) => post.body)).toEqual([{ action: 'answer', id: 'wq_1' }, { action: 'seen', ack: 'A'.repeat(32) }]);
+    expect(page.posts.map((post) => post.body)).toEqual([{ action: 'read', id: 'wq_1' }, { action: 'seen', id: 'wq_1', generation: 2 }]);
     expect(page.posts.every((post) => post.url === DASHBOARD_PRIVATE_ANSWERS_PATH && post.headers['X-Olympus-CSRF'] === 'csrf-token')).toBe(true);
     const out = row.querySelector('[data-pa-out]')!;
-    expect(out.textContent).toContain('It ends in May. <img src=x onerror=alert(1)>');
-    expect(out.querySelector('img')).toBeNull();
+    expect(out.querySelector('.paanswer strong')!.textContent).toBe('May');
+    expect(out.querySelector('img, a')).toBeNull();
     expect(out.querySelector('.pacard .paquestion strong')!.textContent).toBe('Where is the lease?');
-    expect(out.querySelector('a')!.getAttribute('href')).toBe('https://www.dropbox.com/preview/lease.pdf');
     expect(out.textContent).toContain('Left out: Gmail.');
-    // Cleared: the row keeps its answer and loses its buttons.
-    expect(row.querySelector('[data-pa-answer]')).toBeNull();
+    expect(out.textContent).toContain('Not found here: End date.');
+    expect(row.classList.contains('unread')).toBe(false);
+    expect(row.querySelector('[data-pa-delete]')).not.toBeNull();
+    (out.querySelector('.paopen') as unknown as { click(): void }).click();
+    await page.settle();
+    expect(page.posts.at(-1)!.body).toEqual({ action: 'open', token: 'A'.repeat(32) });
   });
 
-  test('a question no longer waiting says so; Dismiss removes the row', async () => {
-    const gone = renderAndRun(() => ({ status: 410, body: { ok: false, error: { code: 'gone', message: 'This question is no longer waiting.' } } }));
-    const row = gone.document.querySelector('[data-pa-question="wq_1"]')!;
-    (row.querySelector('[data-pa-answer]') as unknown as { click(): void }).click();
-    await gone.settle();
-    expect(row.textContent).toContain('This question is no longer waiting.');
-    expect(gone.posts.map((post) => post.body.action)).toEqual(['answer']);
+  test('opening a retained not-found answer marks it read without deleting it', async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'read'
+      ? { ok: true, status: 'not_found', left_out: ['Cloud-only source'], generation: 8 }
+      : { ok: true, status: 'read' } }));
+    (page.document.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await page.settle();
+    expect(page.document.body.textContent).toContain('Nothing on this computer answers this.');
+    expect(page.posts.map(post => post.body)).toEqual([{ action: 'read', id: 'wq_1' }, { action: 'seen', id: 'wq_1', generation: 8 }]);
+    expect(page.document.querySelector('[data-pa-question]')!.classList.contains('unread')).toBe(false);
+    expect(page.document.querySelector('[data-pa-question]')).not.toBeNull();
+  });
 
-    const dismissed = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'dismissed' } }));
-    (dismissed.document.querySelector('[data-pa-dismiss]') as unknown as { click(): void }).click();
-    await dismissed.settle();
-    expect(dismissed.document.querySelector('[data-pa-question="wq_1"]')).toBeNull();
+  test('deleted answers show plain deletion copy and Delete removes a row without answering it', async () => {
+    const gone = renderAndRun(() => ({ status: 410, body: { ok: false, error: { code: 'gone', message: 'Old backend words' } } }));
+    const row = gone.document.querySelector('[data-pa-question="wq_1"]')!;
+    (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await gone.settle();
+    expect(row.textContent).toContain('That answer was deleted');
+    expect(gone.posts.map((post) => post.body.action)).toEqual(['read']);
+
+    const deleted = renderAndRun(() => ({ status: 200, body: { ok: true } }));
+    (deleted.document.querySelector('[data-pa-delete]') as unknown as { click(): void }).click();
+    await deleted.settle();
+    expect(deleted.posts.map((post) => post.body)).toEqual([{ action: 'delete', id: 'wq_1' }]);
+    expect(deleted.document.querySelector('[data-pa-question="wq_1"]')).toBeNull();
+    expect((deleted.document.querySelector('[data-pa-none]') as unknown as { hidden: boolean }).hidden).toBe(false);
+  });
+
+  test('Delete all asks once and posts one deletion', async () => {
+    const page = renderAndRun(() => ({ status: 200, body: { ok: true } }));
+    (page.document.querySelector('[data-pa-delete-all]') as unknown as { click(): void }).click();
+    await page.settle();
+    expect(page.posts.map((post) => post.body)).toEqual([{ action: 'delete_all' }]);
+    expect(page.confirmations()).toBe(1);
+    expect(page.document.querySelector('[data-pa-question]')).toBeNull();
+  });
+
+  test('polling orders new rows newest first and removes displayed text when eligibility changes', async () => {
+    let changed = false;
+    const page = renderAndRun((body) => {
+      if (body.action === 'list') return { status: 200, body: { ok: true, olderRemoved: false, questions: [
+        { id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: '2026-10-01T01:00:00Z', state: 'retrying', unread: false },
+        { id: 'wq_new', question: 'New question', from: 'Agent', askedAt: '2026-10-02T01:00:00Z', state: 'answered', unread: true },
+      ] } };
+      if (body.action === 'read') return { status: 200, body: changed
+        ? { ok: true, status: 'retrying' }
+        : { ok: true, status: 'answered', answer: 'Previously readable private text', generation: 3 } };
+      return { status: 200, body: { ok: true } };
+    });
+    (page.document.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await page.settle();
+    expect(page.document.querySelector('[data-pa-question]')!.textContent).toContain('Previously readable private text');
+    changed = true;
+    await page.poll();
+    expect([...page.document.querySelectorAll('[data-pa-question]')].map((row) => row.getAttribute('data-pa-question'))).toEqual(['wq_new', 'wq_1']);
+    expect(page.document.querySelector('[data-pa-question="wq_new"]')!.classList.contains('unread')).toBe(true);
+    expect(page.document.body.textContent).not.toContain('Previously readable private text');
+    expect(page.document.querySelector('[data-pa-question="wq_1"] [data-pa-out]')!.textContent).toContain('Retrying on this computer');
+    expect(page.posts.filter((post) => post.body.action === 'seen').length).toBe(1);
+  });
+
+  test('answer fragments read an existing row and missing fragments say the answer was deleted', async () => {
+    const page = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'retrying' } }), 'http://127.0.0.1:8010/dashboard?private-answers#wq_1');
+    await page.settle();
+    expect(page.posts.map((post) => post.body)).toEqual([{ action: 'read', id: 'wq_1' }]);
+    expect(page.document.querySelector('[data-pa-question] [data-pa-out]')!.textContent).toContain('Retrying on this computer');
+    const missing = renderAndRun(() => ({ status: 200, body: { ok: true } }), 'http://127.0.0.1:8010/dashboard?private-answers#wq_deleted');
+    expect(missing.document.querySelector('[data-pa-missing]')!.textContent).toBe('That answer was deleted');
+    expect(missing.posts.length).toBe(0);
   });
 
   test('the old address\'s fragment opens Anonymous answers, labeled as outside help, collapsed otherwise', () => {

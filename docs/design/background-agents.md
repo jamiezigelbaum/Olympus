@@ -1,6 +1,6 @@
 # Olympus for background agents (dots, Grok Bot, Muse)
 
-Status: approved design, revision 4 (2026-10-12), after three Codex
+Status: approved design, revision 5 (owner decision 2026-10-14), after three Codex
 (gpt-6-astra) review rounds (final verdict: approve with changes, made) and the owner's decisions below. Builds on
 [hosted-agent-compatibility.md](hosted-agent-compatibility.md) (2026-09-24),
 which put Grok and Muse out of scope for 1.0, and on
@@ -11,8 +11,8 @@ which put Grok and Muse out of scope for 1.0, and on
 Someone who uses an always-on agent (OpenAI's dots, xAI's Grok Bot, Meta's
 Muse, or any agent that speaks remote MCP) can add Olympus to it and have it
 answer from their mail, files and notes in the background. Where an agent
-cannot show Olympus's private answer panel, the private part waits for the
-person in Olympus on their computer. The dashboard grows by one conditional
+cannot show Olympus's private answer panel, Olympus answers on the computer
+automatically and the agent links to that answer in the Private answers inbox. The dashboard grows by one conditional
 line and one page, and loses a page.
 
 ## Owner decisions (2026-10-12)
@@ -27,8 +27,9 @@ line and one page, and loses a page.
      never Private source text.
 2. **An unopened private answer is not lost.** If no panel shows it, it waits
    on the computer (this is what makes dots work).
-3. **Waiting answers are written only when the person opens them.** Nothing
-   Private-derived is computed for nobody or stored.
+3. **Superseded 2026-10-14:** agent questions are answered on arrival and
+   retained in a local inbox; the person never asks the same question twice.
+   Panel claim/ack remains unchanged.
 4. **`secret_locations` is dropped for remote agents** (section C).
 5. **Phone access to waiting questions is deferred** past v1.
 
@@ -78,90 +79,89 @@ line and one page, and loses a page.
 
 ## Design
 
-### A. Waiting private questions
+### A. Private answers inbox (owner decision 2026-10-14, 1.1.0)
 
-**When one is recorded.** At the moment of the match, independent of any
-panel job:
+This supersedes **answered on demand** and **no Private synthesis runs for
+nobody** for agent questions whose panel does not claim them. 1.0.1 ships
+first; this 1.1.0 branch must not land before it.
 
-- *ChatGPT surface (chats and dots):* whenever a search or answer has a
-  Private match.
-- *Summary-rule agents:* the private part has three typed outcomes:
-  **delivered** (the summary included Private evidence: nothing recorded),
-  **excluded by policy** or **private route unavailable** (the answer fell
-  back to Public and Personal, `analyst-answer.ts:537-556,729-741`). For the
-  last two, a new local match probe decides whether anything Private
-  matches. It returns `match`, `no_match` or `unknown` (timeout or error) and
-  reads metadata only; it is not today's ChatGPT probe, which loads passages
-  (`email-source/server.ts:5013-5021`) and turns a timeout into "no match"
-  (`mcp-surface.ts:565-596`). `match` records a waiting question; `unknown`
-  records it too, marked "couldn't check yet" and retried locally, never
-  reported to the agent as a match. The agent is told one sentence only on
-  `match`: "Private items may answer this; the person can see that answer in
-  Olympus on their computer." Policy is never bypassed: the probe result goes
-  nowhere but the local record.
+**Arrival.** A ChatGPT Private match records the question independently of
+its panel job. Other agents record when their Private part was withheld,
+required approval, excluded by policy or unavailable and a metadata-only
+local probe says `match`. `unknown` records an unchecked row and re-probes
+locally every ten minutes; a later match schedules the same answer path.
+Delivered Private summaries and `no_match` record nothing. Stored selectors
+are bounded and replayed exactly; malformed/oversized selectors refuse the
+record rather than widening the search. The local path in B answers under
+today's tiers and policy, with no remote fallback or anonymous consultation.
 
-**What is stored.** Question (at most 2 KB), stable connection id, time,
-detail level, and the request's retrieval selectors: corpus, explicit query,
-selected items, account and filters (`analyst-answer.ts:394-402`,
-`email-source/server.ts:3353-3367`), bounded in size. A request whose
-selectors can't be stored within the bound is not recorded (the agent's own
-answer stands); replay never silently widens the search. Not stored:
-evidence, answers, match counts, job ids, citation tokens. Total store at
-most 256 KB.
+**ChatGPT without duplication.** A 30-second grace window allows the live
+panel's normal claim to arrive, without leaving background tasks waiting
+for minutes. A claimed panel job stays hidden from the inbox while it lives.
+Its existing sealed acknowledgment (or the pinned directory panel's existing
+seen-on-delivery compatibility) deletes only the matching id/generation/
+connection. A busy store returns the existing retryable busy response and
+keeps the capability unspent: no successful acknowledgment, or pinned sealed
+hand-out, until deletion commits (or that generation is already absent). No claim within 30 seconds schedules a local inbox answer;
+a claimed job that expires without acknowledgment also falls back. Restart
+forgets in-memory panel claims and resumes persisted questions after their
+grace window. An acknowledged answer never appears in the inbox.
 
-**Bounds.** Deduplicated by connection, selectors and normalized question; a
-duplicate refreshes the time and keeps the fuller detail level. 20 per
-connection, 50 in all, oldest dropped, with a visible "older questions were
-removed" line. 7 days. Dismiss and Dismiss all; a dismissed question asked
-again comes back.
+**Priority and failures.** The inbox runs at background priority, at most
+one answer globally (therefore at most one per connection). Interactive
+owner work is selected before queued background calls at the worker's
+shared model completion boundary, including synthesis and audit. Evidence
+authorization is repeated after queueing, before the model call starts, for
+both inbox/panel answers and ordinary source answers sharing that model. A running
+model call finishes; subsequent background calls yield. Upgrade resumes
+bounded existing records. Failures remain row states, with persisted
+exponential backoff from 5 seconds up to 30 minutes, no raw exception text.
+Rows say Answering…, Trying again…, or Could not check yet.
 
-**Answered on demand, everywhere.** No Private synthesis runs for nobody:
+**Storage.** Migration v2 of the question store retains answer text, citation
+labels/locators (no source content copies), an allowlist of corpus/tier/source
+item identities for eligibility, answered-at and read/unread. Questions keep
+2 KB/4 KB selector bounds, deduplication, 20 per connection, 50 total, 256 KB
+and seven-day bounds until answered. Answered rows have no time expiry,
+including when invalidated and being re-answered. The storage safety cap is
+500 retained answered rows/16 MiB (including invalidated rows and their
+questions/selectors) and 128 KiB per answer; oldest beyond the cap are
+removed with the visible older answers were removed line. Re-asking a
+question refreshes its generation and queues a new answer. Reading marks
+read, never deletes. Delete removes one; Delete all has one confirmation.
 
-- A ChatGPT panel's job starts synthesis when the panel **claims** it, not
-  when the tool result is built (`private-answer-jobs.ts:524` today
-  precomputes). In a live chat the panel claims within seconds, so latency
-  barely changes; for a dot no panel claims, so nothing runs.
-- On the computer, pressing **Answer** re-runs the search under today's
-  tiers and policy, answers through the local path (B), and rechecks
-  eligibility again before showing the answer and before opening any cited
-  item (as panels already do, `private-answer-jobs.ts:568,589`).
+**Current authorization.** Before each stored read and each cited-item open,
+every identity read by the answer is checked under today's tiers, scope and
+policy. Secret, deleted or disallowed evidence withholds all stored text,
+invalidates that generation and schedules re-answering; the panel plainly
+shows Answering…. Source links are session-bound local POST tokens, not
+public hrefs. They are checked again immediately before desktop dispatch.
+Delete, revoke and re-ask fence stale reads/completions and open tokens.
 
-**Seen.** A record leaves the list only after an acknowledgment that the
-answer was decrypted and rendered. Today's claim proves neither (it accepts
-a job id and a public key, `private-answer-jobs.ts:529-546`), so:
+**Protection and lifecycle.** SQLite in worker private state, directory
+0700/file 0600, secure_delete and DELETE journaling. No indexing, telemetry,
+support bundle, export or shared dashboard JSON. Only a local control
+session may list/read/delete/open; dash_ viewers, ChatGPT widgets and Gateway
+read scope are refused. Revoking a connection deletes all of its rows and
+bumps its recording ticket generation, exactly as before. data delete --all
+removes answers and sidecars. --source deletes answers depending on that
+source's corpora, unmapped dependencies, and all pending questions, whose dependencies are not known;
+this also fences a pending answer completing after deletion. Direct Ask
+privately questions and ChatGPT panel answers are not copied into this inbox.
 
-- the sealed answer carries a random, single-use **acknowledgment
-  capability**, bound on the computer to the job, the record's generation
-  and the connection;
-- the panel posts it back only after rendering; the local page acknowledges
-  through its control session;
-- the computer deletes the record only if the generation still matches
-  (atomic compare), so a newer duplicate is not cleared by an older answer.
-
-This proves decryption plus the panel's own claim that it rendered, not
-that a person read it; the accepted trust in the OpenAI-served panel and
-the relay (`chatgpt-plugin.md`, "Who can read the answer") is unchanged. A
-lost acknowledgment leaves the question waiting; a duplicate is better than
-a loss.
-
-**Protection.** In the worker's private state with the same file
-permissions as Private stores; excluded from indexing, telemetry and
-support bundles; served only to a local control session (not `dash_`
-read-only viewers, not the ChatGPT widget, not the Gateway's read scope, not
-any shared dashboard JSON). Questions typed into the private question panel
-are never recorded. Revoking a connection deletes its records and bumps a
-generation in the same transaction, so an in-flight insert for that
-connection is refused.
-
-**The model's note** stays one bit and becomes host-neutral: "Some matching
-items are Private in Olympus. Their contents stay on the user's computer and
-are never shown to you. Olympus answers from them privately: in a panel below
-this reply if the app shows one, and always in Olympus on the user's
-computer. Say that briefly; don't guess at the private part."
+**The model's note**, host-neutral: “Your answer is in Olympus on your
+computer.” Followed by **Open answer**, using the existing open-on-computer
+handler: `olympus://open/private/<id>`. The only variable is 16 random bytes
+encoded as a 22-character base64url id: no question, capability or meaningful
+information off the computer. It chooses only a page location, not authority.
+The local launch maps it to `/dashboard?private-answers#<id>`. If still being
+written, that row says Answering…. Unknown/deleted ids open the inbox with
+“That answer was deleted”. ChatGPT's panel acknowledgment protocol and its
+model-visible content are unchanged.
 
 ### B. Ask privately on the computer (fully local)
 
-A box on the Private answers page, also used by Answer in A. It needs its
+A box on the Private answers page, also used by automatic inbox answers in A. It needs its
 own retrieval path, because today's routes are not local end to end:
 Private search is Private-only (`analyst-answer.ts:2690-2704,2807-2808`),
 Personal retrieval may query the cloud (`:2551`), some Personal connector
@@ -185,7 +185,7 @@ sources were left out (every problem findable). Anonymous outside help
 (zkAPI) stays a separate, clearly labeled action, never mixed into this
 answer, and waiting questions never feed `ask_anonymously`. Proof: a test
 that denies all outbound requests and still answers, for B and for A's
-Answer, covering planning, embedding, retrieval, passage ranking and
+automatic answers, covering planning, embedding, retrieval, passage ranking and
 synthesis.
 
 ### C. Remote result hardening (summary rule)
@@ -253,26 +253,20 @@ same-provider exclusion can't be applied.
 
 ## Dashboard changes (all of them)
 
-1. **On the computer, Needs you:** one line, only when something waits:
-   "2 private questions are waiting". It opens the page. **ChatGPT's
-   dashboard shows nothing new:** everything in Needs you is copied into the
-   text ChatGPT's model reads (`response-builder.ts:156-160,402`), so a count
-   there would leak, as would other connections' activity. The agent's own
-   note already tells the person where to look.
-2. **One page, "Private answers"**, which absorbs the Anonymous answers page:
-   - Ask privately (B) at the top;
-   - the waiting list: question, "ChatGPT · 2 h ago", **Answer**, Dismiss; the
-     answer appears in place, with citations opened through local
-     authenticated handling;
-   - Anonymous answers (zkAPI setup, balance, ask) collapsed beneath, labeled
-     as outside help.
-   A fixed open-on-computer target for the page (no question text or
-   capability in the link). Net page count is unchanged.
+1. **On the computer, Needs you:** “N new private answers” only while unread
+   answered rows exist, opening Private answers. ChatGPT's dashboard shows
+   nothing new and receives no counts or other connections' activity.
+2. **One page, Private answers**, keeping the 1.0.0/#391 panels and sections:
+   Ask privately at top; inbox rows = question · connection name · when,
+   newest first and unread in bold; click opens the full Markdown answer with
+   a bold question, sources and left-out beneath. Only Delete and Delete all
+   (one confirmation), no Answer or Dismiss. Deep links open and scroll the
+   named row. Anonymous answers stays collapsed underneath. Light/dark and
+   390/1280-wide proof includes unread, opened list/bold and Answering… rows.
 3. **Agents page, Connect an agent:** ChatGPT, Grok, Muse, Other, each with
    its own short steps; the choice sets the provider (D).
 
-Not added: per-agent question history (the ledger is content-free by design,
-and storing questions per agent is new exposure), notifications, a phone view.
+Not added: notifications or a phone view. The timing ledger stays content-free.
 
 ## Sign-in per host
 

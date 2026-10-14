@@ -78,6 +78,8 @@ export interface RemotePrivatePart {
 }
 
 export interface RemotePrivatePartCall {
+  /** Opaque local row locator, never a capability or answer. */
+  readonly answerId?: string | undefined;
   /**
    * Settles the call's raw result, given the remote output it releases:
    * records a waiting question when the outcome and the probe say so. True
@@ -169,6 +171,7 @@ export interface RemotePrivateParts {
 interface Handoff {
   expiresAt: number;
   settled: Promise<boolean>;
+  answerId?: string;
 }
 
 /**
@@ -236,6 +239,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     released: Readonly<Record<string, unknown>> | undefined,
     args: Readonly<Record<string, unknown>>,
     ticket: WaitingQuestionTicket | undefined,
+    recordedId?: (id: string) => void,
   ): Promise<boolean> => {
     try {
       if (closed || !ticket) return false;
@@ -250,12 +254,14 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       if (verdict === 'no_match' || closed) return false;
       let recorded = false;
       try {
-        recorded = options.store()?.record(ticket, {
+        const ref = options.store()?.record(ticket, {
           question,
           surface: 'remote',
           state: verdict === 'match' ? 'waiting' : 'unchecked',
           selectors,
-        }) !== undefined;
+        });
+        recorded = ref !== undefined;
+        if (ref) recordedId?.(ref.id);
       } catch {
         console.warn('[olympus:remote] waiting private question not recorded reason=store_unavailable');
       }
@@ -275,6 +281,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     args: Readonly<Record<string, unknown>>,
     ticket: WaitingQuestionTicket | undefined,
     releaseCheck: ReleaseCheck | undefined,
+    recordedId?: (id: string) => void,
   ): Promise<boolean> | undefined => {
     let finished: ReturnType<SourceAnswerJobScope['registry']['whenFinished']>;
     try {
@@ -295,7 +302,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       } catch {
         released = { status: 'error' };
       }
-      return settleAnswer(outcome.value, released, args, ticket);
+      return settleAnswer(outcome.value, released, args, ticket, recordedId);
     }).catch(() => false);
   };
 
@@ -369,11 +376,13 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
         start(operation, args, context) {
           if (operation === 'source_answer') {
             const ticket = ticketFor(connectionId);
+            let answerId: string | undefined;
             return {
+              get answerId() { return answerId; },
               async settle(raw, released) {
                 const pending = asRecord(raw);
                 if (pending?.status === 'working' && typeof pending.job_id === 'string') {
-                  const settled = settleWhenFinished(context?.jobs, pending.job_id, args, ticket, context?.releaseCheck);
+                  const settled = settleWhenFinished(context?.jobs, pending.job_id, args, ticket, context?.releaseCheck, id => { answerId = id; const handoff = handoffs.get(`${connectionId}\u0000${pending.job_id}`); if (handoff) handoff.answerId = id; });
                   if (settled) {
                     sweep();
                     handoffs.set(`${connectionId}\u0000${pending.job_id}`, { settled, expiresAt: now() + handoffTtlMs });
@@ -381,7 +390,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
                   }
                   return false;
                 }
-                return settleAnswer(raw, released, args, ticket);
+                return settleAnswer(raw, released, args, ticket, id => { answerId = id; });
               },
             };
           }
@@ -389,6 +398,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
             const jobId = typeof args.job_id === 'string' ? args.job_id : undefined;
             if (!jobId) return undefined;
             return {
+              get answerId() { return handoffs.get(`${connectionId}\u0000${jobId}`)?.answerId; },
               async settle(raw) {
                 sweep();
                 const entry = handoffs.get(`${connectionId}\u0000${jobId}`);

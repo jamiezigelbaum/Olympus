@@ -15175,7 +15175,7 @@ function allOpenTargets() {
 }
 function openTargetPath(target) {
   if (target.kind === "private_answers")
-    return "private";
+    return target.answerId ? `private/${target.answerId}` : "private";
   if (target.kind === "connect")
     return `connect/${target.source}`;
   if (target.kind === "fix")
@@ -15187,6 +15187,9 @@ function openTargetPath(target) {
 function openTargetFromPath(path) {
   if (typeof path !== "string")
     return;
+  const answer = /^private\/([A-Za-z0-9_-]{22})$/.exec(path);
+  if (answer)
+    return { kind: "private_answers", answerId: answer[1] };
   return allOpenTargets().find((target) => openTargetPath(target) === path);
 }
 function olympusOpenUrl(target) {
@@ -15202,6 +15205,9 @@ function parseOlympusOpenUrl(raw) {
     return;
   if (!raw.toLowerCase().startsWith(`${OLYMPUS_URL_SCHEME}:`))
     return;
+  const answer = /^olympus:\/\/open\/private\/([A-Za-z0-9_-]{22})\/?$/.exec(raw);
+  if (answer)
+    return { kind: "private_answers", answerId: answer[1] };
   const match = /^olympus:\/\/open\/([a-z]+(?:\/[a-z]+)?)\/?$/.exec(raw);
   const path = match?.[1];
   if (path !== undefined) {
@@ -15214,7 +15220,7 @@ function parseOlympusOpenUrl(raw) {
 }
 function openTargetToken(target) {
   if (target.kind === "private_answers")
-    return "page.private";
+    return target.answerId ? `page.private.${target.answerId}` : "page.private";
   if (target.kind === "connect")
     return `connect.${target.source}`;
   if (target.kind === "fix")
@@ -15225,7 +15231,7 @@ function openTargetToken(target) {
 }
 function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 function isKeysOpenTarget(target) {
   return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
@@ -15235,7 +15241,7 @@ function keysOpenTargetTokenPattern() {
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 function privateAnswersOpenTargetTokenPattern() {
-  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
+  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
 }
 function isPanelOpenTarget(target) {
   return target.kind === "unreadable";
@@ -15415,7 +15421,7 @@ var init_dashboard_launch = __esm(() => {
             window.location.replace(KEYS.test(open)
               ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PRIVATE.test(open) ? '/dashboard?private-answers' : '/dashboard');
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -16182,7 +16188,8 @@ __export(exports_waiting_private_questions, {
   WAITING_QUESTION_LIMITS: () => WAITING_QUESTION_LIMITS,
   WAITING_PRIVATE_QUESTIONS_STORE_ID: () => WAITING_PRIVATE_QUESTIONS_STORE_ID,
   WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION: () => WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION,
-  WAITING_PRIVATE_QUESTIONS_FILE_NAME: () => WAITING_PRIVATE_QUESTIONS_FILE_NAME
+  WAITING_PRIVATE_QUESTIONS_FILE_NAME: () => WAITING_PRIVATE_QUESTIONS_FILE_NAME,
+  CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
 });
 import { Database } from "bun:sqlite";
 import { createHash as createHash12, randomBytes as randomBytes9 } from "node:crypto";
@@ -16266,6 +16273,11 @@ function utf8Length(text2) {
 }
 function openWaitingPrivateQuestionStore(dbPath, options = {}) {
   const now = options.now ?? Date.now;
+  const listeners = new Set;
+  const notify = () => queueMicrotask(() => {
+    for (const listener of listeners)
+      listener();
+  });
   hardenPrivatePath(dbPath);
   const db = new Database(dbPath, { create: true });
   try {
@@ -16288,24 +16300,20 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     return row?.generation ?? 0;
   };
   const expire = (at) => {
-    db.query("DELETE FROM waiting_questions WHERE asked_at <= ?").run(at - WAITING_QUESTION_LIMITS.ttlMs);
-    const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
-    if (marker && Number(marker.value) <= at - WAITING_QUESTION_LIMITS.ttlMs) {
-      db.query("DELETE FROM waiting_meta WHERE key = ?").run(OLDER_REMOVED_KEY);
-    }
+    db.query("DELETE FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ?").run(at - WAITING_QUESTION_LIMITS.ttlMs);
   };
   const markOlderRemoved = (at) => {
     db.query("INSERT INTO waiting_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(OLDER_REMOVED_KEY, String(at));
   };
   const enforceBounds = (connectionId, at) => {
     let removed = 0;
-    const perConnection = db.query("SELECT id FROM waiting_questions WHERE connection_id = ? ORDER BY asked_at DESC, rowid DESC").all(connectionId);
+    const perConnection = db.query("SELECT id FROM waiting_questions WHERE connection_id = ? AND answered_at IS NULL ORDER BY asked_at DESC, rowid DESC").all(connectionId);
     for (const row of perConnection.slice(WAITING_QUESTION_LIMITS.perConnection)) {
       removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
     }
     const all = db.query(`
       SELECT id, LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes
-      FROM waiting_questions ORDER BY asked_at DESC, rowid DESC
+      FROM waiting_questions WHERE answered_at IS NULL ORDER BY asked_at DESC, rowid DESC
     `).all();
     let total = 0;
     all.forEach((row, index) => {
@@ -16366,7 +16374,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           const generation = existing.generation + 1;
           db.query(`
             UPDATE waiting_questions
-            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?
+            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0
             WHERE id = ?
           `).run(question, existing.detail === "full" || detail === "full" ? "full" : "summary", existing.state === "waiting" || input.state === "waiting" ? "waiting" : "unchecked", generation, at, existing.id);
           ref = { id: existing.id, generation, connectionId: ticket.connectionId };
@@ -16380,6 +16388,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           ref = { id, generation: 1, connectionId: ticket.connectionId };
         }
         enforceBounds(ticket.connectionId, at);
+        notify();
         return db.query("SELECT 1 FROM waiting_questions WHERE id = ?").get(ref.id) ? ref : undefined;
       }).immediate();
     },
@@ -16395,7 +16404,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     get(id) {
       if (typeof id !== "string")
         return;
-      const row = db.query("SELECT * FROM waiting_questions WHERE id = ? AND asked_at > ?").get(id, now() - WAITING_QUESTION_LIMITS.ttlMs);
+      const row = db.query("SELECT * FROM waiting_questions WHERE id = ? AND (answered_at IS NOT NULL OR asked_at > ?)").get(id, now() - WAITING_QUESTION_LIMITS.ttlMs);
       return row ? toQuestion(row) : undefined;
     },
     dismiss(id) {
@@ -16425,6 +16434,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     },
     settleUnchecked(ref, verdict) {
       const where = "id = ? AND generation = ? AND connection_id = ? AND state = 'unchecked'";
+      notify();
       return verdict === "match" ? db.query(`UPDATE waiting_questions SET state = 'waiting' WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0 : db.query(`DELETE FROM waiting_questions WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0;
     },
     unchecked() {
@@ -16441,6 +16451,60 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       if (ids.length === 0)
         return 0;
       return db.transaction(() => ids.reduce((sum, id) => sum + revokeInTransaction(id), 0)).immediate();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    markRead(ref) {
+      return db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NOT NULL").run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    saveAnswer(ref, result) {
+      const serialized = JSON.stringify(result);
+      if (utf8Length(serialized) > WAITING_QUESTION_LIMITS.answerBytes)
+        return false;
+      return db.transaction(() => {
+        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), ref.id, ref.generation, ref.connectionId).changes > 0;
+        if (!changed)
+          return false;
+        const rows = db.query("SELECT id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC").all();
+        let bytes = 0;
+        rows.forEach((row, index) => {
+          bytes += row.bytes + RECORD_OVERHEAD_BYTES;
+          if (index >= WAITING_QUESTION_LIMITS.answeredTotal || bytes > WAITING_QUESTION_LIMITS.answeredBytes) {
+            db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id);
+            markOlderRemoved(now());
+          }
+        });
+        return true;
+      }).immediate();
+    },
+    retry(ref) {
+      const row = db.query("SELECT attempts FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").get(ref.id, ref.generation, ref.connectionId);
+      if (!row)
+        return false;
+      const delay = Math.min(30 * 60000, 5000 * 2 ** Math.min(row.attempts, 9));
+      return db.query("UPDATE waiting_questions SET attempts = attempts + 1, next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").run(now() + delay, ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    invalidate(ref) {
+      return db.query("UPDATE waiting_questions SET result = NULL, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    deleteForCorpora(corpusIds, knownCorpusIds) {
+      const ids = new Set(corpusIds);
+      const known = knownCorpusIds ? new Set(knownCorpusIds) : undefined;
+      return db.transaction(() => {
+        const rows = db.query("SELECT * FROM waiting_questions").all();
+        let removed = 0;
+        for (const row of rows) {
+          const result = toQuestion(row).result;
+          if (!result || result.read.some((item) => typeof item.corpusId !== "string" || ids.has(item.corpusId) || known && !known.has(item.corpusId))) {
+            removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
+          }
+        }
+        return removed;
+      }).immediate();
     },
     close() {
       closeSqliteStore(db);
@@ -16476,7 +16540,11 @@ function toQuestion(row) {
     state: row.state === "waiting" ? "waiting" : "unchecked",
     seen: row.seen === 1,
     generation: row.generation,
-    askedAt: new Date(row.asked_at).toISOString()
+    askedAt: new Date(row.asked_at).toISOString(),
+    ...row.result ? { result: JSON.parse(row.result) } : {},
+    ...row.answered_at !== null ? { answeredAt: new Date(row.answered_at).toISOString() } : {},
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at
   };
 }
 function migrations() {
@@ -16509,6 +16577,15 @@ function migrations() {
         );
       `);
     }
+  }, {
+    version: 2,
+    name: "private_answers_inbox",
+    up(db) {
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN result TEXT;
+        ALTER TABLE waiting_questions ADD COLUMN answered_at INTEGER;
+        ALTER TABLE waiting_questions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE waiting_questions ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;`);
+    }
   }];
 }
 function hardenPrivatePath(dbPath) {
@@ -16531,7 +16608,7 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 1, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 2, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
   WAITING_QUESTION_LIMITS = Object.freeze({
@@ -16540,6 +16617,9 @@ var init_waiting_private_questions = __esm(() => {
     perConnection: 20,
     total: 50,
     totalBytes: 256 * 1024,
+    answeredTotal: 500,
+    answeredBytes: 16 * 1024 * 1024,
+    answerBytes: 128 * 1024,
     ttlMs: 7 * 24 * 60 * 60000
   });
   SELECTOR_TEXT_FIELDS = [
@@ -41878,6 +41958,194 @@ function namesOnlyCoverageNote(count) {
   return count === 1 ? "1 match is in a folder set to Names only, so Olympus has its name but not its contents. " + "Switch that folder to Full in the folder picker to let Olympus read it." : `${count} matches are in folders set to Names only, so Olympus has their names but not their contents. ` + "Switch those folders to Full in the folder picker to let Olympus read them.";
 }
 
+// src/workers/answer-activity.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+function runWithLocalInferenceGuard(guard, work) {
+  localInferenceGuards ??= new AsyncLocalStorage2;
+  return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
+}
+function runBackgroundInference(work) {
+  localInferencePriority ??= new AsyncLocalStorage2;
+  return localInferencePriority.run("background", work);
+}
+function createAnswerActivity(onBusy, options = {}) {
+  const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
+  const now = options.now ?? Date.now;
+  const leases = new Map;
+  const idleListeners = new Set;
+  let interactive = 0;
+  let nextId = 0;
+  let expired = 0;
+  const drop = (id) => {
+    const lease = leases.get(id);
+    if (!lease)
+      return;
+    leases.delete(id);
+    if (lease.kind === "background")
+      return;
+    interactive -= 1;
+    if (interactive > 0 || idleListeners.size === 0)
+      return;
+    queueMicrotask(() => {
+      if (interactive > 0)
+        return;
+      for (const listener of [...idleListeners]) {
+        try {
+          listener();
+        } catch {}
+      }
+    });
+  };
+  const sweep = () => {
+    const at = now();
+    for (const [id, { startedAt }] of leases) {
+      if (at - startedAt < maxLeaseMs)
+        break;
+      drop(id);
+      expired += 1;
+      try {
+        options.onExpired?.(at - startedAt);
+      } catch {}
+    }
+  };
+  const activity = {
+    get busy() {
+      sweep();
+      return leases.size > 0;
+    },
+    get inFlight() {
+      sweep();
+      return leases.size;
+    },
+    get interactiveInFlight() {
+      sweep();
+      return interactive;
+    },
+    get expired() {
+      sweep();
+      return expired;
+    },
+    begin(kind = "owner") {
+      sweep();
+      const id = nextId++;
+      leases.set(id, { startedAt: now(), kind });
+      if (kind !== "background")
+        interactive += 1;
+      if (leases.size === 1) {
+        try {
+          onBusy();
+        } catch {}
+      }
+      return () => {
+        drop(id);
+      };
+    },
+    end() {
+      const oldest = leases.keys().next();
+      if (!oldest.done)
+        drop(oldest.value);
+    },
+    onInteractiveIdle(listener) {
+      idleListeners.add(listener);
+      return () => {
+        idleListeners.delete(listener);
+      };
+    },
+    async run(work, kind) {
+      const release = activity.begin(kind);
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
+  return activity;
+}
+function localModelResourceKey(profile) {
+  return `${profile.baseUrl?.replace(/\/+$/, "") ?? ""}\x00${profile.model ?? ""}`;
+}
+function createLocalModelActivity() {
+  const queues = new Map;
+  const dispatch = (key2, work) => new Promise((resolve8, reject) => {
+    let queue = queues.get(key2);
+    if (!queue) {
+      queue = { running: false, tasks: [] };
+      queues.set(key2, queue);
+    }
+    const pending = queue;
+    const pump = () => {
+      if (pending.running)
+        return;
+      const owner = pending.tasks.findIndex((task) => !task.background);
+      const next = pending.tasks.splice(owner < 0 ? 0 : owner, 1)[0];
+      if (!next)
+        return;
+      pending.running = true;
+      next.run().finally(() => {
+        pending.running = false;
+        pump();
+      });
+    };
+    pending.tasks.push({ background: localInferencePriority?.getStore() === "background", run: async () => {
+      try {
+        resolve8(await get(key2).run(work));
+      } catch (error) {
+        reject(error);
+      }
+    } });
+    queueMicrotask(pump);
+  });
+  const resources = new Map;
+  const busyListeners = new Map;
+  const get = (key2) => {
+    let activity = resources.get(key2);
+    if (!activity) {
+      activity = createAnswerActivity(() => {
+        for (const listener of busyListeners.get(key2) ?? [])
+          listener();
+      });
+      resources.set(key2, activity);
+    }
+    return activity;
+  };
+  return {
+    busy: (key2) => get(key2).busy,
+    run: (key2, work) => get(key2).run(work),
+    onBusy(key2, listener) {
+      const listeners = busyListeners.get(key2) ?? new Set;
+      busyListeners.set(key2, listeners);
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    onIdle: (key2, listener) => get(key2).onInteractiveIdle(listener),
+    track(key2, model) {
+      return { ...model, complete: (request) => {
+        const guards = localInferenceGuards?.getStore() ?? [];
+        return dispatch(key2, async () => {
+          request.signal?.throwIfAborted();
+          for (const guard of guards) {
+            try {
+              await guard();
+            } catch (error) {
+              request.signal?.throwIfAborted();
+              throw error;
+            }
+          }
+          request.signal?.throwIfAborted();
+          return model.complete(request);
+        });
+      } };
+    }
+  };
+}
+var localInferencePriority, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS;
+var init_answer_activity = __esm(() => {
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+});
+
 // src/core/opsec.ts
 function createStructuredEvidenceFact(input) {
   const factId = input.factId.trim();
@@ -42138,7 +42406,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel2) {
   if (!request.localOnly)
     return;
@@ -42887,7 +43155,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage2;
+  analystAbortSignalStorage = new AsyncLocalStorage3;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -43366,7 +43634,7 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 import { randomUUID as randomUUID7 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
@@ -43627,7 +43895,7 @@ function nonNegativeMs(value) {
 }
 var storage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage3;
+  storage = new AsyncLocalStorage4;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -44524,7 +44792,7 @@ var init_evidence_pack = __esm(() => {
 });
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function createReleaseManifestSink() {
   return { manifests: [] };
 }
@@ -44545,7 +44813,7 @@ function adoptReleaseManifests(into, from) {
 }
 var storage2;
 var init_release_manifest = __esm(() => {
-  storage2 = new AsyncLocalStorage4;
+  storage2 = new AsyncLocalStorage5;
 });
 
 // src/core/secret-location-note.ts
@@ -44854,21 +45122,43 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
       const analyze = (analysisDetail, analysisLocalOnly) => {
         const { localLeg, cloudLeg } = legFitting(analysisDetail);
-        return routeAnalysis({
+        const guard = async () => {
+          if (!options.inferenceGuard)
+            return;
+          try {
+            await options.inferenceGuard(analysisDetail.pack, request, analysisDetail.candidateCorpusIds);
+          } catch {
+            currentAnalystAbortSignal()?.throwIfAborted();
+            throw new OperationError("source_index_policy_violation", "Source evidence is no longer allowed.", "Ask again under the current source policy.");
+          }
+        };
+        const live = (analyst) => options.inferenceGuard ? {
+          async analyze(legPack, legOptions) {
+            await guard();
+            return analyst.analyze(legPack, legOptions);
+          }
+        } : analyst;
+        const dispatch = () => routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
-          local: localLeg(options.analyst),
-          ...options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {},
-          ...veniceAnalyst ? { venice: veniceAnalyst } : {},
+          local: localLeg(live(options.analyst)),
+          ...options.cloudAnalyst ? { cloud: cloudLeg(live(options.cloudAnalyst)) } : {},
+          ...veniceAnalyst ? { venice: live(veniceAnalyst) } : {},
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg) } : {},
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, (analyst) => localLeg(live(analyst)), (analyst) => cloudLeg(live(analyst)), live) } : {},
           secureAnalystPoolState,
           ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
           ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
           secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs
+        });
+        if (!options.inferenceGuard)
+          return dispatch();
+        return runWithLocalInferenceGuard(guard, async () => {
+          await guard();
+          return dispatch();
         });
       };
       const analystStartedAt = Date.now();
@@ -45079,10 +45369,10 @@ function secureLocalExclusionCoverageNotes(detail) {
   }
   return notes;
 }
-function withLegPromptBudgets(route, localLeg, cloudLeg) {
+function withLegPromptBudgets(route, localLeg, cloudLeg, veniceLeg) {
   return (input) => {
     const resolved = route(input);
-    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step.backend === "cloud" ? { ...step, analyst: cloudLeg(step.analyst) } : step);
+    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step.backend === "cloud" ? { ...step, analyst: cloudLeg(step.analyst) } : { ...step, analyst: veniceLeg(step.analyst) });
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
@@ -45463,6 +45753,8 @@ async function routeAnalysis(input) {
       const result2 = await observeImplicitAnalystLeg("cloud", cloudAnalystTimeoutMs, () => analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result: result2, backend: "cloud" };
     } catch (error) {
+      if (isAnalystPolicyRefusal(error))
+        throw error;
       if (isCallerCancellation(error))
         throw error;
       const fallback = await observeImplicitAnalystLeg("local", localAnalystTimeoutMs, () => analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
@@ -45499,6 +45791,8 @@ async function routeAnalysis(input) {
       const result2 = await observeImplicitAnalystLeg("cloud", cloudAnalystTimeoutMs, () => analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result: result2, backend: "cloud" };
     } catch (error) {
+      if (isAnalystPolicyRefusal(error) || isCallerCancellation(error))
+        throw error;
       const fallback = await observeImplicitAnalystLeg("local", localAnalystTimeoutMs, () => analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
       return {
         result: fallback,
@@ -46400,6 +46694,28 @@ async function probePrivateMatch(input) {
       clearTimeout(timer);
   }
 }
+async function guardSourceAnswerEvidence(input) {
+  const lanes = input.lanes(input.request);
+  for (const [index, candidate] of input.pack.candidates.entries()) {
+    const corpusId = input.corpusIds[index];
+    const adapter = corpusId ? lanes.adapters[corpusId] : undefined;
+    const provider = corpusId ? lanes.contentProviders[corpusId] : undefined;
+    let allowed = Boolean(corpusId && lanes.registry.get(corpusId)?.trustDomain === candidate.trustDomain && adapter && provider);
+    const hasContent = Boolean(candidate.chunks.length || candidate.tables?.length || candidate.facts?.length);
+    if (allowed && hasContent && adapter?.selectedItemServable)
+      allowed = adapter.selectedItemServable(candidate.provenance.sourceItem);
+    if (allowed) {
+      if (hasContent && provider?.contentServable) {
+        allowed = provider.contentServable({ provenance: candidate.provenance, trustDomain: candidate.trustDomain });
+      } else {
+        const content = await provider?.fetchLocalContent({ provenance: candidate.provenance, trustDomain: candidate.trustDomain, maxChars: 1 });
+        allowed = Boolean(content && (!hasContent || !content.namesOnly && !content.contentPrivate && content.chunks.length) && content.sensitivity.trustDomain === candidate.trustDomain && content.sensitivity.trustTier === candidate.trustTier);
+      }
+    }
+    if (!allowed)
+      throw new OperationError("source_index_policy_violation", "Source evidence is no longer allowed.", "Ask again under the current source policy.");
+  }
+}
 async function checkPrivateEvidenceItems(input) {
   if (input.items.length === 0)
     return [];
@@ -46471,6 +46787,7 @@ async function readPrivateEvidenceItem(input) {
 }
 var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
+  init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();
   init_evidence_pack();
@@ -70986,7 +71303,7 @@ var init_vocabulary = __esm(() => {
       privateAnswers: { title: "Private answers", line: "Questions answered only on this computer" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
-    waiting: { one: "1 private question is waiting", many: "{count} private questions are waiting" },
+    waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
     locked: "Open dashboard controls first",
     readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
     indexFaster: DASHBOARD_INDEX_FASTER
@@ -71427,16 +71744,17 @@ var init_vocabulary = __esm(() => {
     askLabel: "Ask privately",
     askPlaceholder: "Ask about your private things",
     ask: "Ask",
-    waitingTitle: "Questions waiting for you",
-    waitingIntro: "Agents asked these, and the answer needs your private things. Answer them here.",
-    noneWaiting: "Nothing is waiting.",
-    olderRemoved: "Older questions were removed.",
-    answer: "Answer",
-    dismiss: "Dismiss",
-    dismissAll: "Dismiss all",
-    dismissAllConfirm: "Dismiss every waiting question?",
+    waitingTitle: "Private inbox",
+    waitingIntro: "Questions from your connections, answered here.",
+    noneWaiting: "Your private inbox is empty.",
+    olderRemoved: "Older private answers were removed.",
+    delete: "Delete",
+    deleteAll: "Delete all",
+    deleteAllConfirm: "Delete every question and answer in your private inbox?",
+    deleted: "That answer was deleted",
+    retrying: "Retrying on this computer…",
     unchecked: "not checked yet",
-    answering: "Answering on this computer…",
+    answering: "Answering…",
     sources: "Sources",
     open: "Open",
     leftOut: "Left out: {sources}. Olympus cannot search them on this computer.",
@@ -71447,7 +71765,6 @@ var init_vocabulary = __esm(() => {
     changed: "Something it read changed. Ask again.",
     failed: "Olympus could not answer this. Try again.",
     unreachable: "Olympus is not responding. Try again in a moment.",
-    dismissed: "Dismissed.",
     locked: "Open dashboard controls to see and answer private questions.",
     openControls: "Open dashboard controls →",
     unlockIntro: "Private answers need a session opened here, not by an agent or the launch link.",
@@ -103268,8 +103585,8 @@ function sourceAnswerOutput(raw, options) {
     citations
   };
 }
-function withRemotePrivateNote(output) {
-  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: REMOTE_PRIVATE_NOTE } : output;
+function withRemotePrivateNote(output, answerId) {
+  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: answerId && /^[A-Za-z0-9_-]{22}$/.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE } : output;
 }
 function withheldAnswer(message2) {
   return { kind: "source_answer", status: "withheld", answer: message2, citations: [] };
@@ -103521,7 +103838,7 @@ function dateOnly(value2) {
 function asRecord15(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Private items may answer this; the person can see that answer in Olympus on their computer.", REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_operation_error();
   init_opsec();
@@ -103744,7 +104061,7 @@ var init_remote_result = __esm(() => {
       status: { enum: ["answered", "withheld"] },
       answer: { type: "string", maxLength: MAX_ANSWER },
       citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-      private_note: { const: REMOTE_PRIVATE_NOTE }
+      private_note: { type: "string", pattern: "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?$" }
     }
   };
   ANONYMOUS_ANSWERED_SCHEMA = {
@@ -104560,7 +104877,7 @@ async function handleRemoteCallTool(request, makeOperationContext) {
     const approved = release();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
     const output = privatePart ? release() : approved;
-    return { content: text2(privateMayAnswer ? withRemotePrivateNote(output) : output) };
+    return { content: text2(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId) : output) };
   } catch (error2) {
     return { content: text2(remoteErrorOutput(error2, { declaredParams })), isError: true };
   }
@@ -124841,7 +125158,7 @@ function computerOpenTargets(origin, token) {
     if (target.kind === "dashboard")
       out[path] = `${origin}${dashboardHomeHref(token)}`;
     else if (target.kind === "private_answers")
-      out[path] = `${origin}${dashboardLocalPageHref("privateAnswers", token)}`;
+      out[path] = `${origin}${dashboardLocalPageHref("privateAnswers", token)}${target.answerId ? "#" + target.answerId : ""}`;
     else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref("keys", token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     } else if (isPanelOpenTarget(target)) {
@@ -126400,23 +126717,20 @@ function renderWaiting(waiting, now) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
     return parts.join("") + "</section>";
   }
-  if (waiting.questions.length === 0) {
-    parts.push(`<p class="pnote" data-pa-none>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
-  } else {
-    parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
-    const rows = waiting.questions.map((question) => {
-      const asked = Date.parse(question.askedAt);
-      const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
-      const from = [question.from, when, question.unchecked ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : ""].filter((part) => part !== "").join(" · ");
-      return `<li class="srow nodot" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><div class="paq">${escapeHtml2(question.question)}</div><div class="pafrom">${escapeHtml2(from)}</div></div>` + `<div class="sact"><button type="button" class="btn primary" data-pa-answer>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answer)}</button>` + `<button type="button" class="btn" data-pa-dismiss>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.dismiss)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
-    });
-    parts.push(`<ul class="srows palist">${rows.join("")}</ul>`);
-    if (waiting.questions.length > 1) {
-      parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-dismiss-all>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.dismissAll)}</button></div>`);
-    }
-  }
-  if (waiting.olderRemoved)
-    parts.push(`<p class="pnote hint" data-pa-older-removed>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
+  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? " hidden" : ""}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
+  parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
+  const rows = [...waiting.questions].sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt)).map((question) => {
+    const asked = Date.parse(question.askedAt);
+    const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
+    const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
+    const status = state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
+    const from = [question.from, when, status].filter(Boolean).join(" · ");
+    return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+  });
+  parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
+  parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button></div>`);
+  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
+  parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join("") + "</section>";
 }
 function renderAnonymous(options, csrfToken) {
@@ -126458,8 +126772,11 @@ function privateAnswersClientScript(input) {
       changed: DASHBOARD_PRIVATE_ANSWERS_COPY.changed,
       failed: DASHBOARD_PRIVATE_ANSWERS_COPY.failed,
       unreachable: DASHBOARD_PRIVATE_ANSWERS_COPY.unreachable,
-      dismissed: DASHBOARD_PRIVATE_ANSWERS_COPY.dismissed,
-      dismissAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.dismissAllConfirm
+      delete: DASHBOARD_PRIVATE_ANSWERS_COPY.delete,
+      deleteAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAllConfirm,
+      deleted: DASHBOARD_PRIVATE_ANSWERS_COPY.deleted,
+      retrying: DASHBOARD_PRIVATE_ANSWERS_COPY.retrying,
+      unchecked: DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked
     }
   };
   return `window.olympusMarkdown=(${chatgptMarkdownRender.toString()});
@@ -126564,15 +126881,7 @@ function privateAnswersClientScript(input) {
         citations.forEach(function (citation) {
           var item = el('li');
           var label = [citation.title, citation.source, citation.date].filter(function (part) { return typeof part === 'string' && part !== ''; }).join(' · ');
-          if (typeof citation.url === 'string' && /^https:\\/\\//.test(citation.url)) {
-            var link = el('a', '', label || citation.url);
-            link.href = citation.url;
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer';
-            item.appendChild(link);
-          } else {
-            item.appendChild(document.createTextNode(label));
-          }
+          item.appendChild(document.createTextNode(label));
           if (typeof citation.open === 'string') {
             var button = el('button', 'paopen', config.copy.open);
             button.type = 'button';
@@ -126589,6 +126898,8 @@ function privateAnswersClientScript(input) {
       if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
+    } else if (status === 'answering' || status === 'retrying' || status === 'unchecked') {
+      card.appendChild(el('p', 'pamsg', status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
@@ -126618,53 +126929,136 @@ function privateAnswersClientScript(input) {
       render(out, outcome.result, question);
     });
   }
-  root.querySelectorAll('[data-pa-question]').forEach(function (row) {
+  var selected = null;
+  var readVersion = 0;
+  var seen = {};
+  var list = root.querySelector('[data-pa-list]');
+  function rows() { return Array.from(root.querySelectorAll('[data-pa-question]')); }
+  function findRow(id) { return rows().find(function (row) { return row.getAttribute('data-pa-question') === id; }); }
+  function missing() {
+    var note = root.querySelector('[data-pa-missing]');
+    if (note) { note.hidden = false; note.textContent = config.copy.deleted; }
+  }
+  async function read(row, quiet) {
     var id = row.getAttribute('data-pa-question');
+    selected = id;
+    var version = ++readVersion;
     var question = row.querySelector('.paq').textContent;
     var out = row.querySelector('[data-pa-out]');
-    var actions = row.querySelector('.sact');
-    var answer = row.querySelector('[data-pa-answer]');
-    var dismiss = row.querySelector('[data-pa-dismiss]');
-    function busy(on) {
-      if (answer) answer.disabled = on;
-      if (dismiss) dismiss.disabled = on;
-    }
-    if (answer) answer.addEventListener('click', async function () {
-      busy(true);
+    if (!quiet) {
+      rows().forEach(function (other) { if (other !== row) other.querySelector('[data-pa-out]').textContent = ''; });
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: 'answer', id: id });
-      if (!outcome.ok) {
-        message(out, errorText(outcome), true, question);
-        if (outcome.status === 410 && actions) actions.remove(); else busy(false);
-        return;
-      }
-      render(out, outcome.result, question);
-      if (outcome.result.status === 'answered') row.classList.add('answered');
-      // The answer is on screen: only now may the question be cleared.
-      if (typeof outcome.result.ack === 'string') {
-        var seen = await send({ action: 'seen', ack: outcome.result.ack });
-        if (seen.ok && seen.result.status === 'cleared' && actions) { actions.remove(); return; }
-      }
-      busy(false);
-    });
-    if (dismiss) dismiss.addEventListener('click', async function () {
-      busy(true);
-      var outcome = await send({ action: 'dismiss', id: id });
-      if (!outcome.ok) { message(out, errorText(outcome), true, question); busy(false); return; }
+    }
+    var outcome = await send({ action: 'read', id: id });
+    if (version !== readVersion || selected !== id || !row.isConnected) return;
+    if (!outcome.ok) {
+      message(out, outcome.status === 410 || outcome.status === 404 ? config.copy.deleted : errorText(outcome), true, question);
+      return;
+    }
+    render(out, outcome.result, question);
+    var generation = outcome.result.generation;
+    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
+      var ack = await send({ action: 'seen', id: id, generation: generation });
+      if (ack.ok) { seen[id] = generation; row.classList.remove('unread'); }
+    }
+  }
+  function bind(row) {
+    row.querySelector('[data-pa-read]').addEventListener('click', function () { read(row, false); });
+    row.querySelector('[data-pa-delete]').addEventListener('click', async function () {
+      var button = this;
+      button.disabled = true;
+      var id = row.getAttribute('data-pa-question');
+      var outcome = await send({ action: 'delete', id: id });
+      button.disabled = false;
+      if (!outcome.ok) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      if (selected === id) { selected = null; ++readVersion; }
       row.remove();
+      empty();
     });
-  });
-  var all = root.querySelector('[data-pa-dismiss-all]');
+  }
+  function empty() {
+    var count = rows().length;
+    var none = root.querySelector('[data-pa-none]');
+    var all = root.querySelector('[data-pa-delete-all]');
+    if (none) none.hidden = count !== 0;
+    if (all) all.hidden = count === 0;
+  }
+  rows().forEach(bind);
+  var all = root.querySelector('[data-pa-delete-all]');
   if (all) all.addEventListener('click', async function () {
-    if (!window.confirm(config.copy.dismissAllConfirm)) return;
+    if (!window.confirm(config.copy.deleteAllConfirm)) return;
     all.disabled = true;
-    var outcome = await send({ action: 'dismiss_all' });
-    if (outcome.ok) { window.location.reload(); return; }
+    var outcome = await send({ action: 'delete_all' });
     all.disabled = false;
+    if (outcome.ok) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
+    else {
+      var note = root.querySelector('[data-pa-missing]');
+      if (note) { note.hidden = false; note.textContent = errorText(outcome); }
+    }
   });
+  function openFragment() {
+    var id;
+    try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (_) { return; }
+    if (!id || id === config.fragment) return;
+    var row = findRow(id);
+    if (!row) { missing(); return; }
+    if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+    read(row, false);
+  }
+  openFragment();
+  window.addEventListener('hashchange', openFragment);
+  async function poll() {
+    if (document.hidden) return;
+    var outcome = await send({ action: 'list' });
+    if (!outcome.ok || !Array.isArray(outcome.result.questions) || !list) {
+      var openRow = selected && findRow(selected);
+      if (openRow) await read(openRow, true);
+      return;
+    }
+    var questions = outcome.result.questions.slice().sort(function (a, b) { return Date.parse(b.askedAt) - Date.parse(a.askedAt); });
+    rows().forEach(function (row) {
+      if (!questions.some(function (q) { return q.id === row.getAttribute('data-pa-question'); })) {
+        if (selected === row.getAttribute('data-pa-question')) { selected = null; ++readVersion; missing(); }
+        row.remove();
+      }
+    });
+    questions.forEach(function (q) {
+      var row = findRow(q.id);
+      if (!row) {
+        row = el('li', 'srow nodot'); row.id = q.id; row.setAttribute('data-pa-question', q.id);
+        var main = el('div', 'smain'); var link = el('button', 'pa-read'); link.type = 'button'; link.setAttribute('data-pa-read', '');
+        link.appendChild(el('span', 'paq')); link.appendChild(el('span', 'pafrom')); main.appendChild(link); row.appendChild(main);
+        var actions = el('div', 'sact'); var remove = el('button', 'btn', config.copy.delete); remove.type = 'button'; remove.setAttribute('data-pa-delete', ''); actions.appendChild(remove); row.appendChild(actions);
+        var out = el('div', 'paout'); out.setAttribute('data-pa-out', ''); out.setAttribute('aria-live', 'polite'); row.appendChild(out); bind(row);
+      }
+      row.classList.toggle('unread', q.unread === true);
+      row.querySelector('.paq').textContent = q.question;
+      if (selected === q.id && q.state !== 'answered') {
+        message(row.querySelector('[data-pa-out]'), q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
+      }
+      var state = q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var date = new Date(q.askedAt);
+      row.querySelector('.pafrom').textContent = ' · ' + [q.from, isNaN(date.getTime()) ? '' : date.toLocaleString(), state].filter(Boolean).join(' · ');
+      list.appendChild(row);
+    });
+    empty();
+    var older = root.querySelector('[data-pa-older-removed]');
+    if (older) older.hidden = !outcome.result.olderRemoved;
+    var current = selected && findRow(selected);
+    if (current) await read(current, true);
+  }
+  // A selected answer is rechecked through read eligibility on each visible poll.
+  function schedule() {
+    if (typeof window.setTimeout !== 'function') return;
+    window.setTimeout(async function () { await poll(); schedule(); }, 5000);
+  }
+  schedule();
 })();`;
 }
 var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
+.pa { width: 100%; min-width: 0; max-width: min(760px, 100%); }
+.pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
+.pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
 .pa .pasection > .sect { margin: 0 0 12px; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
@@ -126680,7 +127074,10 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
 .pa .paout { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
-.pa .srow.answered .paq { font-weight: 600; }
+.pa .srow.unread .paq { font-weight: 700; }
+.pa .pa-read { display: block; width: 100%; min-width: 0; border: 0; padding: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
+.pa .smain { min-width: 0; }
+.pa .pa-read:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
 .pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .pa .paanswer p { margin: 0 0 10px; max-width: 72ch; overflow-wrap: anywhere; }
 .pa .paanswer p:last-child { margin-bottom: 0; }
@@ -135214,140 +135611,6 @@ var init_installed_tier_classification = __esm(() => {
   init_sniffer();
   init_sniffer_store();
   init_tier_rules();
-});
-
-// src/workers/answer-activity.ts
-function createAnswerActivity(onBusy, options = {}) {
-  const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
-  const now = options.now ?? Date.now;
-  const leases = new Map;
-  const idleListeners = new Set;
-  let interactive = 0;
-  let nextId = 0;
-  let expired = 0;
-  const drop = (id) => {
-    const lease = leases.get(id);
-    if (!lease)
-      return;
-    leases.delete(id);
-    if (lease.kind === "background")
-      return;
-    interactive -= 1;
-    if (interactive > 0 || idleListeners.size === 0)
-      return;
-    queueMicrotask(() => {
-      if (interactive > 0)
-        return;
-      for (const listener of [...idleListeners]) {
-        try {
-          listener();
-        } catch {}
-      }
-    });
-  };
-  const sweep = () => {
-    const at = now();
-    for (const [id, { startedAt }] of leases) {
-      if (at - startedAt < maxLeaseMs)
-        break;
-      drop(id);
-      expired += 1;
-      try {
-        options.onExpired?.(at - startedAt);
-      } catch {}
-    }
-  };
-  const activity = {
-    get busy() {
-      sweep();
-      return leases.size > 0;
-    },
-    get inFlight() {
-      sweep();
-      return leases.size;
-    },
-    get interactiveInFlight() {
-      sweep();
-      return interactive;
-    },
-    get expired() {
-      sweep();
-      return expired;
-    },
-    begin(kind = "owner") {
-      sweep();
-      const id = nextId++;
-      leases.set(id, { startedAt: now(), kind });
-      if (kind !== "background")
-        interactive += 1;
-      if (leases.size === 1) {
-        try {
-          onBusy();
-        } catch {}
-      }
-      return () => {
-        drop(id);
-      };
-    },
-    end() {
-      const oldest = leases.keys().next();
-      if (!oldest.done)
-        drop(oldest.value);
-    },
-    onInteractiveIdle(listener) {
-      idleListeners.add(listener);
-      return () => {
-        idleListeners.delete(listener);
-      };
-    },
-    async run(work, kind) {
-      const release = activity.begin(kind);
-      try {
-        return await work();
-      } finally {
-        release();
-      }
-    }
-  };
-  return activity;
-}
-function localModelResourceKey(profile) {
-  return `${profile.baseUrl?.replace(/\/+$/, "") ?? ""}\x00${profile.model ?? ""}`;
-}
-function createLocalModelActivity() {
-  const resources = new Map;
-  const busyListeners = new Map;
-  const get = (key2) => {
-    let activity = resources.get(key2);
-    if (!activity) {
-      activity = createAnswerActivity(() => {
-        for (const listener of busyListeners.get(key2) ?? [])
-          listener();
-      });
-      resources.set(key2, activity);
-    }
-    return activity;
-  };
-  return {
-    busy: (key2) => get(key2).busy,
-    run: (key2, work) => get(key2).run(work),
-    onBusy(key2, listener) {
-      const listeners = busyListeners.get(key2) ?? new Set;
-      busyListeners.set(key2, listeners);
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    onIdle: (key2, listener) => get(key2).onInteractiveIdle(listener),
-    track(key2, model) {
-      return { ...model, complete: (request) => get(key2).run(() => model.complete(request)) };
-    }
-  };
-}
-var DEFAULT_ANSWER_LEASE_MS;
-var init_answer_activity = __esm(() => {
-  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
 // src/workers/classification/sniffer-resolver.ts
@@ -151692,6 +151955,10 @@ class PrivateAnswerJobs {
   get size() {
     return this.jobs.size;
   }
+  hasClaimedWaiting(ref) {
+    this.sweep();
+    return [...this.jobs.values()].some((job) => !!job.claimKey && job.waiting?.id === ref.id && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
+  }
   get pendingAnalyses() {
     return this.waiting.length + (this.running ? 1 : 0);
   }
@@ -151791,8 +152058,8 @@ class PrivateAnswerJobs {
       return this.jobs.get(jobId) === job ? { status: 200, body: { status: "failed" } } : gone();
     if (this.jobs.get(jobId) !== job || job.outcome !== outcome)
       return job.outcome?.kind === "failed" ? { status: 200, body: { status: "failed" } } : gone();
-    if (job.seenOnDelivery)
-      this.acknowledgeWaiting(job);
+    if (job.seenOnDelivery && !this.acknowledgeWaiting(job))
+      return { status: 503, body: { status: "busy" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     return { status: 200, body: { status: "ready", v: 1, ...outcome.sealed } };
   }
   async open(jobId, token) {
@@ -151843,18 +152110,23 @@ class PrivateAnswerJobs {
       return gone();
     if (!timingSafeEqual11(Buffer.from(expected), Buffer.from(ack)))
       return gone();
-    this.acknowledgeWaiting(job);
+    if (!this.acknowledgeWaiting(job))
+      return { status: 503, body: { status: "busy" }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     return { status: 200, body: { status: "acknowledged" } };
   }
   acknowledgeWaiting(job) {
     if (job.ack === undefined)
-      return;
+      return true;
+    if (job.waiting) {
+      try {
+        if (!this.options.acknowledge || this.options.acknowledge(job.waiting) === false)
+          return false;
+      } catch {
+        return false;
+      }
+    }
     job.ack = undefined;
-    if (!job.waiting)
-      return;
-    try {
-      this.options.acknowledge?.(job.waiting);
-    } catch {}
+    return true;
   }
   async stillReleasable(job) {
     const kind = job.outcome?.kind;
@@ -152990,12 +153262,17 @@ function createBuiltInPrivateAnswerModel(options) {
         status: () => model.status(),
         stop: () => model.stop(),
         async complete(modelRequest) {
-          const ok = await checkPrivateEvidence(options.eligible, prompted);
-          if (!ok.every(Boolean)) {
-            revoked = true;
-            throw new NoPrivateEvidenceError;
-          }
-          return model.complete(modelRequest);
+          const guard = async () => {
+            const ok = await checkPrivateEvidence(options.eligible, prompted);
+            if (!ok.every(Boolean)) {
+              revoked = true;
+              throw new NoPrivateEvidenceError;
+            }
+          };
+          return runWithLocalInferenceGuard(guard, async () => {
+            await guard();
+            return model.complete(modelRequest);
+          });
         }
       };
       let result;
@@ -153418,6 +153695,7 @@ function string4(value2) {
 }
 var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
 var init_private_answer_model = __esm(() => {
+  init_answer_activity();
   init_source_model_policy();
   init_evidence_versions();
   init_private_answer_contract();
@@ -153621,6 +153899,7 @@ var init_local_answer = __esm(() => {
 // src/workers/email-source/local-private-answers.ts
 var exports_local_private_answers = {};
 __export(exports_local_private_answers, {
+  inboxEvidenceIdentity: () => inboxEvidenceIdentity,
   createLocalPrivateAnswers: () => createLocalPrivateAnswers,
   createLocalAnswerPath: () => createLocalAnswerPath,
   LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH
@@ -153653,35 +153932,33 @@ function createLocalAnswerPath(options) {
 function refused(status, code, message2) {
   return { status, body: { ok: false, error: { code, message: message2 } } };
 }
+function inboxEvidenceIdentity(item) {
+  const out = {};
+  for (const key2 of ["corpusId", "trustDomain", "trustTier", "tier"]) {
+    if (typeof item[key2] === "string")
+      out[key2] = item[key2];
+  }
+  const provenance = item.provenance;
+  const source = provenance?.sourceItem;
+  if (source) {
+    const kept = {};
+    for (const key2 of ["family", "provider", "accountScope", "providerItemId", "localItemId"]) {
+      if (typeof source[key2] === "string")
+        kept[key2] = source[key2];
+    }
+    out.provenance = { sourceItem: kept };
+  }
+  return out;
+}
 function createLocalPrivateAnswers(options) {
   const now = options.now ?? Date.now;
-  const acks = new Map;
   const opens = new Map;
   let running = false;
-  const sweep = () => {
-    const at = now();
-    for (const map2 of [acks, opens]) {
-      for (const [key2, entry] of map2)
-        if (entry.expiresAt <= at)
-          map2.delete(key2);
-      while (map2.size > MAX_TOKENS2) {
-        const oldest = map2.keys().next().value;
-        if (oldest === undefined)
-          break;
-        map2.delete(oldest);
-      }
-    }
-  };
-  const token = () => randomBytes28(24).toString("base64url");
-  const nameOf = (question) => {
-    let name;
-    try {
-      name = options.connectionName?.(question.connectionId)?.trim();
-    } catch {
-      name = undefined;
-    }
-    return name || (question.surface === "chatgpt" ? "ChatGPT" : "An agent");
-  };
+  let closed = false;
+  let pass;
+  let timer;
+  let unsubscribe;
+  const abort = new AbortController;
   const store = () => {
     try {
       return options.store();
@@ -153689,189 +153966,256 @@ function createLocalPrivateAnswers(options) {
       return;
     }
   };
-  const answerBody = (result, session) => {
-    if (result.status !== "answered") {
-      return {
-        status: result.status,
-        ...result.status === "not_found" ? { left_out: result.leftOut } : {},
-        ...result.status === "model_downloading" && result.percent !== undefined ? { percent: Math.round(result.percent) } : {}
-      };
+  const refOf = (q) => ({ id: q.id, generation: q.generation, connectionId: q.connectionId });
+  const active = (q) => {
+    try {
+      return !closed && (!options.isActive || options.isActive(q.connectionId));
+    } catch {
+      return false;
     }
+  };
+  const hidden = (q) => q.surface === "chatgpt" && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
+  const current2 = (q) => {
+    const fresh2 = store()?.get(q.id);
+    return fresh2 && fresh2.generation === q.generation && active(fresh2) && !hidden(fresh2) ? fresh2 : undefined;
+  };
+  const eligible = async (read) => {
+    try {
+      const ok = options.eligible ? await options.eligible(read) : read.map(() => false);
+      return ok.length === read.length && ok.every((value2) => value2 === true);
+    } catch {
+      return false;
+    }
+  };
+  const sweep = () => {
+    for (const [id, entry] of opens)
+      if (entry.expiresAt <= now())
+        opens.delete(id);
+    while (opens.size > MAX_TOKENS2)
+      opens.delete(opens.keys().next().value);
+  };
+  const answerFor = async (input, background = false) => {
+    try {
+      return await (background ? options.backgroundAnswer ?? options.answer : options.answer)(input);
+    } catch {
+      return { status: "failed" };
+    }
+  };
+  const wake = () => {
+    if (!closed)
+      api2.tick().catch(() => {
+        return;
+      });
+  };
+  const invalidate = (q) => {
+    store()?.invalidate?.(refOf(q));
+    for (const [id, entry] of opens)
+      if (entry.ref?.id === q.id)
+        opens.delete(id);
+    wake();
+  };
+  const answerBody = (result, session, q) => {
+    if (result.status !== "answered")
+      return { status: result.status, ..."leftOut" in result ? { left_out: result.leftOut } : {} };
     sweep();
     const citations = result.citations.map((citation) => {
       const view2 = {
         ...citation.title ? { title: citation.title } : {},
         ...citation.source ? { source: citation.source } : {},
-        ...citation.date ? { date: citation.date } : {},
-        ...typeof citation.url === "string" && /^https:\/\//.test(citation.url) ? { url: citation.url } : {}
+        ...citation.date ? { date: citation.date } : {}
       };
-      if (citation.localPath && options.openFile) {
-        const id = token();
-        opens.set(id, { session, path: citation.localPath, read: result.read, expiresAt: now() + TOKEN_TTL_MS });
+      const path = citation.localPath && options.openFile ? citation.localPath : undefined;
+      const url = !path && citation.url?.startsWith("https://") && options.openUrl ? citation.url : undefined;
+      if (path || url) {
+        const id = randomBytes28(24).toString("base64url");
+        opens.set(id, { session, ...path ? { path } : { url }, read: result.read.map(inboxEvidenceIdentity), expiresAt: now() + TOKEN_TTL_MS, ...q ? { ref: refOf(q) } : {} });
         view2.open = id;
       }
       return view2;
     });
-    return {
-      status: "answered",
-      answer: result.answer,
-      citations,
-      unanswered: result.unanswered,
-      left_out: result.leftOut
-    };
+    return { status: "answered", answer: result.answer, citations, unanswered: result.unanswered, left_out: result.leftOut };
   };
-  const exclusive = async (run) => {
-    if (running)
-      return refused(429, "busy", "Olympus is answering another question. Try again in a moment.");
-    running = true;
-    try {
-      return await run();
-    } finally {
-      running = false;
-    }
-  };
-  const answerFor = async (input) => {
-    try {
-      return await options.answer(input);
-    } catch {
-      return { status: "failed" };
-    }
-  };
-  return {
-    waiting() {
-      const current2 = store();
-      if (!current2)
+  const api2 = {
+    start() {
+      if (timer || closed)
         return;
+      unsubscribe = store()?.subscribe?.(wake);
+      timer = setInterval(wake, 1000);
+      timer.unref?.();
+      wake();
+    },
+    tick() {
+      if (pass)
+        return pass;
+      if (closed || options.interactiveBusy?.())
+        return Promise.resolve();
+      pass = (async () => {
+        const currentStore = store();
+        if (!currentStore)
+          return;
+        if (options.isActive)
+          currentStore.reconcileConnections?.(options.isActive);
+        for (const q of [...currentStore.list().questions].reverse()) {
+          if (closed || options.interactiveBusy?.())
+            break;
+          if (q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
+            continue;
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
+          if (!current2(q))
+            continue;
+          if (result.status === "answered" && await eligible(result.read) || result.status === "not_found") {
+            if (!current2(q))
+              continue;
+            const saved = result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) } : { status: "not_found", citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
+            if (!currentStore.saveAnswer?.(refOf(q), saved))
+              currentStore.retry?.(refOf(q));
+          } else
+            currentStore.retry?.(refOf(q));
+        }
+      })().catch(() => {
+        return;
+      }).finally(() => {
+        pass = undefined;
+      });
+      return pass;
+    },
+    close() {
+      closed = true;
+      abort.abort();
+      if (timer)
+        clearInterval(timer);
+      unsubscribe?.();
+      opens.clear();
+    },
+    waiting() {
       try {
-        const listed = current2.list();
-        return {
-          questions: listed.questions.map((question) => ({
-            id: question.id,
-            question: question.question,
-            from: nameOf(question),
-            askedAt: question.askedAt,
-            unchecked: question.state === "unchecked"
-          })),
-          olderRemoved: listed.olderRemoved
-        };
+        const listed = store()?.list();
+        if (!listed)
+          return;
+        return { questions: listed.questions.filter((q) => active(q) && !hidden(q)).map((q) => ({
+          id: q.id,
+          question: q.question,
+          from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === "chatgpt" ? "ChatGPT" : "An agent"),
+          askedAt: q.askedAt,
+          unchecked: q.state === "unchecked",
+          unread: !q.seen,
+          state: q.result ? "answered" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : "answering",
+          ...q.answeredAt ? { answeredAt: q.answeredAt } : {}
+        })), olderRemoved: listed.olderRemoved };
       } catch {
         return;
       }
     },
     waitingCount() {
-      try {
-        return store()?.list().questions.length ?? 0;
-      } catch {
-        return 0;
-      }
+      return api2.waiting()?.questions.filter((q) => q.unread && q.state === "answered").length ?? 0;
     },
     async handle(body, session) {
       const action = body.action;
+      if (action === "list")
+        return { status: 200, body: { ok: true, ...api2.waiting() } };
       if (action === "ask") {
         const question = typeof body.question === "string" ? body.question.trim() : "";
         if (!question || question.length > MAX_QUESTION_CHARS3)
           return refused(400, "invalid_params", "Type a question first.");
-        const detail = body.detail === "full" ? "full" : "summary";
-        return exclusive(async () => ({ status: 200, body: { ok: true, ...answerBody(await answerFor({ question, detail }), session) } }));
+        if (running)
+          return refused(429, "busy", "Olympus is answering another question. Try again in a moment.");
+        running = true;
+        try {
+          const result = await answerFor({ question, detail: body.detail === "full" ? "full" : "summary" });
+          if (result.status === "answered" && !await eligible(result.read))
+            return { status: 200, body: { ok: true, status: "changed" } };
+          return { status: 200, body: { ok: true, ...answerBody(result, session) } };
+        } finally {
+          running = false;
+        }
       }
-      if (action === "answer") {
-        const id = typeof body.id === "string" ? body.id : "";
-        const current2 = store();
-        if (!current2)
-          return refused(503, "unavailable", "Waiting questions cannot be read right now.");
-        const record5 = id ? current2.get(id) : undefined;
-        if (!record5)
-          return refused(410, "gone", "This question is no longer waiting.");
-        return exclusive(async () => {
-          const result = await answerFor({ question: record5.question, selectors: record5.selectors, detail: record5.detail });
-          const out = answerBody(result, session);
-          if (result.status === "answered" || result.status === "not_found") {
-            sweep();
-            const ack = token();
-            acks.set(ack, {
-              session,
-              ref: { id: record5.id, generation: record5.generation, connectionId: record5.connectionId },
-              expiresAt: now() + TOKEN_TTL_MS
-            });
-            out.ack = ack;
-          }
-          return { status: 200, body: { ok: true, ...out } };
-        });
+      if (action === "read") {
+        const q = typeof body.id === "string" ? store()?.get(body.id) : undefined;
+        if (!q || !current2(q))
+          return refused(410, "gone", "That answer was deleted");
+        if (!q.result)
+          return { status: 200, body: { ok: true, status: q.state === "unchecked" ? "unchecked" : q.attempts ? "retrying" : "answering" } };
+        if (!await eligible(q.result.read) || !current2(q)) {
+          invalidate(q);
+          return { status: 200, body: { ok: true, status: "answering" } };
+        }
+        return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
       }
       if (action === "seen") {
-        sweep();
-        const ack = typeof body.ack === "string" && TOKEN_PATTERN3.test(body.ack) ? body.ack : "";
-        const entry = ack ? acks.get(ack) : undefined;
-        if (!entry || entry.session !== session)
-          return refused(410, "gone", "This answer can no longer be marked seen.");
-        acks.delete(ack);
-        let cleared = false;
-        try {
-          cleared = store()?.acknowledge(entry.ref) === true;
-        } catch {
-          cleared = false;
-        }
-        return { status: 200, body: { ok: true, status: cleared ? "cleared" : "kept" } };
+        const q = typeof body.id === "string" ? store()?.get(body.id) : undefined;
+        const marked = !!q && q.generation === body.generation && !!current2(q) && store()?.markRead?.(refOf(q)) === true;
+        return { status: 200, body: { ok: true, status: marked ? "read" : "kept" } };
       }
-      if (action === "dismiss") {
-        const id = typeof body.id === "string" ? body.id : "";
-        let removed = false;
+      if (action === "delete" || action === "delete_all") {
         try {
-          removed = id ? store()?.dismiss(id) === true : false;
+          const removed = action === "delete_all" ? store()?.dismissAll() ?? 0 : typeof body.id === "string" && store()?.dismiss(body.id) ? 1 : 0;
+          if (action === "delete_all")
+            opens.clear();
+          else
+            for (const [id, entry] of opens)
+              if (entry.ref?.id === body.id)
+                opens.delete(id);
+          return { status: 200, body: { ok: true, status: "deleted", removed } };
         } catch {
-          return refused(503, "unavailable", "Waiting questions cannot be changed right now.");
-        }
-        return { status: 200, body: { ok: true, status: removed ? "dismissed" : "gone" } };
-      }
-      if (action === "dismiss_all") {
-        try {
-          const removed = store()?.dismissAll() ?? 0;
-          return { status: 200, body: { ok: true, status: "dismissed", removed } };
-        } catch {
-          return refused(503, "unavailable", "Waiting questions cannot be changed right now.");
+          return refused(503, "unavailable", "Private answers cannot be changed right now.");
         }
       }
       if (action === "open") {
         sweep();
         const id = typeof body.token === "string" && TOKEN_PATTERN3.test(body.token) ? body.token : "";
-        const entry = id ? opens.get(id) : undefined;
-        if (!entry || entry.session !== session || !options.openFile)
-          return refused(410, "gone", "Ask again to open this file.");
-        let ok = [];
-        try {
-          ok = options.eligible ? await options.eligible(entry.read) : entry.read.map(() => false);
-        } catch {
-          ok = [];
-        }
-        if (ok.length !== entry.read.length || !ok.every((value2) => value2 === true)) {
+        const entry = opens.get(id);
+        if (!entry || entry.session !== session)
+          return refused(410, "gone", "This source cannot be opened from this session.");
+        const allowed = async () => {
+          sweep();
+          if (!entry || entry.session !== session || opens.get(id) !== entry)
+            return false;
+          if (entry.ref) {
+            const q = store()?.get(entry.ref.id);
+            if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
+              return false;
+          }
+          if (!await eligible(entry.read))
+            return false;
+          sweep();
+          if (opens.get(id) !== entry)
+            return false;
+          if (entry.ref) {
+            const q = store()?.get(entry.ref.id);
+            if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
+              return false;
+          }
+          return true;
+        };
+        if (!entry || !await allowed()) {
+          if (entry?.ref) {
+            const q = store()?.get(entry.ref.id);
+            if (q)
+              invalidate(q);
+          }
           opens.delete(id);
-          return refused(410, "gone", "This file changed since the answer. Ask again.");
+          return refused(410, "gone", "This source changed. The answer is being written again.");
         }
-        let isFile = false;
         try {
-          isFile = lstatSync36(entry.path).isFile();
+          if (entry.path && options.openFile && lstatSync36(entry.path).isFile())
+            await options.openFile(entry.path, allowed);
+          else if (entry.url && options.openUrl)
+            await options.openUrl(entry.url, allowed);
+          else
+            return refused(410, "gone", "This file is no longer on this computer.");
         } catch {
-          isFile = false;
-        }
-        if (!isFile)
-          return refused(410, "gone", "This file is no longer on this computer.");
-        try {
-          await options.openFile(entry.path, async () => {
-            const current2 = options.eligible ? await options.eligible(entry.read) : [];
-            sweep();
-            return opens.get(id) === entry && current2.length === entry.read.length && current2.every((value2) => value2 === true);
-          });
-        } catch {
-          return refused(500, "failed", "The file could not be opened.");
+          return refused(500, "failed", "The source could not be opened.");
         }
         return { status: 200, body: { ok: true, status: "opened" } };
       }
       return refused(400, "invalid_params", "Unknown action.");
     }
   };
+  return api2;
 }
 var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS3 = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
+  init_waiting_private_questions();
   init_analyst_built_in();
   init_private_answer_model();
   init_local_answer();
@@ -153965,7 +154309,7 @@ function createRemotePrivateParts(options) {
         clearTimeout(timer);
     }
   };
-  const settleAnswer = async (raw, released, args, ticket) => {
+  const settleAnswer = async (raw, released, args, ticket, recordedId) => {
     try {
       if (closed || !ticket)
         return false;
@@ -153982,12 +154326,15 @@ function createRemotePrivateParts(options) {
         return false;
       let recorded = false;
       try {
-        recorded = options.store()?.record(ticket, {
+        const ref = options.store()?.record(ticket, {
           question,
           surface: "remote",
           state: verdict === "match" ? "waiting" : "unchecked",
           selectors
-        }) !== undefined;
+        });
+        recorded = ref !== undefined;
+        if (ref)
+          recordedId?.(ref.id);
       } catch {
         console.warn("[olympus:remote] waiting private question not recorded reason=store_unavailable");
       }
@@ -153996,7 +154343,7 @@ function createRemotePrivateParts(options) {
       return false;
     }
   };
-  const settleWhenFinished = (jobs, jobId, args, ticket, releaseCheck) => {
+  const settleWhenFinished = (jobs, jobId, args, ticket, releaseCheck, recordedId) => {
     let finished;
     try {
       finished = jobs?.registry.whenFinished(jobs.owner, jobId);
@@ -154017,7 +154364,7 @@ function createRemotePrivateParts(options) {
       } catch {
         released = { status: "error" };
       }
-      return settleAnswer(outcome.value, released, args, ticket);
+      return settleAnswer(outcome.value, released, args, ticket, recordedId);
     }).catch(() => false);
   };
   const runPass = async () => {
@@ -154089,11 +154436,20 @@ function createRemotePrivateParts(options) {
         start(operation, args, context2) {
           if (operation === "source_answer") {
             const ticket = ticketFor(connectionId);
+            let answerId;
             return {
+              get answerId() {
+                return answerId;
+              },
               async settle(raw, released) {
                 const pending = asRecord19(raw);
                 if (pending?.status === "working" && typeof pending.job_id === "string") {
-                  const settled = settleWhenFinished(context2?.jobs, pending.job_id, args, ticket, context2?.releaseCheck);
+                  const settled = settleWhenFinished(context2?.jobs, pending.job_id, args, ticket, context2?.releaseCheck, (id) => {
+                    answerId = id;
+                    const handoff = handoffs.get(`${connectionId}\x00${pending.job_id}`);
+                    if (handoff)
+                      handoff.answerId = id;
+                  });
                   if (settled) {
                     sweep();
                     handoffs.set(`${connectionId}\x00${pending.job_id}`, { settled, expiresAt: now() + handoffTtlMs });
@@ -154101,7 +154457,9 @@ function createRemotePrivateParts(options) {
                   }
                   return false;
                 }
-                return settleAnswer(raw, released, args, ticket);
+                return settleAnswer(raw, released, args, ticket, (id) => {
+                  answerId = id;
+                });
               }
             };
           }
@@ -154110,6 +154468,9 @@ function createRemotePrivateParts(options) {
             if (!jobId)
               return;
             return {
+              get answerId() {
+                return handoffs.get(`${connectionId}\x00${jobId}`)?.answerId;
+              },
               async settle(raw) {
                 sweep();
                 const entry = handoffs.get(`${connectionId}\x00${jobId}`);
@@ -154254,7 +154615,7 @@ async function callTool(request, name, options) {
     const approved = release();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
     const output = privatePart ? release() : approved;
-    return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output) : output);
+    return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId) : output);
   } catch (error2) {
     return operationErrorResponse(error2, declaredParams);
   }
@@ -157668,6 +158029,7 @@ async function main() {
     }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
     return createAnalystSourceIndexAnswerHandler({
+      inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,
       queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
       ...cloudAnalyst ? { cloudAnalyst } : {},
@@ -158676,7 +159038,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     installId: () => remotePublicUrls()?.installId,
     activity: answerActivity,
     acknowledge: (ref) => {
-      waitingQuestionStore()?.acknowledge(ref);
+      const store = waitingQuestionStore();
+      if (!store)
+        return false;
+      store.acknowledge(ref);
+      const remaining = store.get(ref.id);
+      return !remaining || remaining.generation !== ref.generation || remaining.connectionId !== ref.connectionId;
     },
     ...openCitedFile ? { openFile: openCitedFile } : {}
   });
@@ -158706,11 +159073,23 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     });
     localPrivateAnswers = createLocalPrivateAnswers2({
       answer: (input) => answerActivity.run(() => local.answer(input)),
+      backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), "background")),
+      interactiveBusy: () => answerActivity.interactiveInFlight > 0,
+      panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
+      isActive: connectionActive,
       store: waitingQuestionStore,
       connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
-      ...openCitedFile ? { openFile: openCitedFile } : {}
+      ...openCitedFile ? {
+        openFile: openCitedFile,
+        openUrl: async (url, eligible) => {
+          if (!await eligible())
+            throw new Error("open refused");
+          await new Promise((resolve14, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14()));
+        }
+      } : {}
     });
+    localPrivateAnswers.start();
   }
   const privateQuestions = new PrivateQuestionJobs2({
     installId: () => remotePublicUrls()?.installId,
@@ -159237,6 +159616,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     clearInterval(uncheckedRetry);
     remotePrivateParts.close();
+    localPrivateAnswers?.close();
     waitingStoreClosed = true;
     waitingStore?.close();
     waitingStore = undefined;
@@ -160666,6 +161046,7 @@ init_live_control2();
 init_whatsapp();
 init_sovereignty();
 init_pairing_session_paths();
+init_source_corpus_registry();
 init_public_source_capabilities();
 init_worker_service();
 init_media_cache();
@@ -160966,6 +161347,21 @@ function deleteOlympusData(options) {
   }
   const sourceMedia = selectedSource ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? []) : [];
   const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
+  if (selectedSource && options.dryRun !== true) {
+    const inboxPath = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(envForContext(options)));
+    if (existsSync37(inboxPath)) {
+      const inbox = openWaitingPrivateQuestionStore(inboxPath);
+      try {
+        const registry = createSourceCorpusRegistry().list();
+        const corpora = registry.filter((c) => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId)).map((c) => c.corpusId);
+        const count = inbox.deleteForCorpora(corpora, registry.map((c) => c.corpusId));
+        if (count > 0)
+          removed.push(`${inboxPath} (private answers: ${count})`);
+      } finally {
+        inbox.close();
+      }
+    }
+  }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync37(target.path)) {
       missing.push(target.path);

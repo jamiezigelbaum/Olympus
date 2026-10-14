@@ -1,3 +1,19 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+let localInferencePriority: AsyncLocalStorage<AnswerLeaseKind> | undefined;
+let localInferenceGuards: AsyncLocalStorage<readonly (() => Promise<void>)[]> | undefined;
+/** Provider-internal context, outside the frozen Analyst contract. A queued
+ * call repeats these live guards after waiting, immediately before dispatch. */
+export function runWithLocalInferenceGuard<T>(guard: () => Promise<void>, work: () => Promise<T>): Promise<T> {
+  localInferenceGuards ??= new AsyncLocalStorage();
+  return localInferenceGuards.run([...(localInferenceGuards?.getStore() ?? []), guard], work);
+}
+/** Applies at each shared model dispatch, including later synthesis/audit calls. */
+export function runBackgroundInference<T>(work: () => Promise<T>): Promise<T> {
+  localInferencePriority ??= new AsyncLocalStorage();
+  return localInferencePriority.run('background', work);
+}
+
 /**
  * Answers in flight on this worker (source answers, ChatGPT evidence
  * searches, private answer panel jobs). These leases coordinate owner and
@@ -149,6 +165,25 @@ export function localModelResourceKey(profile: { baseUrl?: string; model?: strin
 }
 
 export function createLocalModelActivity() {
+  const queues = new Map<string, { running: boolean; tasks: Array<{ background: boolean; run: () => Promise<void> }> }>();
+  const dispatch = <T>(key: string, work: () => Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+    let queue = queues.get(key);
+    if (!queue) { queue = { running: false, tasks: [] }; queues.set(key, queue); }
+    const pending = queue;
+    const pump = () => {
+      if (pending.running) return;
+      const owner = pending.tasks.findIndex(task => !task.background);
+      const next = pending.tasks.splice(owner < 0 ? 0 : owner, 1)[0];
+      if (!next) return;
+      pending.running = true;
+      void next.run().finally(() => { pending.running = false; pump(); });
+    };
+    pending.tasks.push({ background: localInferencePriority?.getStore() === 'background', run: async () => {
+      try { resolve(await get(key).run(work)); } catch (error) { reject(error); }
+    } });
+    // Gather simultaneous dispatches before choosing owner-first.
+    queueMicrotask(pump);
+  });
   const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
   const busyListeners = new Map<string, Set<() => void>>();
   const get = (key: string) => {
@@ -172,7 +207,20 @@ export function createLocalModelActivity() {
     },
     onIdle: (key: string, listener: () => void) => get(key).onInteractiveIdle(listener),
     track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T): T {
-      return { ...model, complete: request => get(key).run(() => model.complete(request)) };
+      return { ...model, complete: request => {
+        const guards = localInferenceGuards?.getStore() ?? [];
+        return dispatch(key, async () => {
+          request.signal?.throwIfAborted();
+          for (const guard of guards) {
+            try { await guard(); } catch (error) {
+              request.signal?.throwIfAborted();
+              throw error;
+            }
+          }
+          request.signal?.throwIfAborted();
+          return model.complete(request);
+        });
+      } };
     },
   };
 }

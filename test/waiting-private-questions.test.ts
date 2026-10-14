@@ -69,6 +69,7 @@ describe('waiting private questions: what is stored', () => {
       seen: false,
       generation: 1,
       askedAt: new Date(1_000_000).toISOString(),
+      attempts: 0, nextAttemptAt: 0,
     }]);
     // Owner-only file in an owner-only directory, like the Private stores.
     expect(statSync(path).mode & 0o777).toBe(0o600);

@@ -5,6 +5,18 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## 1.1.0 Private answers inbox (owner decision 2026-10-14)
+
+Commit-only implementation in `claude/private-answers-inbox`; do not land
+before 1.0.1 ships. Agent questions needing Private items are answered locally
+on arrival and linked to a retained inbox; ChatGPT panel acknowledgments avoid
+duplication. Design: [background agents, A](design/background-agents.md).
+Done when automatic answering, current source eligibility, local-only access,
+delete/export/revoke, remote broad checks, rebuilt dist and light/dark
+390/1280 renders pass; independent privacy review is required before landing.
+No live systems in this branch. Parallel tier purge/Private embeddings remain
+owned by their respective builders.
+
 ## Olympus 1.0 (ChatGPT)
 
 Status: active, 2026-10-02. Owner decision 2026-10-01 (Decisions, below):

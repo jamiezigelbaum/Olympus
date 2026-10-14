@@ -56,6 +56,7 @@ import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,
   checkPrivateEvidenceItems,
+  guardSourceAnswerEvidence,
   probePrivateMatch,
   searchPrivateEvidence,
   searchReleasedEvidence,
@@ -377,7 +378,7 @@ import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-source
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
-import { createAnswerActivity, createLocalModelActivity, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -3286,6 +3287,7 @@ export async function main(): Promise<void> {
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       return createAnalystSourceIndexAnswerHandler({
+        inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
@@ -4730,7 +4732,13 @@ export async function main(): Promise<void> {
     // The panel's seen ack clears the waiting question it answered (same
     // id, generation and connection; a re-asked question survives).
     acknowledge: (ref) => {
-      waitingQuestionStore()?.acknowledge(ref);
+      const store = waitingQuestionStore();
+      if (!store) return false;
+      store.acknowledge(ref);
+      const remaining = store.get(ref.id);
+      // Missing/advanced means the old generation has no debt. A newer
+      // duplicate is never deleted by an older panel acknowledgment.
+      return !remaining || remaining.generation !== ref.generation || remaining.connectionId !== ref.connectionId;
     },
     ...(openCitedFile ? { openFile: openCitedFile } : {}),
   });
@@ -4765,11 +4773,22 @@ export async function main(): Promise<void> {
     localPrivateAnswers = createLocalPrivateAnswers({
       // The built-in model serves one question at once: an answer preempts the sniffer.
       answer: (input) => answerActivity.run(() => local.answer(input)),
+      backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background')),
+      interactiveBusy: () => answerActivity.interactiveInFlight > 0,
+      panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
+      isActive: connectionActive,
       store: waitingQuestionStore,
       connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
-      ...(openCitedFile ? { openFile: openCitedFile } : {}),
+      ...(openCitedFile ? {
+        openFile: openCitedFile,
+        openUrl: async (url: string, eligible: () => Promise<boolean>) => {
+          if (!(await eligible())) throw new Error('open refused');
+          await new Promise<void>((resolve, reject) => execFile('/usr/bin/open', [url], { timeout: 10_000 }, error => error ? reject(error) : resolve()));
+        },
+      } : {}),
     });
+    localPrivateAnswers.start();
   }
   // The private question panel's jobs (chatgpt/private-question-jobs.ts):
   // the sealed question runs the same ask lane as the ask_anonymously tool,
@@ -5427,6 +5446,7 @@ export async function main(): Promise<void> {
     // The re-check timer, any pass or settle in flight, then the store.
     clearInterval(uncheckedRetry);
     remotePrivateParts.close();
+    localPrivateAnswers?.close();
     waitingStoreClosed = true;
     waitingStore?.close();
     waitingStore = undefined;
