@@ -3,7 +3,7 @@ import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, linkSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { userInfo } from 'node:os';
@@ -600,14 +600,24 @@ function migrateLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInst
  for(const name of files){
   const source=join(layout.home,'.olympus',name),target=legacySettingTarget(layout,name);
   assertLinuxManagedPath(source);assertLinuxManagedPath(target);
+  const sourceIdentity=lstatSync(source);
   if(hashFile(source)!==snapshots[name]!.sha256)throw new Error('Legacy Olympus settings changed during migration.');
   createLinuxPrivateDirectory(dirname(target));
   const temporary=legacyMigrationTemporary(layout,transaction,name);
   const fd=openSync(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
   try { writeFileSync(fd,snapshotBytes(snapshots[name]!)!);fsyncSync(fd); } finally { closeSync(fd); }
   // link is an atomic no-replace publication on this filesystem, unlike copyFile.
-  linkSync(temporary,target);syncDirectorySync(dirname(target));lifecycleCheckpoint(options,'legacy_setting_published');removeFileDurablySync(temporary);removeFileDurablySync(source);
+  linkSync(temporary,target);syncDirectorySync(dirname(target));lifecycleCheckpoint(options,'legacy_setting_published');removeFileDurablySync(temporary);
+  assertLegacySettingUnchanged(source,sourceIdentity,snapshots[name]!);
+  removeFileDurablySync(source);
  }
+}
+/** Check both content and pathname identity after publication, just before unlink. */
+function assertLegacySettingUnchanged(source: string, before: Stats, snapshot: LinuxFileSnapshot): void {
+ assertLinuxManagedPath(source);
+ const digest=hashFile(source),after=lstatSync(source);
+ if(digest!==snapshot.sha256 || (['dev','ino','size','mtimeMs','ctimeMs','mode','uid','nlink'] as const).some(key=>before[key]!==after[key]))
+  throw new Error('Legacy Olympus settings changed during migration.');
 }
 function legacyMigrationTemporary(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction, name: string): string {
  return `${legacySettingTarget(layout,name)}.${basename(transaction.backupDir)}.migration`;
@@ -640,8 +650,12 @@ function restoreLegacySettings(layout: LinuxEngineLayout, transaction: LinuxInst
   for(const [index,[name,original]] of Object.entries(transaction.legacySettings).entries()){
    const source=join(layout.home,'.olympus',name),target=legacySettingTarget(layout,name);
    assertLinuxManagedPath(source);assertLinuxManagedPath(target);
-   if(existsSync(source)&&hashFile(source)!==original.sha256)throw new Error(`Legacy settings changed at ${source}; retained for recovery.`);
-   const bytes=existsSync(target)?readFileSync(target):snapshotBytes(original);
+   const sourceChanged=existsSync(source)&&hashFile(source)!==original.sha256;
+   // A writer may have replaced the legacy source after publication. Preserve
+   // that newer policy and remove our unchanged target when rolling back.
+   if(sourceChanged&&existsSync(target)&&hashFile(target)!==original.sha256&&hashFile(source)!==hashFile(target))
+    throw new Error(`Conflicting settings edits at ${source} and ${target}; retained for recovery.`);
+   const bytes=sourceChanged?readFileSync(source):existsSync(target)?readFileSync(target):snapshotBytes(original);
    snapshots[name]=writeSnapshot(transaction.backupDir,20000+index,bytes,0o600);
   }
   transaction.legacyRestoreSettings=snapshots;writeInstallTransaction(layout,transaction);

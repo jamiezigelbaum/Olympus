@@ -70,7 +70,7 @@ function installed(initialEnablement: 'enabled' | 'enabled-runtime' = 'enabled')
  const calls:string[][]=[]; let active=true,enabled: string | false=initialEnablement;
  const exec:EngineExec=(c,a)=>{ calls.push([c,...a]);
   if(a.includes('show'))return good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled || 'disabled'}\nMainPID=${active?42:0}\nControlGroup=/user.slice/engine\nResult=success\nExecMainStatus=0\nFragmentPath=${l.unitPath}\n`);
-  if(a.includes('disable')){enabled=false;active=false;} if(a.includes('enable'))enabled=a.includes('--runtime')?'enabled-runtime':'enabled';if(a.includes('start')||a.includes('restart'))active=true;
+  if(a.includes('disable')){enabled=false;active=false;} if(a.includes('enable'))enabled=a.includes('--runtime')?'enabled-runtime':'enabled';if(a.includes('start')||a.includes('restart'))active=true;if(a.includes('stop'))active=false;
   return good(); };
  return {l,calls,exec,options:{platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),exec,consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true}};
 }
@@ -351,4 +351,19 @@ for(const live of [false,true])test(`legacy consult lease ${live?'refuses a live
  const run=()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)});
  if(live){expect(run).toThrow('Finish saving Olympus settings');expect(calls.some(args=>args.includes('stop'))).toBe(false);}
  else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult.json'),'utf8')).toBe('{}');for(const suffix of ['.lock','.lock.commit'])expect(existsSync(join(legacy,'consult.json'+suffix))).toBe(false);}
+},15_000);
+
+for (const replacement of ['new-content', 'same-content', 'in-place'] as const) test(`legacy migration rolls back a concurrent ${replacement} writer before unlink`, () => {
+ const {l,options,calls}=installed();
+ const source=join(l.home,'.olympus/privacy.json');mkdirSync(dirname(source),{mode:0o700});writeFileSync(source,'original synthetic policy',{mode:0o600});
+ const next=replacement==='same-content'?'original synthetic policy':'newer synthetic policy'; let replaced=false;
+ const exec:EngineExec=(command,args)=>command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):args.includes('olympus-worker.service')?good('LoadState=not-found'):options.exec(command,args);
+ expect(()=>installEngine({...options,exec,uid:process.getuid!(),fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home),lifecycleCheckpoint:(name)=>{
+  if(name==='legacy_setting_published'&&!replaced){replaced=true;if(replacement==='in-place')writeFileSync(source,next);else{writeFileSync(source+'.replacement',next,{mode:0o600});renameSync(source+'.replacement',source);}}
+ }})).toThrow('Legacy Olympus settings changed during migration');
+ expect(replaced).toBe(true);expect(readFileSync(source,'utf8')).toBe(next);
+ expect(existsSync(join(l.configDir,'privacy.json'))).toBe(false);
+ expect(readFileSync(l.unitPath,'utf8')).toBe('unit');
+ expect(JSON.parse(readFileSync(join(l.stateDir,'install-transaction.json'),'utf8')).phase).toBe('rollback_required');
+ expect(calls.filter(args=>args.includes('restart'))).toHaveLength(1);
 },15_000);
