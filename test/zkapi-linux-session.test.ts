@@ -16,13 +16,13 @@ for(const code of ['namespace_unavailable','loopback_unavailable','landlock_unav
   expect(completions()).toHaveLength(0);expectNothingReserved();
 },15000);
 test('check refusal and self-test failure happen before Tor starts',async()=>{
-  const confinement=linuxZkapiConfinement({platform:'linux',arch:'x64',resolveLauncher:()=>'/unused',check:()=>({ok:false,code:'landlock_unavailable'})});
+  const confinement=linuxZkapiConfinement({platform:'linux',arch:'x64',launcherIdentity:()=> 'fixture-v1',resolveLauncher:()=>'/unused',check:()=>({ok:false,code:'landlock_unavailable'})});
   const options=transport({confinement});
   const ready=await zkapiConsultReadiness(options);
   expect(ready.confinement.checkLine).toContain('Linux 6.7');
   expect((await sendZkapiConsult(QUESTION,options))).toMatchObject({ok:false,error:{code:'confinement_unavailable'}});
   expect(torRuns()).toHaveLength(0);
-  const failed=linuxZkapiConfinement({platform:'linux',arch:'x64',resolveLauncher:()=>'/unused',check:()=>check,selfTest:async()=>false});
+  const failed=linuxZkapiConfinement({platform:'linux',arch:'x64',launcherIdentity:()=> 'fixture-v1',resolveLauncher:()=>'/unused',check:()=>check,selfTest:async()=>false});
   expect(await sendZkapiConsult(QUESTION,transport({confinement:failed}))).toMatchObject({ok:false,error:{code:'confinement_self_test_failed'}});
   expect(torRuns()).toHaveLength(0);
 });

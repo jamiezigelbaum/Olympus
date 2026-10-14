@@ -2404,7 +2404,7 @@ async function runSession(
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === 'per_consult';
-  const filtered = perConsultTor && confinement.level === 'loopback_filtered';
+  let filtered = perConsultTor && confinement.level === 'loopback_filtered';
   const ports: ZkapiConfinementPorts = { tor: settings.torSocksPort, daemon: daemonPort };
   const receipt: ZkapiSessionReceipt = {
     recovery,
@@ -2476,10 +2476,12 @@ async function runSession(
   // No network confinement on this platform: refused first, with or without
   // Tor and for a recovery too, so neither Tor nor the daemon ever starts
   // unconfined (owner ruling 2026-10-12: no weaker mode).
+  try { if (confinement.check && !(await confinement.check()).ok) return refuse('confinement_unavailable'); } catch { return refuse('confinement_unavailable'); }
   if (!zkapiConfinementAvailable(confinement)) return refuse('confinement_unavailable');
+  filtered = perConsultTor && confinement.level === 'loopback_filtered';
+  receipt.confinement = perConsultTor ? confinement.level : 'none';
   // A Linux confinementSession backend has no direct/unwrapped mode. Mac behaviour is unchanged.
   if (confinement.prepare && !perConsultTor) return refuse('confinement_unavailable');
-  try { if (confinement.check && !(await confinement.check()).ok) return refuse('confinement_unavailable'); } catch { return refuse('confinement_unavailable'); }
   // The cost-and-risk statements govern questions: what the owner's model
   // sends and what each one costs. A recovery session sends the fixed empty
   // request, nothing of the owner's, to settle money already held, so the

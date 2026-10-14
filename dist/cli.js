@@ -63933,7 +63933,9 @@ __export(exports_zkapi_confinement_linux, {
   linuxConfinementCheck: () => linuxConfinementCheck,
   inspectLinuxNamespace: () => inspectLinuxNamespace
 });
-import { execFileSync as execFileSync2 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile as readFile6, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash47 } from "node:crypto";
 import { lstatSync as lstatSync23, readFileSync as readFileSync38, readlinkSync as readlinkSync2, readdirSync as readdirSync9, realpathSync as realpathSync9 } from "node:fs";
 import { dirname as dirname43, join as join62 } from "node:path";
@@ -64092,7 +64094,7 @@ Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus
   }
   return "The private-answer helper could not establish its protections. Private answers are unavailable on this computer.";
 }
-function launcherPath(env) {
+async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
   const managed = daemon ? join62(dirname43(daemon), "zkapi-confine") : undefined;
   const system = "/usr/local/libexec/olympus/zkapi-confine";
@@ -64111,38 +64113,84 @@ function launcherPath(env) {
           break;
         current2 = dirname43(current2);
       }
-      if (!lstatSync23(path).isFile() || createHash47("sha256").update(readFileSync38(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
-        continue;
-      if (execFileSync2(path, ["--version"], { env, encoding: "utf8", timeout: 5000 }).trim() !== `zkapi-confine ${MANAGED_TOOL_PINS["zkapi-clientd"].version}`)
+      if (!lstatSync23(path).isFile() || createHash47("sha256").update(await readFile6(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
   }
   return;
 }
+async function launcherIdentity(path) {
+  const info = await fileStat(path);
+  if (!info.isFile())
+    throw new Error("not a launcher");
+  const hash = createHash47("sha256").update(await readFile6(path)).digest("hex");
+  return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
+}
 function linuxZkapiConfinement(deps = {}) {
   const env = deps.env ?? process.env;
   const proc = deps.proc ?? realProc;
+  const now = deps.now ?? Date.now;
+  const identity = deps.launcherIdentity ?? launcherIdentity;
+  const resolve11 = deps.resolveLauncher ?? (() => launcherPath(env));
+  let cache = hostChecks;
+  if (deps.check) {
+    cache = injectedChecks.get(deps.check) ?? new Map;
+    injectedChecks.set(deps.check, cache);
+  }
   let check = { ok: false, code: "confinement_unavailable" };
   let launcher;
-  const refresh = () => {
+  const refresh = async () => {
     if ((deps.platform ?? process.platform) !== "linux" || (deps.arch ?? process.arch) !== "x64")
       return check = { ok: false, code: "unsupported_platform" };
-    launcher = (deps.resolveLauncher ?? (() => launcherPath(env)))();
-    if (!launcher)
-      return check = { ok: false, code: "launcher_missing_or_untrusted" };
     try {
-      check = linuxConfinementCheck(deps.check ? deps.check(launcher) : JSON.parse(execFileSync2(launcher, ["check"], { env, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })));
-    } catch (e) {
-      try {
-        check = linuxConfinementCheck(JSON.parse(String(e.stdout)));
-      } catch {
-        check = { ok: false, code: "no_status_event" };
+      const selected = await resolve11();
+      if (!selected)
+        return check = { ok: false, code: "launcher_missing_or_untrusted" };
+      const before = await identity(selected);
+      const key2 = selected + "\x00" + before;
+      let entry = cache.get(key2);
+      if (!entry || now() >= entry.expires) {
+        const created = { expires: Infinity, result: Promise.resolve({ ok: false, code: "no_status_event" }) };
+        created.result = (async () => {
+          try {
+            if (deps.check)
+              return linuxConfinementCheck(await deps.check(selected));
+            const args = { env, encoding: "utf8", timeout: 5000, maxBuffer: 64 * 1024 };
+            try {
+              const version = await execFileAsync(selected, ["--version"], args);
+              if (version.stdout.trim() !== `zkapi-confine ${MANAGED_TOOL_PINS["zkapi-clientd"].version}`)
+                return { ok: false, code: "launcher_missing_or_untrusted" };
+            } catch {
+              return { ok: false, code: "launcher_missing_or_untrusted" };
+            }
+            return linuxConfinementCheck(JSON.parse((await execFileAsync(selected, ["check"], args)).stdout));
+          } catch (e) {
+            try {
+              return linuxConfinementCheck(JSON.parse(String(e.stdout)));
+            } catch {
+              return { ok: false, code: "no_status_event" };
+            }
+          } finally {
+            created.expires = now() + CHECK_TTL_MS;
+          }
+        })();
+        cache.set(key2, created);
+        entry = created;
+        if (cache.size > 64)
+          cache.delete(cache.keys().next().value);
       }
+      const result = await entry.result;
+      if (await resolve11() !== selected || await identity(selected) !== before) {
+        cache.delete(key2);
+        return check = { ok: false, code: "launcher_missing_or_untrusted" };
+      }
+      launcher = selected;
+      return check = result;
+    } catch {
+      return check = { ok: false, code: "launcher_missing_or_untrusted" };
     }
-    return check;
   };
-  refresh();
   return {
     get level() {
       return check.ok ? "loopback_filtered" : "none";
@@ -64152,7 +64200,7 @@ function linuxZkapiConfinement(deps = {}) {
       throw new Error("Linux requires a prepared session");
     },
     check: async () => {
-      const result = refresh();
+      const result = await refresh();
       const sysctls = {};
       for (const p of ["/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "/proc/sys/user/max_user_namespaces", "/proc/sys/kernel/unprivileged_userns_clone"])
         try {
@@ -64161,9 +64209,9 @@ function linuxZkapiConfinement(deps = {}) {
       const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join62(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
       return { ok: result.ok, line, ...!result.ok && result.code === "launcher_missing_or_untrusted" ? { installRequired: true } : {} };
     },
-    selfTest: async (dir, childEnv, ports) => Boolean(launcher && check.ok && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
+    selfTest: async (dir, childEnv, ports) => Boolean((await refresh()).ok && launcher && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
     prepare: async (dir, ports) => {
-      if (!check.ok || !launcher)
+      if (!(await refresh()).ok || !launcher)
         throw new Error("confinement_unavailable");
       const selected = launcher;
       const nums = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
@@ -64224,12 +64272,15 @@ function linuxZkapiConfinement(deps = {}) {
     }
   };
 }
-var realProc, shellQuote2 = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+var realProc, shellQuote2 = (s) => "'" + s.replace(/'/g, "'\\''") + "'", execFileAsync, CHECK_TTL_MS = 30000, hostChecks, injectedChecks;
 var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
   realProc = { read: (p) => readFileSync38(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync9(p) };
+  execFileAsync = promisify(execFile3);
+  hostChecks = new Map;
+  injectedChecks = new WeakMap;
 });
 
 // src/core/consult-transport-zkapi.ts
@@ -64278,7 +64329,7 @@ __export(exports_consult_transport_zkapi, {
   WATCHDOG_SCRIPT: () => WATCHDOG_SCRIPT,
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
-import { spawn as spawn5, execFileSync as execFileSync3 } from "node:child_process";
+import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash48, randomUUID as randomUUID17 } from "node:crypto";
 import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants5, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync39, readlinkSync as readlinkSync3, realpathSync as realpathSync10, rmSync as rmSync16, statSync as statSync20, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
@@ -64389,7 +64440,7 @@ function versionSupported(version, platform2 = process.platform) {
 }
 function supportsManagedConfinement(executable, env) {
   try {
-    const help = execFileSync3(executable, ["serve", "--help"], {
+    const help = execFileSync2(executable, ["serve", "--help"], {
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 64 * 1024,
@@ -64443,7 +64494,7 @@ function darwinSandboxProfile(policy, ports) {
 }
 function runSelfTestProbe(argv, env) {
   try {
-    return JSON.parse(execFileSync3(argv[0], argv.slice(1), {
+    return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
       encoding: "utf8",
       timeout: 25000,
       env,
@@ -64948,7 +64999,7 @@ function processGroupOf(pid) {
       const pgrp = Number(fields[2]);
       return Number.isInteger(pgrp) ? pgrp : undefined;
     }
-    const out = execFileSync3("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
+    const out = execFileSync2("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "ignore"]
@@ -65155,7 +65206,7 @@ function inspectLoopbackListener(port) {
   let pids;
   if (process.platform === "darwin") {
     try {
-      const out = execFileSync3("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+      const out = execFileSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
         encoding: "utf8",
         timeout: 5000,
         stdio: ["ignore", "pipe", "ignore"]
@@ -65258,7 +65309,7 @@ async function zkapiConsultReadiness(options) {
     blockers.push("daemon_not_found");
   } else {
     try {
-      const out = execFileSync3(daemonExecutable, ["--version"], {
+      const out = execFileSync2(daemonExecutable, ["--version"], {
         encoding: "utf8",
         timeout: 5000,
         env: childEnvironment(env),
@@ -65510,7 +65561,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === "per_consult";
-  const filtered = perConsultTor && confinement.level === "loopback_filtered";
+  let filtered = perConsultTor && confinement.level === "loopback_filtered";
   const ports = { tor: settings.torSocksPort, daemon: daemonPort };
   const receipt = {
     recovery,
@@ -65573,16 +65624,18 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     cleanupCallerSignals();
     return fail(code);
   };
-  if (!zkapiConfinementAvailable(confinement))
-    return refuse2("confinement_unavailable");
-  if (confinement.prepare && !perConsultTor)
-    return refuse2("confinement_unavailable");
   try {
     if (confinement.check && !(await confinement.check()).ok)
       return refuse2("confinement_unavailable");
   } catch {
     return refuse2("confinement_unavailable");
   }
+  if (!zkapiConfinementAvailable(confinement))
+    return refuse2("confinement_unavailable");
+  filtered = perConsultTor && confinement.level === "loopback_filtered";
+  receipt.confinement = perConsultTor ? confinement.level : "none";
+  if (confinement.prepare && !perConsultTor)
+    return refuse2("confinement_unavailable");
   const blocked = settingsBlockers(zkapiMoneyStatus(settings, now())).find((code) => !(recovery && code === "acknowledgements_incomplete"));
   if (blocked)
     return refuse2(blocked);
@@ -80430,7 +80483,7 @@ var init_ocr_probe_fixture = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr-capability.ts
-import { mkdtemp as mkdtemp2, readFile as readFile6, readdir as readdir2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdtemp as mkdtemp2, readFile as readFile7, readdir as readdir2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
 import { join as join73 } from "node:path";
 function ocrmypdfArguments(input) {
@@ -80570,7 +80623,7 @@ async function probeOcrmypdf(input) {
     return commandMissing(error) ? "missing" : "failed";
   }
   try {
-    return probeWordRead(await readFile6(sidecarPath, "utf8")) ? "ok" : "failed";
+    return probeWordRead(await readFile7(sidecarPath, "utf8")) ? "ok" : "failed";
   } catch {
     return "failed";
   }
@@ -81938,7 +81991,7 @@ var init_version = __esm(() => {
 
 // src/workers/classification-ledger.ts
 import { homedir as homedir48 } from "node:os";
-import { mkdir as mkdir4, open as open5, readFile as readFile7 } from "node:fs/promises";
+import { mkdir as mkdir4, open as open5, readFile as readFile8 } from "node:fs/promises";
 import { dirname as dirname55, join as join78 } from "node:path";
 function resolveClassificationLedgerPath(env = process.env) {
   const configured = env[CLASSIFICATION_LEDGER_PATH_ENV]?.trim();
@@ -81974,7 +82027,7 @@ async function appendClassificationLedgerEntryOnce(path, entry) {
 async function readClassificationLedger(path) {
   let raw = "";
   try {
-    raw = await readFile7(path, "utf8");
+    raw = await readFile8(path, "utf8");
   } catch (error) {
     if (error?.code !== "ENOENT")
       throw error;
@@ -87335,7 +87388,7 @@ __export(exports_consult_writer, {
   CONSULT_STANDARD_RESPONSE_SCHEMA: () => CONSULT_STANDARD_RESPONSE_SCHEMA,
   CONSULT_STANDARD_REPLY_FORMAT: () => CONSULT_STANDARD_REPLY_FORMAT
 });
-import { execFileSync as execFileSync4 } from "node:child_process";
+import { execFileSync as execFileSync3 } from "node:child_process";
 import { readFileSync as readFileSync56 } from "node:fs";
 import { freemem, platform as osPlatform5, totalmem } from "node:os";
 function consultWriterSystem(level, options = {}) {
@@ -87505,12 +87558,12 @@ function meminfoBytes(meminfo, field) {
   return raw === undefined ? undefined : Number(raw) * 1024;
 }
 function defaultConsultMemoryProbe(deps = {}) {
-  const exec = deps.exec ?? ((file, args) => execFileSync4(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
-  const readFile8 = deps.readFile ?? ((path) => readFileSync56(path, "utf8"));
+  const exec = deps.exec ?? ((file, args) => execFileSync3(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
+  const readFile9 = deps.readFile ?? ((path) => readFileSync56(path, "utf8"));
   const platform2 = deps.platform ?? osPlatform5();
   const readOptional = (path) => {
     try {
-      return readFile8(path);
+      return readFile9(path);
     } catch {
       return;
     }
@@ -106725,7 +106778,7 @@ var init_dashboard_session_secret = __esm(() => {
 });
 
 // src/workers/dropbox-files/extraction-source.ts
-import { readFile as readFile8, realpath as realpath2, stat as stat5 } from "node:fs/promises";
+import { readFile as readFile9, realpath as realpath2, stat as stat5 } from "node:fs/promises";
 import { relative as relative9, resolve as resolve12, sep as sep10 } from "node:path";
 
 class DropboxExtractionSource {
@@ -106974,21 +107027,21 @@ function singleAccount(scopes) {
   return accounts.size === 1 ? [...accounts][0] : undefined;
 }
 async function readVerifiedCandidate(input) {
-  let fileStat;
+  let fileStat2;
   try {
-    fileStat = await stat5(input.candidatePath);
+    fileStat2 = await stat5(input.candidatePath);
   } catch {
     return;
   }
-  if (!fileStat.isFile())
+  if (!fileStat2.isFile())
     return;
-  if (input.maxBytes !== undefined && fileStat.size > input.maxBytes) {
+  if (input.maxBytes !== undefined && fileStat2.size > input.maxBytes) {
     throw new FileExtractionSourceError("source_too_large");
   }
-  if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
+  if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat2.size) {
     return;
   }
-  const bytes = new Uint8Array(await readFile8(input.candidatePath));
+  const bytes = new Uint8Array(await readFile9(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
     throw new FileExtractionSourceError("source_too_large");
   }
@@ -110418,7 +110471,7 @@ var init_pdf_raster_ocr = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
-import { mkdtemp as mkdtemp6, readFile as readFile9, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
+import { mkdtemp as mkdtemp6, readFile as readFile10, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir11 } from "node:os";
 import { join as join96 } from "node:path";
 function createOcrEngine(input) {
@@ -110603,7 +110656,7 @@ function createImageOcr(options = {}) {
         const vision = await withVision2(engine, (reader) => visionImage(laneInput, reader));
         if (vision)
           return vision;
-        const decoded = preparedImage ? await readFile9(preparedImage.path) : undefined;
+        const decoded = preparedImage ? await readFile10(preparedImage.path) : undefined;
         return commandImageOcr(engine, decoded ? { ...laneInput, bytes: decoded, mimeType: "image/jpeg", sizeBytes: decoded.byteLength } : laneInput);
       });
     } catch (error2) {
@@ -110713,7 +110766,7 @@ async function extractPdfOcr(input) {
         throw error2;
       return { status: "failed_terminal", errorKind: rejectionKind };
     }
-    const bounded = boundText(normalizeExtractedText(await readFile9(sidecarPath, "utf8")), input.maxBoundedTextChars);
+    const bounded = boundText(normalizeExtractedText(await readFile10(sidecarPath, "utf8")), input.maxBoundedTextChars);
     if (!bounded.text) {
       return mediaDescriptorOutput({
         mimeType: input.mimeType,
@@ -111194,7 +111247,7 @@ var init_audio_wav = __esm(() => {
 
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
 import { existsSync as existsSync59 } from "node:fs";
-import { mkdtemp as mkdtemp7, readFile as readFile10, rm as rm8 } from "node:fs/promises";
+import { mkdtemp as mkdtemp7, readFile as readFile11, rm as rm8 } from "node:fs/promises";
 import { tmpdir as tmpdir12, totalmem as totalmem3 } from "node:os";
 import { join as join97 } from "node:path";
 function defaultAudioConverter(platform2, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
@@ -111392,7 +111445,7 @@ function createBuiltInTranscriber(options = {}) {
         }
         let audio;
         try {
-          audio = parseWav16Mono(new Uint8Array(await readFile10(wavPath)));
+          audio = parseWav16Mono(new Uint8Array(await readFile11(wavPath)));
         } catch (error2) {
           if (error2 instanceof WavFormatError)
             throw new AudioUndecodableError(error2.message);
@@ -111533,7 +111586,7 @@ var init_built_in_transcriber = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/transcription.ts
-import { mkdtemp as mkdtemp8, readFile as readFile11, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
+import { mkdtemp as mkdtemp8, readFile as readFile12, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir13 } from "node:os";
 import { extname as extname3, join as join98 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
@@ -111746,7 +111799,7 @@ function sidecarPathForInput(inputPath) {
 async function readFirstExisting(paths) {
   for (const path of [...new Set(paths)]) {
     try {
-      return await readFile11(path, "utf8");
+      return await readFile12(path, "utf8");
     } catch {}
   }
   return;
@@ -153699,12 +153752,12 @@ function createDashboardConsultAdapter(options) {
   const readiness = options.readiness ?? zkapiConsultReadiness;
   const confinement = options.confinement ?? defaultZkapiConfinement({ env });
   let confinementInstallRequired = false;
-  const confined = async () => {
+  const confined = async (selected = confinement) => {
     confinementInstallRequired = false;
     try {
-      const check = await confinement.check?.();
+      const check = await selected.check?.();
       confinementInstallRequired = check?.installRequired === true;
-      return (!check || check.ok) && zkapiConfinementAvailable(confinement);
+      return (!check || check.ok) && zkapiConfinementAvailable(selected);
     } catch {
       return false;
     }
@@ -153814,7 +153867,7 @@ function createDashboardConsultAdapter(options) {
       return { language, pack, state: entry?.state ?? "missing", installed: entry?.state === "verified" };
     });
   };
-  const routeView = async () => {
+  const routeView = async (selected = confinement) => {
     const route = zkapiProfile();
     if (!route)
       return { state: "not_configured", policyWritable: policyWritable() };
@@ -153837,7 +153890,7 @@ function createDashboardConsultAdapter(options) {
     if (!transportOptions)
       return base;
     try {
-      const ready = await readiness({ ...transportOptions, confinement, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
+      const ready = await readiness({ ...transportOptions, confinement: selected, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
       return {
         ...base,
         readiness: {
@@ -153900,10 +153953,18 @@ function createDashboardConsultAdapter(options) {
       return { ok: true, status_message: MESSAGES2.installStarted };
     },
     async status() {
+      const check = Promise.resolve().then(() => confinement.check?.());
+      const selected = {
+        ...confinement,
+        get level() {
+          return confinement.level;
+        },
+        ...confinement.check ? { check: async () => await check } : {}
+      };
       return {
-        ...await confined() ? {} : { unavailable: "confinement_unavailable", ...confinementInstallRequired ? { confinementInstallRequired: true } : {} },
+        ...await confined(selected) ? {} : { unavailable: "confinement_unavailable", ...confinementInstallRequired ? { confinementInstallRequired: true } : {} },
         settings: settingsView(),
-        route: await routeView(),
+        route: await routeView(selected),
         languages: languages(),
         restartPending,
         tools: { tools: toolsState(), install: dashboardInstallView(toolsJob.progress()) },
@@ -154633,7 +154694,7 @@ __export(exports_server2, {
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle,
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
-import { execFile as execFile3 } from "node:child_process";
+import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync64 } from "node:fs";
 import { dirname as dirname75, isAbsolute as isAbsolute29, join as join103 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
@@ -156564,7 +156625,7 @@ async function main() {
             reject(new Error("open refused"));
             return;
           }
-          execFile3("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+          execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
         });
       }
     } : {}
@@ -157405,7 +157466,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         reject(new Error("open refused"));
         return;
       }
-      execFile3("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
     });
   } : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel2({

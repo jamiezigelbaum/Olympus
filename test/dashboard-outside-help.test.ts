@@ -1,3 +1,4 @@
+import { linuxZkapiConfinement } from '../src/core/zkapi-confinement-linux.ts';
 /**
  * The Outside help card (src/workers/dashboard/outside-help.ts,
  * pages/private-answers.ts) and its worker side (email-source/dashboard-consult.ts,
@@ -835,6 +836,7 @@ function adapter(input: {
   profileOverrides?: Record<string, unknown>;
   secret?: string;
   readiness?: Partial<ZkapiConsultReadiness>;
+  probeConfinement?: boolean;
   recover?: ZkapiConsultResult;
   reload?: boolean;
   source?: string;
@@ -859,7 +861,7 @@ function adapter(input: {
     env,
     statePath: join(input.home, '.olympus', 'zkapi-consult-state.json'),
     now: () => new Date('2026-10-07T12:00:00.000Z'),
-    readiness: async (options) => { probes.push(options); return readiness(input.readiness); },
+    readiness: async (options) => { probes.push(options); if (input.probeConfinement) await options.confinement?.check?.(); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
     ...(input.writerCheck ? { writerCheck: input.writerCheck } : {}),
     ...(input.chatgptModelProblem ? { chatgptModelProblem: input.chatgptModelProblem } : {}),
@@ -876,6 +878,28 @@ const UNCONFINED: ZkapiConfinement = { level: 'none', limit: 'no network confine
 // card says so in one line and offers nothing to set up; the worker refuses
 // the same actions itself.
 describe('the adapter: a computer without network confinement', () => {
+  test('one status render shares its confinement check with readiness', async () => {
+    let calls = 0;
+    const confinement = { ...CONFINED, check: async () => { calls++; return { ok: true, line: 'ready' }; } };
+    const { backend } = adapter({ home: tempHome(), confinement, probeConfinement: true });
+    await backend.status();
+    expect(calls).toBe(1);
+  });
+  test('two Linux status renders within the TTL run the launcher once', async () => {
+    const home = tempHome();
+    const path = join(home, 'launcher');
+    writeFileSync(path, 'synthetic launcher', { mode: 0o700 });
+    let calls = 0;
+    const confinement = linuxZkapiConfinement({ platform: 'linux', arch: 'x64', resolveLauncher: () => path, check: async () => {
+      calls++;
+      return { ok: true, landlockAbi: 4, layers: ['netns','pidns','ipv6-off','caps','nnp','launcher-undumpable','launcher-seccomp','landlock-net','seccomp'], stage0Layers: ['nnp','launcher-undumpable','launcher-seccomp'] };
+    } });
+    const { backend } = adapter({ home, confinement, probeConfinement: true });
+    expect((await backend.status()).unavailable).toBeUndefined();
+    expect((await backend.status()).unavailable).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
   test('configured executables keep the real adapter launcher-download offer', async () => {
     const home = tempHome();
     const executable = join(home, 'configured-tool');

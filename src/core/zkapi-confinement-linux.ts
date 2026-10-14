@@ -1,5 +1,7 @@
 /** Checked Linux confinement; no available launcher means no anonymous route. */
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { readFile, stat as fileStat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -127,7 +129,7 @@ export function linuxConfinementRemedy(code:string, sysctls:Record<string,string
 
 // The archive pin authenticates this digest; checked again at every session.
 
-function launcherPath(env:NodeJS.ProcessEnv):string|undefined {
+async function launcherPath(env:NodeJS.ProcessEnv):Promise<string|undefined> {
   const daemon=managedToolExecutable('zkapi-clientd',{env,platform:'linux',arch:'x64'});
   const managed=daemon?join(dirname(daemon),'zkapi-confine'):undefined;
   const system='/usr/local/libexec/olympus/zkapi-confine';
@@ -140,8 +142,7 @@ function launcherPath(env:NodeJS.ProcessEnv):string|undefined {
         const s=lstatSync(current); if(s.isSymbolicLink()||(s.mode&0o022)!==0||(path===system?s.uid!==0:s.uid!==0&&s.uid!==process.getuid?.())) throw new Error('untrusted path');
         if(current==='/')break;current=dirname(current);
       }
-      if(!lstatSync(path).isFile() || createHash('sha256').update(readFileSync(path)).digest('hex')!==ZKAPI_CONFINE_SHA256) continue;
-      if(execFileSync(path,['--version'],{env,encoding:'utf8',timeout:5000}).trim()!==`zkapi-confine ${MANAGED_TOOL_PINS['zkapi-clientd'].version}`) continue;
+      if(!lstatSync(path).isFile() || createHash('sha256').update(await readFile(path)).digest('hex')!==ZKAPI_CONFINE_SHA256) continue;
       return path;
     }catch{}
   }
@@ -149,37 +150,89 @@ function launcherPath(env:NodeJS.ProcessEnv):string|undefined {
 }
 export interface LinuxConfinementDependencies {
   platform?:NodeJS.Platform; arch?:string; env?:NodeJS.ProcessEnv;
-  resolveLauncher?():string|undefined;
+  resolveLauncher?():string|undefined|Promise<string|undefined>;
+  /** Test seams for synthetic launchers and the cache expiry clock. */
+  launcherIdentity?(launcher:string):string|Promise<string>;
+  now?():number;
   check?(launcher:string):unknown;
   selfTest?(launcher:string,dir:string,env:NodeJS.ProcessEnv,ports:ZkapiConfinementPorts):Promise<boolean>;
   proc?:LinuxProc;
 }
+const execFileAsync = promisify(execFile);
+const CHECK_TTL_MS = 30_000;
+type CheckEntry = { result: Promise<LinuxCheck>; expires: number };
+const hostChecks = new Map<string, CheckEntry>();
+// Injected executors have their own cache; production shares one process cache.
+const injectedChecks = new WeakMap<NonNullable<LinuxConfinementDependencies['check']>, Map<string, CheckEntry>>();
+async function launcherIdentity(path:string):Promise<string> {
+  const info = await fileStat(path);
+  if (!info.isFile()) throw new Error('not a launcher');
+  const hash = createHash('sha256').update(await readFile(path)).digest('hex');
+  return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(':');
+}
 /** Selection and each session require a trusted launcher and a passing host check. */
 export function linuxZkapiConfinement(deps:LinuxConfinementDependencies={}):ZkapiConfinement {
   const env=deps.env??process.env; const proc=deps.proc??realProc;
+  const now=deps.now??Date.now;
+  const identity=deps.launcherIdentity??launcherIdentity;
+  const resolve=deps.resolveLauncher??(()=>launcherPath(env));
+  let cache=hostChecks;
+  if(deps.check) {
+    cache=injectedChecks.get(deps.check)??new Map();
+    injectedChecks.set(deps.check,cache);
+  }
   let check:LinuxCheck={ok:false,code:'confinement_unavailable'};
   let launcher:string|undefined;
-  const refresh=():LinuxCheck=>{
+  const refresh=async():Promise<LinuxCheck>=>{
     if((deps.platform??process.platform)!=='linux'||(deps.arch??process.arch)!=='x64') return check={ok:false,code:'unsupported_platform'};
-    launcher=(deps.resolveLauncher??(()=>launcherPath(env)))();
-    if(!launcher) return check={ok:false,code:'launcher_missing_or_untrusted'};
-    try {check=linuxConfinementCheck(deps.check?deps.check(launcher):JSON.parse(execFileSync(launcher,['check'],{env,encoding:'utf8',timeout:5000,stdio:['ignore','pipe','ignore']})));}
-    catch(e) { try {check=linuxConfinementCheck(JSON.parse(String((e as {stdout?:unknown}).stdout)));}catch{check={ok:false,code:'no_status_event'};} }
-    return check;
+    try {
+      const selected=await resolve();
+      if(!selected) return check={ok:false,code:'launcher_missing_or_untrusted'};
+      const before=await identity(selected);
+      const key=selected+'\0'+before;
+      let entry=cache.get(key);
+      if(!entry || now()>=entry.expires) {
+        const created:CheckEntry={expires:Infinity,result:Promise.resolve({ok:false,code:'no_status_event'})};
+        created.result=(async():Promise<LinuxCheck>=>{
+          try {
+            if(deps.check) return linuxConfinementCheck(await deps.check(selected));
+            const args={env,encoding:'utf8' as const,timeout:5000,maxBuffer:64*1024};
+            try {
+              const version=await execFileAsync(selected,['--version'],args);
+              if(version.stdout.trim()!==`zkapi-confine ${MANAGED_TOOL_PINS['zkapi-clientd'].version}`) return {ok:false,code:'launcher_missing_or_untrusted'};
+            } catch {return {ok:false,code:'launcher_missing_or_untrusted'};}
+            return linuxConfinementCheck(JSON.parse((await execFileAsync(selected,['check'],args)).stdout));
+          } catch(e) {
+            try {return linuxConfinementCheck(JSON.parse(String((e as {stdout?:unknown}).stdout)));}
+            catch {return {ok:false,code:'no_status_event'};}
+          } finally {created.expires=now()+CHECK_TTL_MS;}
+        })();
+        cache.set(key,created); entry=created;
+        if(cache.size>64) cache.delete(cache.keys().next().value!);
+      }
+      const result=await entry.result;
+      // Do not publish a cached or in-flight success after replacement/removal,
+      // or after the selected path loses its ownership/permission trust.
+      if(await resolve()!==selected || await identity(selected)!==before) {
+        cache.delete(key);
+        return check={ok:false,code:'launcher_missing_or_untrusted'};
+      }
+      launcher=selected;
+      return check=result;
+    } catch {return check={ok:false,code:'launcher_missing_or_untrusted'};}
   };
-  refresh();
   return {
     get level() { return check.ok ? 'loopback_filtered' : 'none'; }, limit:'Linux network isolation is checked before each session.',
     wrap:()=>{throw new Error('Linux requires a prepared session');},
     check:async()=>{
-      const result=refresh(); const sysctls:Record<string,string>={};
+      const result=await refresh(); const sysctls:Record<string,string>={};
       for(const p of ['/proc/sys/kernel/apparmor_restrict_unprivileged_userns','/proc/sys/user/max_user_namespaces','/proc/sys/kernel/unprivileged_userns_clone'])try{sysctls[p]=proc.read(p);}catch{}
       const line=result.ok?`network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)`:`network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code,sysctls,launcher??join(managedToolsRoot({env,platform:'linux',arch:'x64'})??'/unavailable/olympus/tools','zkapi-clientd',MANAGED_TOOL_PINS['zkapi-clientd'].version,'bin','zkapi-confine'))}`;
       return {ok:result.ok,line, ...(!result.ok && result.code === 'launcher_missing_or_untrusted' ? {installRequired:true} : {})};
     },
-    selfTest:async(dir,childEnv,ports)=> Boolean(launcher && check.ok && await (deps.selfTest??runLinuxConfinementSelfTest)(launcher,dir,childEnv,ports)),
+    selfTest:async(dir,childEnv,ports)=> Boolean((await refresh()).ok && launcher && await (deps.selfTest??runLinuxConfinementSelfTest)(launcher,dir,childEnv,ports)),
     prepare:async(dir,ports)=>{
-      if(!check.ok||!launcher) throw new Error('confinement_unavailable');
+      if(!(await refresh()).ok||!launcher) throw new Error('confinement_unavailable');
       const selected=launcher;
       const nums=[ports.tor,ports.daemon,ports.companionProxy,ports.walletApi];
       if(nums.some(n=>!Number.isInteger(n)||n!<1||n!>65535)||new Set(nums).size!==4) throw new Error('invalid ports');

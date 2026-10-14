@@ -279,12 +279,12 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   // One judgement of this computer's confinement, for the card and the readiness probe alike.
   const confinement = options.confinement ?? defaultZkapiConfinement({ env });
   let confinementInstallRequired = false;
-  const confined = async (): Promise<boolean> => {
+  const confined = async (selected = confinement): Promise<boolean> => {
     confinementInstallRequired = false;
     try {
-      const check = await confinement.check?.();
+      const check = await selected.check?.();
       confinementInstallRequired = check?.installRequired === true;
-      return (!check || check.ok) && zkapiConfinementAvailable(confinement);
+      return (!check || check.ok) && zkapiConfinementAvailable(selected);
     } catch { return false; }
   };
   const toolsJob = options.toolsJob ?? createManagedToolsJob({ env });
@@ -425,7 +425,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     });
   };
 
-  const routeView = async (): Promise<DashboardOutsideHelpRoute> => {
+  const routeView = async (selected = confinement): Promise<DashboardOutsideHelpRoute> => {
     const route = zkapiProfile();
     if (!route) return { state: 'not_configured', policyWritable: policyWritable() };
     const settings = route.profile.zkapi;
@@ -446,7 +446,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     const transportOptions = transport();
     if (!transportOptions) return base;
     try {
-      const ready = await readiness({ ...transportOptions, confinement, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
+      const ready = await readiness({ ...transportOptions, confinement: selected, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
       return {
         ...base,
         readiness: {
@@ -521,10 +521,18 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
 
 
     async status() {
+      // The card and readiness consume one check, even if rendering crosses
+      // the process cache expiry. Actions still check confinement independently.
+      const check = Promise.resolve().then(() => confinement.check?.());
+      const selected: ZkapiConfinement = {
+        ...confinement,
+        get level() { return confinement.level; },
+        ...(confinement.check ? { check: async () => (await check)! } : {}),
+      };
       return {
-        ...(await confined() ? {} : { unavailable: 'confinement_unavailable' as const, ...(confinementInstallRequired ? { confinementInstallRequired: true as const } : {}) }),
+        ...(await confined(selected) ? {} : { unavailable: 'confinement_unavailable' as const, ...(confinementInstallRequired ? { confinementInstallRequired: true as const } : {}) }),
         settings: settingsView(),
-        route: await routeView(),
+        route: await routeView(selected),
         languages: languages(),
         restartPending,
         tools: { tools: toolsState(), install: dashboardInstallView(toolsJob.progress()) },

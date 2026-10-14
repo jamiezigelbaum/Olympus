@@ -8102,7 +8102,9 @@ __export(exports_zkapi_confinement_linux, {
   linuxConfinementCheck: () => linuxConfinementCheck,
   inspectLinuxNamespace: () => inspectLinuxNamespace
 });
-import { execFileSync as execFileSync2 } from "node:child_process";
+import { execFile as execFile2 } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile as readFile2, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash3 } from "node:crypto";
 import { lstatSync as lstatSync7, readFileSync as readFileSync19, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
 import { dirname as dirname17, join as join25 } from "node:path";
@@ -8261,7 +8263,7 @@ Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus
   }
   return "The private-answer helper could not establish its protections. Private answers are unavailable on this computer.";
 }
-function launcherPath(env) {
+async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
   const managed = daemon ? join25(dirname17(daemon), "zkapi-confine") : undefined;
   const system = "/usr/local/libexec/olympus/zkapi-confine";
@@ -8280,38 +8282,84 @@ function launcherPath(env) {
           break;
         current2 = dirname17(current2);
       }
-      if (!lstatSync7(path).isFile() || createHash3("sha256").update(readFileSync19(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
-        continue;
-      if (execFileSync2(path, ["--version"], { env, encoding: "utf8", timeout: 5000 }).trim() !== `zkapi-confine ${MANAGED_TOOL_PINS["zkapi-clientd"].version}`)
+      if (!lstatSync7(path).isFile() || createHash3("sha256").update(await readFile2(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
   }
   return;
 }
+async function launcherIdentity(path) {
+  const info = await fileStat(path);
+  if (!info.isFile())
+    throw new Error("not a launcher");
+  const hash = createHash3("sha256").update(await readFile2(path)).digest("hex");
+  return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
+}
 function linuxZkapiConfinement(deps = {}) {
   const env = deps.env ?? process.env;
   const proc = deps.proc ?? realProc;
+  const now = deps.now ?? Date.now;
+  const identity = deps.launcherIdentity ?? launcherIdentity;
+  const resolve5 = deps.resolveLauncher ?? (() => launcherPath(env));
+  let cache = hostChecks;
+  if (deps.check) {
+    cache = injectedChecks.get(deps.check) ?? new Map;
+    injectedChecks.set(deps.check, cache);
+  }
   let check = { ok: false, code: "confinement_unavailable" };
   let launcher;
-  const refresh = () => {
+  const refresh = async () => {
     if ((deps.platform ?? process.platform) !== "linux" || (deps.arch ?? process.arch) !== "x64")
       return check = { ok: false, code: "unsupported_platform" };
-    launcher = (deps.resolveLauncher ?? (() => launcherPath(env)))();
-    if (!launcher)
-      return check = { ok: false, code: "launcher_missing_or_untrusted" };
     try {
-      check = linuxConfinementCheck(deps.check ? deps.check(launcher) : JSON.parse(execFileSync2(launcher, ["check"], { env, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })));
-    } catch (e) {
-      try {
-        check = linuxConfinementCheck(JSON.parse(String(e.stdout)));
-      } catch {
-        check = { ok: false, code: "no_status_event" };
+      const selected = await resolve5();
+      if (!selected)
+        return check = { ok: false, code: "launcher_missing_or_untrusted" };
+      const before = await identity(selected);
+      const key = selected + "\x00" + before;
+      let entry = cache.get(key);
+      if (!entry || now() >= entry.expires) {
+        const created = { expires: Infinity, result: Promise.resolve({ ok: false, code: "no_status_event" }) };
+        created.result = (async () => {
+          try {
+            if (deps.check)
+              return linuxConfinementCheck(await deps.check(selected));
+            const args = { env, encoding: "utf8", timeout: 5000, maxBuffer: 64 * 1024 };
+            try {
+              const version = await execFileAsync(selected, ["--version"], args);
+              if (version.stdout.trim() !== `zkapi-confine ${MANAGED_TOOL_PINS["zkapi-clientd"].version}`)
+                return { ok: false, code: "launcher_missing_or_untrusted" };
+            } catch {
+              return { ok: false, code: "launcher_missing_or_untrusted" };
+            }
+            return linuxConfinementCheck(JSON.parse((await execFileAsync(selected, ["check"], args)).stdout));
+          } catch (e) {
+            try {
+              return linuxConfinementCheck(JSON.parse(String(e.stdout)));
+            } catch {
+              return { ok: false, code: "no_status_event" };
+            }
+          } finally {
+            created.expires = now() + CHECK_TTL_MS;
+          }
+        })();
+        cache.set(key, created);
+        entry = created;
+        if (cache.size > 64)
+          cache.delete(cache.keys().next().value);
       }
+      const result = await entry.result;
+      if (await resolve5() !== selected || await identity(selected) !== before) {
+        cache.delete(key);
+        return check = { ok: false, code: "launcher_missing_or_untrusted" };
+      }
+      launcher = selected;
+      return check = result;
+    } catch {
+      return check = { ok: false, code: "launcher_missing_or_untrusted" };
     }
-    return check;
   };
-  refresh();
   return {
     get level() {
       return check.ok ? "loopback_filtered" : "none";
@@ -8321,7 +8369,7 @@ function linuxZkapiConfinement(deps = {}) {
       throw new Error("Linux requires a prepared session");
     },
     check: async () => {
-      const result = refresh();
+      const result = await refresh();
       const sysctls = {};
       for (const p of ["/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "/proc/sys/user/max_user_namespaces", "/proc/sys/kernel/unprivileged_userns_clone"])
         try {
@@ -8330,9 +8378,9 @@ function linuxZkapiConfinement(deps = {}) {
       const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join25(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
       return { ok: result.ok, line, ...!result.ok && result.code === "launcher_missing_or_untrusted" ? { installRequired: true } : {} };
     },
-    selfTest: async (dir, childEnv, ports) => Boolean(launcher && check.ok && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
+    selfTest: async (dir, childEnv, ports) => Boolean((await refresh()).ok && launcher && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
     prepare: async (dir, ports) => {
-      if (!check.ok || !launcher)
+      if (!(await refresh()).ok || !launcher)
         throw new Error("confinement_unavailable");
       const selected = launcher;
       const nums = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
@@ -8393,12 +8441,15 @@ function linuxZkapiConfinement(deps = {}) {
     }
   };
 }
-var realProc, shellQuote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+var realProc, shellQuote = (s) => "'" + s.replace(/'/g, "'\\''") + "'", execFileAsync, CHECK_TTL_MS = 30000, hostChecks, injectedChecks;
 var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
   realProc = { read: (p) => readFileSync19(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync4(p) };
+  execFileAsync = promisify(execFile2);
+  hostChecks = new Map;
+  injectedChecks = new WeakMap;
 });
 
 // src/core/consult-transport-zkapi.ts
@@ -8447,7 +8498,7 @@ __export(exports_consult_transport_zkapi, {
   WATCHDOG_SCRIPT: () => WATCHDOG_SCRIPT,
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
-import { spawn as spawn2, execFileSync as execFileSync3 } from "node:child_process";
+import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID8 } from "node:crypto";
 import { accessSync as accessSync7, chmodSync as chmodSync5, closeSync as closeSync4, constants as constants3, existsSync as existsSync9, mkdirSync as mkdirSync11, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync20, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync6, statSync as statSync13, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
@@ -8558,7 +8609,7 @@ function versionSupported(version, platform2 = process.platform) {
 }
 function supportsManagedConfinement(executable, env) {
   try {
-    const help = execFileSync3(executable, ["serve", "--help"], {
+    const help = execFileSync2(executable, ["serve", "--help"], {
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 64 * 1024,
@@ -8612,7 +8663,7 @@ function darwinSandboxProfile(policy, ports) {
 }
 function runSelfTestProbe(argv, env) {
   try {
-    return JSON.parse(execFileSync3(argv[0], argv.slice(1), {
+    return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
       encoding: "utf8",
       timeout: 25000,
       env,
@@ -9117,7 +9168,7 @@ function processGroupOf(pid) {
       const pgrp = Number(fields[2]);
       return Number.isInteger(pgrp) ? pgrp : undefined;
     }
-    const out = execFileSync3("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
+    const out = execFileSync2("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "ignore"]
@@ -9324,7 +9375,7 @@ function inspectLoopbackListener(port) {
   let pids;
   if (process.platform === "darwin") {
     try {
-      const out = execFileSync3("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+      const out = execFileSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
         encoding: "utf8",
         timeout: 5000,
         stdio: ["ignore", "pipe", "ignore"]
@@ -9427,7 +9478,7 @@ async function zkapiConsultReadiness(options) {
     blockers.push("daemon_not_found");
   } else {
     try {
-      const out = execFileSync3(daemonExecutable, ["--version"], {
+      const out = execFileSync2(daemonExecutable, ["--version"], {
         encoding: "utf8",
         timeout: 5000,
         env: childEnvironment(env),
@@ -9679,7 +9730,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === "per_consult";
-  const filtered = perConsultTor && confinement.level === "loopback_filtered";
+  let filtered = perConsultTor && confinement.level === "loopback_filtered";
   const ports = { tor: settings.torSocksPort, daemon: daemonPort };
   const receipt = {
     recovery,
@@ -9742,16 +9793,18 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     cleanupCallerSignals();
     return fail(code);
   };
-  if (!zkapiConfinementAvailable(confinement))
-    return refuse("confinement_unavailable");
-  if (confinement.prepare && !perConsultTor)
-    return refuse("confinement_unavailable");
   try {
     if (confinement.check && !(await confinement.check()).ok)
       return refuse("confinement_unavailable");
   } catch {
     return refuse("confinement_unavailable");
   }
+  if (!zkapiConfinementAvailable(confinement))
+    return refuse("confinement_unavailable");
+  filtered = perConsultTor && confinement.level === "loopback_filtered";
+  receipt.confinement = perConsultTor ? confinement.level : "none";
+  if (confinement.prepare && !perConsultTor)
+    return refuse("confinement_unavailable");
   const blocked = settingsBlockers(zkapiMoneyStatus(settings, now())).find((code) => !(recovery && code === "acknowledgements_incomplete"));
   if (blocked)
     return refuse(blocked);
@@ -10837,7 +10890,7 @@ var init_publisher_oauth_client = __esm(() => {
 
 // src/workers/credential-broker/index.ts
 import { createHash as createHash6 } from "node:crypto";
-import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
+import { mkdir as mkdir2, readFile as readFile3 } from "node:fs/promises";
 import { dirname as dirname21 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
@@ -10927,7 +10980,7 @@ class JsonCredentialOAuth2StateStore {
   async readStore() {
     let text2;
     try {
-      text2 = await readFile2(this.path, "utf8");
+      text2 = await readFile3(this.path, "utf8");
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
         return { version: 1, handles: {} };
@@ -10976,7 +11029,7 @@ class JsonCredentialSessionBackendStateStore {
   async readStore() {
     let text2;
     try {
-      text2 = await readFile2(this.path, "utf8");
+      text2 = await readFile3(this.path, "utf8");
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
         return { version: 1, handles: {} };
@@ -27241,7 +27294,7 @@ function parseOcrEnginePreference(value) {
 
 // src/workers/file-extraction/extractors/ocr-capability.ts
 init_command_runner();
-import { mkdtemp, readFile as readFile3, readdir, rm as rm2, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile as readFile4, readdir, rm as rm2, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
 import { join as join39 } from "node:path";
 
@@ -27470,7 +27523,7 @@ async function probeOcrmypdf(input) {
     return commandMissing(error) ? "missing" : "failed";
   }
   try {
-    return probeWordRead(await readFile3(sidecarPath, "utf8")) ? "ok" : "failed";
+    return probeWordRead(await readFile4(sidecarPath, "utf8")) ? "ok" : "failed";
   } catch {
     return "failed";
   }

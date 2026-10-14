@@ -71,20 +71,20 @@ describe('4.7 check and remedies', () => {
     expect(text).toContain('sudo install'); expect(text).toContain('-o root'); expect(text).toContain('sudo apparmor_parser'); expect(text).not.toContain('userns=0');
   });
   test('Linux x64 selects confinement only when the pinned launcher check passes', async () => {
-    let permitted = true;
-    const selected = defaultZkapiConfinement({ platform: 'linux', arch: 'x64', resolveLauncher: () => '/fixture/zkapi-confine', check: () => permitted ? { ...ready, ok: true } : { ok: false, code: 'namespace_unavailable' }, proc: fixture().proc });
-    expect(selected.level).toBe('loopback_filtered');
+    let permitted = true; let time = 0;
+    const selected = defaultZkapiConfinement({ platform: 'linux', arch: 'x64', now: () => time, launcherIdentity: () => 'fixture-v1', resolveLauncher: () => '/fixture/zkapi-confine', check: () => permitted ? { ...ready, ok: true } : { ok: false, code: 'namespace_unavailable' }, proc: fixture().proc });
+    expect(selected.level).toBe('none');
     expect((await selected.check!()).line).toContain('network confinement: ready');
-    permitted = false;
+    permitted = false; time += 30_000;
     expect((await selected.check!()).ok).toBe(false);
     expect(selected.level).toBe('none');
-    permitted = true;
+    permitted = true; time += 30_000;
     expect((await selected.check!()).ok).toBe(true);
     expect(selected.level).toBe('loopback_filtered');
   });
   test('unsupported Linux and failed host checks never select a weaker route', () => {
     for (const mode of ['arm64', 'missing', 'refused'] as const) {
-      const selected = defaultZkapiConfinement({ platform: 'linux', arch: mode === 'arm64' ? 'arm64' : 'x64', resolveLauncher: () => mode === 'missing' ? undefined : '/fixture', check: () => ({ ok: false, code: 'namespace_unavailable' }) });
+      const selected = defaultZkapiConfinement({ platform: 'linux', arch: mode === 'arm64' ? 'arm64' : 'x64', launcherIdentity: () => 'fixture-v1', resolveLauncher: () => mode === 'missing' ? undefined : '/fixture', check: () => ({ ok: false, code: 'namespace_unavailable' }) });
       expect(selected.level).toBe('none');
     }
   });
@@ -142,7 +142,7 @@ describe('4.4 actual watchdog status descriptor', () => {
 describe('Linux prepared session refuses before dispatch', () => {
   async function prepared() {
     const f=fixture();
-    const confinement=linuxZkapiConfinement({platform:'linux',arch:'x64',resolveLauncher:()=>'/fixture/zkapi-confine',check:()=>({...ready,ok:true}),proc:f.proc,selfTest:async()=>true});
+    const confinement=linuxZkapiConfinement({platform:'linux',arch:'x64',launcherIdentity: () => 'fixture-v1', resolveLauncher:()=>'/fixture/zkapi-confine',check:()=>({...ready,ok:true}),proc:f.proc,selfTest:async()=>true});
     expect((await confinement.check!()).ok).toBe(true);
     return {f,session:await confinement.prepare!('/fixture',ports)};
   }
@@ -163,7 +163,7 @@ describe('Linux prepared session refuses before dispatch', () => {
     await expect(session.fetch('http://127.0.0.1:9002/admin/status',{headers:{Authorization:'Bearer fixed-canary'}})).rejects.toThrow('daemon_identity_failed');
   });
   for(const kind of ['missing','arch','check failed'] as const) test(`preflight ${kind}`,async()=>{
-    const confinement=linuxZkapiConfinement({platform:'linux',arch:kind==='arch'?'arm64':'x64',resolveLauncher:()=>kind==='missing'?undefined:'/fixture',check:()=>({ok:false,code:'namespace_unavailable'}),proc:fixture().proc});
+    const confinement=linuxZkapiConfinement({platform:'linux',arch:kind==='arch'?'arm64':'x64',launcherIdentity: () => 'fixture-v1', resolveLauncher:()=>kind==='missing'?undefined:'/fixture',check:()=>({ok:false,code:'namespace_unavailable'}),proc:fixture().proc});
     expect((await confinement.check!()).ok).toBe(false);
     await expect(confinement.prepare!('/fixture',ports)).rejects.toThrow('confinement_unavailable');
   });
