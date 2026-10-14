@@ -782,6 +782,8 @@ function linuxOwnerConfigPath(name, env = process.env) {
   if (process.platform !== "linux")
     return;
   const layout = resolveLinuxEngineLayout(env);
+  if (!readLinuxEngineReceipt(layout.receiptPath) && env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1")
+    return join(layout.home, ".olympus", name);
   if ([name, ...LEGACY_LINUX_POLICY_FILES].some((file) => lstatSync(join(layout.home, ".olympus", file), { throwIfNoEntry: false }))) {
     throw new Error("Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.");
   }
@@ -4657,6 +4659,24 @@ function resolveLinuxEngineLayout(env = process.env) {
   if (receipt && receipt.layout.home !== home)
     throw new Error(`${present[0]} belongs to another home.`);
   return receipt?.layout ?? rawLayout(env);
+}
+function isLegacyLinuxSetting(name) {
+  const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
+  if (temporary)
+    return isLegacyLinuxSetting(temporary[1]);
+  return [
+    "privacy.json",
+    "tier-rules.json",
+    "consult.json",
+    "consult.json.lock",
+    "consult.json.lock.commit",
+    "sovereignty.json",
+    "sources/dropbox.personal.ingestion.json",
+    "sources/ingestion-exclusions.json",
+    "consult/vocabulary/manifest.json",
+    "consult/vocabulary/de-hunspell.txt.gz",
+    "consult/vocabulary/it-hunspell.txt.gz"
+  ].includes(name) || /^consult\/vocabulary\/[a-z]{2}(?:[.]txt[.]gz|[.]LICENSE[.]txt)$/.test(name) || /^pending-oauth\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.-]+[.]json(?:[.]request[.][0-9]+[.][0-9]+[.]json)?$/.test(name) || /^logs\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.:-]+[.][0-9TZ-]+[.]log$/.test(name);
 }
 function standaloneLinuxDataDir(env = process.env) {
   if (process.platform !== "linux")
@@ -23186,6 +23206,8 @@ function constantTimeStringEqual(actual, expected) {
 }
 
 // src/core/linux-engine-service.ts
+init_file_lease();
+init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { chmodSync as chmodSync6, closeSync as closeSync5, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync10, linkSync, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync23, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync7, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
@@ -23986,6 +24008,7 @@ init_connected_handles();
 
 // src/core/connect.ts
 init_owner_config_read();
+init_linux_engine_layout();
 init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
@@ -24048,7 +24071,17 @@ function defaultDetachedOAuthStateDir(env = process.env) {
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync25(path, "utf8")));
+    const state = sanitizeDetachedOAuthState(JSON.parse(readFileSync25(path, "utf8")));
+    if (process.platform === "linux" && state.logPath) {
+      const layout = resolveLinuxEngineLayout();
+      const legacyLogs = join31(layout.home, ".olympus/logs") + "/";
+      if (readLinuxEngineReceipt(layout.receiptPath) && dirname23(path) === join31(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
+        const name = state.logPath.slice(legacyLogs.length);
+        if (isLegacyLinuxSetting(`logs/${name}`))
+          state.logPath = join31(layout.configDir, "logs", name);
+      }
+    }
+    return state;
   } catch {
     return;
   }

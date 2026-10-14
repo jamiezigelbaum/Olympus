@@ -1622,6 +1622,8 @@ function linuxOwnerConfigPath(name, env = process.env) {
   if (process.platform !== "linux")
     return;
   const layout = resolveLinuxEngineLayout(env);
+  if (!readLinuxEngineReceipt(layout.receiptPath) && env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1")
+    return join3(layout.home, ".olympus", name);
   if ([name, ...LEGACY_LINUX_POLICY_FILES].some((file) => lstatSync3(join3(layout.home, ".olympus", file), { throwIfNoEntry: false }))) {
     throw new Error("Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.");
   }
@@ -30027,6 +30029,7 @@ var init_source_account_binding = __esm(() => {
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
   init_owner_config_read();
+  init_linux_engine_layout();
   init_google_handle_compatibility();
   init_model_transport();
   init_zkapi_consult_settings();

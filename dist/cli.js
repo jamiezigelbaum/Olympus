@@ -984,6 +984,8 @@ function linuxOwnerConfigPath(name, env = process.env) {
   if (process.platform !== "linux")
     return;
   const layout = resolveLinuxEngineLayout(env);
+  if (!readLinuxEngineReceipt(layout.receiptPath) && env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1")
+    return join(layout.home, ".olympus", name);
   if ([name, ...LEGACY_LINUX_POLICY_FILES].some((file) => lstatSync(join(layout.home, ".olympus", file), { throwIfNoEntry: false }))) {
     throw new Error("Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.");
   }
@@ -6745,10 +6747,14 @@ function isLegacyLinuxSetting(name) {
     "privacy.json",
     "tier-rules.json",
     "consult.json",
+    "consult.json.lock",
+    "consult.json.lock.commit",
     "sovereignty.json",
     "sources/dropbox.personal.ingestion.json",
     "sources/ingestion-exclusions.json",
-    "consult/vocabulary/manifest.json"
+    "consult/vocabulary/manifest.json",
+    "consult/vocabulary/de-hunspell.txt.gz",
+    "consult/vocabulary/it-hunspell.txt.gz"
   ].includes(name) || /^consult\/vocabulary\/[a-z]{2}(?:[.]txt[.]gz|[.]LICENSE[.]txt)$/.test(name) || /^pending-oauth\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.-]+[.]json(?:[.]request[.][0-9]+[.][0-9]+[.]json)?$/.test(name) || /^logs\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.:-]+[.][0-9TZ-]+[.]log$/.test(name);
 }
 function legacyLinuxSettings(layout) {
@@ -13966,7 +13972,17 @@ function writeDetachedOAuthState(path, state) {
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync21(path, "utf8")));
+    const state = sanitizeDetachedOAuthState(JSON.parse(readFileSync21(path, "utf8")));
+    if (process.platform === "linux" && state.logPath) {
+      const layout = resolveLinuxEngineLayout();
+      const legacyLogs = join24(layout.home, ".olympus/logs") + "/";
+      if (readLinuxEngineReceipt(layout.receiptPath) && dirname16(path) === join24(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
+        const name = state.logPath.slice(legacyLogs.length);
+        if (isLegacyLinuxSetting(`logs/${name}`))
+          state.logPath = join24(layout.configDir, "logs", name);
+      }
+    }
+    return state;
   } catch {
     return;
   }
@@ -14140,6 +14156,7 @@ function retryableErrorDisposition(error, now) {
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, DROPBOX_OAUTH_SCOPES, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
   init_owner_config_read();
+  init_linux_engine_layout();
   init_google_handle_compatibility();
   init_model_transport();
   init_zkapi_consult_settings();
@@ -68567,8 +68584,42 @@ function priorEngineUsesLegacySettings(layout, receiptState = readLinuxEngineRec
   }
   return receiptState === "installed";
 }
-function assertLegacySettingDestinations(layout) {
+function isLegacyConsultSidecar(name) {
+  return name === "consult.json.lock" || name === "consult.json.lock.commit";
+}
+function withLegacyConsultLease(layout, run) {
   const files = legacyLinuxSettings(layout);
+  if (!files.some((name) => name === "consult.json" || isLegacyConsultSidecar(name)))
+    return run();
+  try {
+    return withFileLeaseSync(join66(layout.home, ".olympus/consult.json"), (lease) => lease.commit(run), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      throw new Error("Finish saving Olympus settings, then retry the upgrade. A settings writer is still running; nothing was migrated.");
+    throw error;
+  }
+}
+function assertLegacySettingOverrides(layout, env) {
+  const files = legacyLinuxSettings(layout);
+  if (!files.length)
+    return;
+  const effective = environmentWithWorkerSetupEnv({ env, workerEnvPath: layout.workerEnvPath });
+  for (const [key2, value2] of Object.entries(effective)) {
+    if (!/^OLYMPUS_.*(?:_PATH|_DIR|_CONFIG)$/.test(key2) || !value2?.trim())
+      continue;
+    const selected = resolve11(value2.trim());
+    const moved = files.find((name) => {
+      const source = join66(layout.home, ".olympus", name);
+      return selected === source || source.startsWith(selected + sep9);
+    });
+    if (!moved)
+      continue;
+    const destination = join66(layout.configDir, relative8(join66(layout.home, ".olympus"), selected));
+    throw new Error(`Set ${key2} to ${destination} in ${layout.workerEnvPath} and in any launch environment that sets it, then retry the upgrade. Nothing was changed.`);
+  }
+}
+function assertLegacySettingDestinations(layout) {
+  const files = legacyLinuxSettings(layout).filter((name) => !isLegacyConsultSidecar(name));
   if (priorEngineUsesLegacySettings(layout)) {
     for (const name of LEGACY_LINUX_POLICY_FILES) {
       const target = legacySettingTarget(layout, name);
@@ -68587,7 +68638,7 @@ function assertLegacySettingDestinations(layout) {
   }
   return files;
 }
-function migrateLegacySettings(layout, transaction) {
+function migrateLegacySettings(layout, transaction, options) {
   const files = assertLegacySettingDestinations(layout);
   const receiptText = snapshotText(transaction.before.receipt);
   const legacyReader = priorEngineUsesLegacySettings(layout, receiptText ? JSON.parse(receiptText).installationState : undefined);
@@ -68618,6 +68669,7 @@ function migrateLegacySettings(layout, transaction) {
     }
     linkSync(temporary, target);
     syncDirectorySync(dirname46(target));
+    lifecycleCheckpoint(options, "legacy_setting_published");
     removeFileDurablySync(temporary);
     removeFileDurablySync(source);
   }
@@ -68625,7 +68677,29 @@ function migrateLegacySettings(layout, transaction) {
 function legacyMigrationTemporary(layout, transaction, name) {
   return `${legacySettingTarget(layout, name)}.${basename8(transaction.backupDir)}.migration`;
 }
+function recoverLegacyMigrationTemporary(layout, transaction, name, original) {
+  const temporary = legacyMigrationTemporary(layout, transaction, name), target = legacySettingTarget(layout, name);
+  assertLinuxManagedPath(temporary);
+  const temp = lstatSync26(temporary, { throwIfNoEntry: false });
+  if (!temp)
+    return;
+  assertLinuxManagedPath(target);
+  const published = lstatSync26(target, { throwIfNoEntry: false });
+  if (published) {
+    if (!published.isFile() || temp.dev !== published.dev || temp.ino !== published.ino || temp.nlink !== 2 || published.nlink !== 2)
+      throw new Error(`Migration temporary identity changed at ${temporary}; retained for recovery.`);
+    removeFileDurablySync(temporary);
+    if (hashFile(target) !== original.sha256)
+      throw new Error(`Migrated settings changed at ${target}; retained for recovery.`);
+  } else {
+    if (hashFile(temporary) !== original.sha256)
+      throw new Error(`Migration temporary changed at ${temporary}; retained for recovery.`);
+    removeFileDurablySync(temporary);
+  }
+}
 function restoreLegacySettings(layout, transaction) {
+  for (const [name, original] of Object.entries(transaction.legacySettings ?? {}))
+    recoverLegacyMigrationTemporary(layout, transaction, name, original);
   if (transaction.legacySettings && !transaction.legacyRestoreSettings) {
     const snapshots = {};
     for (const [index, [name, original]] of Object.entries(transaction.legacySettings).entries()) {
@@ -68871,13 +68945,14 @@ function installLinuxEngine(options) {
     warnings: [],
     plist: sourceUnit
   };
-  return locked(l, () => {
+  return locked(l, () => withLegacyConsultLease(l, () => {
     preflightSystemdEngine(l, exec, options.uid);
     preflightLinuxDesktopEntry(l);
     for (const path of unitLinkCandidates(l))
       assertLinuxManagedPath(dirname46(path), process.getuid(), "directory");
     assertNoInterruptedInstall(l);
     assertLegacySettingDestinations(l);
+    assertLegacySettingOverrides(l, options.env ?? process.env);
     const before = inspectSystemdEngine(l, exec);
     assertKnown(before);
     if (options.dryRun)
@@ -68938,7 +69013,7 @@ function installLinuxEngine(options) {
       transaction.phase = "activating";
       writeInstallTransaction(l, transaction);
       lifecycleCheckpoint(options, "activating_published");
-      migrateLegacySettings(l, transaction);
+      migrateLegacySettings(l, transaction, options);
       selectLinuxSecretBackend({ encryptedFilePath: l.secretsPath, keyFilePath: l.secretsKeyPath, backendFilePath: join66(l.configDir, "secret-backend.json") }, (options.env ?? process.env).OLYMPUS_SECRET_STORE_BACKEND?.trim() || "auto");
       for (const path of [paths.logPath, paths.errorLogPath]) {
         assertLinuxManagedPath(path);
@@ -68989,7 +69064,7 @@ OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
       }
       throw error;
     }
-  });
+  }));
 }
 function previousProgram(layout) {
   try {
@@ -69337,6 +69412,8 @@ function linuxEngineCustody(l, facts, options = {}) {
 }
 var SYSTEMD_ENGINE_UNIT = "olympus-engine.service", runtimeRequire2, heldLifecycleLocks, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, F_SETFD = 2, FD_CLOEXEC = 1, flockSymbols;
 var init_linux_engine_service = __esm(() => {
+  init_file_lease();
+  init_worker_auth();
   init_linux_desktop_entry();
   init_linux_engine_layout();
   init_atomic_file();
