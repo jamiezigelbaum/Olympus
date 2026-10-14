@@ -105577,10 +105577,17 @@ var init_remote_relay_runtime = __esm(() => {
 import { readFileSync as readFileSync59 } from "node:fs";
 import { join as join88 } from "node:path";
 function installerForPlatform(platform2) {
-  return platform2 === "darwin" ? {
-    url: "https://olympusplugin.ai/install.sh",
-    command: "curl -fsSL https://olympusplugin.ai/install.sh | sh"
-  } : undefined;
+  if (platform2 === "darwin")
+    return {
+      url: "https://olympusplugin.ai/install.sh",
+      command: "curl -fsSL https://olympusplugin.ai/install.sh | sh"
+    };
+  if (platform2 === "linux")
+    return {
+      url: "https://olympusplugin.ai/install-linux.sh",
+      command: "curl -fsSL https://olympusplugin.ai/install-linux.sh | sh"
+    };
+  return;
 }
 function semver(version2) {
   if (version2.length > 64 || !VERSION_PATTERN.test(version2))

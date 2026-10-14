@@ -10,12 +10,17 @@ export const UPDATE_TIMEOUT_MS = 10_000;
 export interface UpdateAvailable { version: string }
 
 export function installerForPlatform(platform: string): { url: string; command: string } | undefined {
-  // The publisher reserves site/install-linux.sh, but it is not publicly served
-  // yet (404 on 2026-10-14). Enable Linux only once rerunning its command works.
-  return platform === 'darwin' ? {
+  // Linux reads the installer the site publishes with 1.0.0; until it is
+  // served, the check fails quietly like any other failed check.
+  if (platform === 'darwin') return {
     url: 'https://olympusplugin.ai/install.sh',
     command: 'curl -fsSL https://olympusplugin.ai/install.sh | sh',
-  } : undefined;
+  };
+  if (platform === 'linux') return {
+    url: 'https://olympusplugin.ai/install-linux.sh',
+    command: 'curl -fsSL https://olympusplugin.ai/install-linux.sh | sh',
+  };
+  return undefined;
 }
 
 function semver(version: string): { core: bigint[]; pre: string[] } | undefined {

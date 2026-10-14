@@ -41,9 +41,9 @@ for (const [remote, running, expected] of [
   ['1.1.0-rc', '1.1.0-beta.9', true], ['1.1.0-rc.01', '1.1.0-beta', false],
 ] as const) test(`semver ${remote} vs ${running}`, () => expect(newerVersion(remote, running)).toBe(expected));
 
-test('only the publicly served Mac installer is enabled; Linux URL currently returns 404', () => {
+test('Mac and Linux each use their own served installer; other platforms none', () => {
   expect(installerForPlatform('darwin')).toEqual({ url: 'https://olympusplugin.ai/install.sh', command: 'curl -fsSL https://olympusplugin.ai/install.sh | sh' });
-  expect(installerForPlatform('linux')).toBeUndefined();
+  expect(installerForPlatform('linux')).toEqual({ url: 'https://olympusplugin.ai/install-linux.sh', command: 'curl -fsSL https://olympusplugin.ai/install-linux.sh | sh' });
   expect(installerForPlatform('win32')).toBeUndefined();
 });
 
@@ -163,9 +163,17 @@ test('Mac dashboard renders a plain notice and copies the exact README command',
   await window.happyDOM.close();
 });
 
-test('Linux does not request or show a notice without a public installer', async () => {
+test('Linux checks the Linux installer and reports a newer version', async () => {
+  const urls: string[] = [];
+  const checker = createUpdateChecker({ ...options, platform: 'linux', fetchImpl: (async (url: string | URL | Request) => { urls.push(String(url)); return new Response(script('1.0.1')); }) as unknown as typeof fetch });
+  checker.start(); await checker.check();
+  expect(urls).toEqual(['https://olympusplugin.ai/install-linux.sh']);
+  expect(checker.available()).toEqual({ version: '1.0.1' }); checker.stop();
+});
+
+test('an unsupported platform requests nothing', async () => {
   let calls = 0;
-  const checker = createUpdateChecker({ ...options, platform: 'linux', fetchImpl: (async () => { calls++; return new Response(script('1.0.1')); }) as unknown as typeof fetch });
+  const checker = createUpdateChecker({ ...options, platform: 'win32', fetchImpl: (async () => { calls++; return new Response(script('1.0.1')); }) as unknown as typeof fetch });
   checker.start(); await checker.check(); expect(calls).toBe(0); expect(checker.available()).toBeUndefined(); checker.stop();
 });
 
@@ -208,17 +216,11 @@ test('an already-open Mac dashboard shows and removes a notice from local health
   } finally { await window.happyDOM.close(); }
 });
 
-test('a Linux dashboard never renders or polls the update notice, even with a stray version', async () => {
+test('a Linux dashboard shows the Linux update command', () => {
   const html = renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'linux', updateAvailable: { version: '1.0.1' } });
-  const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
-  let calls = 0;
-  Object.defineProperty(window, 'fetch', { value: async () => { calls++; throw new Error('unexpected fetch'); } });
-  try {
-    window.document.write(html); window.document.close();
-    await new Promise(resolve => setTimeout(resolve, 10));
-    expect(calls).toBe(0);
-    expect(window.document.querySelector('[data-update-notice]') === null).toBe(true);
-  } finally { await window.happyDOM.close(); }
+  expect(html).toContain('data-update-notice');
+  expect(html).toContain('curl -fsSL https://olympusplugin.ai/install-linux.sh | sh');
+  expect(html).not.toContain('curl -fsSL https://olympusplugin.ai/install.sh | sh');
 });
 
 
