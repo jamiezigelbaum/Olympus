@@ -29168,7 +29168,7 @@ function createConnectorStoreCorpusAdapter(options) {
       }
     }
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason) {
-      const keywordLane = connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters);
+      const keywordLane = relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters), options.localKeywordFallback);
       const rows = keywordLane.rows;
       const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
@@ -29217,7 +29217,7 @@ function createConnectorStoreCorpusAdapter(options) {
         rawExposed: false
       };
     }
-    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, options.accountScope, filters, semanticRelevanceBar, options.resultProjector);
+    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
   };
   adapter.hybridAvailability = () => {
     if (!embeddingProvider) {
@@ -29375,7 +29375,7 @@ function connectorStoreRecencyLaneAudit(corpusId, candidateCount) {
     rawExposed: false
   };
 }
-async function hybridConnectorStoreSearch(store, provider, request, startedAt, accountScope, filters, semanticRelevanceBar, resultProjector) {
+async function hybridConnectorStoreSearch(store, provider, request, startedAt, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback) {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
   let keywordLane = connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false });
@@ -29396,6 +29396,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
       saturated: keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated
     } };
   }
+  keywordLane = relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
@@ -29534,6 +29535,24 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []])
+  };
+}
+function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled) {
+  if (!enabled || strict.rows.length > 0)
+    return strict;
+  const relaxed = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { relaxed: true });
+  const allRows = relaxed.rows;
+  return {
+    rows: allRows.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    allRows,
+    matchCount: {
+      matchedItems: allRows.length,
+      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
+      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
+      saturated: relaxed.saturated
+    },
+    matchedItemIds: new Set(allRows.map((row) => row.sourceItem.localItemId)),
+    completeItemIds: new Set
   };
 }
 function connectorStoreRowHasContent(row) {
@@ -31336,6 +31355,18 @@ function foldLocator(locator) {
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
+function toRelaxedLocalFtsQuery(query) {
+  const terms = new Set;
+  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
+    const term = match[0];
+    if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term))
+      continue;
+    terms.add(term);
+    if (terms.size === 8)
+      break;
+  }
+  return [...terms].map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
+}
 function connectorStoreTitleFtsQuery(terms) {
   const normalizedTerms = [
     ...new Set(terms.map((term) => term.trim().toLowerCase()).filter(Boolean))
@@ -31537,7 +31568,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -36227,11 +36258,11 @@ var init_local_index = __esm(() => {
     searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-      const terms = toFtsQuery(query, ftsOptions);
+      const terms = ftsOptions.relaxed ? toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
-      const groups = sourceIndexFtsTermGroups(query);
+      const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
       const exact = queryInitialisms(query);
       const minimumSignal = groups.length >= 2;
       const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
@@ -36892,6 +36923,49 @@ var init_local_index = __esm(() => {
     "attempts",
     "tier_checked_at"
   ];
+  LOCAL_RELAXED_STOPWORDS = new Set([
+    "do",
+    "i",
+    "me",
+    "my",
+    "any",
+    "anyone",
+    "anything",
+    "what",
+    "who",
+    "is",
+    "are",
+    "the",
+    "a",
+    "an",
+    "to",
+    "of",
+    "in",
+    "on",
+    "for",
+    "about",
+    "does",
+    "did",
+    "and",
+    "or",
+    "not",
+    "have",
+    "has",
+    "was",
+    "were",
+    "with",
+    "this",
+    "that",
+    "can",
+    "could",
+    "would",
+    "should",
+    "please",
+    "how",
+    "when",
+    "where",
+    "why"
+  ]);
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
@@ -131905,6 +131979,7 @@ function createSourceAnswerLanes(deps) {
       return createConnectorStoreCorpusAdapter({
         store,
         retrievalMode: request.retrieval_mode ?? "keyword",
+        localKeywordFallback: embedding === "built_in_only",
         ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
         ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
         ...filters ? { filters } : {},

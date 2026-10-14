@@ -10006,14 +10006,14 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     // locate: false is the metadata-only mode: a text match is reported as
     // such, and no chunk text is read to place it.
-    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean } = {},
+    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean; relaxed?: boolean } = {},
   ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-    const terms = toFtsQuery(query, ftsOptions);
+    const terms = ftsOptions.relaxed ? toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
-    const groups = sourceIndexFtsTermGroups(query);
+    const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
     const exact = queryInitialisms(query);
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
@@ -10967,6 +10967,8 @@ export interface ConnectorStoreCorpusAdapterOptions {
   store: LocalConnectorStore;
   embeddingProvider?: SourceEmbeddingProvider;
   retrievalMode?: 'keyword' | 'hybrid';
+  /** Trusted local-answer wiring only; never read from a search request. */
+  localKeywordFallback?: boolean;
   /** Absolute cosine floor for hybrid vector-lane rows; sub-bar semantic similarity is not evidence. */
   semanticRelevanceBar?: number;
   /** Optional principal account boundary applied to every retrieval lane. */
@@ -11011,7 +11013,8 @@ export function createConnectorStoreCorpusAdapter(
     }
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) {
-      const keywordLane = connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters);
+      const keywordLane = relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
+        connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters), options.localKeywordFallback);
       const rows = keywordLane.rows;
       const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
@@ -11087,6 +11090,7 @@ export function createConnectorStoreCorpusAdapter(
       filters,
       semanticRelevanceBar,
       options.resultProjector,
+      options.localKeywordFallback,
     );
   };
   adapter.hybridAvailability = () => {
@@ -11345,6 +11349,7 @@ async function hybridConnectorStoreSearch(
   filters?: ConnectorStoreSearchFilters,
   semanticRelevanceBar?: number,
   resultProjector?: ConnectorStoreResultProjector,
+  localKeywordFallback?: boolean,
 ): Promise<SourceIndexCorpusSearchResponse> {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
@@ -11386,6 +11391,7 @@ async function hybridConnectorStoreSearch(
       saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
     }};
   }
+  keywordLane = relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
@@ -11597,6 +11603,34 @@ function connectorStoreKeywordLaneRows(
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
+  };
+}
+
+/** One bounded OR retry after the strict lane is empty, with identical SQL/tier scope. */
+function relaxEmptyLocalKeywordLane(
+  store: LocalConnectorStore,
+  query: string,
+  limit: number,
+  accountScope: string | undefined,
+  filters: ConnectorStoreSearchFilters | undefined,
+  strict: ReturnType<typeof connectorStoreKeywordLaneRows>,
+  enabled: boolean | undefined,
+): ReturnType<typeof connectorStoreKeywordLaneRows> {
+  if (!enabled || strict.rows.length > 0) return strict;
+  const relaxed = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { relaxed: true });
+  const allRows = relaxed.rows;
+  return {
+    rows: allRows.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    allRows,
+    matchCount: {
+      matchedItems: allRows.length,
+      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
+      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
+      saturated: relaxed.saturated,
+    },
+    matchedItemIds: new Set(allRows.map(row => row.sourceItem.localItemId)),
+    // Partial matches stay partial: the retry does not claim every concept matched.
+    completeItemIds: new Set(),
   };
 }
 
@@ -14517,6 +14551,25 @@ function foldLocator(locator: string): string {
 
 function toFtsQuery(query: string, options: { prefix?: boolean } = {}): string {
   return sourceIndexFtsQuery(query, options);
+}
+
+const LOCAL_RELAXED_STOPWORDS = new Set([
+  'do', 'i', 'me', 'my', 'any', 'anyone', 'anything', 'what', 'who', 'is', 'are',
+  'the', 'a', 'an', 'to', 'of', 'in', 'on', 'for', 'about', 'does', 'did',
+  'and', 'or', 'not', 'have', 'has', 'was', 'were', 'with', 'this', 'that',
+  'can', 'could', 'would', 'should', 'please', 'how', 'when', 'where', 'why',
+]);
+
+/** Literal terms only: neither FTS operators nor lexical expansions enter the retry. */
+function toRelaxedLocalFtsQuery(query: string): string {
+  const terms = new Set<string>();
+  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
+    const term = match[0];
+    if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term)) continue;
+    terms.add(term);
+    if (terms.size === 8) break;
+  }
+  return [...terms].map(term => `"${term.replace(/"/g, '""')}"`).join(' OR ');
 }
 
 function connectorStoreTitleFtsQuery(terms: readonly string[]): string {

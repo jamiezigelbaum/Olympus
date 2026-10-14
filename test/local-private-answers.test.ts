@@ -28,6 +28,7 @@ import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-b
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
+import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
@@ -275,6 +276,7 @@ async function localFixture(options: {
   answer?: string;
   limits?: Partial<PanelAnswerLimits>;
   duringSynthesis?: (fixture: TierFixture) => Promise<void>;
+  keywordOnly?: boolean;
 } = {}) {
   const { dir, cleanup } = tempDir('olympus-local-answer-');
   const fixture = openTierFixture(dir);
@@ -289,8 +291,10 @@ async function localFixture(options: {
     await moveTieredItem({ set: fixture.set, identity: identityOf(id), target: { metadataTier: 'secure', contentTier: 'secure' } });
   }
   const builtIn = await builtInEmbedding(options.embedding ?? 'loaded');
-  await fixture.stores.secure_local!.embedChunks({ provider: builtIn.vectors });
-  await fixture.stores.internal!.embedChunks({ provider: fixture.cloud });
+  if (!options.keywordOnly) {
+    await fixture.stores.secure_local!.embedChunks({ provider: builtIn.vectors });
+    await fixture.stores.internal!.embedChunks({ provider: fixture.cloud });
+  }
   const lanes = createSourceAnswerLanes({
     stores: () => fixture.set.openStores(),
     registry: () => buildSourceIndexCorpusRegistry([
@@ -299,7 +303,7 @@ async function localFixture(options: {
       defineSourceIndexCorpus({ corpusId: CLOUD_ONLY_CORPUS, family: 'email', trustDomain: 'internal', storageProfileInput: { cloudQueryApproved: true } }),
       defineConnectorCorpus({ corpusId: NO_ADAPTER_CORPUS, family: 'file', trustDomain: 'secure_local' }),
     ]),
-    embeddingProvider: (store) => (store.trustDomain === 'secure_local' ? builtIn.provider : fixture.cloud),
+    embeddingProvider: (store) => options.keywordOnly ? undefined : (store.trustDomain === 'secure_local' ? builtIn.provider : fixture.cloud),
     localEmbedding: loadedBuiltInEmbedding,
     readScope: () => ({ allowed: true, contentAllowed: true }),
     answerScope: () => ({ kind: 'search' }),
@@ -315,7 +319,7 @@ async function localFixture(options: {
     sourceName: (corpusId) => SOURCE_NAMES[corpusId],
     ...(options.limits ? { limits: options.limits } : {}),
   });
-  return { fixture, builtIn, stub, answer: path.answer, eligible: path.eligible };
+  return { fixture, builtIn, stub, lanes, answer: path.answer, eligible: path.eligible };
 }
 
 function waitingStore(): WaitingQuestionStore {
@@ -336,6 +340,75 @@ async function backgroundSettled(): Promise<void> {
 }
 
 describe('answers on this computer, with every outbound request denied', () => {
+  const oweSpec: FixtureSpec = { id: 'owe', name: 'balance.txt', text: 'SENTINEL_OWE: I owe Alex twenty euros.', legacyDomain: 'secure_local' };
+  const oweAnswer = JSON.stringify({ answer: 'You owe Alex twenty euros [1].', citations: [{ evidence: 1, claim: 'You owe Alex twenty euros.' }], unanswered: [], sufficient: true });
+
+  test('keyword-only Private: Ask and waiting Answer find owe in a natural question; cloud search stays strict', async () => {
+    const local = await localFixture({ specs: [oweSpec], privateIds: ['owe'], keywordOnly: true, answer: oweAnswer });
+    const question = 'do i owe anyone anything?';
+    const cloudRequest = { question, retrieval_mode: 'keyword' as const, include_secure_local: true, include_secure_local_content: true,
+      localKeywordFallback: true, embedding: 'built_in_only' };
+    const cloud = local.lanes(cloudRequest);
+    const strict = await routeSourceIndexSearch({ registry: cloud.registry, adapters: cloud.adapters,
+      request: { query: question, maxResults: 16, context: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false } } });
+    expect(strict.hits).toEqual([]);
+    const store = waitingStore();
+    const ref = store.record(store.ticket('conn-chatgpt'), { question, surface: 'chatgpt', state: 'waiting' })!;
+    const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => store });
+    const network = denyNetwork();
+    try {
+      for (const action of [{ action: 'ask', question }, { action: 'answer', id: ref.id }]) {
+        const result = await controller.handle(action, 'session:owner');
+        expect(result.body).toMatchObject({ ok: true, status: 'answered', answer: 'You owe Alex twenty euros.' });
+      }
+      expect(JSON.stringify(local.stub.requests)).toContain('SENTINEL_OWE');
+      expect(network.attempts).toEqual([]);
+    } finally { network.restore(); }
+  });
+
+  test('keyword-only local retry prefers strict hits and never adds partial matches when strict hits exist', async () => {
+    const strictSpec = { ...oweSpec, id: 'strict', text: 'SENTINEL_STRICT: I owe anyone who lent money.' };
+    const local = await localFixture({ specs: [oweSpec, strictSpec], privateIds: ['owe', 'strict'], keywordOnly: true, answer: oweAnswer });
+    expect((await local.answer({ question: 'owe anyone' })).status).toBe('answered');
+    expect(JSON.stringify(local.stub.requests)).toContain('SENTINEL_STRICT');
+    expect(JSON.stringify(local.stub.requests)).not.toContain('SENTINEL_OWE');
+  });
+
+  test('keyword-only local retry ignores stopwords and quotes FTS special characters safely', async () => {
+    const local = await localFixture({ specs: [oweSpec], privateIds: ['owe'], keywordOnly: true, answer: oweAnswer });
+    expect((await local.answer({ question: 'do i me my any anyone anything what who is are the a an to of in on for about does did' })).status).toBe('not_found');
+    expect(local.stub.requests).toEqual([]);
+    expect((await local.answer({ question: 'do I "owe" anyone anything? : * ( ) + - ^ NEAR("missing")' })).status).toBe('answered');
+    expect(JSON.stringify(local.stub.requests)).toContain('SENTINEL_OWE');
+  });
+
+  test('relaxed local matches still withdraw an answer when its Private item becomes a Secret', async () => {
+    const local = await localFixture({ specs: [oweSpec], privateIds: ['owe'], keywordOnly: true, answer: oweAnswer,
+      duringSynthesis: async fixture => { await moveTieredItem({ set: fixture.set, identity: identityOf('owe'), target: { metadataTier: 'secrets', contentTier: 'secrets' } }); } });
+    expect(await local.answer({ question: 'do i owe anyone anything?' })).toEqual({ status: 'changed' });
+  });
+
+  test('local OR retry ranks by bm25, caps eight meaningful terms, and drops short terms', async () => {
+    const specs: FixtureSpec[] = [oweSpec,
+      { ...oweSpec, id: 'rich', name: 'record.txt', text: 'I owe money and owe money.' },
+      { ...oweSpec, id: 'short', name: 'short.txt', text: 'xx ox' },
+      { ...oweSpec, id: 'ninth', name: 'last.txt', text: 'zephyr' },
+    ];
+    const local = await localFixture({ specs, privateIds: specs.map(spec => spec.id), keywordOnly: true, answer: oweAnswer });
+    const search = async (query: string) => {
+      const lanes = local.lanes({ question: query, retrieval_mode: 'keyword' }, 'built_in_only');
+      return routeSourceIndexSearch({ registry: lanes.registry, adapters: lanes.adapters,
+        request: { query, maxResults: 16, context: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false } } });
+    };
+    const ranked = await search('do I owe anyone money?');
+    expect(ranked.hits.map(hit => hit.sourceItem.localItemId)).toEqual(['personal:rich', 'personal:owe']);
+    expect(ranked.hits[0]!.score!).toBeGreaterThan(ranked.hits[1]!.score!);
+    const bounded = await search('alpha beta gamma delta epsilon zeta theta kappa zephyr');
+    expect(bounded.hits).toEqual([]);
+    const short = await search('do I xx ox owe anyone anything?');
+    expect(short.hits.map(hit => hit.sourceItem.localItemId).sort()).toEqual(['personal:owe', 'personal:rich']);
+  });
+
   test('Ask privately: retrieval, the built-in embedding, passage ranking and synthesis all run here', async () => {
     const local = await localFixture();
     const installsBefore = local.builtIn.installs.length;

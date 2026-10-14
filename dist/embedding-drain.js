@@ -20152,6 +20152,18 @@ function foldLocator(locator) {
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
+function toRelaxedLocalFtsQuery(query) {
+  const terms = new Set;
+  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
+    const term = match[0];
+    if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term))
+      continue;
+    terms.add(term);
+    if (terms.size === 8)
+      break;
+  }
+  return [...terms].map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
+}
 function connectorStoreTitleFtsQuery(terms) {
   const normalizedTerms = [
     ...new Set(terms.map((term) => term.trim().toLowerCase()).filter(Boolean))
@@ -20353,7 +20365,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -25043,11 +25055,11 @@ var init_local_index = __esm(() => {
     searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-      const terms = toFtsQuery(query, ftsOptions);
+      const terms = ftsOptions.relaxed ? toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
-      const groups = sourceIndexFtsTermGroups(query);
+      const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
       const exact = queryInitialisms(query);
       const minimumSignal = groups.length >= 2;
       const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
@@ -25708,6 +25720,49 @@ var init_local_index = __esm(() => {
     "attempts",
     "tier_checked_at"
   ];
+  LOCAL_RELAXED_STOPWORDS = new Set([
+    "do",
+    "i",
+    "me",
+    "my",
+    "any",
+    "anyone",
+    "anything",
+    "what",
+    "who",
+    "is",
+    "are",
+    "the",
+    "a",
+    "an",
+    "to",
+    "of",
+    "in",
+    "on",
+    "for",
+    "about",
+    "does",
+    "did",
+    "and",
+    "or",
+    "not",
+    "have",
+    "has",
+    "was",
+    "were",
+    "with",
+    "this",
+    "that",
+    "can",
+    "could",
+    "would",
+    "should",
+    "please",
+    "how",
+    "when",
+    "where",
+    "why"
+  ]);
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
