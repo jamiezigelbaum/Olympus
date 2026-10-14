@@ -20,7 +20,6 @@
 .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 4px; padding: 0 var(--gutter); }
 .actions .small { color: inherit; opacity: 0.7; font-family: var(--font-mono); font-size: 12px; }
 .works { max-width: 44ch; margin: 0 auto; padding: 0 var(--gutter); text-align: center; font-size: clamp(17px, 1.6vw, 20px); color: var(--ink-soft); }
-.works + .works { margin-top: 1em; }
 
 /* The close: the film's own button and address, made clickable as one link over the stage. */
 .scene:has(.stage__link) { position: relative; }
