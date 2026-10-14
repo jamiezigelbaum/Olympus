@@ -3,7 +3,7 @@ export { defaultSovereigntyConfigPath } from './owner-config-read.ts';
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -198,8 +198,14 @@ export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): Sov
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync(configPath)) {
-    const standaloneDefault = !requestedConfigPath && !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()
-      && (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1');
+    // The Linux engine always names its own default file (OLYMPUS_SOVEREIGNTY_CONFIG),
+    // so eligibility is the resolved path, not whether a path was given.
+    const isDefaultPath = (path: string) => {
+      try { return resolve(path) === resolve(defaultSovereigntyConfigPath(env)); } catch { return false; }
+    };
+    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()
+      && (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
+      && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);

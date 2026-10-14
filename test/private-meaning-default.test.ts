@@ -179,23 +179,38 @@ describe('the default install finds Private items by meaning locally', () => {
 });
 
 
-test('pinned paths and hosted startup never rewrite the 1.0.0 policy, including a pin to the default', () => {
+test('pinned elsewhere, hosted, or not the standalone engine: the 1.0.0 policy is never rewritten', () => {
   const { path, home, env } = policyFile();
+  const elsewhereDir = mkdtempSync(join(tmpdir(), 'private-meaning-pinned-')); homes.push(elsewhereDir);
+  const elsewhere = join(elsewhereDir, 'sovereignty.json'); writeFileSync(elsewhere, oldBytes);
   const log = spyOn(console, 'info').mockImplementation(() => {});
   try {
     for (const overrides of [
-      { config: { sovereignty: { configPath: path } }, env },
-      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: path } },
-      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG: path } },
+      { config: { sovereignty: { configPath: elsewhere } }, env },
+      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: elsewhere } },
+      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG: elsewhere } },
       { config: {}, env: { ...env, OLYMPUS_ENGINE_HOST: '0' } },
       { config: {}, env: { ...env, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway-fixture' } },
+      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: path, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway-fixture' } },
     ]) {
       expect(loadSourceWorkerSovereignty(overrides.config, overrides.env).resolveEmbeddingProfile('secure_local')).toBeUndefined();
       expect(readFileSync(path, 'utf8')).toBe(oldBytes);
+      expect(readFileSync(elsewhere, 'utf8')).toBe(oldBytes);
       expect(readdirSync(home)).toEqual(['sovereignty.json']);
+      expect(readdirSync(elsewhereDir)).toEqual(['sovereignty.json']);
     }
-    expect(log.mock.calls).toHaveLength(5);
+    expect(log.mock.calls).toHaveLength(6);
     expect(log.mock.calls[0]![0]).toContain('1.0.0 keyword-only');
+  } finally { log.mockRestore(); }
+});
+
+test('the standalone engine naming its own default file (the Linux engine shape) still migrates', () => {
+  const { path, home, env } = policyFile();
+  const log = spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    const engine = loadSourceWorkerSovereignty({}, { ...env, OLYMPUS_SOVEREIGNTY_CONFIG: path });
+    expect(engine.config.retrieval.trustDomains.secure_local).toEqual(expectedSecure);
+    expect(readdirSync(home).filter(name => name.startsWith('sovereignty.json.backup-private-meaning-'))).toHaveLength(1);
   } finally { log.mockRestore(); }
 });
 
@@ -224,7 +239,11 @@ test('unrelated settings survive block migration and the success log names the b
 
 test('direct drain startup uses the standalone migration rule and respects pinned policies', () => {
   for (const pinned of [false, true]) {
-    const { path, home, env } = policyFile();
+    const { path: defaultPath, home: defaultHome, env } = policyFile();
+    const pinnedDir = mkdtempSync(join(tmpdir(), 'private-meaning-drain-pinned-')); homes.push(pinnedDir);
+    const path = pinned ? join(pinnedDir, 'sovereignty.json') : defaultPath;
+    const home = pinned ? pinnedDir : defaultHome;
+    if (pinned) writeFileSync(path, oldBytes);
     const drainEnv = {
       ...env, OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
       OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'direct',
