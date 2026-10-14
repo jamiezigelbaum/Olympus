@@ -2,6 +2,8 @@
 
 ## 1.0.1 - unreleased
 
+- Connecting an agent no longer shows an expired approval after it worked.
+
 - Private items can be found by meaning, on your computer only. Installs still on the 1.0.0 default privacy settings switch over automatically, keeping your other settings; privacy settings managed by OpenClaw stay as they are.
 - Fixed content and prepared answers remaining available after an item moves from Personal to Private.
 

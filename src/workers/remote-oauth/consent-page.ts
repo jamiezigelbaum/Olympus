@@ -332,3 +332,26 @@ export function renderConsentErrorPage(message: string): { body: string; headers
 </html>`;
   return { body, headers: consentSecurityHeaders(nonce) };
 }
+
+/** A stable terminal receipt: no script, automatic close, or OAuth credentials. */
+export function renderConsentSuccessPage(): { body: string; headers: Record<string, string> } {
+  const nonce = randomBytes(16).toString('base64');
+  return {
+    body: `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connected · Olympus</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Connected</h1>
+<div class="card"><p>You already approved this connection. You can close this page and return to the app.</p></div>
+</main>
+</body>
+</html>`,
+    headers: consentSecurityHeaders(nonce),
+  };
+}

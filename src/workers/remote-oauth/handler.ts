@@ -76,7 +76,7 @@ import {
 } from '../../core/remote-public-url.ts';
 import { isClientIdMetadataUrl, pinnedClient, type PinnedHost } from './pinned-clients.ts';
 import { readBoundedRequestText } from '../remote-request-body.ts';
-import { renderConsentErrorPage, renderConsentPage, renderDemoSignInPage, renderLoopbackConsentPage } from './consent-page.ts';
+import { renderConsentErrorPage, renderConsentSuccessPage, renderConsentPage, renderDemoSignInPage, renderLoopbackConsentPage } from './consent-page.ts';
 import { demoGrantDisplayName, demoSignInLimiter, verifyDemoSignIn, type DemoConsentSettings } from './demo-consent.ts';
 import { isAcceptableRedirectUri, isLoopbackRedirectUri, redirectHost, redirectUriMatches } from './redirect-uris.ts';
 
@@ -96,6 +96,10 @@ const ROUTED_PATHS = new Set<string>(Object.values(REMOTE_OAUTH_PATHS));
 const AUTHORIZATION_CODE_TTL_MS = 60_000;
 const CONSENT_REQUEST_TTL_MS = 10 * 60_000;
 const CONSENT_MAX_ATTEMPTS = 5;
+// Presentation receipts contain no code, token, redirect, or client data. Keep
+// them past the request/code TTL so a browser resubmission cannot look expired.
+const COMPLETED_CONSENT_TTL_MS = 24 * 60 * 60_000;
+const MAX_COMPLETED_CONSENTS = 256;
 /**
  * Waiting approvals are bounded, but a full table never refuses a new one: a
  * new request evicts the oldest instead (see admitPending), so a flood can
@@ -152,6 +156,8 @@ interface ResolvedClient {
 }
 
 interface PendingConsent {
+  /** Hash of the validated OAuth transaction, for browser/agent retries. */
+  transaction: string;
   client: ResolvedClient;
   redirectUri: string;
   codeChallenge: string;
@@ -235,11 +241,13 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3_600_000, now);
   const pending = new Map<string, PendingConsent>();
   const codes = new Map<string, IssuedCode>();
+  const completed = new Map<string, { csrf: string; transaction: string; expiresAt: number }>();
   const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))));
 
   const sweep = (): void => {
     const at = now();
     for (const [id, entry] of pending) if (entry.expiresAt <= at) pending.delete(id);
+    for (const [id, entry] of completed) if (entry.expiresAt <= at) completed.delete(id);
     for (const [hash, entry] of codes) if (entry.expiresAt <= at) codes.delete(hash);
   };
 
@@ -328,10 +336,21 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       return fail('invalid_target', 'This app connects to Olympus at its /mcp address.');
     }
     sweep();
+    const transaction = sha256(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    // The relay's browser bridge or an agent may reopen the same authorization.
+    // Reuse its form before approval, then show a receipt instead of sending a
+    // second callback to an OAuth state the client may already have consumed.
+    if (u.installId && !demo) {
+      if ([...completed.values()].some((receipt) => receipt.transaction === transaction)) return connectedPage();
+      for (const [id, entry] of pending) {
+        if (!entry.demo && entry.transaction === transaction) return consentPage(id, entry, u);
+      }
+    }
     admitPending();
     const requestId = randomBytes(16).toString('hex');
     const csrf = randomBytes(32).toString('base64url');
     const entry: PendingConsent = {
+      transaction,
       client,
       redirectUri,
       codeChallenge,
@@ -375,7 +394,20 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       expiresAt: now() + AUTHORIZATION_CODE_TTL_MS,
     });
     pending.delete(requestId);
+    if (!entry.demo) {
+      if (completed.size >= MAX_COMPLETED_CONSENTS) completed.delete(completed.keys().next().value!);
+      completed.set(requestId, { csrf: entry.csrf, transaction: entry.transaction, expiresAt: now() + COMPLETED_CONSENT_TTL_MS });
+    }
     return redirectWithParams(entry.redirectUri, { code, state: entry.state, iss: u.issuer });
+  };
+
+  // Resubmission may have no cookie: the successful POST cleared it. The
+  // original form's random CSRF token binds this status-only receipt. Never
+  // replay the OAuth redirect or mint a second code on this path.
+  const completedPage = (requestId: string, csrf: string): Response | undefined => {
+    const receipt = completed.get(requestId);
+    if (!receipt || !constantTimeEqual(csrf, receipt.csrf)) return undefined;
+    return connectedPage();
   };
 
   /**
@@ -465,7 +497,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const requestId = form.get('request_id') ?? '';
     sweep();
     const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
-    if (!entry || entry.demo) return errorPage(400, 'This approval has expired or was replaced by a newer one. Start again from the app.');
+    if (!entry) return completedPage(requestId, form.get('csrf') ?? '')
+      ?? errorPage(400, 'This approval has expired or was replaced by a newer one. Start connecting again from the app.');
+    if (entry.demo) return errorPage(400, 'This approval has expired. Start connecting again from the app.');
     const csrf = form.get('csrf') ?? '';
     const cookie = readCookie(request, consentCookieName(requestId)) ?? '';
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
@@ -904,4 +938,9 @@ function jsonResponse(status: number, body: unknown, headers: Record<string, str
     status,
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers },
   });
+}
+
+function connectedPage(): Response {
+  const page = renderConsentSuccessPage();
+  return new Response(page.body, { status: 200, headers: page.headers });
 }
