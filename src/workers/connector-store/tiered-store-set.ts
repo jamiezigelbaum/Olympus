@@ -267,10 +267,11 @@ export class TieredStoreSet {
   private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
   private lastRowRehome: TierRowRehomeReport | undefined;
 
-  private lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
+  private lastLowerContentRepairAt: number;
   private lowerContentRepair: Promise<void> | undefined;
 
   constructor(options: TieredStoreSetOptions) {
+    this.lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
     this.setId = options.setId;
     this.ledger = options.ledger;

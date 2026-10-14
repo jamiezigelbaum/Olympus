@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fixtureConnector, FIXTURE_PLACEMENT, openTierFixture, tempDir, identityOf, localId } from './helpers/tier-fixtures.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { purgeLowerTierContent } from '../src/workers/connector-store/tier-content-purge.ts';
@@ -9,11 +10,12 @@ afterEach(() => { for (const close of closes.splice(0)) close(); });
 const body = 'Synthetic message about a garden meeting. Bodymarkerprivatepurge.';
 const target = { metadataTier: 'private' as const, contentTier: 'secure' as const };
 
-async function fixture() {
+async function fixture(clean = 0) {
   const tmp = tempDir('olympus-private-purge-');
   let f = openTierFixture(tmp.dir, { family: 'email' });
   // Synthetic Gmail identities exercise the shared connector pipeline.
-  const base = fixtureConnector(() => [{ id: 'mail', name: 'Garden', text: body }, { id: 'safe', name: 'Orchard', text: 'Ordinary pears.' }]);
+  const base = fixtureConnector(() => [{ id: 'mail', name: 'Garden', text: body }, { id: 'safe', name: 'Orchard', text: 'Ordinary pears.' },
+    ...Array.from({ length: clean }, (_, i) => ({ id: `clean-${i}`, name: 'Clean', text: 'Ordinary synthetic content.' }))]);
   const connector = { ...base, id: 'gmail.synthetic', family: 'email' as const,
     listItems: async function* () { for await (const page of base.listItems()) {
       if ('items' in page) yield { ...page, items: page.items.map(item => ({ ...item, identity: { ...item.identity, provider: 'gmail', family: 'email' as const } })) };
@@ -38,6 +40,50 @@ function contentCounts(path: string, id = 'personal:mail') {
   } finally { db.close(); }
 }
 const empty = { chunks: 0, vectors: 0, versions: 0, fts: 0 };
+
+test('stuck notes never fail landed moves or block other notes, and drain after the path becomes writable', async () => {
+  const x = await fixture(); const f = x.f;
+  const blocker = `${f.dir}/blocked-parent`;
+  writeFileSync(blocker, 'synthetic blocker');
+  const embeddingLedger = { path: `${blocker}/ledger.jsonl`, approvedBy: 'system-automatic' as const };
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    for (const identity of [x.identity, x.safe]) {
+      await moveTieredItem({ set: f.set, identity, target, embeddingLedger });
+      expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    }
+    const pending = f.ledger.metaEntries('tier-move-note:');
+    expect(pending).toHaveLength(2);
+    expect(warn.mock.calls).toHaveLength(2);
+    for (const [line] of warn.mock.calls) expect(line).toMatch(/^\[tier-move-note\] kind=note code=[A-Z0-9_]{1,32}$/);
+    const { flushTierMoveNotes } = await import('../src/workers/connector-store/tier-move.ts');
+    const other = JSON.parse(pending[0]!.value);
+    other.path = `${f.dir}/other-ledger.jsonl`;
+    f.ledger.writeMeta('tier-move-note:zzz-valid', JSON.stringify(other));
+    await flushTierMoveNotes(f.ledger);
+    expect(f.ledger.readMeta('tier-move-note:zzz-valid')).toBe('');
+    expect(f.ledger.metaEntries('tier-move-note:')).toHaveLength(2);
+    rmSync(blocker); mkdirSync(blocker);
+    await flushTierMoveNotes(f.ledger);
+    expect(f.ledger.metaEntries('tier-move-note:')).toHaveLength(0);
+    const { readEmbeddingLedger } = await import('../src/workers/embedding-ledger.ts');
+    expect((await readEmbeddingLedger(embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('tier-move:'))).toHaveLength(2);
+  } finally { warn.mockRestore(); }
+});
+
+test('historical repair spends its first page only on real leftovers among many clean identities', async () => {
+  const x = await fixture(450); const f = x.f;
+  for (const identity of [x.identity, x.safe]) {
+    const held = f.stores.internal!.exportItemCopy(identity)!;
+    await moveTieredItem({ set: f.set, identity, target });
+    f.stores.internal!.importItemCopy(held, { trustTier: 'S3', syncConnectorId: 'old', layers: 'both' });
+  }
+  f.ledger.writeMeta('lower-content-purge-done-v2', '');
+  expect(purgeLowerTierContent(f.set, { maintenance: true })).toMatchObject({ checked: 2, purged: 2, failed: 0 });
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+  expect(contentCounts(f.paths.internal, localId('safe'))).toEqual(empty);
+  expect(f.ledger.readMeta('lower-content-purge-done-v2')).toBe('1');
+});
 
 test('Gmail Personal to Private removes lower body, FTS, vectors and version rows; Personal neighbour unchanged', async () => {
   const x = await fixture(); const f = x.f;
@@ -258,6 +304,27 @@ test('abandon removes verified receipt before another move queues at the same ge
   expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
 });
 
+test('override replaced by Secrets after strip replans from verified copies and settles without a wedge', async () => {
+  const x = await fixture(); const f = x.f;
+  const { applyOwnerOverrides } = await import('../src/workers/connector-store/tier-override-settle.ts');
+  f.ledger.setOverride(x.identity, { kind: 'tier', tier: 'secure' });
+  expect(applyOwnerOverrides({ set: f.set }).raised).toBe(1);
+  const raised = { metadataTier: 'secure' as const, contentTier: 'secure' as const };
+  await expect(moveTieredItem({ set: f.set, identity: x.identity, target: raised,
+    afterPurge: () => { throw new Error('crash'); } })).rejects.toThrow('crash');
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+  const generation = f.ledger.getCurrent(x.identity)!.generation;
+  f.ledger.setOverride(x.identity, { kind: 'tier', tier: 'secrets' });
+  expect(f.ledger.getCurrent(x.identity)).toMatchObject({ state: 'moving', generation: generation + 1 });
+  expect(f.ledger.metaEntries('tier-move-verified:')).toHaveLength(0);
+  expect(f.ledger.copies(x.identity).some(copy => copy.trustDomain === 'secure_local' && copy.state === 'superseded' && copy.supersededByGeneration === generation + 2)).toBe(true);
+  expect(applyOwnerOverrides({ set: f.set }).secrets).toBe(1);
+  expect(f.ledger.getCurrent(x.identity)).toMatchObject({ state: 'current', metadataTier: 'secrets', contentTier: 'secrets' });
+  expect(f.ledger.copies(x.identity).every(copy => copy.state !== 'current')).toBe(true);
+  expect(f.stores.secure_local!.localContent(localId('mail'))).toBeUndefined();
+  expect(applyOwnerOverrides({ set: f.set }).heldMoving).toBe(0);
+});
+
 test.each(['empty', 'stale'] as const)('repair preserves lower content when destination body is %s', async damage => {
   const x = await fixture(); const f = x.f;
   const retained = f.stores.internal!.exportItemCopy(x.identity)!;
@@ -276,9 +343,9 @@ test('maintenance finishes, persists done across restart, and neither exports no
   const x = await fixture(); const f = x.f;
   await f.set.repairLowerContent(); // let startup note flush settle
   let scans = 0; let exports = 0;
-  const originalScan = f.ledger.listRouted.bind(f.ledger);
+  const originalScan = f.ledger.listLowerContentLeftovers.bind(f.ledger);
   const originalExport = f.stores.secure_local!.exportItemCopy.bind(f.stores.secure_local!);
-  f.ledger.listRouted = options => { scans++; return originalScan(options); };
+  f.ledger.listLowerContentLeftovers = options => { scans++; return originalScan(options); };
   f.stores.secure_local!.exportItemCopy = identity => { exports++; return originalExport(identity); };
   await f.set.repairLowerContent({ nowMs: Date.now() + 1_000 });
   purgeLowerTierContent(f.set, { maintenance: true });
@@ -327,9 +394,9 @@ test('an unfinished repair page waits for the maintenance cadence rather than ea
   const x = await fixture(); const f = x.f;
   await f.set.repairLowerContent();
   f.ledger.writeMeta('lower-content-purge-done-v2', '');
-  const original = f.ledger.listRouted.bind(f.ledger);
+  const original = f.ledger.listLowerContentLeftovers.bind(f.ledger);
   let scans = 0;
-  f.ledger.listRouted = options => { scans++; return original(options); };
+  f.ledger.listLowerContentLeftovers = options => { scans++; return original(options); };
   const now = Date.now() + 5 * 60_000;
   await f.set.repairLowerContent({ nowMs: now });
   expect(scans).toBe(1);
@@ -370,7 +437,7 @@ test('failed receipts rotate without starving a later valid receipt or historica
   const first = purgeLowerTierContent(f.set, { maintenance: true });
   expect(first.checked).toBeLessThanOrEqual(200);
   expect(first.failed).toBe(100);
-  expect(first.checked).toBeGreaterThan(100); // historical identities also got budget
+  expect(first.checked).toBe(100); // clean historical identities consume no budget
   purgeLowerTierContent(f.set, { maintenance: true });
   const third = purgeLowerTierContent(f.set, { maintenance: true });
   expect(third.resumed).toBe(1);

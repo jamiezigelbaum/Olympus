@@ -444,10 +444,21 @@ function queueMoveNote(options: VerifiedMoveOptions, receipt: VerifiedMove, resu
 
 /** Retry durable note writes even when the move receipt has already been cleared. */
 export async function flushTierMoveNotes(ledger: TierLedger): Promise<void> {
+  let logged = false;
   for (const { key, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
-    const note = JSON.parse(value) as { path: string; entry: EmbeddingLedgerEntry };
-    await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
-    if (ledger.readMeta(key) === value) ledger.writeMeta(key, '');
+    try {
+      const note = JSON.parse(value) as { path: string; entry: EmbeddingLedgerEntry };
+      await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+      if (ledger.readMeta(key) === value) ledger.writeMeta(key, '');
+    } catch (error) {
+      // Notes never change the outcome of a landed move. Retain each failed
+      // obligation, try the others, and emit at most one content-free line.
+      if (!logged) {
+        const code = (error as { code?: unknown } | null)?.code;
+        console.warn(`[tier-move-note] kind=note code=${typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN'}`);
+        logged = true;
+      }
+    }
   }
 }
 

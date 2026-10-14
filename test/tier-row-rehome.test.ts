@@ -729,16 +729,17 @@ describe('Private-row re-home', () => {
       expect(JSON.parse(ledger.readMeta('private_row_rehome_refused') ?? 'x')).toEqual([]);
     });
 
-    test('a crash right after the flip (before the note) still gets the row queued for embedding by the next pass', async () => {
+    test('a stuck note leaves the move successful and queues embedding immediately and after restart', async () => {
       const fixture = fixtureIn();
       await seedLegacy(fixture, [ORCHID]);
-      // The note cannot be written (the path is a directory): the move flips, then throws.
+      // The note cannot be written (the path is a directory): the move still succeeds.
       const badPath = join(fixture.dir, 'not-a-file');
       require('node:fs').mkdirSync(badPath);
-      const crashed = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: badPath });
-      expect(crashed).toMatchObject({ queued: 1, moved: 0, failed: 1 });
+      const moved = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: badPath });
+      expect(moved).toMatchObject({ queued: 1, moved: 1, failed: 0 });
       expect(currentCorpora(fixture, 'orchid')).toEqual([CORPORA.secure_local]);
-      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([]);
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([localId('orchid')]);
+      expect(fixture.ledger.metaEntries('tier-move-note:')).toHaveLength(1);
       // Restart, then the next pass reconciles from the stores and also replays the note.
       const next = reopen(fixture);
       const recovered = await rehomePrivateTierRows({ set: next.set, embeddingLedgerPath: ledgerPath(next) });

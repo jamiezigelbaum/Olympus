@@ -13642,6 +13642,52 @@ class TierLedger {
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
     return rows.map(recordFromRow);
   }
+  listLowerContentLeftovers(options) {
+    const attached = [];
+    try {
+      const queries = [];
+      const params = [];
+      for (const store of options.stores) {
+        const alias = `purge_lower_${attached.length}`;
+        this.db.query(`ATTACH DATABASE ? AS ${alias}`).run(store.dbPath);
+        attached.push(alias);
+        const higher = store.trustDomain === "public_safe" ? "('internal', 'secure_local')" : "('secure_local')";
+        const metadataAllowed = store.trustDomain === "public_safe" ? "('public_safe')" : "('public_safe', 'internal')";
+        queries.push(`SELECT l.provider, l.account_scope, l.conversation_key, l.provider_item_id
+          FROM tier_copies l INDEXED BY tier_copies_corpus
+          JOIN ${alias}.items s ON s.provider = l.provider AND s.account_scope = l.account_scope
+            AND s.normalized_conversation = l.conversation_key AND s.provider_item_id = l.provider_item_id
+          WHERE l.corpus_id = ? AND s.tombstoned = 0
+            AND EXISTS (SELECT 1 FROM tier_copies h
+              WHERE h.provider = l.provider AND h.account_scope = l.account_scope
+                AND h.conversation_key = l.conversation_key AND h.provider_item_id = l.provider_item_id
+                AND h.copy_state = 'current' AND h.layers IN ('content', 'both') AND h.trust_domain IN ${higher})
+            AND (EXISTS (SELECT 1 FROM ${alias}.chunks c WHERE c.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.chunk_embeddings e WHERE e.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.item_text_versions v WHERE v.item_pk = s.item_pk)
+              OR ((s.title IS NOT NULL OR s.locator_uri IS NOT NULL OR s.search_text IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM tier_copies m
+                  WHERE m.provider = l.provider AND m.account_scope = l.account_scope
+                    AND m.conversation_key = l.conversation_key AND m.provider_item_id = l.provider_item_id
+                    AND m.copy_state = 'current' AND m.layers IN ('metadata', 'both')
+                    AND m.trust_domain IN ${metadataAllowed})))`);
+        params.push(store.corpusId);
+      }
+      if (!queries.length)
+        return [];
+      const after = options.after ? idParams(options.after) : ["", "", "", ""];
+      const rows = this.db.query(`SELECT i.* FROM (${queries.join(" UNION ")}) candidates
+        JOIN tier_items i USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE i.routed = 1 AND i.state <> 'moving'
+          AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?)
+        ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...params, ...after, options.limit);
+      return rows.map(recordFromRow);
+    } finally {
+      for (const alias of attached.reverse())
+        this.db.exec(`DETACH DATABASE ${alias}`);
+    }
+  }
   secretsIdentities() {
     const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id, metadata_tier FROM tier_items
@@ -16803,9 +16849,6 @@ var init_secret_locations = __esm(() => {
 function registeredInstalledTierClassification() {
   return registered;
 }
-function registerTierSetPlanner(ledgerPath, planner) {
-  (tierSetPlanners ??= new Map).set(ledgerPath, planner);
-}
 function tierSetPlannerForLedger(ledgerPath) {
   return tierSetPlanners?.get(ledgerPath);
 }
@@ -18592,9 +18635,6 @@ function exclusionCounts(tally) {
     }))
   };
 }
-function connectorStoreEmbeddingDeferredReason(error) {
-  return `embedding_provider_unavailable:${error.reason}`;
-}
 function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
@@ -18616,67 +18656,6 @@ function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit
     localItemId: row.local_item_id,
     embedding: row.embedding
   }));
-}
-async function syncAndEmbedFromConnector(options) {
-  const localItemIds = new Set;
-  const connector = {
-    id: options.connector.id,
-    family: options.connector.family,
-    authenticate: () => options.connector.authenticate(),
-    listItems(listOptions) {
-      const pages = options.connector.listItems(listOptions);
-      return async function* () {
-        for await (const page of pages) {
-          for (const item of page.items)
-            localItemIds.add(item.identity.localItemId);
-          yield page;
-        }
-      }();
-    },
-    fetchItem: (localItemId) => options.connector.fetchItem(localItemId),
-    classificationSignals: (item) => options.connector.classificationSignals(item)
-  };
-  const sync = await options.store.syncFromConnector(connector, options.sync);
-  const selectedIds = [...localItemIds];
-  const emptyEmbed = () => connectorStoreEmbedSummary(options.store.corpusId, options.store.trustDomain, options.embeddingProvider, 0, 0, 0);
-  if (options.embed === false) {
-    options.store.queueEmbedding(selectedIds, options.embeddingProvider);
-    return { sync, embed: emptyEmbed() };
-  }
-  const selectedBatches = selectedIds.length === 0 ? [[]] : [...batched(selectedIds, MAX_SELECTED_EMBED_ITEM_IDS)];
-  let embed;
-  for (const [batchIndex, localItemIdBatch] of selectedBatches.entries()) {
-    let batch;
-    try {
-      batch = await options.store.embedChunks({
-        provider: options.embeddingProvider,
-        localItemIds: localItemIdBatch
-      });
-    } catch (error) {
-      const unembedded = selectedBatches.slice(batchIndex).flat();
-      if (error instanceof FileLeaseBusyError) {
-        options.store.queueEmbedding(unembedded, options.embeddingProvider);
-        return { sync, embed: { ...embed ?? emptyEmbed(), deferredReason: "embedding_lane_busy" } };
-      }
-      if (!(error instanceof TransientSourceEmbeddingError))
-        throw error;
-      const deferredReason = connectorStoreEmbeddingDeferredReason(error);
-      options.store.queueEmbedding(unembedded, options.embeddingProvider, deferredReason);
-      console.warn(`[olympus:connector-store] embedding_deferred corpus_id=${options.store.corpusId} reason=${deferredReason}`);
-      return { sync, embed: { ...embed ?? emptyEmbed(), deferredReason } };
-    }
-    embed = embed ? {
-      ...embed,
-      chunksSeen: embed.chunksSeen + batch.chunksSeen,
-      chunksEmbedded: embed.chunksEmbedded + batch.chunksEmbedded,
-      chunksSkipped: embed.chunksSkipped + batch.chunksSkipped,
-      ...mergedPrivateTierWithheld(embed, batch)
-    } : batch;
-  }
-  if (!embed) {
-    throw new Error("Connector store sync-and-embed produced no embed batches.");
-  }
-  return { sync, embed };
 }
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
@@ -19011,10 +18990,6 @@ function statusScopeContentFilter(scope) {
     params: [...accountScope ? [accountScope] : [], ...contentFilters.params]
   };
 }
-function mergedPrivateTierWithheld(a, b) {
-  const chunks = (a.privateTierWithheld?.chunks ?? 0) + (b.privateTierWithheld?.chunks ?? 0);
-  return chunks > 0 ? { privateTierWithheld: { chunks, reason: CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON } } : {};
-}
 function connectorStoreEmbedSummary(corpusId, trustDomain, provider, chunksSeen, chunksEmbedded, chunksSkipped) {
   return {
     corpusId,
@@ -19091,9 +19066,6 @@ function namesOnlyKept(db, itemPks) {
 }
 function migrationFingerprint(contentHash, chunkHashes) {
   return createHash11("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
-}
-function connectorStoreItemText(item) {
-  return textFromRawItem(item);
 }
 function textFromRawItem(item) {
   if (item.content.kind === "text")
@@ -25994,9 +25966,6 @@ var init_local_index = __esm(() => {
 });
 
 // src/workers/connector-store/tier-set-registry.ts
-function registerTierSetForLedger(ledgerPath, set) {
-  (tierSets ??= new Map).set(ledgerPath, set);
-}
 function tierSetForLedger(ledgerPath) {
   return tierSets?.get(ledgerPath);
 }
@@ -26595,11 +26564,20 @@ function queueMoveNote(options, receipt, result) {
   options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
 }
 async function flushTierMoveNotes(ledger) {
+  let logged = false;
   for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
-    const note = JSON.parse(value);
-    await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
-    if (ledger.readMeta(key2) === value)
-      ledger.writeMeta(key2, "");
+    try {
+      const note = JSON.parse(value);
+      await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+      if (ledger.readMeta(key2) === value)
+        ledger.writeMeta(key2, "");
+    } catch (error) {
+      if (!logged) {
+        const code = error?.code;
+        console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
+        logged = true;
+      }
+    }
   }
 }
 function purgeReceiptKey(identity) {
@@ -26799,130 +26777,6 @@ var init_tier_move = __esm(() => {
 });
 
 // src/workers/connector-store/tier-content-purge.ts
-function purgeLowerTierContent(set, options = {}) {
-  const report = { checked: 0, purged: 0, resumed: 0, failed: 0 };
-  const limit = Math.max(1, Math.min(options.limit ?? LOWER_CONTENT_PURGE_BATCH, LOWER_CONTENT_PURGE_BATCH));
-  const note = options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: "system-automatic" };
-  const resumed = new Set;
-  const receiptBudget = Math.max(1, Math.floor(limit / 2));
-  const receiptAfter = set.ledger.readMeta(RECEIPT_CURSOR) || undefined;
-  let receipts = set.ledger.metaEntries(VERIFIED, { ...receiptAfter ? { after: receiptAfter } : {}, limit: receiptBudget });
-  if (!receipts.length && receiptAfter)
-    receipts = set.ledger.metaEntries(VERIFIED, { limit: receiptBudget });
-  for (const { key: key2 } of receipts) {
-    const [provider, accountScope, conversation, providerItemId] = key2.slice(VERIFIED.length).split("\x00");
-    if (!provider || !accountScope || !providerItemId)
-      continue;
-    const identity = { provider, accountScope, providerItemId, ...conversation ? { providerConversationId: conversation } : {} };
-    report.checked++;
-    try {
-      if (resumeVerifiedTierMove(set, identity, note))
-        report.resumed++;
-      resumed.add(tierLedgerIdentityKey(identity));
-    } catch {
-      report.failed++;
-    }
-  }
-  set.ledger.writeMeta(RECEIPT_CURSOR, receipts.at(-1)?.key ?? "");
-  if (options.maintenance && set.ledger.readMeta(DONE) === "1")
-    return report;
-  const raw = set.ledger.readMeta(CURSOR);
-  const after = raw ? JSON.parse(raw) : undefined;
-  const page = set.ledger.listRouted({ ...after ? { after } : {}, limit: Math.max(1, limit - report.checked) });
-  const counts = new Map;
-  const remaining = Math.max(0, limit - report.checked);
-  for (const record of page.slice(0, remaining)) {
-    const identity = {
-      provider: record.provider,
-      accountScope: record.accountScope,
-      providerItemId: record.providerItemId,
-      ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-    };
-    report.checked++;
-    try {
-      if (record.state === "moving" || resumed.has(tierLedgerIdentityKey(identity)))
-        continue;
-      if (record.contentTier === "secrets" || record.metadataTier === "secrets")
-        continue;
-      const copies = set.ledger.copies(identity);
-      const content = copyServingLayer(copies.filter((copy) => copy.state === "current"), "content");
-      const metadata = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
-      if (!content)
-        continue;
-      const lower = copies.filter((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain));
-      if (!lower.length)
-        continue;
-      const destination = set.store(content.trustDomain);
-      if (!destination || destination.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
-        throw new Error("Destination unavailable.");
-      destination.withItemCopyWriteFence(identity, () => {
-        const proof = destination.copyContentState(identity);
-        for (const copy of lower) {
-          const store = set.store(copy.trustDomain);
-          if (!store || store.tierSetBinding()?.ledgerId !== set.ledger.ledgerId())
-            throw new Error("Lower store unavailable.");
-          store.withItemCopyWriteFence(identity, () => {
-            const held = store.copyContentState(identity);
-            const keepMetadata = !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain);
-            const hasBody = !!held && held.chunks + held.vectors + held.versions > 0;
-            if (!held || !hasBody && (keepMetadata || !held.names))
-              return;
-            if (hasBody && (!proof || proof.chunks === 0 || !proof.currentText))
-              throw new Error("Destination content is missing or stale.");
-            if (!proof)
-              throw new Error("Destination disappeared.");
-            options.beforeDelete?.();
-            set.ledger.withGenerationFence(identity, record.generation, () => {
-              const current2 = set.ledger.getCurrent(identity);
-              if (current2.state === "moving")
-                throw new Error("Placement changed.");
-              const chunks = store.stripCopyContent(identity, { keepMetadata });
-              set.ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(current2.generation));
-              const entryId = `tier-content-repair:${set.ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${current2.generation}:${copy.corpusId}`;
-              set.ledger.writeMeta(`tier-move-note:${entryId}`, JSON.stringify({ path: note.path, entry: {
-                entry_id: entryId,
-                recorded_at: new Date().toISOString(),
-                kind: "note",
-                what: `Verified current content in ${content.corpusId}; removed ${chunks} lower-tier chunk(s), their vectors and text-version remnants from ${copy.corpusId}.`,
-                scope: { corpora: [content.corpusId, copy.corpusId], chunks: { [copy.corpusId]: chunks } },
-                approved_by: note.approvedBy,
-                ...note.why ? { why: note.why } : {},
-                status: "complete"
-              } }));
-              report.purged++;
-              const count = counts.get(copy.corpusId) ?? { copies: 0, chunks: 0 };
-              count.copies++;
-              count.chunks += chunks;
-              counts.set(copy.corpusId, count);
-            });
-          });
-        }
-      });
-    } catch {
-      report.failed++;
-    }
-  }
-  if (report.failed)
-    set.ledger.writeMeta(FAILED, "1");
-  if (remaining > 0) {
-    const last = page.at(-1);
-    const finished = page.length < remaining || !last;
-    set.ledger.writeMeta(CURSOR, finished ? "" : JSON.stringify({
-      provider: last.provider,
-      accountScope: last.accountScope,
-      providerItemId: last.providerItemId,
-      ...last.conversationKey ? { providerConversationId: last.conversationKey } : {}
-    }));
-    if (finished) {
-      set.ledger.writeMeta(DONE, set.ledger.readMeta(FAILED) === "1" ? "" : "1");
-      set.ledger.writeMeta(FAILED, "");
-    }
-  }
-  for (const [corpus, count] of counts)
-    options.log?.(corpus, count.copies, count.chunks);
-  return report;
-}
-var CURSOR = "lower-content-purge-cursor-v2", DONE = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", LOWER_CONTENT_PURGE_BATCH = 200;
 var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
@@ -27904,377 +27758,13 @@ var init_provider = __esm(() => {
 });
 
 // src/workers/connector-store/tier-row-rehome.ts
-function emptyTierRowRehomeReport() {
-  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0, receiptsReplayed: 0 };
-}
-async function rehomePrivateTierRows(options) {
-  const report = emptyTierRowRehomeReport();
-  const { set } = options;
-  const ledger = set.ledger;
-  const window2 = Math.max(1, options.scanWindow ?? DEFAULT_ROW_REHOME_SCAN_WINDOW);
-  const limit = Math.max(1, options.candidates ?? DEFAULT_ROW_REHOME_CANDIDATES);
-  const ours = [];
-  const completed = [];
-  for (const domain of NON_SECURE_DOMAINS) {
-    try {
-      const store = set.store(domain);
-      if (!store)
-        continue;
-      if (domainRestsAtPrivateTier(set, domain)) {
-        report.guardedStores += 1;
-        continue;
-      }
-      const key2 = `${CURSOR_KEY_PREFIX}${store.corpusId}`;
-      const stored = Number.parseInt(ledger.readMeta(key2) ?? "", 10);
-      const page = store.privateTierRowWindow({
-        ...Number.isFinite(stored) && stored > 0 ? { after: stored } : {},
-        window: window2,
-        limit
-      });
-      ledger.writeMeta(key2, page.next === undefined ? "" : String(page.next));
-      for (const row of page.rows) {
-        report.examined += 1;
-        try {
-          considerRow(set, domain, row.identity, report, ours, completed);
-        } catch {
-          report.skipped += 1;
-        }
-      }
-    } catch {}
-  }
-  pruneRefused(ledger);
-  resumePendingEmbeddings(set);
-  await runQueuedMoves(options, report, ours);
-  if (completed.length > 0) {
-    addPendingEmbeddings(set, completed.map((move) => move.localItemId));
-    resumePendingEmbeddings(set);
-  }
-  await replayMissingReceipts(options, report, completed);
-  set.recordRowRehomeReport(report);
-  return report;
-}
-function domainRestsAtPrivateTier(set, domain) {
-  if (isSecureTrustTier(set.restingTierFor(domain)))
-    return true;
-  const placement = set.placementFor({
-    metadataTier: "secure",
-    contentTier: "secure",
-    state: "current",
-    metadataPending: false,
-    contentPending: false,
-    contentRead: true
-  });
-  return placement.copies.every((copy) => trustDomainRank(copy.trustDomain) <= trustDomainRank(domain));
-}
-function considerRow(set, domain, row, report, ours, completed) {
-  const ledger = set.ledger;
-  const store = set.store(domain);
-  const identity = {
-    provider: row.provider,
-    accountScope: row.accountScope,
-    providerItemId: row.providerItemId,
-    ...row.providerConversationId ? { providerConversationId: row.providerConversationId } : {}
-  };
-  if (ledger.getOverride(identity) || ledger.rejudgeQuestion(identity))
-    return void (report.skipped += 1);
-  let record = ledger.getCurrent(identity);
-  if (record?.routed && record.state === "moving" && record.reasons.includes(ROW_REHOME_REASON)) {
-    ours.push(identity);
-    return void (report.skipped += 1);
-  }
-  if (record?.routed && record.state === "current" && record.reasons.includes(ROW_REHOME_REASON)) {
-    const generation = record.generation;
-    const copies = ledger.copies(identity);
-    const left = copies.find((copy) => copy.state === "superseded" && copy.corpusId === store.corpusId && copy.supersededByGeneration === generation);
-    const arrived = copies.find((copy) => copy.state === "current" && copy.trustDomain === "secure_local");
-    if (left && arrived)
-      completed.push({ identity, localItemId: row.localItemId, generation, from: left.corpusId, to: arrived.corpusId });
-    return void (report.skipped += 1);
-  }
-  if (record && (openQuestion(record) || record.state === "moving" || forced(record) || record.contentTier === "secrets" || record.metadataTier === "secrets")) {
-    return void (report.skipped += 1);
-  }
-  if (record?.routed) {
-    const here = ledger.copies(identity).some((copy) => copy.state === "current" && copy.corpusId === store.corpusId);
-    if (!here)
-      return void (report.skipped += 1);
-  } else {
-    if (set.legSpec(domain)?.legacy !== true)
-      return void (report.skipped += 1);
-    store.bindTierSet(ledger);
-    record = ledger.adoptLegacyPlacement(identity, [{ corpusId: store.corpusId, trustDomain: domain, layers: "both" }], {
-      whenMissing: {
-        family: row.family,
-        metadataTier: domain === "public_safe" ? "public" : "private",
-        contentTier: domain === "public_safe" ? "public" : "private"
-      }
-    });
-    report.adopted += 1;
-  }
-  const decision = {
-    metadataTier: "secure",
-    contentTier: "secure",
-    decidedBy: "sensitive_detector",
-    reasons: [...record.reasons.filter((reason) => reason !== ROW_REHOME_REASON), ROW_REHOME_REASON],
-    state: "current",
-    contentRead: record.contentRead,
-    metadataPending: false,
-    contentPending: false,
-    metadataForced: false,
-    metadataFlagged: record.metadataFlagged,
-    engineVersion: record.engineVersion,
-    mapRevision: record.mapRevision,
-    snifferId: "undecided"
-  };
-  const plan = set.placementFor(decision);
-  if (!plan.copies.some((copy) => trustDomainRank(copy.trustDomain) > trustDomainRank(domain))) {
-    return void (report.skipped += 1);
-  }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, plan, { queueWithoutHiding: true });
-  if (recorded.outcome === "queued_move") {
-    report.queued += 1;
-    ours.push(identity);
-  } else {
-    report.skipped += 1;
-  }
-}
-function refusalKey(identity, generation) {
-  return `${tierLedgerIdentityKey(identity)}#${generation}`;
-}
-function parseRefused(ledger) {
-  try {
-    const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? "[]");
-    return (Array.isArray(parsed) ? parsed : []).filter((entry) => entry?.identity && typeof entry.generation === "number");
-  } catch {
-    return [];
-  }
-}
-function readRefused(ledger) {
-  return new Map(parseRefused(ledger).map((entry) => [refusalKey(entry.identity, entry.generation), entry]));
-}
-function pruneRefused(ledger) {
-  try {
-    const entries = parseRefused(ledger);
-    if (entries.length === 0)
-      return;
-    const checked = entries.slice(0, REFUSED_PRUNE_PER_CALL);
-    const rest = entries.slice(REFUSED_PRUNE_PER_CALL);
-    const kept = checked.filter((entry) => {
-      const record = ledger.getCurrent(entry.identity);
-      return record !== undefined && record.state === "moving" && record.generation === entry.generation;
-    });
-    if (kept.length === checked.length && rest.length === 0)
-      return;
-    ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...rest, ...kept]));
-  } catch {}
-}
-function writeRefused(ledger, entries) {
-  ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...entries.values()]));
-}
-function isOurQueuedRaise(record) {
-  return record.routed && record.state === "moving" && record.targetMetadataTier !== null && record.targetContentTier !== null && record.targetMetadataTier !== "secrets" && record.targetContentTier !== "secrets" && record.reasons.includes(ROW_REHOME_REASON) && (record.targetMetadataTier === "secure" || record.targetContentTier === "secure");
-}
-async function runQueuedMoves(options, report, found) {
-  const { set } = options;
-  const ledger = set.ledger;
-  let budget = Math.max(0, options.maxMoves ?? DEFAULT_ROW_REHOME_MOVES);
-  const outstanding = ledger.readMeta(OUTSTANDING_META_KEY) === "1";
-  if (report.queued === 0 && found.length === 0 && !outstanding)
-    return;
-  if (set.privateEmbedderBackend() !== "local") {
-    report.awaitingMigration += found.length;
-    if (found.length > 0)
-      ledger.writeMeta(OUTSTANDING_META_KEY, "1");
-    return;
-  }
-  if (budget === 0) {
-    ledger.writeMeta(OUTSTANDING_META_KEY, "1");
-    return;
-  }
-  const work = new Map;
-  try {
-    if (outstanding) {
-      for (const record of ledger.listMoving({ limit: 5000 })) {
-        if (isOurQueuedRaise(record))
-          work.set(tierLedgerIdentityKey(identityOfRecord(record)), record);
-      }
-    }
-    for (const identity of found) {
-      const key2 = tierLedgerIdentityKey(identity);
-      const record = work.has(key2) ? undefined : ledger.getCurrent(identity);
-      if (record && isOurQueuedRaise(record))
-        work.set(key2, record);
-    }
-  } catch {
-    return;
-  }
-  const builtInOnly = setEmbedsWithBuiltInOnly(set);
-  const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
-  const refused = readRefused(ledger);
-  const maxLooked = Math.max(1, options.maxLooked ?? DEFAULT_ROW_REHOME_LOOKED);
-  const ordered = [...work.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-  const cursor = ledger.readMeta(QUEUE_CURSOR_META_KEY) ?? "";
-  const start = Math.max(0, ordered.findIndex(([key2]) => key2 > cursor));
-  const rotated = cursor === "" || ordered.every(([key2]) => key2 <= cursor) ? ordered : [...ordered.slice(start), ...ordered.slice(0, start)];
-  let looked = 0;
-  let waiting = 0;
-  let lastLooked = "";
-  const moved = [];
-  for (const [key2, queued] of rotated) {
-    const identity = identityOfRecord(queued);
-    if (looked >= maxLooked || budget === 0) {
-      waiting += 1;
-      continue;
-    }
-    looked += 1;
-    lastLooked = key2;
-    const refusedKey = refusalKey(identity, queued.generation);
-    if (refused.has(refusedKey)) {
-      report.refused += 1;
-      continue;
-    }
-    try {
-      const record = ledger.getCurrent(identity);
-      if (!record || !isOurQueuedRaise(record) || record.generation !== queued.generation || ledger.getOverride(identity) || ledger.rejudgeQuestion(identity) || record.targetMetadataTier !== queued.targetMetadataTier || record.targetContentTier !== queued.targetContentTier) {
-        report.skipped += 1;
-        continue;
-      }
-      const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
-      if (sources.length === 0 || sources.every((copy) => copy.trustDomain === "secure_local"))
-        continue;
-      const source = copyServingLayer(sources, "content") ?? sources[0];
-      const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
-      if (!exported)
-        throw new Error("no current copy");
-      budget -= 1;
-      await moveTieredItem({
-        set,
-        identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
-        target: { metadataTier: record.targetMetadataTier, contentTier: record.targetContentTier },
-        embeddingLedger: { path: embeddingLedgerPath, approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL, why: MOVE_WHY },
-        expectedGeneration: record.generation,
-        ...builtInOnly ? { replaceOwnSupersededCopy: true } : {}
-      });
-      report.moved += 1;
-      moved.push(exported.identity.localItemId);
-      addPendingEmbeddings(set, [exported.identity.localItemId]);
-    } catch (error) {
-      if (error instanceof TierLedgerGenerationConflictError) {
-        continue;
-      }
-      if (error instanceof TierMoveRefusedError) {
-        refused.set(refusalKey(identity, queued.generation), { identity, generation: queued.generation });
-        writeRefused(ledger, refused);
-        report.refused += 1;
-        budget += 1;
-        continue;
-      }
-      report.failed += 1;
-      try {
-        ledger.recordMoveFailure(identity, { expectedGeneration: queued.generation });
-      } catch {}
-    }
-  }
-  ledger.writeMeta(QUEUE_CURSOR_META_KEY, waiting > 0 ? lastLooked : "");
-  if (moved.length > 0)
-    resumePendingEmbeddings(set);
-  ledger.writeMeta(OUTSTANDING_META_KEY, waiting + report.failed > 0 ? "1" : "");
-}
-function addPendingEmbeddings(set, localItemIds) {
-  try {
-    const pending = new Set(readPendingEmbed(set));
-    let added = false;
-    for (const id of localItemIds) {
-      if (!pending.has(id)) {
-        pending.add(id);
-        added = true;
-      }
-    }
-    if (added)
-      set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify([...pending]));
-  } catch {}
-}
-function readPendingEmbed(set) {
-  try {
-    const parsed = JSON.parse(set.ledger.readMeta(PENDING_EMBED_META_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
-  } catch {
-    return [];
-  }
-}
-function resumePendingEmbeddings(set) {
-  try {
-    const pending = readPendingEmbed(set);
-    if (pending.length === 0)
-      return;
-    const provider = set.privateEmbeddingProvider();
-    const store = set.store("secure_local");
-    if (!provider || !store)
-      return;
-    const owed = new Set;
-    for (let index = 0;index < pending.length; index += PENDING_EMBED_BATCH) {
-      for (const id of store.embeddingOwedItemIds(provider.modelId, pending.slice(index, index + PENDING_EMBED_BATCH)))
-        owed.add(id);
-    }
-    const still = pending.filter((id) => owed.has(id));
-    if (still.length > 0)
-      store.queueEmbedding(still, provider);
-    if (still.length !== pending.length)
-      set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify(still));
-  } catch {}
-}
-async function replayMissingReceipts(options, report, completed) {
-  if (completed.length === 0)
-    return;
-  const path = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
-  try {
-    const present = new Set((await readEmbeddingLedger(path)).entries.map((entry) => entry.entry_id).filter(Boolean));
-    const missing = completed.map((move) => ({ move, entryId: rowRehomeReceiptId(options.set.ledger, move.identity, move.generation) })).filter(({ entryId }) => !present.has(entryId));
-    for (const { move, entryId } of missing.slice(0, DEFAULT_ROW_REHOME_MOVES)) {
-      const written = await appendEmbeddingLedgerEntryOnce(path, {
-        recorded_at: new Date().toISOString(),
-        kind: "note",
-        what: `Tier move of one item (raise) from ${move.from} to ${move.to} (both): the move completed but its note was missing ` + "and is recorded now. Superseded copies are kept and hidden. Chunk counts are not known after the fact; " + "the destination embeds with its own local model.",
-        scope: { corpora: [move.from, move.to] },
-        why: MOVE_WHY,
-        approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-        status: "complete",
-        entry_id: entryId
-      });
-      if (written)
-        report.receiptsReplayed += 1;
-    }
-  } catch {}
-}
-function identityOfRecord(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-function openQuestion(record) {
-  return record.state === "pending" || record.metadataPending || record.contentPending;
-}
-function forced(record) {
-  return record.metadataForced || record.decidedBy === "override";
-}
-function setEmbedsWithBuiltInOnly(set) {
-  try {
-    return set.openStores().every((store) => store.embeddingAuthorities().every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
-  } catch {
-    return false;
-  }
-}
-var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, DEFAULT_ROW_REHOME_LOOKED = 2000, CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", OUTSTANDING_META_KEY = "private_row_rehome_outstanding", REFUSED_PRUNE_PER_CALL = 200, PENDING_EMBED_META_KEY = "private_row_rehome_pending_embed", QUEUE_CURSOR_META_KEY = "private_row_rehome_queue_cursor", PENDING_EMBED_BATCH = 500;
+var MOVE_WHY;
 var init_tier_row_rehome = __esm(() => {
   init_provider();
   init_types();
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
-  NON_SECURE_DOMAINS = ["public_safe", "internal"];
   MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
 });
 
@@ -29073,644 +28563,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-class TieredStoreSet {
-  setId;
-  ledger;
-  legs;
-  splitLayers;
-  tierClassification;
-  secretLocations;
-  onLegOpened;
-  laneFloor;
-  contentArrivesLater;
-  contentArrivesLaterFor;
-  privateEmbedder;
-  privateEmbedWith;
-  lastRowRehome;
-  lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
-  lowerContentRepair;
-  constructor(options) {
-    if (!options.setId.trim())
-      throw new Error("A tiered store set needs a stable id.");
-    this.setId = options.setId;
-    this.ledger = options.ledger;
-    this.splitLayers = options.splitLayers !== false;
-    this.tierClassification = options.tierClassification;
-    this.secretLocations = options.secretLocations;
-    this.onLegOpened = options.onLegOpened;
-    this.laneFloor = options.laneFloor;
-    this.contentArrivesLater = options.contentArrivesLater === true;
-    this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
-    this.legs = new Map;
-    for (const spec of options.legs) {
-      if (this.legs.has(spec.trustDomain))
-        throw new Error(`A tiered store set has one leg per trust domain (${spec.trustDomain}).`);
-      if (!spec.store && !spec.open)
-        throw new Error("A tiered store leg needs an open store or a way to open one.");
-      if (spec.store && (spec.store.trustDomain !== spec.trustDomain || spec.store.corpusId !== spec.corpusId)) {
-        throw new Error("A tiered store leg's store must match its declared trust domain and corpus.");
-      }
-      spec.store?.useTierLedger(this.ledger);
-      this.legs.set(spec.trustDomain, { spec, store: spec.store });
-    }
-    if (!this.legs.has("secure_local"))
-      throw new Error("A tiered store set needs a secure_local leg.");
-    if (options.registerWithLedger !== false) {
-      registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
-      registerTierSetForLedger(this.ledger.dbPath, this);
-    }
-    this.repairLowerContent();
-  }
-  store(trustDomain, options = {}) {
-    const leg = this.legs.get(trustDomain);
-    if (!leg)
-      return;
-    if (leg.store)
-      return leg.store;
-    if (!options.create && leg.spec.exists?.() !== true)
-      return;
-    const store = leg.spec.open();
-    if (store.trustDomain !== trustDomain || store.corpusId !== leg.spec.corpusId) {
-      store.close();
-      throw new Error("A lazily opened tiered store does not match its declared leg.");
-    }
-    store.useTierLedger(this.ledger);
-    leg.store = store;
-    this.onLegOpened?.(store, leg.spec);
-    return store;
-  }
-  repairLowerContent(options = {}) {
-    if (this.lowerContentRepair)
-      return this.lowerContentRepair;
-    const now = options.nowMs ?? Date.now();
-    if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS)
-      return Promise.resolve();
-    this.lastLowerContentRepairAt = now;
-    try {
-      purgeLowerTierContent(this, {
-        maintenance: true,
-        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
-        log: (corpus, copies, chunks) => {
-          if (chunks > 0)
-            console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
-        }
-      });
-      const pending = flushTierMoveNotes(this.ledger).catch(() => {}).finally(() => {
-        this.lowerContentRepair = undefined;
-      });
-      this.lowerContentRepair = pending;
-      return pending;
-    } catch {
-      return Promise.resolve();
-    }
-  }
-  openStores() {
-    return TIER_DOMAIN_ORDER.flatMap((domain) => {
-      const store = this.store(domain);
-      return store ? [store] : [];
-    });
-  }
-  legSpec(trustDomain) {
-    return this.legs.get(trustDomain)?.spec;
-  }
-  committedCursor(connectorId) {
-    return this.ledger.setCursor(this.setId, connectorId);
-  }
-  placementFor(decision, options = {}) {
-    if (decision.contentTier === "secrets" || decision.metadataTier === "secrets") {
-      return { copies: [], embedHold: false };
-    }
-    const deferred = this.contentArrivesLater || this.contentArrivesLaterFor !== undefined && (options.contentArrivesLater ?? decision.contentRead !== true);
-    const wholePending = decision.metadataPending;
-    if (wholePending) {
-      const domain = this.domainAtLeast("secure_local");
-      return {
-        copies: [{ corpusId: this.corpusFor(domain), trustDomain: domain, layers: "both" }],
-        embedHold: true,
-        stored: { trustDomain: domain, trustTier: this.restingTierFor(domain) }
-      };
-    }
-    const floor = this.floorFor(decision);
-    const metadataDomain = this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[decision.metadataTier], floor));
-    if (deferred && decision.contentRead !== true) {
-      return {
-        copies: [{ corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: "metadata" }],
-        embedHold: false,
-        stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) }
-      };
-    }
-    const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
-    const contentDomain = contentHeld ? this.domainAtLeast("secure_local") : this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier)], floor));
-    const copies = !this.splitLayers || metadataDomain === contentDomain ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "both" }] : [
-      { corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: "metadata" },
-      { corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "content" }
-    ];
-    return {
-      copies,
-      embedHold: contentHeld,
-      stored: { trustDomain: contentDomain, trustTier: this.restingTierFor(contentDomain) }
-    };
-  }
-  declarePrivateEmbedder(provider, options = {}) {
-    this.privateEmbedder = provider;
-    this.privateEmbedWith = options.embedWith;
-  }
-  privateEmbeddingProvider() {
-    if (this.privateEmbedWith) {
-      try {
-        return this.privateEmbedWith();
-      } catch {
-        return;
-      }
-    }
-    return this.privateEmbedder ?? this.legs.get("secure_local")?.spec.embeddingProvider;
-  }
-  privateEmbedderBackend() {
-    const declared = this.privateEmbedder ?? this.legs.get("secure_local")?.spec.embeddingProvider;
-    if (declared)
-      return declared.backend === "local" ? "local" : declared.backend === "cloud" ? "cloud" : undefined;
-    return;
-  }
-  rowRehomeReport() {
-    return this.lastRowRehome;
-  }
-  recordRowRehomeReport(report) {
-    this.lastRowRehome = report;
-  }
-  readsContentLater(item) {
-    if (this.contentArrivesLater)
-      return true;
-    if (!this.contentArrivesLaterFor)
-      return false;
-    return item === undefined || this.contentArrivesLaterFor(item);
-  }
-  restingTierFor(domain) {
-    return this.legs.get(domain)?.spec.restingTier ?? defaultStoreTrustTier(domain);
-  }
-  floorFor(decision) {
-    const floor = this.laneFloor;
-    if (!floor)
-      return;
-    if (decision.decidedBy === "override")
-      return;
-    const rule = decision.metadataOwnerRule;
-    if (rule && floor.liftedByOwnerRule.includes(rule.kind) && rule.tier !== "secrets" && trustDomainRank(TIER_KEY_TRUST_DOMAIN[rule.tier]) < trustDomainRank(floor.trustDomain)) {
-      return;
-    }
-    return floor.trustDomain;
-  }
-  async sync(connector, sync = {}, options = {}) {
-    this.assertLedgerGovernsLegs();
-    await this.settleStoredItems();
-    const run = new TieredRoutingRun(this, "shared");
-    const traversal = recordedTraversal(connector);
-    const legRuns = [];
-    const ran = new Set;
-    const embed = options.embed !== false;
-    for (const domain of TIER_DOMAIN_ORDER) {
-      const store = this.store(domain);
-      if (!store)
-        continue;
-      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
-      ran.add(domain);
-    }
-    for (const domain of TIER_DOMAIN_ORDER) {
-      if (ran.has(domain) || !run.routedDomains.has(domain))
-        continue;
-      const store = this.store(domain, { create: true });
-      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
-    }
-    run.finalize();
-    const cursor = legRuns[0]?.sync.cursor;
-    if (options.commitCursor !== false)
-      this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
-    return tieredRun(legRuns, run.counts, cursor);
-  }
-  async syncLegs(entries) {
-    this.assertLedgerGovernsLegs();
-    await this.settleStoredItems();
-    const run = new TieredRoutingRun(this, "per_leg");
-    const legRuns = [];
-    for (const entry of entries) {
-      const store = this.store(entry.trustDomain, { create: true });
-      if (!store)
-        throw new Error(`No ${entry.trustDomain} leg in this tiered store set.`);
-      run.legOptions.set(store.corpusId, entry.sync ?? {});
-      legRuns.push(await this.runLeg(entry.trustDomain, store, entry.connector, { ...entry.sync, tierRouting: run }));
-      run.finalize();
-    }
-    return tieredRun(legRuns, run.counts, undefined);
-  }
-  async settleStoredItems() {
-    this.repairLowerContent();
-    try {
-      applyOwnerOverrides({ set: this });
-    } catch {}
-    try {
-      sweepOwnerRuleRaises({ set: this });
-    } catch {}
-    try {
-      settleNamesOnlyItems({ set: this });
-    } catch {}
-    try {
-      sweepImageContentToPrivate({ set: this });
-    } catch {}
-    try {
-      applyMediaJudgments({ set: this });
-    } catch {}
-    try {
-      await rehomePrivateTierRows({ set: this });
-    } catch {}
-  }
-  assertLedgerGovernsLegs() {
-    const ledgerId = this.ledger.ledgerId();
-    for (const domain of TIER_DOMAIN_ORDER) {
-      const store = this.store(domain);
-      const binding = store?.tierSetBinding();
-      if (store && binding && binding.ledgerId !== ledgerId)
-        throw new TierLedgerUnavailableError(store.corpusId);
-    }
-  }
-  domainAtLeast(domain) {
-    for (const candidate of TIER_DOMAIN_ORDER) {
-      if (trustDomainRank(candidate) >= trustDomainRank(domain) && this.legs.has(candidate))
-        return candidate;
-    }
-    return "secure_local";
-  }
-  corpusFor(domain) {
-    const leg = this.legs.get(domain);
-    if (!leg)
-      throw new Error(`No ${domain} leg in this tiered store set.`);
-    return leg.spec.corpusId;
-  }
-  domainForCorpus(corpusId) {
-    for (const [domain, leg] of this.legs)
-      if (leg.spec.corpusId === corpusId)
-        return domain;
-    return;
-  }
-  routedCopiesGone(identity) {
-    const copies = this.ledger.copies(identity);
-    if (copies.length === 0)
-      return this.routedWithoutAnyCopy(identity);
-    const current2 = copies.filter((copy) => copy.state === "current");
-    if (current2.length === 0)
-      return false;
-    return current2.every((copy) => {
-      const domain = this.domainForCorpus(copy.corpusId);
-      const store = domain ? this.store(domain) : undefined;
-      return store !== undefined && !store.itemPresence(identity).active;
-    });
-  }
-  routedWithoutAnyCopy(identity) {
-    if (this.ledger.copies(identity).length > 0)
-      return false;
-    return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
-  }
-  anyLegHasRow(identity) {
-    return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity) === true);
-  }
-  classification() {
-    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
-  }
-  secrets() {
-    return this.secretLocations;
-  }
-  async runLeg(domain, store, connector, sync, embed = true) {
-    const provider = this.legs.get(domain)?.spec.embeddingProvider;
-    if (!provider) {
-      return { trustDomain: domain, corpusId: store.corpusId, sync: await store.syncFromConnector(connector, sync) };
-    }
-    const result = await syncAndEmbedFromConnector({ store, connector, embeddingProvider: provider, sync, embed });
-    return {
-      trustDomain: domain,
-      corpusId: store.corpusId,
-      sync: result.sync,
-      ...embed ? { embed: result.embed } : {}
-    };
-  }
-}
-
-class TieredRoutingRun {
-  routedDomains;
-  legOptions;
-  counts;
-  plans;
-  copyRemovals;
-  set;
-  mode;
-  classification;
-  constructor(set, mode) {
-    this.set = set;
-    this.mode = mode;
-    this.classification = set.classification();
-    this.routedDomains = new Set;
-    this.legOptions = new Map;
-    this.plans = new Map;
-    this.copyRemovals = new Map;
-    this.counts = {
-      itemsRouted: 0,
-      itemsLegacy: 0,
-      itemsSecrets: 0,
-      itemsPendingHeld: 0,
-      movesQueued: 0,
-      routedDeletions: 0,
-      contentUnreadHeld: 0
-    };
-  }
-  async route(input) {
-    const domain = this.set.domainForCorpus(input.store.corpusId);
-    if (!domain)
-      throw new Error("A tier route was asked by a store outside its set.");
-    const key2 = identityKey(input.item.identity);
-    let entry = this.plans.get(key2);
-    if (!entry) {
-      entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
-      this.plans.set(key2, entry);
-    }
-    if (this.mode === "per_leg" && !entry.handedOff) {
-      entry.handedOff = true;
-      await this.handOff(entry, input, domain);
-    }
-    return this.routeFor(entry.plan, input.store.corpusId, domain);
-  }
-  finalize() {
-    for (const identity of this.copyRemovals.values())
-      this.set.ledger.removeCopies(identity);
-    this.copyRemovals.clear();
-  }
-  routeFor(plan, corpusId, domain) {
-    switch (plan.kind) {
-      case "legacy":
-        return this.set.legSpec(domain)?.legacy === true ? { kind: "legacy" } : { kind: "elsewhere", reason: "routed_to_other_tier" };
-      case "routed": {
-        const layers = plan.copies.get(corpusId);
-        const sensitivity = plan.sensitivity.get(corpusId);
-        return layers && sensitivity ? { kind: "store", sensitivity, layer: layers } : { kind: "elsewhere", reason: "routed_to_other_tier" };
-      }
-      case "hold":
-        return { kind: "elsewhere", reason: plan.reason };
-      case "delete":
-        return plan.corpora.has(corpusId) ? { kind: "delete", reason: plan.reason } : { kind: "elsewhere", reason: plan.reason === "secrets" ? "secrets" : "routed_to_other_tier" };
-    }
-  }
-  planFor(input) {
-    const { item, connector } = input;
-    const identity = item.identity;
-    const ledger = this.set.ledger;
-    const hasRow = this.set.anyLegHasRow(identity);
-    const routed = ledger.isRouted(identity);
-    if (item.metadata["deleted"] === true) {
-      this.set.secrets()?.remove(identity);
-      if (!routed) {
-        this.counts.itemsLegacy += 1;
-        return { kind: "legacy" };
-      }
-      this.counts.routedDeletions += 1;
-      this.copyRemovals.set(identityKey(identity), identity);
-      return { kind: "delete", corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: "provider_deleted" };
-    }
-    const deferred = this.set.readsContentLater(item);
-    const text2 = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
-    const classification = this.classification;
-    let decision = decideItemTiers(connector, item, text2, classification, ledger, {
-      namesOnly: deferred && input.metadataOnly,
-      ...input.contentFetchFailed ? { contentFetchFailed: true } : {}
-    });
-    if (classification?.unavailableReason && decision.contentTier !== "secrets") {
-      decision = { ...decision, state: "pending", metadataPending: true, reasons: [...decision.reasons, `metadata:${classification.unavailableReason}`] };
-    }
-    this.recordSecretLocation(input, text2, decision);
-    const contentRead = decision.contentRead && !input.contentFetchFailed;
-    if (!routed) {
-      if (hasRow || !deferred && (!contentRead || input.metadataOnly)) {
-        this.counts.itemsLegacy += 1;
-        return { kind: "legacy" };
-      }
-    } else if (!contentRead) {
-      if (!deferred) {
-        this.counts.contentUnreadHeld += 1;
-        return { kind: "hold", reason: "content_unread" };
-      }
-      decision = withRecordedContent(decision, ledger.getCurrent(identity));
-    }
-    let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
-    const currentCopies = ledger.copies(identity).filter((copy) => copy.state === "current");
-    const fromContent = copyServingLayer(currentCopies, "content");
-    const toContent = copyServingLayer(placement.copies, "content");
-    if (contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(currentCopies, placement.copies)) {
-      placement = { copies: currentCopies, embedHold: true };
-    }
-    const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
-      staleCopiesGone: routed && this.set.routedCopiesGone(identity),
-      ...deferred ? { stagedLandingAllowed: true } : {}
-    });
-    if (recorded.outcome !== "secrets")
-      retireSecretRedactions(ledger, { identity });
-    switch (recorded.outcome) {
-      case "secrets":
-        this.counts.itemsSecrets += 1;
-        forgetSecretInSideStores({ ledger, identity });
-        if (secretsDisposition() === "hide_until_purge")
-          return { kind: "hold", reason: "secrets" };
-        this.copyRemovals.set(identityKey(identity), identity);
-        return { kind: "delete", corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: "secrets" };
-      case "queued_move":
-        this.counts.movesQueued += 1;
-        if (contentRead && !recorded.raise) {
-          return this.storedPlan(currentCopies);
-        }
-        return { kind: "hold", reason: "move_queued" };
-      case "held_moving":
-        this.counts.movesQueued += 1;
-        return { kind: "hold", reason: "move_queued" };
-      default: {
-        this.counts.itemsRouted += 1;
-        if (placement.embedHold)
-          this.counts.itemsPendingHeld += 1;
-        const copies = new Map;
-        const sensitivity = new Map;
-        for (const copy of placement.copies) {
-          this.set.store(copy.trustDomain, { create: true }).bindTierSet(ledger);
-          copies.set(copy.corpusId, copy.layers);
-          sensitivity.set(copy.corpusId, buildSourceSensitivity({
-            trustTier: this.set.restingTierFor(copy.trustDomain),
-            trustDomain: copy.trustDomain
-          }));
-          this.routedDomains.add(copy.trustDomain);
-        }
-        return { kind: "routed", copies, sensitivity };
-      }
-    }
-  }
-  storedPlan(copies) {
-    return {
-      kind: "routed",
-      copies: new Map(copies.map((copy) => [copy.corpusId, copy.layers])),
-      sensitivity: new Map(copies.map((copy) => [copy.corpusId, buildSourceSensitivity({
-        trustTier: this.set.restingTierFor(copy.trustDomain),
-        trustDomain: copy.trustDomain
-      })]))
-    };
-  }
-  async handOff(entry, input, listingDomain) {
-    const plan = entry.plan;
-    if (plan.kind === "routed") {
-      for (const corpusId of plan.copies.keys()) {
-        const domain = this.set.domainForCorpus(corpusId);
-        if (domain === listingDomain)
-          continue;
-        const store = this.set.store(domain, { create: true });
-        const listing = this.legOptions.get(input.store.corpusId) ?? {};
-        await store.syncFromConnector(handoffConnector(input.connector, input.item), {
-          ...listing.fetchContent !== undefined ? { fetchContent: listing.fetchContent } : {},
-          ...listing.deferMetadataOnlyContent !== undefined ? { deferMetadataOnlyContent: listing.deferMetadataOnlyContent } : {},
-          tierRouting: this
-        });
-      }
-      return;
-    }
-    if (plan.kind === "delete") {
-      for (const corpusId of plan.corpora) {
-        const domain = this.set.domainForCorpus(corpusId);
-        if (!domain || domain === listingDomain)
-          continue;
-        this.set.store(domain)?.tombstoneCopy(entry.identity, {
-          connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
-          ...plan.reason === "secrets" ? { trustTier: "S5" } : {}
-        });
-      }
-    }
-  }
-  recordSecretLocation(input, text2, decision) {
-    const index = this.set.secrets();
-    if (!index)
-      return;
-    const item = input.item;
-    if (decision.contentTier !== "secrets" && decision.metadataTier !== "secrets") {
-      if (decision.contentRead)
-        index.remove(item.identity);
-      return;
-    }
-    const title = stringMetadata(item, ["title", "name", "subject"]);
-    const locator = stringMetadata(item, ["locatorUri", "pathDisplay", "url"]);
-    const kinds = [...new Set([
-      ...text2 ? detectSecretFindingKinds(text2) : [],
-      ...title ? detectSecretFindingKinds(title) : [],
-      ...locator ? detectSecretFindingKinds(locator) : [],
-      ...decision.reasons.flatMap((reason) => {
-        const match = /^(?:metadata|content):secret:([a-z_]+)$/.exec(reason);
-        return match ? [match[1]] : [];
-      })
-    ])];
-    let folderKeys = input.sourceScope?.folderKeys ?? [];
-    if (folderKeys.length === 0) {
-      try {
-        folderKeys = input.connector.classificationSignals(item).folderKeys ?? [];
-      } catch {
-        folderKeys = [];
-      }
-    }
-    const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
-    index.record({
-      identity: item.identity,
-      ...locator && !hasCredentialUrl(locator) ? { locator } : {},
-      ...title && namesReleasable ? { title } : {},
-      namesReleasable,
-      folderKeys,
-      ...input.sourceScope ? { scopeGeneration: input.sourceScope.accountGeneration, scopeRevision: input.sourceScope.scopeRevision } : {},
-      findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
-      ...text2 !== undefined ? { text: text2 } : {}
-    });
-  }
-}
-function tieredRun(legs, routing, cursor) {
-  const byDomain = {};
-  for (const leg of legs)
-    byDomain[leg.trustDomain] = leg;
-  return { legs, byDomain, ...cursor ? { cursor } : {}, routing: { ...routing } };
-}
-function atLeastDomain(domain, floor) {
-  return floor !== undefined && trustDomainRank(floor) > trustDomainRank(domain) ? floor : domain;
-}
-function withRecordedContent(decision, record) {
-  if (decision.contentRead || !record?.contentRead)
-    return decision;
-  const contentPending = record.contentPending;
-  return {
-    ...decision,
-    contentTier: maxTier(record.contentTier, decision.metadataTier),
-    contentRead: true,
-    contentPending,
-    decidedBy: record.decidedBy,
-    reasons: [
-      ...decision.reasons.filter((reason) => !reason.startsWith("content:")),
-      ...record.reasons.filter((reason) => reason.startsWith("content:"))
-    ],
-    state: decision.metadataPending || contentPending ? "pending" : "current"
-  };
-}
-function identityKey(identity) {
-  return tierLedgerIdentityKey(identity);
-}
-function stringMetadata(item, keys) {
-  for (const key2 of keys) {
-    const value = item.metadata[key2];
-    if (typeof value === "string" && value.trim())
-      return value.trim();
-  }
-  return;
-}
-function recordedTraversal(connector) {
-  const pages = [];
-  let recorded = false;
-  let failed = false;
-  return {
-    id: connector.id,
-    family: connector.family,
-    authenticate: () => connector.authenticate(),
-    fetchItem: (localItemId) => connector.fetchItem(localItemId),
-    classificationSignals: (item) => connector.classificationSignals(item),
-    listItems(options = {}) {
-      if (recorded) {
-        return async function* () {
-          for (const page of pages)
-            yield page;
-        }();
-      }
-      return async function* () {
-        try {
-          for await (const page of connector.listItems(options)) {
-            pages.push(page);
-            yield page;
-          }
-        } catch (error) {
-          failed = true;
-          throw error;
-        } finally {
-          if (!failed)
-            recorded = true;
-        }
-      }();
-    }
-  };
-}
-function handoffConnector(source, item) {
-  return {
-    id: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
-    family: source.family,
-    authenticate: async () => {},
-    fetchItem: (localItemId) => source.fetchItem(localItemId),
-    classificationSignals: (listed) => source.classificationSignals(listed),
-    listItems() {
-      return async function* () {
-        yield { items: [item], done: true };
-      }();
-    }
-  };
-}
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -29728,12 +28581,6 @@ var init_tiered_store_set = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
-  TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
-  TIER_KEY_TRUST_DOMAIN = {
-    public: "public_safe",
-    private: "internal",
-    secure: "secure_local"
-  };
 });
 
 // src/workers/connector-store/principal.ts
@@ -43302,7 +42149,7 @@ class TierSnifferService {
     if (!options)
       return false;
     try {
-      return options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly2(set);
+      return options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
     } catch {
       return false;
     }
@@ -43321,7 +42168,7 @@ class TierSnifferService {
       const queued = set.ledger.listMoving({ limit: budget }).filter((record) => record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null && record.targetMetadataTier !== "secrets" && record.targetContentTier !== "secrets");
       if (queued.length === 0)
         continue;
-      if (!setEmbedsWithBuiltInOnly2(set)) {
+      if (!setEmbedsWithBuiltInOnly(set)) {
         report.notEligible += queued.length;
         continue;
       }
@@ -43441,7 +42288,7 @@ function matchingVectorIdentities(set, exported) {
   }
   return identities;
 }
-function setEmbedsWithBuiltInOnly2(set) {
+function setEmbedsWithBuiltInOnly(set) {
   try {
     return set.openStores().every((store) => store.embeddingAuthorities().every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
   } catch {

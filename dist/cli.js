@@ -22059,6 +22059,52 @@ class TierLedger {
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
     return rows.map(recordFromRow);
   }
+  listLowerContentLeftovers(options) {
+    const attached = [];
+    try {
+      const queries = [];
+      const params = [];
+      for (const store of options.stores) {
+        const alias = `purge_lower_${attached.length}`;
+        this.db.query(`ATTACH DATABASE ? AS ${alias}`).run(store.dbPath);
+        attached.push(alias);
+        const higher = store.trustDomain === "public_safe" ? "('internal', 'secure_local')" : "('secure_local')";
+        const metadataAllowed = store.trustDomain === "public_safe" ? "('public_safe')" : "('public_safe', 'internal')";
+        queries.push(`SELECT l.provider, l.account_scope, l.conversation_key, l.provider_item_id
+          FROM tier_copies l INDEXED BY tier_copies_corpus
+          JOIN ${alias}.items s ON s.provider = l.provider AND s.account_scope = l.account_scope
+            AND s.normalized_conversation = l.conversation_key AND s.provider_item_id = l.provider_item_id
+          WHERE l.corpus_id = ? AND s.tombstoned = 0
+            AND EXISTS (SELECT 1 FROM tier_copies h
+              WHERE h.provider = l.provider AND h.account_scope = l.account_scope
+                AND h.conversation_key = l.conversation_key AND h.provider_item_id = l.provider_item_id
+                AND h.copy_state = 'current' AND h.layers IN ('content', 'both') AND h.trust_domain IN ${higher})
+            AND (EXISTS (SELECT 1 FROM ${alias}.chunks c WHERE c.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.chunk_embeddings e WHERE e.item_pk = s.item_pk)
+              OR EXISTS (SELECT 1 FROM ${alias}.item_text_versions v WHERE v.item_pk = s.item_pk)
+              OR ((s.title IS NOT NULL OR s.locator_uri IS NOT NULL OR s.search_text IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM tier_copies m
+                  WHERE m.provider = l.provider AND m.account_scope = l.account_scope
+                    AND m.conversation_key = l.conversation_key AND m.provider_item_id = l.provider_item_id
+                    AND m.copy_state = 'current' AND m.layers IN ('metadata', 'both')
+                    AND m.trust_domain IN ${metadataAllowed})))`);
+        params.push(store.corpusId);
+      }
+      if (!queries.length)
+        return [];
+      const after = options.after ? idParams(options.after) : ["", "", "", ""];
+      const rows = this.db.query(`SELECT i.* FROM (${queries.join(" UNION ")}) candidates
+        JOIN tier_items i USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE i.routed = 1 AND i.state <> 'moving'
+          AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?)
+        ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...params, ...after, options.limit);
+      return rows.map(recordFromRow);
+    } finally {
+      for (const alias of attached.reverse())
+        this.db.exec(`DETACH DATABASE ${alias}`);
+    }
+  }
   secretsIdentities() {
     const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id, metadata_tier FROM tier_items
@@ -37727,11 +37773,20 @@ function queueMoveNote(options, receipt, result) {
   options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
 }
 async function flushTierMoveNotes(ledger) {
+  let logged = false;
   for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
-    const note = JSON.parse(value);
-    await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
-    if (ledger.readMeta(key2) === value)
-      ledger.writeMeta(key2, "");
+    try {
+      const note = JSON.parse(value);
+      await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+      if (ledger.readMeta(key2) === value)
+        ledger.writeMeta(key2, "");
+    } catch (error) {
+      if (!logged) {
+        const code = error?.code;
+        console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
+        logged = true;
+      }
+    }
   }
 }
 function purgeReceiptKey(identity) {
@@ -37960,7 +38015,15 @@ function purgeLowerTierContent(set, options = {}) {
     return report;
   const raw = set.ledger.readMeta(CURSOR);
   const after = raw ? JSON.parse(raw) : undefined;
-  const page2 = set.ledger.listRouted({ ...after ? { after } : {}, limit: Math.max(1, limit - report.checked) });
+  const stores = ["public_safe", "internal"].flatMap((domain) => {
+    const store = set.store(domain);
+    return store ? [{ corpusId: store.corpusId, dbPath: store.dbPath, trustDomain: domain }] : [];
+  });
+  const page2 = set.ledger.listLowerContentLeftovers({
+    stores,
+    ...after ? { after } : {},
+    limit: Math.max(1, limit - report.checked)
+  });
   const counts = new Map;
   const remaining = Math.max(0, limit - report.checked);
   for (const record of page2.slice(0, remaining)) {
@@ -40409,9 +40472,10 @@ class TieredStoreSet {
   privateEmbedder;
   privateEmbedWith;
   lastRowRehome;
-  lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
+  lastLowerContentRepairAt;
   lowerContentRepair;
   constructor(options) {
+    this.lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
     if (!options.setId.trim())
       throw new Error("A tiered store set needs a stable id.");
     this.setId = options.setId;

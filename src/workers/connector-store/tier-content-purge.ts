@@ -46,7 +46,12 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
   if (options.maintenance && set.ledger.readMeta(DONE) === '1') return report;
   const raw = set.ledger.readMeta(CURSOR);
   const after = raw ? JSON.parse(raw) as TierLedgerIdentity : undefined;
-  const page = set.ledger.listRouted({ ...(after ? { after } : {}), limit: Math.max(1, limit - report.checked) });
+  const stores = (['public_safe', 'internal'] as const).flatMap(domain => {
+    const store = set.store(domain);
+    return store ? [{ corpusId: store.corpusId, dbPath: store.dbPath, trustDomain: domain }] : [];
+  });
+  const page = set.ledger.listLowerContentLeftovers({ stores,
+    ...(after ? { after } : {}), limit: Math.max(1, limit - report.checked) });
   const counts = new Map<string, { copies: number; chunks: number }>();
   const remaining = Math.max(0, limit - report.checked);
   for (const record of page.slice(0, remaining)) {
