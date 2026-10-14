@@ -29604,73 +29604,6 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
-// src/core/package-root.ts
-var init_package_root = () => {};
-
-// src/core/open-targets.ts
-function allOpenTargets() {
-  return [
-    { kind: "dashboard" },
-    { kind: "private_answers" },
-    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
-  ];
-}
-function openTargetToken(target) {
-  if (target.kind === "private_answers")
-    return "page.private";
-  if (target.kind === "connect")
-    return `connect.${target.source}`;
-  if (target.kind === "fix")
-    return `fix.${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable.${target.source}`;
-  return;
-}
-function openTargetTokenPattern() {
-  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function isKeysOpenTarget(target) {
-  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
-}
-function keysOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function privateAnswersOpenTargetTokenPattern() {
-  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
-}
-function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
-}
-function panelOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
-var init_open_targets = __esm(() => {
-  OPEN_CONNECT_SOURCES = {
-    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
-    readwise: { sourceId: "readwise.library", label: "Readwise" },
-    telegram: { sourceId: "telegram.messages", label: "Telegram" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
-  OPEN_UNREADABLE_SOURCES = {
-    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
-    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-});
-
-// src/core/worker-transport.ts
-var init_worker_transport = __esm(() => {
-  init_linux_engine_layout();
-  init_atomic_file();
-});
-
 // src/workers/dropbox-files/open-target.ts
 var OPENABLE_EXTENSIONS;
 var init_open_target = __esm(() => {
@@ -29773,11 +29706,78 @@ var init_linux_desktop_opener = __esm(() => {
   }
 });
 
+// src/core/worker-transport.ts
+var init_worker_transport = __esm(() => {
+  init_linux_engine_layout();
+  init_atomic_file();
+});
+
 // src/workers/remote-request-body.ts
 var REMOTE_REQUEST_MAX_BODY_BYTES;
 var init_remote_request_body = __esm(() => {
   init_http_timeout();
   REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
+});
+
+// src/core/package-root.ts
+var init_package_root = () => {};
+
+// src/core/open-targets.ts
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    { kind: "private_answers" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+  ];
+}
+function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return "page.private";
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function keysOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var init_open_targets = __esm(() => {
+  OPEN_CONNECT_SOURCES = {
+    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+    readwise: { sourceId: "readwise.library", label: "Readwise" },
+    telegram: { sourceId: "telegram.messages", label: "Telegram" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
 });
 
 // src/core/dashboard-launch.ts
@@ -38164,15 +38164,10 @@ import { createHash as createHash24 } from "node:crypto";
 import { existsSync as existsSync19, lstatSync as lstatSync7, mkdirSync as mkdirSync15, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname23, isAbsolute as isAbsolute9 } from "node:path";
 
-// src/core/update-check.ts
-init_package_root();
-var UPDATE_MAX_BYTES = 512 * 1024;
-
-// src/workers/email-source/server.ts
-init_open_targets();
+// src/core/linux-owner-bridge-host.ts
+init_linux_desktop_opener();
 
 // src/core/linux-owner-bridge.ts
-init_atomic_file();
 init_worker_transport();
 init_linux_desktop_opener();
 init_remote_request_body();
@@ -38203,7 +38198,15 @@ document.addEventListener('submit',function(event){
 },true);
 })();</script>`;
 
+// src/core/linux-owner-bridge-host.ts
+init_worker_transport();
+
+// src/core/update-check.ts
+init_package_root();
+var UPDATE_MAX_BYTES = 512 * 1024;
+
 // src/workers/email-source/server.ts
+init_open_targets();
 init_linux_desktop_opener();
 init_dashboard_opening();
 init_worker_transport();

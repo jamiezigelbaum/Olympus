@@ -970,7 +970,7 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const health = asRecord(await response.json());
   const bridge = asRecord(health.desktop_bridge);
   if ((deps.platform ?? process.platform) === 'linux' && ['port_in_use', 'unavailable'].includes(String(bridge.state))) {
-    return { name, ok: false, detail: `The owner socket is healthy, but the desktop owner bridge is ${bridge.state}.`,
+    return { name, ok: false, detail: `The owner socket is healthy, but the desktop listener is ${bridge.state}.`,
       hint: typeof bridge.remedy === 'string' ? bridge.remedy : 'Free the configured loopback port or use the owner SSH socket forward.' };
   }
   const degradedCredentials = degradedCredentialDetails(health);
@@ -995,7 +995,7 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   return {
     name,
     ok: true,
-    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.`,
+    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.${(deps.platform ?? process.platform) === 'linux' && bridge.listener_owner === 'engine-host' && ['listening', 'restarting'].includes(String(bridge.state)) ? ' The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin.' : ''}`,
   };
 }
 

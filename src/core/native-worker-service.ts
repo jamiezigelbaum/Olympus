@@ -1,3 +1,4 @@
+import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
 import { removeReleasedWorkerSocket, workerFetch } from './worker-transport.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -55,6 +56,7 @@ export interface NativeWorkerServiceOptions {
   workerEnvPath?: string;
   /** Test seam; production inherits the Gateway working directory. */
   workingDirectory?: string;
+  ownerBridgeHostSocket?: string;
 }
 
 interface WorkerLaunchSettings extends NativeProcessStartSettings {
@@ -116,6 +118,8 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
       });
       if (!settings) return undefined;
+      if (options.ownerBridgeHostSocket) settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
+      else delete settings.env[OWNER_BRIDGE_HOST_ENV];
       const probe = settings.readinessProbe;
       return {
         ...settings,

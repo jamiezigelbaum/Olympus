@@ -1,6 +1,8 @@
+import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
+import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
-import { manageLinuxOwnerBridge, revokeLinuxOwnerBridgeSessions, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
+import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
 import { linuxGraphicalSessionReadinessAsync } from '../../core/linux-desktop-opener.ts';
 import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
 import { workerFetch } from '../../core/worker-transport.ts';
@@ -19,7 +21,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
+import { workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
@@ -1895,12 +1897,10 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
-  // Startup awaits desktop readiness before installing the full shutdown
-  // handler. A stop during that interval must revoke the previous epoch too.
-  const startupInt = () => { revokeLinuxOwnerBridgeSessions(); process.exit(130); };
-  const startupTerm = () => { revokeLinuxOwnerBridgeSessions(); process.exit(143); };
-  process.once('SIGINT', startupInt);
-  process.once('SIGTERM', startupTerm);
+  // Startup signals can close only this instance's listener/client. A second
+  // foreground worker never revokes the engine host's epoch or runtime path.
+  let closeDesktopBridge = () => {};
+  const shutdownSignals = installWorkerShutdownSignals({ closeOwnerBridge: () => closeDesktopBridge(), exit: code => process.exit(code) });
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -4443,7 +4443,8 @@ export async function main(): Promise<void> {
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
-  let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+  let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
+  closeDesktopBridge = () => desktopBridge?.close();
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
   const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
@@ -5439,7 +5440,12 @@ export async function main(): Promise<void> {
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   updateChecker.start();
-  if (socketPath) {
+  if (socketPath && process.env[OWNER_BRIDGE_HOST_ENV]) {
+    const client = connectLinuxOwnerBridgeHost(process.env[OWNER_BRIDGE_HOST_ENV]!);
+    desktopBridge = client;
+    await client.refresh();
+    desktopPoll = setInterval(() => { void client.refresh(); }, 2_000); desktopPoll.unref();
+  } else if (socketPath) {
     let ready = false;
     let probing = false;
     const probeDesktop = async () => {
@@ -5528,9 +5534,9 @@ export async function main(): Promise<void> {
   // needs a way to put it down. Without this the only shutdown was the process
   // dying, which is not a shutdown so much as an interruption.
   let shuttingDown = false;
-  const shutdown = (signal: NodeJS.Signals, kind: 'shutdown' | 'reload' = 'shutdown'): void => {
-    // A real stop arriving during a reload must still revoke the owner epoch.
-    desktopBridge?.close(kind);
+  const shutdown = (signal: NodeJS.Signals): void => {
+    // The host keeps its listener; a foreground worker closes only its own.
+    closeDesktopBridge();
     if (shuttingDown) return;
     shuttingDown = true;
     updateChecker.stop();
@@ -5555,15 +5561,12 @@ export async function main(): Promise<void> {
     sourceScheduler?.stop();
     void server.stop();
   };
-  requestModelReload = createModelKeyReload({
+  shutdownSignals.setShutdown(shutdown);
+  requestModelReload = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
-    shutdown: async () => { shutdown('SIGTERM', 'reload'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
+    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
-  process.once('SIGINT', () => shutdown('SIGINT'));
-  process.once('SIGTERM', () => shutdown('SIGTERM'));
-  process.removeListener('SIGINT', startupInt);
-  process.removeListener('SIGTERM', startupTerm);
 
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));

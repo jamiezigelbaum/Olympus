@@ -22311,6 +22311,41 @@ function shouldExposeOperation(operation, context) {
 // src/native-plugin.ts
 init_worker_auth();
 
+// src/workers/remote-request-body.ts
+init_http_timeout();
+var REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
+
+// src/core/linux-owner-bridge.ts
+var PROOF_HEADER = "X-Olympus-Owner-Proof";
+var FORM_PROOF = "_olympus_owner_proof";
+var STORAGE = "olympus-desktop-owner-v1";
+var SESSION_MS = 12 * 60 * 60 * 1000;
+var BOOTSTRAP = `<script>(function(){
+const key=${JSON.stringify(STORAGE)}, header=${JSON.stringify(PROOF_HEADER)}, field=${JSON.stringify(FORM_PROOF)};
+const nativeFetch=window.fetch.bind(window);
+window.fetch=async function(input,init){
+ const url=new URL(input instanceof Request?input.url:input,location.href);
+ if(url.origin!==location.origin)return nativeFetch(input,init);
+ const opts=Object.assign({},init||{}), headers=new Headers(opts.headers||(input instanceof Request?input.headers:undefined));
+ const proof=localStorage.getItem(key);if(proof)headers.set(header,proof);
+ opts.headers=headers;opts.redirect='manual';
+ const response=await nativeFetch(input,opts);
+ const destination=response.headers.get('X-Olympus-Owner-Location');
+ if(destination){location.replace(destination);throw new Error('Navigating');}
+ return response;
+};
+document.addEventListener('submit',function(event){
+ const form=event.target;if(!(form instanceof HTMLFormElement))return;
+ if(new URL(form.action,location.href).origin!==location.origin){event.preventDefault();return;}
+ if(form.method.toLowerCase()!=='post')return;
+ let input=form.querySelector('input[name="'+field+'"]');if(!input){input=document.createElement('input');input.type='hidden';input.name=field;form.appendChild(input);}
+ input.value=localStorage.getItem(key)||'';
+},true);
+})();</script>`;
+
+// src/core/linux-owner-bridge-host.ts
+var OWNER_BRIDGE_HOST_ENV = "OLYMPUS_OWNER_BRIDGE_HOST_SOCKET";
+
 // src/core/native-worker-service.ts
 init_config();
 import { randomUUID as randomUUID3 } from "node:crypto";
@@ -22368,6 +22403,10 @@ function createNativeWorkerService(options) {
       });
       if (!settings)
         return;
+      if (options.ownerBridgeHostSocket)
+        settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
+      else
+        delete settings.env[OWNER_BRIDGE_HOST_ENV];
       const probe = settings.readinessProbe;
       return {
         ...settings,
@@ -26675,7 +26714,7 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `The owner socket is healthy, but the desktop owner bridge is ${bridge.state}.`,
+      detail: `The owner socket is healthy, but the desktop listener is ${bridge.state}.`,
       hint: typeof bridge.remedy === "string" ? bridge.remedy : "Free the configured loopback port or use the owner SSH socket forward."
     };
   }
@@ -26699,7 +26738,7 @@ async function emailWorkerCheck(deps) {
   return {
     name,
     ok: true,
-    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.`
+    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.${(deps.platform ?? process.platform) === "linux" && bridge.listener_owner === "engine-host" && ["listening", "restarting"].includes(String(bridge.state)) ? " The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin." : ""}`
   };
 }
 async function sourceIndexStatusCheck(deps) {

@@ -605,8 +605,11 @@ mechanism. No browser request gains an injected bearer.
 
 Browser and socket fetches never follow redirects with the storage proof.
 A browser fetch receives an inert destination and performs ordinary navigation;
-form responses use 303. Upstream document CSP is enforced in the reconstructed
-document, with only the bridge bootstrap additionally authorized; all pages
+form responses use 303. Reconstructed documents use the bridge response-header
+policy and the worker policy as a meta element, with the bridge bootstrap
+additionally authorized. Header-only worker directives (`sandbox`, `report-to`,
+`frame-ancestors`) cannot survive `document.write`; this is not an exact copy
+of the worker response CSP. All pages
 set `worker-src 'none'`, and every `Service-Worker` request is rejected.
 `Clear-Site-Data` clears entry cache/storage and proof-response cache; it is
 not treated as a way to revoke a hostile running tab. Fresh origin isolation
@@ -614,7 +617,7 @@ provides that boundary. All bridge content is no-store.
 
 Live graphical readiness and the current server-mode setting gate startup,
 every request, and post-await publication. A coalesced asynchronous two-second
-observer performs bounded desktop probes (up to three seconds per command);
+observer in the long-lived standalone engine host performs bounded desktop probes (up to three seconds per command);
 HTTP requests only read its snapshot, never spawn subprocesses. When the
 observer detects logout or server-mode enable it closes the listener and
 revokes proofs; requests immediately refuse the unavailable snapshot. Relogin creates a new
@@ -623,11 +626,21 @@ listener and reports `desktop_bridge.state=port_in_use` plus its remedy through
 socket health, engine status and doctor. Headless hosts open no TCP listener.
 Mac browser, socket-free transport, and page output are unchanged.
 
-Non-reload worker shutdown revokes the saved desktop epoch immediately,
-including SIGINT/SIGTERM during startup or before the readiness observer sees
-logout. Only a deliberate settings reload keeps the fixed-expiry hashed
-sessions and their existing configured port and random origin. Revocation
-validates the private runtime directory even when the socket is not bound.
+**Invariant: an origin and its owner sessions may be reused only while their
+TCP listener has remained continuously bound; every release revokes the epoch.**
+The standalone engine host owns the listener, in-memory hashed sessions and
+readiness observer. A worker settings reload, crash or kill releases only its
+Unix socket: the host keeps the TCP port bound and returns a constant styled
+“Olympus is restarting…” page with automatic retry in the same window, no
+bootstrap or proof material. The worker asks an owner-only 0600 Unix control
+socket in its validated runtime directory to open tickets and read status.
+No desktop session state is saved or restored from disk; old session files
+are ignored. Stop, host crash/kill, engine restart, logout and server mode
+release TCP and force a fresh random origin, rejecting old cookies/proofs.
+Foreground workers own only their own listener and also rotate on exit;
+startup signals never revoke another instance's runtime state. The stale
+reload-readiness restoration decision is gone: the host continues observing
+desktop presence while the worker is absent, and logout closes the listener.
 The private ticket file is the opening view of the same Olympus window; after
 single-use redemption the bridge renders the requested document there. No
 disposable owner-check window is opened or closed, and no proof is sent with
@@ -638,8 +651,9 @@ issued only by the owner's CLI, bound to the pending install/client/redirect/
 state/PKCE approval transaction. Never expose it through an unauthenticated
 HTTP endpoint or logs. Bound attempts and atomically consume it; CSRF, origin
 checks and explicit consent still apply. This protects approval but does not
-by itself prevent TCP port squatting; fail on collisions and never submit an
-owner code to an unverified worker.
+by itself prevent TCP port squatting. A stable port number is insufficient:
+the host must hold the listening socket throughout any reused epoch. Fail on
+collisions and never submit an owner code to an unverified worker.
 
 Conditional headless connection sequence after the owner's choice:
 
@@ -673,7 +687,7 @@ Doctor reports independent facts and remedies, without printing credentials:
 | Process custody | Manager MainPID/cgroup agrees with current host; no stale competing listener or escaped recorded child; unknown observation is not healthy. |
 | Runtime capabilities | Exact Bun pin, CPU/glibc loadability, model manifests and actual runtime probes; W1–W4 results surfaced separately from engine health. |
 | Credentials | Selected backend and reason; locked/unreachable/corrupt versus absent; unattended unlock state; no secret values, refs or probe residue in output. |
-| Opening and consent | Current desktop session plus xdg-open/handler readiness, or explicit remote mode with configured SSH target/instructions; missing target is actionable. Read-only diagnostics never mint consent or approve. |
+| Opening and consent | The host owns the desktop TCP listener across worker reloads and reports listening/restarting, headless, collision or unavailable without credentials; every listener release rotates the origin. Current desktop session plus xdg-open/handler readiness, or explicit remote mode with configured SSH target/instructions; missing target is actionable. Read-only diagnostics never mint consent or approve. |
 | End-to-end reachability | Worker readiness and relay connection are distinct; relay offline can coexist with a healthy local engine. Connection smoke proof is a separate authorized action. |
 
 ## Independently reviewable landing plan
@@ -1184,7 +1198,12 @@ Repeat with a benign squatter serving the fixed entry while the engine is
 stopped: leave its tab and service worker alive, then stop the squatter and
 start Olympus. Open the owner's ticket using `olympus dashboard`. The old tab
 must not read owner pages or storage or obtain the new cookie. Restart the
-engine and repeat with the old random origin. Confirm `/sw.js` requests with
+worker by saving a setting: its existing window and owner session must survive,
+the host must serve the restarting page during the gap, and a second process
+must fail to bind that port with EADDRINUSE. Kill the worker and repeat: the
+host still holds TCP. Restart or kill the host: leave a benign squatter's tab
+at the old random origin alive while the port is released, then reopen Olympus
+and verify a fresh origin refuses the old cookies and proofs. Confirm `/sw.js` requests with
 `Service-Worker: script` refuse and browser registration is blocked by CSP.
 Log out and inspect from another owner SSH session: only the Unix socket
 remains after the bounded reconciliation interval. Log back in and verify a
@@ -1497,7 +1516,10 @@ Independent review and a real isolated Chromium reproduction found:
 The owner approved fresh random session origins on 2026-10-12. The bridge
 implementation keeps the cookie-independent origin-storage proof, isolates
 old execution contexts with origin rotation, and retains the Unix socket and
-SSH headless path. Disposition: **fix** the browser-origin boundary; no new
+SSH headless path. The 2026-10-14 launch P1 correction removes persisted epochs:
+reusing an origin after releasing its port re-admitted the same-port squatter.
+Only the host's continuously bound listener permits reuse across worker
+restarts; every release (including host death) loses the in-memory epoch. Disposition: **fix** the browser-origin boundary; no new
 release gate or fixed-origin fallback.
 
 

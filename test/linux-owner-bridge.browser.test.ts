@@ -38,6 +38,7 @@ for (const kind of ['chromium', 'firefox']) {
     let auth = makeAuth();
     const socket = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch: (r, server) => new URL(r.url).pathname.startsWith('/connect/') ? oauth(r, server) : auth(r, server) }));
     let bridge: LinuxOwnerBridge | undefined;
+    let workerReady = true;
     const listenerOptions = { hostname: '127.0.0.1', async fetch(r: Request) {
       if (bridge) return bridge.handle(r);
       if (new URL(r.url).pathname === '/sw.js') return new Response("self.addEventListener('fetch',e=>e.respondWith(fetch(e.request)));self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));", { headers: { 'Content-Type': 'application/javascript', 'Service-Worker-Allowed': '/' } });
@@ -55,7 +56,7 @@ for (const kind of ['chromium', 'firefox']) {
       await hostile.goto(entry);
       await hostile.evaluate(async () => { await navigator.serviceWorker.ready; });
       let ticketPath = '';
-      bridge = new LinuxOwnerBridge({ port: listener.port!, socketPath, transport, ready: () => true,
+      bridge = new LinuxOwnerBridge({ port: listener.port!, socketPath, transport, ready: () => true, workerReady: () => workerReady,
         fetchSocket: r => fetch(r, { unix: socketPath, redirect: 'manual' } as RequestInit), establishDashboard, openFile: async p => { ticketPath = p; } });
       const opening = new URL(await mintDashboardOpeningUrl(entry, token, { fetchImpl: (input, init) => fetch(input, { ...init, unix: socketPath } as RequestInit) }));
       await bridge.openTicket(opening.pathname + opening.hash);
@@ -104,13 +105,18 @@ for (const kind of ['chromium', 'firefox']) {
       const returned = new URL(next.url()); expect(returned.searchParams.get('state')).toBe('original+state');
       const exchanged = await fetch(entry + '/connect/token', { unix: socketPath, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: client.clientId, redirect_uri: redirect, code: returned.searchParams.get('code')!, code_verifier: verifier }) } as RequestInit);
       expect(exchanged.status).toBe(200);
-      const oldOrigin = bridge.origin; bridge.close(false);
-      const stablePort = listener.port!;
-      await listener.stop(true);
-      listener = Bun.serve({ ...listenerOptions, port: stablePort });
-      bridge = new LinuxOwnerBridge({ port: listener.port!, socketPath, transport, ready: () => true, fetchSocket: r => fetch(r, { unix: socketPath, redirect: 'manual' } as RequestInit), establishDashboard, openFile: async p => { ticketPath = p; } });
-      auth = makeAuth(); // Simulate the worker's auth wrapper restarting too.
-      expect(bridge.origin).toBe(oldOrigin);
+      const oldOrigin = bridge.origin;
+      // The worker disappears, but the host retains the SAME listening socket.
+      const retained = bridge;
+      workerReady = false;
+      await owner.reload();
+      await owner.waitForFunction(() => document.body.textContent?.includes('Olympus is restarting…'));
+      expect(await owner.content()).not.toContain('PRIVATE OWNER DASHBOARD');
+      // Check the actual bind while the original listener is still held.
+      expect(() => Bun.serve({ hostname: '127.0.0.1', port: listener.port!, fetch: () => new Response('squatter') })).toThrow();
+      auth = makeAuth();
+      workerReady = true;
+      expect(bridge).toBe(retained); expect(bridge.origin).toBe(oldOrigin);
       await owner.reload();
       await owner.waitForFunction(() => document.body.dataset.loaded === 'yes');
       expect(await owner.locator('h1').textContent()).toBe('PRIVATE OWNER DASHBOARD');
@@ -129,10 +135,22 @@ for (const kind of ['chromium', 'firefox']) {
       expect(saved).toEqual({ hasCsrf: true, statuses: [200, 200] });
       // Owner proof alone also establishes the existing dashboard cookie;
       // OAuth-first/bookmarked entries do not require a CLI launch fragment.
+      // A held listener also retains its ticket-opening rate limit.
+      await Bun.sleep(10_001);
       await bridge.openTicket('/dashboard');
       await fresh.goto(pathToFileURL(ticketPath).href);
       await fresh.waitForURL(bridge.origin + '/dashboard');
       await fresh.waitForFunction(() => document.body.dataset.loaded === 'yes');
+      const releasedOrigin = bridge.origin;
+      const oldProof = await owner.evaluate(() => localStorage.getItem('olympus-desktop-owner-v1'));
+      bridge.close();
+      const port = listener.port!; await listener.stop(true);
+      listener = Bun.serve({ ...listenerOptions, port });
+      bridge = new LinuxOwnerBridge({ port, socketPath, transport, ready: () => true, fetchSocket: r => fetch(r, { unix: socketPath, redirect: 'manual' } as RequestInit) });
+      expect(bridge.origin).not.toBe(releasedOrigin);
+      const rejected = await fetch(entry + '/dashboard.json', { headers: { Host: new URL(bridge.origin).host,
+        Cookie: `olympus_desktop_owner=${cookie.value}`, 'X-Olympus-Owner-Proof': oldProof! } });
+      expect(rejected.status).toBe(403);
       console.log(`${kind}: native localhost resolution and persistent squatter isolation passed`);
     } finally { bridge?.close(); listener.stop(true); socket.stop(true); callback.stop(true); connections.close(); await browser.close(); rmSync(root, { recursive: true, force: true }); }
   }, 90_000);
