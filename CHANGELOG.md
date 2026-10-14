@@ -24,6 +24,8 @@
   Olympus's index (its location, a screened title and the kinds of secret
   found), so you can still find it. If you mark it not Secret, what
   Olympus hid comes back.
+- **Remote document reading rechecks privacy after local OCR and model preparation.**
+  An item that becomes Secret during that work is withheld from the model.
 - **Model downloads use bounded memory.** The private and search models
   download in pieces and retry a dropped connection; the private model
   resumes where it stopped when the server supports it, or safely restarts

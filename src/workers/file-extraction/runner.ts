@@ -228,6 +228,15 @@ export function evaluateExtractionEgress(input: {
   return { allowed: true };
 }
 
+/**
+ * A late live-policy refusal keeps the same disposition as the pre-fetch gate.
+ */
+class ExtractionEgressRefusedError extends Error {
+  constructor(readonly errorKind: string) {
+    super(errorKind);
+  }
+}
+
 // --- corpora ---------------------------------------------------------------
 
 /**
@@ -993,18 +1002,20 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
   }
 
-  // The gate runs before the bytes are fetched. Doing it here rather than at
-  // the call site inside the extractor is what makes it a boundary: the remote
-  // extractor cannot be reached at all, so it cannot be reached by mistake.
-  const trustTier = extractor.egress === 'approved_remote'
-    ? await readTrustTier(corpus, job.ref)
-    : undefined;
-  const egress = evaluateExtractionEgress({
-    egress: extractor.egress,
-    ...(corpus.egressPolicy ? { policy: corpus.egressPolicy } : {}),
-    policyDecision: job.policyDecision,
-    ...(trustTier !== undefined ? { trustTier } : {}),
-  });
+  // Refuse before fetching, then use the same live gate after local reading
+  // and model preparation, when the remote lane is about to send the bytes.
+  const checkEgress = async (): Promise<ExtractionEgressDecision> => {
+    const trustTier = extractor.egress === 'approved_remote'
+      ? await readTrustTier(corpus, job.ref)
+      : undefined;
+    return evaluateExtractionEgress({
+      egress: extractor.egress,
+      ...(corpus.egressPolicy ? { policy: corpus.egressPolicy } : {}),
+      policyDecision: job.policyDecision,
+      ...(trustTier !== undefined ? { trustTier } : {}),
+    });
+  };
+  const egress = await checkEgress();
   if (!egress.allowed) {
     return { status: 'blocked_policy', errorKind: egress.errorKind };
   }
@@ -1051,6 +1062,15 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   const resolvedSizeBytes = fetched?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput: ExtractorInput = {
     ref: job.ref,
+    ...(extractor.egress === 'approved_remote' ? {
+      assertRemoteEgressAllowed: async () => {
+        if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
+          throw new ExtractionEgressRefusedError(EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED);
+        }
+        const current = await checkEgress();
+        if (!current.allowed) throw new ExtractionEgressRefusedError(current.errorKind);
+      },
+    } : {}),
     job: {
       jobId: job.jobId,
       extractorKind: job.extractorKind,
@@ -1077,6 +1097,9 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     output = await extractor.extract(extractorInput);
     if (output.status === 'indexed' && output.media) staged.media = output.media;
   } catch (error) {
+    if (error instanceof ExtractionEgressRefusedError) {
+      return { status: 'blocked_policy', errorKind: error.errorKind };
+    }
     // A redirecting model endpoint is a configuration fault, not this file's:
     // it keeps its own kind so the lane can say so, and the job waits for its
     // ordinary backoff rather than being re-run at once.
