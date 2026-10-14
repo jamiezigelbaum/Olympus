@@ -117735,6 +117735,29 @@ function renderConsentErrorPage(message2) {
 </html>`;
   return { body, headers: consentSecurityHeaders(nonce) };
 }
+function renderConsentSuccessPage(connected2) {
+  const nonce = randomBytes22(16).toString("base64");
+  const heading = connected2 ? "Connected" : "Approved";
+  const message2 = connected2 ? "You already approved this connection. You can close this page and return to the app." : "You approved this connection. Return to the app to finish. If it doesn't show Olympus as connected, start connecting again from the app.";
+  return {
+    body: `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${heading} · Olympus</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>${heading}</h1>
+<div class="card"><p>${message2}</p></div>
+</main>
+</body>
+</html>`,
+    headers: consentSecurityHeaders(nonce)
+  };
+}
 var CONSENT_PAGE_STYLE = `
 :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafaf8; --card: #ffffff;
   --line: #deded8; --accent: #1f4fd1; --warn-bg: #fff4d6; --warn-fg: #6b4a00; --err: #b3261e; }
@@ -151756,12 +151779,16 @@ function createRemoteOAuthHandler(options) {
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
   const pending = new Map;
   const codes = new Map;
+  const completed = new Map;
   const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
       if (entry.expiresAt <= at)
         pending.delete(id);
+    for (const [id, entry] of completed)
+      if (entry.expiresAt <= at)
+        completed.delete(id);
     for (const [hash2, entry] of codes)
       if (entry.expiresAt <= at)
         codes.delete(hash2);
@@ -151837,10 +151864,22 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
+    const transaction = sha2566(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    if (u.installId && !demo) {
+      if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
+        return receiptPage(true);
+      for (const [id, entry2] of pending) {
+        if (entry2.demo || entry2.transaction !== transaction)
+          continue;
+        entry2.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
+        return consentPage(id, entry2, u);
+      }
+    }
     admitPending();
     const requestId = randomBytes25(16).toString("hex");
     const csrf = randomBytes25(32).toString("base64url");
     const entry = {
+      transaction,
       client,
       redirectUri,
       codeChallenge,
@@ -151871,6 +151910,7 @@ function createRemoteOAuthHandler(options) {
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes25(32).toString("base64url");
     codes.set(sha2566(code), {
+      ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
       redirectUri: entry.redirectUri,
@@ -151879,7 +151919,27 @@ function createRemoteOAuthHandler(options) {
       expiresAt: now() + AUTHORIZATION_CODE_TTL_MS
     });
     pending.delete(requestId);
+    if (!entry.demo) {
+      if (completed.size >= MAX_COMPLETED_CONSENTS)
+        completed.delete(completed.keys().next().value);
+      completed.set(requestId, { csrf: entry.csrf, transaction: entry.transaction, expiresAt: now() + COMPLETED_CONSENT_TTL_MS });
+    }
     return redirectWithParams(entry.redirectUri, { code, state: entry.state, iss: u.issuer });
+  };
+  const completedPage = (requestId, csrf) => {
+    const receipt = completed.get(requestId);
+    if (!receipt || !constantTimeEqual(csrf, receipt.csrf))
+      return;
+    return receiptPage(liveReceipt(receipt));
+  };
+  const liveReceipt = (receipt) => {
+    if (receipt.connectionId === undefined)
+      return false;
+    try {
+      return options.connections().list().some((connection) => connection.id === receipt.connectionId && connection.revokedAt === null);
+    } catch {
+      return false;
+    }
   };
   const demoPost = async (request, u) => {
     const settings = demoSettings(u);
@@ -151957,8 +152017,10 @@ function createRemoteOAuthHandler(options) {
     const requestId = form.get("request_id") ?? "";
     sweep();
     const entry = /^[a-f0-9]{32}$/.test(requestId) ? pending.get(requestId) : undefined;
-    if (!entry || entry.demo)
-      return errorPage(400, "This approval has expired or was replaced by a newer one. Start again from the app.");
+    if (!entry)
+      return completedPage(requestId, form.get("csrf") ?? "") ?? errorPage(400, "This approval has expired or was replaced by a newer one. Start connecting again from the app.");
+    if (entry.demo)
+      return errorPage(400, "This approval has expired. Start connecting again from the app.");
     const csrf = form.get("csrf") ?? "";
     const cookie = readCookie(request, consentCookieName(requestId)) ?? "";
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
@@ -152035,6 +152097,8 @@ function createRemoteOAuthHandler(options) {
       if (issued.connectionId !== undefined) {
         codes.delete(hash2);
         store.oauth.revokeGrant(issued.connectionId);
+        if (issued.receipt)
+          completed.delete(issued.receipt);
         return oauthError(400, "invalid_grant", "The authorization code was already used.");
       }
       if (issued.clientId !== clientId || issued.redirectUri !== redirectUri) {
@@ -152055,6 +152119,9 @@ function createRemoteOAuthHandler(options) {
         ...u.installId ? { installId: u.installId } : {}
       });
       issued.connectionId = granted.connection.id;
+      const receipt = issued.receipt ? completed.get(issued.receipt) : undefined;
+      if (receipt)
+        receipt.connectionId = granted.connection.id;
       return tokenResponse(granted.tokens);
     }
     if (grantType === "refresh_token") {
@@ -152362,7 +152429,11 @@ function jsonResponse2(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, MAX_PENDING_CONSENTS = 64, PAIRING_FAILURE_WINDOW_MS, PAIRING_MAX_DELAY_MS = 60000, PAIRING_MAX_HELD_MS = 1e4, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
+function receiptPage(connected2) {
+  const page2 = renderConsentSuccessPage(connected2);
+  return new Response(page2.body, { status: 200, headers: page2.headers });
+}
+var REMOTE_OAUTH_PATHS, ROUTED_PATHS, AUTHORIZATION_CODE_TTL_MS = 60000, CONSENT_REQUEST_TTL_MS, CONSENT_MAX_ATTEMPTS = 5, COMPLETED_CONSENT_TTL_MS, MAX_COMPLETED_CONSENTS = 256, MAX_PENDING_CONSENTS = 64, PAIRING_FAILURE_WINDOW_MS, PAIRING_MAX_DELAY_MS = 60000, PAIRING_MAX_HELD_MS = 1e4, MAX_LIVE_CODES = 256, MAX_FORM_BYTES, MAX_REGISTRATION_BYTES, CONNECT_BODY_DEADLINE_MS = 1e4, PKCE_VERIFIER_PATTERN, PKCE_CHALLENGE_PATTERN, LOOPBACK_HOSTNAMES4;
 var init_handler = __esm(() => {
   init_tokens();
   init_operation_caller();
@@ -152388,6 +152459,7 @@ var init_handler = __esm(() => {
   };
   ROUTED_PATHS = new Set(Object.values(REMOTE_OAUTH_PATHS));
   CONSENT_REQUEST_TTL_MS = 10 * 60000;
+  COMPLETED_CONSENT_TTL_MS = 24 * 60 * 60000;
   PAIRING_FAILURE_WINDOW_MS = 15 * 60000;
   MAX_FORM_BYTES = 8 * 1024;
   MAX_REGISTRATION_BYTES = 16 * 1024;

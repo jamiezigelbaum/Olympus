@@ -2,6 +2,7 @@
 
 ## 1.0.1 - unreleased
 
+- Connecting an agent no longer shows an expired approval after it worked.
 - Private search finds items when not every word matches, keeping readable content ahead of title-only matches.
 - Progress finishes when names-only copies have content elsewhere; items settled without readable content appear under problems with a way to find them.
 
