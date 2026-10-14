@@ -934,6 +934,14 @@ describe('extraction egress gate: the boundary, as a pure decision', () => {
     })).toEqual({ allowed: true });
   });
 
+  test('a Secrets item is refused as Secrets, so restoring it reads it again', () => {
+    expect(evaluateExtractionEgress({
+      ...REMOTE_ALLOWED,
+      trustTier: 'S5',
+      policy: { maxTrustTierForRemote: 'S4', allowDefaultDeferred: false },
+    })).toEqual({ allowed: false, errorKind: 'store_item_secrets' });
+  });
+
   test('a tier above the corpus ceiling is refused', () => {
     expect(evaluateExtractionEgress({ ...REMOTE_ALLOWED, trustTier: 'S4' }))
       .toEqual({ allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_TRUST_TIER });
@@ -1088,7 +1096,8 @@ describe('extraction egress gate: unreachable, not merely unconfigured', () => {
         expect(jobs.get(queued.jobRefs[0]!.jobId)).toMatchObject({ status: change === 'unreadable tier' ? 'failed_retryable' : 'blocked_policy', lastErrorKind:
           change === 'unreadable tier' ? 'egress_trust_tier_unknown'
             : change === 'revoked scope' ? 'source_scope_superseded'
-              : change === 'revoked policy' ? 'egress_remote_not_permitted' : 'egress_policy_trust_tier' });
+              : change === 'revoked policy' ? 'egress_remote_not_permitted'
+                : change === 'Secrets' ? 'store_item_secrets' : 'egress_policy_trust_tier' });
       } finally { jobs.close(); }
     });
   }
@@ -1186,7 +1195,7 @@ describe('extraction egress gate: unreachable, not merely unconfigured', () => {
         expect(catalogCalls).toBe(1);
         expect(remoteCalls).toBe(markSecret ? 0 : 1);
         expect(jobs.get(queued.jobRefs[0]!.jobId)).toMatchObject(markSecret
-          ? { status: 'blocked_policy', lastErrorKind: 'egress_policy_trust_tier' } : { status: 'indexed' });
+          ? { status: 'blocked_policy', lastErrorKind: 'store_item_secrets' } : { status: 'indexed' });
       } finally { jobs.close(); }
     });
   }

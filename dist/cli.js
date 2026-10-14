@@ -110774,6 +110774,8 @@ function evaluateExtractionEgress(input) {
   const itemRank = SOURCE_TRUST_TIERS.indexOf(input.trustTier);
   const maxRank = SOURCE_TRUST_TIERS.indexOf(input.policy.maxTrustTierForRemote);
   if (itemRank < 0 || maxRank < 0 || itemRank > maxRank) {
+    if (input.trustTier === "S5")
+      return { allowed: false, errorKind: EXTRACTION_SINK_SKIPPED_SECRETS };
     return { allowed: false, errorKind: EXTRACTION_EGRESS_REFUSED_TRUST_TIER };
   }
   return { allowed: true };

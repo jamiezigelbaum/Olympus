@@ -51,6 +51,8 @@ for (const change of ['personal', 'owner secrets', 'ledger secrets', 'unreadable
         expect(fx.ledger.itemIsSecret(identityOf('garden'))).toBe(true);
         expect(view.itemTrustTier(ref.localItemId)).toBe('S5');
         expect(runtime!.jobs.get(id)?.status).toBe('blocked_policy');
+        // The Secrets kind is what a later restoration requeues (job-names.ts).
+        expect(runtime!.jobs.get(id)?.lastErrorKind).toBe('store_item_secrets');
       }
       if (change === 'unreadable ledger') expect(runtime!.jobs.get(id)?.status).toBe('failed_retryable');
     } finally {
