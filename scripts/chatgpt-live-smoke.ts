@@ -533,6 +533,28 @@ interface QuestionRun {
   privateAnswer?: PanelAnswer;
 }
 
+/** What one asked question looked like from ChatGPT's side, for callers that need data rather than a transcript. */
+export interface SmokeObservation {
+  question: SmokeQuestion;
+  /** The olympus_search tool result exactly as ChatGPT receives it. */
+  result: ToolResultLike;
+  searchMs: number;
+  /** Present only when the search created a private answer job and the panel was collected. */
+  panel?: { ok: boolean; status?: string; detail?: string; claimMs: number; polls: number; totalMs: number };
+  privateAnswer?: PanelAnswer;
+}
+
+/**
+ * Optional structured sink: the release check (scripts/release-check) reuses
+ * this smoke as its ChatGPT-protocol pass and reads results here instead of
+ * parsing printed lines. The CLI passes none and behaves as before.
+ */
+export interface SmokeSink {
+  onTools?(names: readonly string[]): void;
+  onQuestion?(observation: SmokeObservation): void;
+  onOther?(label: string, result: ToolResultLike): void;
+}
+
 function print(line = ''): void {
   console.log(line);
 }
@@ -574,7 +596,7 @@ async function callTool(client: Client, name: string, args: Record<string, unkno
   return await client.callTool({ name, arguments: args }, undefined, { timeout: TOOL_TIMEOUT_MS }) as ToolResultLike;
 }
 
-export async function runSmoke(options: SmokeOptions): Promise<number> {
+export async function runSmoke(options: SmokeOptions, sink?: SmokeSink): Promise<number> {
   const failures: string[] = [];
   const warnings: string[] = [];
   let grant: SmokeGrant;
@@ -594,6 +616,7 @@ export async function runSmoke(options: SmokeOptions): Promise<number> {
     await client.connect(transport as unknown as Parameters<Client['connect']>[0]);
     print(`relay ${options.relay} · panel origin ${options.origin.replace(/mcp-app-[0-9a-f]+/, 'mcp-app-…')}`);
     const tools = await client.listTools();
+    sink?.onTools?.(tools.tools.map((tool) => tool.name));
     print(`\n=== tools/list: ${tools.tools.length} tools`);
     for (const tool of tools.tools) {
       const ui = (tool._meta as Record<string, unknown> | undefined)?.ui as { resourceUri?: string } | undefined;
@@ -605,6 +628,7 @@ export async function runSmoke(options: SmokeOptions): Promise<number> {
       const result = await callTool(client, 'olympus_dashboard', {});
       printView('olympus_dashboard {}', result, options.quiet, Date.now() - started);
       others.push({ label: 'olympus_dashboard', result });
+      sink?.onOther?.('olympus_dashboard', result);
     }
 
     for (const question of options.questions) {
@@ -616,23 +640,29 @@ export async function runSmoke(options: SmokeOptions): Promise<number> {
       const run: QuestionRun = { question, result };
       runs.push(run);
       const meta = panelMeta(result);
+      const observation: SmokeObservation = { question, result, searchMs };
       if (result.isError) failures.push(`olympus_search errored for "${question.question}"`);
       if (meta?.state === 'ready' && meta.jobId) {
         const full = meta.detail === 'full';
         const outcome = await collectPrivateAnswer({ relay: options.relay, jobId: meta.jobId, origin: options.origin, full });
         const totalMs = Date.now() - started;
         const budget = full ? FULL_BUDGET_MS : SUMMARY_BUDGET_MS;
+        observation.panel = outcome.ok
+          ? { ok: true, claimMs: outcome.claimMs, polls: outcome.polls, totalMs }
+          : { ok: false, status: outcome.status, detail: outcome.detail, claimMs: outcome.claimMs, polls: outcome.polls, totalMs };
         print(`-- panel: ${outcome.ok ? 'ready' : `${outcome.status} (${outcome.detail})`} · search ${(searchMs / 1000).toFixed(1)} s · claim→settled ${(outcome.claimMs / 1000).toFixed(1)} s · search→ready ${(totalMs / 1000).toFixed(1)} s · polls ${outcome.polls} · budget ${budget / 1000} s`);
         if (!outcome.ok) {
           failures.push(`panel ${outcome.status} for "${question.question}"`);
         } else {
           run.privateAnswer = outcome.answer;
+          observation.privateAnswer = outcome.answer;
           printPanel(outcome.answer, options.quiet);
           if (totalMs > budget) failures.push(`private answer took ${(totalMs / 1000).toFixed(1)} s > ${budget / 1000} s for "${question.question}"`);
         }
       } else if (options.expectPrivate) {
         failures.push(`no ready private answer job for "${question.question}" (panel state ${meta?.state ?? 'absent'})`);
       }
+      sink?.onQuestion?.(observation);
     }
   } catch (error) {
     print(`run failed: ${(error as Error).message}`);
