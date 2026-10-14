@@ -29754,7 +29754,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
 function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled, ftsOptions = {}) {
   if (!enabled || strict.rows.length > 0)
     return strict;
-  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true });
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === "private_search" });
   return { ...relaxed, completeItemIds: new Set };
 }
 function connectorStoreRowHasContent(row) {
@@ -31562,7 +31562,7 @@ function foldLocator(locator) {
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
-function toRelaxedLocalFtsQuery(query) {
+function relaxedLocalFtsTerms(query) {
   const terms = new Set;
   for (const term of sourceIndexTopicTokens(query)) {
     if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term))
@@ -31571,7 +31571,10 @@ function toRelaxedLocalFtsQuery(query) {
     if (terms.size === 8)
       break;
   }
-  return [...terms].map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
+  return [...terms].map((term) => `"${term.replace(/"/g, '""')}"`);
+}
+function toRelaxedLocalFtsQuery(query) {
+  return relaxedLocalFtsTerms(query).join(" OR ");
 }
 function connectorStoreTitleFtsQuery(terms) {
   const normalizedTerms = [
@@ -36591,7 +36594,7 @@ var init_local_index = __esm(() => {
     searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-      const terms = ftsOptions.relaxed ? toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
+      const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? this.privateRelaxedFtsQuery(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -36685,6 +36688,27 @@ var init_local_index = __esm(() => {
           ]))
         }
       };
+    }
+    privateRelaxedFtsQuery(query) {
+      const terms = relaxedLocalFtsTerms(query);
+      if (terms.length <= 2)
+        return terms.join(" OR ");
+      const alternatives = [];
+      for (let i = 0;i < terms.length; i += 1) {
+        for (let j = i + 1;j < terms.length; j += 1) {
+          alternatives.push(`(${terms[i]} AND ${terms[j]})`);
+        }
+      }
+      const population = this.db.query("SELECT item_pk FROM items WHERE tombstoned = 0 LIMIT 20").all();
+      if (population.length === 20) {
+        for (const term of terms) {
+          const rows = this.db.query("SELECT item_pk FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT 21").all(term);
+          if (rows.length > 0 && rows.length <= 20 && new Set(rows.map((row) => row.item_pk)).size === 1) {
+            alternatives.push(term);
+          }
+        }
+      }
+      return alternatives.join(" OR ");
     }
     conceptWeights(groups, exact) {
       const items = this.db.query("SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0").get().count;
@@ -133558,7 +133582,7 @@ function createSourceAnswerLanes(deps) {
       return createConnectorStoreCorpusAdapter({
         store,
         retrievalMode: request.retrieval_mode ?? "keyword",
-        localKeywordFallback: mode === "built_in_only" || mode === "private_search" && store.trustDomain === "secure_local",
+        localKeywordFallback: mode === "built_in_only" ? true : mode === "private_search" && store.trustDomain === "secure_local" ? "private_search" : false,
         ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
         ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
         ...filters ? { filters } : {},

@@ -10175,11 +10175,11 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     // locate: false is the metadata-only mode: a text match is reported as
     // such, and no chunk text is read to place it.
-    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean; relaxed?: boolean } = {},
+    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
   ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-    const terms = ftsOptions.relaxed ? toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
+    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? this.privateRelaxedFtsQuery(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
@@ -10299,6 +10299,38 @@ export class LocalConnectorStore {
         ])),
       },
     };
+  }
+
+  private privateRelaxedFtsQuery(query: string): string {
+    const terms = relaxedLocalFtsTerms(query);
+    if (terms.length <= 2) return terms.join(' OR ');
+    // A relaxed match can create a waiting question and a panel job. Require
+    // two distinct topic terms, except for short questions (one extra word
+    // must not hide an item) or a term unique to one of at least 20 items.
+    // Rarity is conservative: inspect at most 21 FTS rows per term, including
+    // repeated chunks. Saturation refuses the rarity exception. No corpus
+    // count, text read, schema change or remote model is needed; <=8 terms,
+    // <=28 pairs. Ask privately retains the unrestricted local OR retry.
+    const alternatives: string[] = [];
+    for (let i = 0; i < terms.length; i += 1) {
+      for (let j = i + 1; j < terms.length; j += 1) {
+        alternatives.push(`(${terms[i]} AND ${terms[j]})`);
+      }
+    }
+    const population = this.db.query(
+      'SELECT item_pk FROM items WHERE tombstoned = 0 LIMIT 20',
+    ).all();
+    if (population.length === 20) {
+      for (const term of terms) {
+        const rows = this.db.query(
+          'SELECT item_pk FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT 21',
+        ).all(term) as Array<{ item_pk: number }>;
+        if (rows.length > 0 && rows.length <= 20 && new Set(rows.map(row => row.item_pk)).size === 1) {
+          alternatives.push(term);
+        }
+      }
+    }
+    return alternatives.join(' OR ');
   }
 
   /**
@@ -11174,7 +11206,7 @@ export interface ConnectorStoreCorpusAdapterOptions {
   embeddingProvider?: SourceEmbeddingProvider;
   retrievalMode?: 'keyword' | 'hybrid';
   /** Trusted local-answer wiring only; never read from a search request. */
-  localKeywordFallback?: boolean;
+  localKeywordFallback?: boolean | 'private_search';
   /** Absolute cosine floor for hybrid vector-lane rows; sub-bar semantic similarity is not evidence. */
   semanticRelevanceBar?: number;
   /** Optional principal account boundary applied to every retrieval lane. */
@@ -11553,7 +11585,7 @@ async function hybridConnectorStoreSearch(
   filters?: ConnectorStoreSearchFilters,
   semanticRelevanceBar?: number,
   resultProjector?: ConnectorStoreResultProjector,
-  localKeywordFallback?: boolean,
+  localKeywordFallback?: boolean | 'private_search',
 ): Promise<SourceIndexCorpusSearchResponse> {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
@@ -11751,7 +11783,7 @@ function connectorStoreKeywordLaneRows(
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean } = {},
+  ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
 ): {
   rows: ConnectorStoreSearchRow[];
   matchCount: SourceIndexCorpusMatchCount;
@@ -11818,11 +11850,11 @@ function relaxEmptyLocalKeywordLane(
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
   strict: ReturnType<typeof connectorStoreKeywordLaneRows>,
-  enabled: boolean | undefined,
+  enabled: boolean | 'private_search' | undefined,
   ftsOptions: { prefix?: boolean; locate?: boolean } = {},
 ): ReturnType<typeof connectorStoreKeywordLaneRows> {
   if (!enabled || strict.rows.length > 0) return strict;
-  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true });
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === 'private_search' });
   // OR matches are ranked, but never claim every concept of the question matched.
   return { ...relaxed, completeItemIds: new Set() };
 }
@@ -14764,14 +14796,18 @@ const LOCAL_RELAXED_STOPWORDS = new Set([
  * retry. The shared stopword decision comes first, so words the strict search
  * deliberately ignores ("show", "files", "saved") never become OR matches.
  */
-function toRelaxedLocalFtsQuery(query: string): string {
+function relaxedLocalFtsTerms(query: string): string[] {
   const terms = new Set<string>();
   for (const term of sourceIndexTopicTokens(query)) {
     if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term)) continue;
     terms.add(term);
     if (terms.size === 8) break;
   }
-  return [...terms].map(term => `"${term.replace(/"/g, '""')}"`).join(' OR ');
+  return [...terms].map(term => `"${term.replace(/"/g, '""')}"`);
+}
+
+function toRelaxedLocalFtsQuery(query: string): string {
+  return relaxedLocalFtsTerms(query).join(' OR ');
 }
 
 function connectorStoreTitleFtsQuery(terms: readonly string[]): string {
