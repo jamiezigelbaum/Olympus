@@ -2827,6 +2827,7 @@ export class LocalConnectorStore {
     rows: readonly T[],
     identityOf: (row: T) => { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string },
     layerOf: (row: T) => TierSearchLayer,
+    throwOnUnavailable = false,
   ): T[] {
     if (rows.length === 0) return [];
     let copies: Map<string, TierCopy[]>;
@@ -2834,7 +2835,8 @@ export class LocalConnectorStore {
       const ledger = this.visibilityLedger();
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return [...rows];
       copies = ledger.copiesForMany(rows.map(identityOf));
-    } catch {
+    } catch (error) {
+      if (throwOnUnavailable) throw error;
       return [];
     }
     return rows.filter((row) => tierRowVisible(
@@ -10494,9 +10496,10 @@ export class LocalConnectorStore {
    * copy current WITH the content layer (a copy that serves only names, or a
    * superseded or staged one, does not). Item, chunk-existence and ledger
    * reads only: no chunk text is loaded. Fails closed (false) when the ledger
-   * cannot be read or the stored tier is unknown.
+   * cannot be read or the stored tier is unknown. Retained-answer checks can
+   * request an exception for unavailable ledger reads instead of withdrawal.
    */
-  contentServedNow(localItemId: string): boolean {
+  contentServedNow(localItemId: string, throwOnUnavailable = false): boolean {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
       FROM items WHERE local_item_id = ? AND tombstoned = 0
@@ -10524,7 +10527,7 @@ export class LocalConnectorStore {
       providerItemId: row.provider_item_id,
       ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
     };
-    return this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    return this.tierVisibleRows([identity], (entry) => entry, () => 'content', throwOnUnavailable).length > 0;
   }
 
   // Local content lane for the evidence-pack provider: bounded chunks, the
@@ -11996,7 +11999,7 @@ export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
  * asks it before every model input.
  */
 export interface ConnectorStoreContentProvider extends LocalContentProvider {
-  contentServable(request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }): boolean;
+  contentServable(request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain; throwOnUnavailable?: boolean }): boolean;
 }
 
 export function createConnectorStoreContentProvider(
@@ -12028,7 +12031,7 @@ export function createConnectorStoreContentProvider(
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId || options.contentAllowed === false) return false;
       if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return false;
-      return store.contentServedNow(localItemId);
+      return store.contentServedNow(localItemId, request.throwOnUnavailable);
     },
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
       if (request.trustDomain !== store.trustDomain) {

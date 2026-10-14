@@ -355,6 +355,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           };
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
+            observe?.modelStarting?.();
             return model.complete(modelRequest);
           });
         },

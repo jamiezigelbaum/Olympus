@@ -1311,3 +1311,85 @@ test('REVIEW R5 transient failure during auto-answer stores a permanent not_foun
   expect(first.result).toBeUndefined();
   expect(first.attempts).toBe(1);
 });
+
+const A = (answer: string) => ({ status: 'answered' as const, answer, citations: [], unanswered: [], leftOut: [], read: [] });
+
+test('re-ask retains answered rows and restarts not-found rows', () => {
+  const store = waitingStore();
+  const ref = store.record(store.ticket('c'), { question: 'dentist?', surface: 'remote', state: 'waiting' })!;
+  store.saveAnswer(ref, { status: 'answered', answer: 'Tuesday', citations: [], unanswered: [], leftOut: [], read: [] });
+  const again = store.record(store.ticket('c'), { question: 'dentist?', surface: 'remote', state: 'waiting' })!;
+  const nf = store.record(store.ticket('c'), { question: 'second question', surface: 'remote', state: 'waiting' })!;
+  store.saveAnswer(nf, { status: 'not_found', citations: [], unanswered: [], leftOut: [], read: [] });
+  const nf2 = store.record(store.ticket('c'), { question: 'second question', surface: 'remote', state: 'waiting' })!;
+  expect(again.generation).toBe(ref.generation);
+  expect(nf2.generation).toBe(nf.generation + 1);
+  expect(store.get(nf.id)?.result).toBeUndefined();
+  expect(store.get(ref.id)?.result?.answer).toBe('Tuesday');
+});
+
+test('a newcomer retains its first answer in a globally full inbox', () => {
+  const store = waitingStore();
+  for (let c = 0; c < 10; c += 1) for (let i = 0; i < 50; i += 1) {
+    const r = store.record(store.ticket(`c${c}`), { question: `q ${c} ${i}`, surface: 'remote', state: 'waiting' })!;
+    store.saveAnswer(r, A('x'));
+  }
+  const fresh = store.record(store.ticket('newcomer'), { question: 'newcomer q', surface: 'remote', state: 'waiting' })!;
+  const saved = store.saveAnswer(fresh, A('newcomer answer'));
+  expect(saved).toBe(true);
+  expect(store.list().questions.length).toBe(500);
+  expect(store.list().olderRemoved).toBe(true);
+  expect(store.get(fresh.id)).toBeDefined();
+});
+
+test('a brief copiesForMany failure hides a stored answer, then shows it again', async () => {
+  const c = await offerCase(undefined);
+  const original = c.local.fixture.ledger.copiesForMany.bind(c.local.fixture.ledger);
+  c.local.fixture.ledger.copiesForMany = () => { throw new Error('SQLITE_BUSY (simulated)'); };
+  const read = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
+  c.local.fixture.ledger.copiesForMany = original;
+  expect(read.body.status).toBe('check_unavailable');
+  expect(c.store.get(c.ref.id)?.generation).toBe(c.ref.generation);
+  expect((await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner')).body.status).toBe('answered');
+  expect(c.store.get(c.ref.id)?.result).toBeDefined();
+});
+
+for (const unavailable of ['no_model', 'model_downloading', 'failed', 'throw'] as const) test(`pre-model ${unavailable} does not spend the hourly auto-answer budget`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rv-'));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  let clock = Date.parse('2026-10-14T12:00:00Z');
+  const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting-private-questions.sqlite'), { now: () => clock, isActive: () => true });
+  cleanups.push(() => store.close());
+  const ref = store.record(store.ticket('c'), { question: 'dentist?', surface: 'remote', state: 'waiting' })!;
+  const start = clock;
+  let ready = false;
+  const controller = createLocalPrivateAnswers({ store: () => store, now: () => clock, answer: async () => { if (ready) return A('Tuesday'); if (unavailable === 'throw') throw new Error('retrieval temporarily unavailable'); return { status: unavailable }; }, eligible: async items => items.map(() => true) });
+  cleanups.push(() => controller.close());
+
+  for (let i = 0; i < 8; i += 1) {
+    await controller.tick();
+    const row = store.get(ref.id)!;
+    clock = Math.max(clock + 1000, row.nextAttemptAt);
+    if (i === 4) ready = true; // model finished downloading after ~2.5 minutes
+  }
+  const done = store.get(ref.id)!;
+  expect(done.result?.status).toBe('answered');
+  expect(Date.parse(done.answeredAt!) - start).toBeLessThan(5 * 60_000);
+  // Only the successful answer spent the five-attempt allowance.
+  for (let i = 0; i < 4; i++) expect(store.reserveAutoAnswer(store.record(store.ticket('c'), { question: `next ${i}`, surface: 'remote', state: 'waiting' })!)).toBe(true);
+  expect(store.reserveAutoAnswer(store.record(store.ticket('c'), { question: 'over budget', surface: 'remote', state: 'waiting' })!)).toBe(false);
+});
+
+test('a failure after a model call still spends the hourly budget', async () => {
+  const store = waitingStore();
+  const ref = store.record(store.ticket('c'), { question: 'dentist?', surface: 'remote', state: 'waiting' })!;
+  const controller = createLocalPrivateAnswers({ store: () => store, answer: async input => {
+    input.onModelCall?.();
+    throw new Error('synthesis failed');
+  } });
+  cleanups.push(() => controller.close());
+  await controller.tick();
+  expect(store.get(ref.id)?.attempts).toBe(1);
+  for (let i = 0; i < 4; i++) expect(store.reserveAutoAnswer(ref)).toBe(true);
+  expect(store.reserveAutoAnswer(ref)).toBe(false);
+});

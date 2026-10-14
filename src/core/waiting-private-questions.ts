@@ -185,6 +185,7 @@ export interface WaitingQuestionStore {
   subscribe(listener: () => void): () => void;
   markRead(ref: WaitingQuestionRef): boolean;
   reserveAutoAnswer(ref: WaitingQuestionRef): boolean;
+  refundAutoAnswer(ref: WaitingQuestionRef, reservedAt: number): void;
   saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer): boolean;
   retry(ref: WaitingQuestionRef): boolean;
   invalidate(ref: WaitingQuestionRef): boolean;
@@ -411,7 +412,7 @@ export function openWaitingPrivateQuestionStore(
         expire(at);
         const existing = db.query('SELECT * FROM waiting_questions WHERE dedupe_key = ?').get(dedupeKey) as QuestionRow | null;
         let ref: WaitingQuestionRef;
-        if (existing?.result) {
+        if (existing?.result && JSON.parse(existing.result).status === 'answered') {
           // Eligibility is checked at every read/open. Re-asking cannot erase
           // a retained answer or restart its generation; only withdrawal can.
           db.query('UPDATE waiting_questions SET asked_at = ? WHERE id = ?').run(at, existing.id);
@@ -554,6 +555,12 @@ export function openWaitingPrivateQuestionStore(
       }).immediate();
     },
 
+    refundAutoAnswer(ref, reservedAt) {
+      // Never refund a newer window if an old model attempt finishes late.
+      db.query('UPDATE auto_answer_budgets SET attempts = MAX(0, attempts - 1) WHERE connection_id = ? AND started_at <= ?')
+        .run(ref.connectionId, reservedAt);
+    },
+
     saveAnswer(ref, result) {
       const serialized = JSON.stringify(result);
       if (utf8Length(serialized) > WAITING_QUESTION_LIMITS.answerBytes) return false;
@@ -572,11 +579,12 @@ export function openWaitingPrivateQuestionStore(
         }
         let count = rows.length - removed.size;
         let bytes = rows.filter(row => !removed.has(row.id)).reduce((sum, row) => sum + row.bytes + RECORD_OVERHEAD_BYTES, 0);
-        // A full global store can consume only the saving connection's rows.
-        // A flood never pays for itself with another connection's answers.
+        // Existing connections pay with their own older answers; a newcomer's
+        // first answer may replace the oldest global row.
+        const newcomer = !rows.some(row => row.connection_id === ref.connectionId && row.id !== ref.id);
         for (const row of [...rows].reverse()) {
           if (count <= WAITING_QUESTION_LIMITS.answeredTotal && bytes <= WAITING_QUESTION_LIMITS.answeredBytes) break;
-          if (row.connection_id !== ref.connectionId || removed.has(row.id)) continue;
+          if ((!newcomer && row.connection_id !== ref.connectionId) || removed.has(row.id)) continue;
           remove(row.id); count--; bytes -= row.bytes + RECORD_OVERHEAD_BYTES;
         }
         if (removed.size) markOlderRemoved(now());
