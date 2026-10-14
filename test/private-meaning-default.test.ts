@@ -1,15 +1,17 @@
-import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, test, spyOn } from 'bun:test';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { optionsFromEnv } from '../scripts/source-embedding-drain.ts';
+import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { withFileLeaseSync } from '../src/core/file-lease.ts';
 import { seedEngineSovereignty } from '../src/core/engine-service.ts';
-import { createSovereigntyEngine, loadSovereigntyEngine, migratePrivateMeaningSearch, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
-import { createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/email-source/server.ts';
+import { createSovereigntyEngine, loadSovereigntyEngine, migratePrivateMeaningSearch, defaultSovereigntyConfigPath, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
+import { localPrivateEmbeddingTargets, loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/email-source/server.ts';
 import { LocalConnectorStore, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { withLocalPrivateEmbeddingBackfill, EMBEDDING_SWEEP_MAX_ITEMS, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { withLocalPrivateEmbeddingBackfill, EMBEDDING_SWEEP_INTERVAL_MS, EMBEDDING_SWEEP_MAX_ITEMS, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 
 const oldBytes = readFileSync(new URL('./fixtures/sovereignty-1.0.0/no-sensitive.json', import.meta.url), 'utf8');
@@ -17,7 +19,9 @@ const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 function policyFile(bytes = oldBytes) {
   const home = mkdtempSync(join(tmpdir(), 'private-meaning-upgrade-')); homes.push(home);
-  const path = join(home, 'sovereignty.json'); writeFileSync(path, bytes); return { path, home };
+  const env = { HOME: home, XDG_CONFIG_HOME: join(home, 'config'), OLYMPUS_ENGINE_HOST: '1' };
+  const path = defaultSovereigntyConfigPath(env); mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, bytes); return { path, home: dirname(path), env };
 }
 const expectedSecure: SovereigntyTrustDomainPolicy = {
   minimumExecutionTrust: 'local', allowedEmbeddingTrust: ['local'],
@@ -62,8 +66,8 @@ describe('the default install finds Private items by meaning locally', () => {
   });
 
   test('existing Private items are owed by the bounded normal sweep and counted as indexing work', async () => {
-    const { path } = policyFile();
-    const engine = loadSovereigntyEngine({ configPath: path, migratePrivateMeaning: true });
+    const { env } = policyFile();
+    const engine = loadSourceWorkerSovereignty({}, env);
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'secure_local.fixture.files', family: 'file', trustDomain: 'secure_local', tierLedger: null });
     const items: RawItem[] = Array.from({ length: EMBEDDING_SWEEP_MAX_ITEMS + 3 }, (_, index) => `item-${index}`).map(id => ({
       identity: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}`, sourceVersion: 'v1' },
@@ -84,7 +88,10 @@ describe('the default install finds Private items by meaning locally', () => {
       expect(before.embedding_parity?.backlog_estimate?.missing_chunks).toBe(35);
       const source: SourceSchedulerSource = { sourceId: 'fixture', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] };
       const task = withLocalPrivateEmbeddingBackfill([source], () => [{ store, provider }])[0]!.tasks[0]!;
-      expect(await task.run()).toMatchObject({ status: 'progress', counts: { chunks_embedded: 32 }, continueSoon: true });
+      const first = await task.run();
+      expect(first).toMatchObject({ status: 'progress', counts: { chunks_embedded: 32 } });
+      expect(first.continueSoon).toBeUndefined();
+      expect(task.intervalMs).toBe(EMBEDDING_SWEEP_INTERVAL_MS);
       expect(store.missingEmbeddingItemIds(provider, 100)).toHaveLength(3);
       expect(await task.run()).toMatchObject({ status: 'progress', counts: { chunks_embedded: 3 } });
       expect(store.missingEmbeddingItemIds(provider, 100)).toEqual([]);
@@ -106,11 +113,11 @@ describe('the default install finds Private items by meaning locally', () => {
   });
 
   test('engine startup migrates the independent 1.0.0 fixture and backs up its exact bytes', () => {
-    const { path, home } = policyFile();
+    const { path, home, env } = policyFile();
     // Inspection is read-only; the engine/drain startup opt-in owns migration.
     expect(loadSovereigntyEngine({ configPath: path }).resolveEmbeddingProfile('secure_local')).toBeUndefined();
     expect(readdirSync(home)).toEqual(['sovereignty.json']);
-    const engine = loadSovereigntyEngine({ configPath: path, migratePrivateMeaning: true });
+    const engine = loadSourceWorkerSovereignty({}, env);
     expect(engine.config.retrieval.trustDomains.secure_local).toEqual(expectedSecure);
     const backups = readdirSync(home).filter(name => name.startsWith('sovereignty.json.backup-private-meaning-'));
     expect(backups).toHaveLength(1);
@@ -119,6 +126,7 @@ describe('the default install finds Private items by meaning locally', () => {
     expect(statSync(join(home, backups[0]!)).mode & 0o777).toBe(0o600);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     const expected = JSON.parse(oldBytes); expected.retrieval.trustDomains.secure_local = expectedSecure;
+    expected.routes.secure_local.disabledReason = 'no-sensitive keeps Private search on this computer; no Private agent answer lane is configured.';
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(expected);
     expect(migratePrivateMeaningSearch(path)).toBeUndefined();
     expect(readdirSync(home).filter(name => name.includes('backup'))).toHaveLength(1);
@@ -132,14 +140,14 @@ describe('the default install finds Private items by meaning locally', () => {
   });
 
   test('custom policies do not acquire a writer lease, and a busy eligible upgrade cannot stop startup', () => {
-    const custom = JSON.parse(oldBytes); custom.retrieval.trustDomains.internal.allowCloudQuery = false;
+    const custom = JSON.parse(oldBytes); custom.retrieval.trustDomains.secure_local.activationMode = 'lexical_only';
     const { path: customPath } = policyFile(JSON.stringify(custom));
     withFileLeaseSync(customPath, () => {
-      expect(loadSovereigntyEngine({ configPath: customPath, migratePrivateMeaning: true }).config.retrieval.trustDomains.internal?.allowCloudQuery).toBe(false);
+      expect(loadSovereigntyEngine({ configPath: customPath, migratePrivateMeaning: true }).config.retrieval.trustDomains.secure_local?.activationMode).toBe('lexical_only');
     });
-    const { path, home } = policyFile();
+    const { path, home, env } = policyFile();
     withFileLeaseSync(path, () => {
-      const engine = loadSovereigntyEngine({ configPath: path, migratePrivateMeaning: true });
+      const engine = loadSourceWorkerSovereignty({}, env);
       expect(engine.resolveEmbeddingProfile('secure_local')).toBeUndefined();
       expect(readFileSync(path, 'utf8')).toBe(oldBytes);
     });
@@ -154,13 +162,10 @@ describe('the default install finds Private items by meaning locally', () => {
     expect(migratePrivateMeaningSearch(path)).toBeDefined();
   });
 
-  test('customized retrieval, profiles, routes, other domains and unknown owner fields remain byte-for-byte unchanged', () => {
+  test('customized Private retrieval and local embedding profiles remain byte-for-byte unchanged', () => {
     const edits = [
       (c: any) => { c.retrieval.trustDomains.secure_local.activationMode = 'lexical_only'; },
       (c: any) => { c.modelProfiles['built-in-embedding'].model = 'owner-model'; },
-      (c: any) => { c.retrieval.trustDomains.internal.allowCloudQuery = false; },
-      (c: any) => { c.routes.secure_local.disabledReason = 'Owner choice'; },
-      (c: any) => { c.ownerNote = 'Keep this'; },
       (c: any) => { c.retrieval.trustDomains.secure_local.ownerNote = 'Keep this'; },
     ];
     for (const edit of edits) {
@@ -171,4 +176,103 @@ describe('the default install finds Private items by meaning locally', () => {
       expect(readdirSync(home)).toEqual(['sovereignty.json']);
     }
   });
+});
+
+
+test('pinned paths and hosted startup never rewrite the 1.0.0 policy, including a pin to the default', () => {
+  const { path, home, env } = policyFile();
+  const log = spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    for (const overrides of [
+      { config: { sovereignty: { configPath: path } }, env },
+      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: path } },
+      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG: path } },
+      { config: {}, env: { ...env, OLYMPUS_ENGINE_HOST: '0' } },
+      { config: {}, env: { ...env, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway-fixture' } },
+    ]) {
+      expect(loadSourceWorkerSovereignty(overrides.config, overrides.env).resolveEmbeddingProfile('secure_local')).toBeUndefined();
+      expect(readFileSync(path, 'utf8')).toBe(oldBytes);
+      expect(readdirSync(home)).toEqual(['sovereignty.json']);
+    }
+    expect(log.mock.calls).toHaveLength(5);
+    expect(log.mock.calls[0]![0]).toContain('1.0.0 keyword-only');
+  } finally { log.mockRestore(); }
+});
+
+test('unrelated settings survive block migration and the success log names the backup once', () => {
+  const old = JSON.parse(oldBytes);
+  old.retrieval.trustDomains.internal.allowCloudQuery = false;
+  old.modelProfiles['cloud-openclaw-infer'].model = 'owner-analyst';
+  old.routes.secure_local.disabledReason = 'Owner choice';
+  old.ownerNote = 'Keep this';
+  const bytes = JSON.stringify(old);
+  const { path, home, env } = policyFile(bytes);
+  const log = spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    loadSourceWorkerSovereignty({}, env);
+    const next = JSON.parse(readFileSync(path, 'utf8'));
+    old.retrieval.trustDomains.secure_local = expectedSecure;
+    expect(next).toEqual(old);
+    const backup = readdirSync(home).find(name => name.includes('backup'))!;
+    expect(readFileSync(join(home, backup), 'utf8')).toBe(bytes);
+    expect(log.mock.calls).toEqual([[`Private meaning search enabled locally; policy backup: ${join(home, backup)}`]]);
+    loadSourceWorkerSovereignty({}, env);
+    expect(log.mock.calls).toHaveLength(1);
+  } finally { log.mockRestore(); }
+});
+
+
+test('direct drain startup uses the standalone migration rule and respects pinned policies', () => {
+  for (const pinned of [false, true]) {
+    const { path, home, env } = policyFile();
+    const drainEnv = {
+      ...env, OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
+      OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'direct',
+      OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED: 'false',
+      ...(pinned ? { OLYMPUS_SOVEREIGNTY_CONFIG_PATH: path } : {}),
+    };
+    if (pinned) expect(() => optionsFromEnv(drainEnv)).toThrow('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER is required');
+    else expect(optionsFromEnv(drainEnv).client).toBeDefined();
+    expect(JSON.parse(readFileSync(path, 'utf8')).retrieval.trustDomains.secure_local.activationMode)
+      .toBe(pinned ? 'metadata_only' : 'hybrid_shadow');
+    expect(readdirSync(home).filter(name => name.includes('backup'))).toHaveLength(pinned ? 0 : 1);
+  }
+});
+
+test('seeded default through worker target wiring gives a Private item a local vector and keyword-only stays idle', async () => {
+  const { path, env } = policyFile(); rmSync(path); seedEngineSovereignty(path);
+  const engine = loadSourceWorkerSovereignty({}, env);
+  const registry = createSourceCorpusRegistry();
+  const corpusId = 'secure_local.whatsapp.messages';
+  const definition = registry.definitions().find(d => d.corpusId === corpusId)!;
+  const s = new LocalConnectorStore({ dbPath: ':memory:', corpusId, family: 'chat', trustDomain: 'secure_local', tierLedger: null });
+  const item: RawItem = {
+    identity: { family: 'chat', provider: 'whatsapp', accountScope: 'personal', providerItemId: 'one', localItemId: 'one', sourceVersion: 'v1' },
+    mimeType: 'text/plain', content: { kind: 'text', text: 'A Private discussion about the morning appointment' },
+    metadata: { name: 'fixture' }, fetchedAt: '2026-10-14T00:00:00Z',
+  };
+  const connector: SourceConnector = { id: 'whatsapp-fixture', family: 'chat', async authenticate() {}, async *listItems() { yield { items: [item], done: true }; }, async fetchItem() { return item; }, classificationSignals() { return {}; } };
+  const provider = createSourceIndexEmbeddingProviderFromSovereignty(engine, 'secure_local', env)!;
+  const embed = provider.embed;
+  const inputs: string[] = [];
+  provider.embed = async batch => { inputs.push(...batch.map(input => input.text)); return batch.map(() => Array.from({ length: provider.dimension }, (_, i) => i === 0 ? 1 : 0)); };
+  const source: SourceSchedulerSource = { sourceId: 'whatsapp.personal.messages', corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] };
+  const targets = () => localPrivateEmbeddingTargets({
+    source, sovereigntyEngine: engine, secureLocalPolicyEmbeddingProvider: provider,
+    sourceCorpusRegistry: registry, connectorStores: [s], fullCorpusDefinitions: [definition],
+    scopeRefs: new Map(), readScope: () => ({ allowed: true, contentAllowed: true }),
+    connectorStoreAccountScopes: new Map([[corpusId, 'personal']]),
+  });
+  try {
+    await s.syncFromConnector(connector, { fetchContent: true });
+    expect(s.hasEmbeddings(provider.modelId)).toBe(false);
+    const task = withLocalPrivateEmbeddingBackfill([source], targets)[0]!.tasks[0]!;
+    expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toContain('Private discussion');
+    expect(s.hasEmbeddings(provider.modelId)).toBe(true);
+    engine.config.retrieval.trustDomains.secure_local!.activationMode = 'lexical_only';
+    expect(withLocalPrivateEmbeddingBackfill([source], targets)[0]!.tasks).toEqual([]);
+    expect(withLocalPrivateEmbeddingBackfill([source], () => [])[0]).toBe(source);
+  } finally { provider.embed = embed; s.close(); }
 });

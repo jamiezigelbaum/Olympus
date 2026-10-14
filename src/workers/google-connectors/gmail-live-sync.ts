@@ -44,6 +44,7 @@ import {
   GMAIL_PROVIDER,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
   GmailPageTokenRejectedError,
+  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
   GoogleGmailSourceConnector,
   gmailConnectorStoreClassification,
   gmailCursorIsMidTraversal,
@@ -380,8 +381,9 @@ export function createGmailConnectorStoreSyncHandler(
         const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
         options.assertScopeCurrent?.();
         let confirmed = 0;
+        const maxItems = Math.min(request.max_items ?? config.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS);
         const connector = buildConnector({
-          maxMessages: request.max_items ?? config.storePullMaxItems,
+          maxMessages: maxItems,
           scope: { ...scope, confirmationOnly: true, storedItemObserved: item => {
             scope.storedItemObserved?.(item);
             if (options.secureStore.itemOwnerPresent(item.identity, connectorId, 'observed')) confirmed++;
@@ -390,7 +392,7 @@ export function createGmailConnectorStoreSyncHandler(
         let done = false;
         let checkpoint: string | null = resume ? encodeCheckpoint({ head: resume, scope: confirmationScope }) : null;
         try {
-          for await (const page of connector.listItems({ limit: request.max_items ?? config.storePullMaxItems, ...(resume ? { cursor: resume } : {}) })) {
+          for await (const page of connector.listItems({ limit: maxItems, ...(resume ? { cursor: resume } : {}) })) {
             done = page.done;
             checkpoint = done ? complete : page.nextCursor ? encodeCheckpoint({ head: page.nextCursor, scope: confirmationScope }) : checkpoint;
           }

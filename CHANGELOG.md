@@ -2,7 +2,7 @@
 
 ## 1.0.1 - unreleased
 
-- Private items can be found by meaning on your computer; existing installs switch over automatically.
+- Private items can be found by meaning on your computer; standalone default-path installs with the shipped 1.0.0 Private retrieval block and built-in local profile switch automatically, preserving other settings. Gateway-pinned policies stay unchanged.
 
 ## 1.0.0 - 2026-10-14
 

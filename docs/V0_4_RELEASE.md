@@ -168,9 +168,11 @@ testers have exercised the normal product journey without custom engineering.
   `hybrid_shadow` and `allowCloudQuery: false`. This adds no Delphi or Venice
   lane. Ask privately, the sealed ChatGPT panel and the private-match probe
   gain local meaning search; the Private agent answer route stays disabled.
-  Engine/drain startup atomically replaces only the secure retrieval block
-  of an unmodified shipped 1.0.0 policy, keeping a dated owner-only backup.
-  Customized files (even edits elsewhere in the policy) stay untouched.
+  Standalone engine/drain startup migrates only its own default policy path:
+  the shipped 1.0.0 Private retrieval block and built-in local profile must match.
+  Other settings are preserved; shipped metadata-only disabled-reason text is
+  corrected, and a dated owner-only backup is logged. Gateway-pinned policies
+  are never rewritten; `activationMode: lexical_only` opts out permanently.
   Existing Private items enter the normal bounded embedding sweep under
   current account and content-scope observations and count as indexing work. No Private text or search vectors leave the computer.
 

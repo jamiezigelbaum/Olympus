@@ -24,6 +24,7 @@ import {
 } from './connector-store/index.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
+  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -1584,17 +1585,13 @@ export function withLocalPrivateEmbeddingBackfill(
   targetsFor: (source: SourceSchedulerSource) => readonly ConnectorStoreEmbeddingTarget[],
 ): SourceSchedulerSource[] {
   return sources.map(source => {
-    const task = embeddingSweepTask(source, () => targetsFor(source)
+    const targets = () => targetsFor(source)
       .filter(target => target.store.trustDomain === 'secure_local'
         && target.provider.provider === 'built-in' && target.provider.backend === 'local')
-      .map(target => ({ ...target, wholeStore: true, missingOnly: true })));
-    return { ...source, tasks: [...source.tasks, {
-      ...task, id: `${source.sourceId}_private_meaning`,
-      run: async context => {
-        const result = await task.run(context);
-        return { ...result, ...(!result.retryAt && (result.counts?.chunks_embedded ?? 0) >= EMBEDDING_SWEEP_MAX_ITEMS ? { continueSoon: true } : {}) };
-      },
-    }] };
+      .map(target => ({ ...target, wholeStore: true, missingOnly: true }));
+    if (targets().length === 0) return source;
+    const task = embeddingSweepTask(source, targets);
+    return { ...source, tasks: [...source.tasks, { ...task, id: `${source.sourceId}_private_meaning` }] };
   });
 }
 
@@ -1959,7 +1956,7 @@ export function createGmailConnectorStoreSchedulerSource(input: {
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
         run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
           try {
-            const result = await input.sync!.confirmPrivateScope!({ max_items: liveConfig.storePullMaxItems, ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}) });
+            const result = await input.sync!.confirmPrivateScope!({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}) });
             return {
               status: result.confirmed > 0 ? 'progress' : 'idle',
               counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },

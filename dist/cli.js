@@ -24441,14 +24441,20 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync22(configPath)) {
-    if (options.migratePrivateMeaning) {
+    const standaloneDefault = !requestedConfigPath && !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1");
+    if (options.migratePrivateMeaning && standaloneDefault) {
       try {
-        migratePrivateMeaningSearch(configPath);
+        const backup = migratePrivateMeaningSearch(configPath);
+        if (backup)
+          console.info(`Private meaning search enabled locally; policy backup: ${backup}`);
       } catch {
         console.warn("Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.");
       }
     }
     const parsed = JSON.parse(readFileSync26(configPath, "utf8"));
+    if (options.migratePrivateMeaning && !standaloneDefault && parsed?.retrieval?.trustDomains?.secure_local?.activationMode === "metadata_only") {
+      console.info("Pinned or hosted privacy policy still uses the 1.0.0 keyword-only Private setting; no migration was performed.");
+    }
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -24831,7 +24837,10 @@ function migratePrivateMeaningSearch(path) {
   };
   if (!existsSync22(path))
     return;
-  const eligible = (current2) => isDeepStrictEqual(current2, legacy) || isDeepStrictEqual(current2, validateSovereigntyConfig(legacy));
+  const eligible = (current2) => {
+    const config = current2;
+    return config?.schemaVersion === 1 && isDeepStrictEqual(config.retrieval?.trustDomains?.secure_local, legacy.retrieval.trustDomains.secure_local) && isDeepStrictEqual(config.modelProfiles?.["built-in-embedding"], legacy.modelProfiles["built-in-embedding"]);
+  };
   if (!eligible(JSON.parse(readFileSync26(path, "utf8"))))
     return;
   return withFileLeaseSync(path, (lease) => {
@@ -24840,8 +24849,12 @@ function migratePrivateMeaningSearch(path) {
     if (!eligible(current2))
       return;
     const nextPolicy = loadSovereigntyPreset("no-sensitive");
+    const nextDisabledReason = nextPolicy.routes.secure_local?.disabledReason;
     const next = {
       ...current2,
+      ...nextDisabledReason && current2.routes?.secure_local?.disabledReason === legacy.routes.secure_local?.disabledReason ? {
+        routes: { ...current2.routes, secure_local: { ...current2.routes.secure_local, disabledReason: nextDisabledReason } }
+      } : {},
       retrieval: {
         ...current2.retrieval,
         trustDomains: { ...current2.retrieval.trustDomains, secure_local: nextPolicy.retrieval.trustDomains.secure_local }
@@ -47831,6 +47844,7 @@ class GoogleGmailSourceConnector {
   }
   async* listItems(options = {}) {
     const client = await this.clientForRequest();
+    let scopeConfirmationsFetched = 0;
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
@@ -47867,7 +47881,8 @@ class GoogleGmailSourceConnector {
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
           continue;
         if (stored && (metadataLeg || stored.hasContent)) {
-          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
+            scopeConfirmationsFetched += 1;
             messagesFetched += 1;
             this.providerRequests += 1;
             const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
@@ -48495,7 +48510,7 @@ function safeProviderDetail(value) {
 function hashString3(value) {
   return createHash29("sha256").update(value).digest("hex");
 }
-var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_linux_engine_layout();
   init_mail_source_scope();
@@ -48658,8 +48673,9 @@ function createGmailConnectorStoreSyncHandler(options) {
         const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
         options.assertScopeCurrent?.();
         let confirmed = 0;
+        const maxItems = Math.min(request.max_items ?? config.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS);
         const connector = buildConnector({
-          maxMessages: request.max_items ?? config.storePullMaxItems,
+          maxMessages: maxItems,
           scope: { ...scope, confirmationOnly: true, storedItemObserved: (item) => {
             scope.storedItemObserved?.(item);
             if (options.secureStore.itemOwnerPresent(item.identity, connectorId, "observed"))
@@ -48669,7 +48685,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         let done = false;
         let checkpoint = resume ? encodeCheckpoint({ head: resume, scope: confirmationScope }) : null;
         try {
-          for await (const page2 of connector.listItems({ limit: request.max_items ?? config.storePullMaxItems, ...resume ? { cursor: resume } : {} })) {
+          for await (const page2 of connector.listItems({ limit: maxItems, ...resume ? { cursor: resume } : {} })) {
             done = page2.done;
             checkpoint = done ? complete : page2.nextCursor ? encodeCheckpoint({ head: page2.nextCursor, scope: confirmationScope }) : checkpoint;
           }
@@ -133406,15 +133422,11 @@ function wholeStoreEmbeddingSweepAllowed(sourceId, corpusId) {
 }
 function withLocalPrivateEmbeddingBackfill(sources, targetsFor) {
   return sources.map((source) => {
-    const task = embeddingSweepTask(source, () => targetsFor(source).filter((target) => target.store.trustDomain === "secure_local" && target.provider.provider === "built-in" && target.provider.backend === "local").map((target) => ({ ...target, wholeStore: true, missingOnly: true })));
-    return { ...source, tasks: [...source.tasks, {
-      ...task,
-      id: `${source.sourceId}_private_meaning`,
-      run: async (context2) => {
-        const result = await task.run(context2);
-        return { ...result, ...!result.retryAt && (result.counts?.chunks_embedded ?? 0) >= EMBEDDING_SWEEP_MAX_ITEMS ? { continueSoon: true } : {} };
-      }
-    }] };
+    const targets = () => targetsFor(source).filter((target) => target.store.trustDomain === "secure_local" && target.provider.provider === "built-in" && target.provider.backend === "local").map((target) => ({ ...target, wholeStore: true, missingOnly: true }));
+    if (targets().length === 0)
+      return source;
+    const task = embeddingSweepTask(source, targets);
+    return { ...source, tasks: [...source.tasks, { ...task, id: `${source.sourceId}_private_meaning` }] };
   });
 }
 function withEmbeddingSweep(sources, targetsFor) {
@@ -133700,7 +133712,7 @@ function createGmailConnectorStoreSchedulerSource(input) {
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
         run: async (context2) => {
           try {
-            const result = await input.sync.confirmPrivateScope({ max_items: liveConfig.storePullMaxItems, ...context2?.checkpoint ? { checkpoint: context2.checkpoint } : {} });
+            const result = await input.sync.confirmPrivateScope({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...context2?.checkpoint ? { checkpoint: context2.checkpoint } : {} });
             return {
               status: result.confirmed > 0 ? "progress" : "idle",
               counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
@@ -155997,6 +156009,8 @@ __export(exports_server2, {
   parseConnectorStoreMountsFromEnv: () => parseConnectorStoreMountsFromEnv,
   openIngestionDispositionsRuntime: () => openIngestionDispositionsRuntime,
   main: () => main,
+  localPrivateEmbeddingTargets: () => localPrivateEmbeddingTargets,
+  loadSourceWorkerSovereignty: () => loadSourceWorkerSovereignty,
   createXBookmarksConnectorStoreRuntime: () => createXBookmarksConnectorStoreRuntime,
   createWorkerMessagingCaptureOwnership: () => createWorkerMessagingCaptureOwnership,
   createSourceIndexEmbeddingProviderFromSovereignty: () => createSourceIndexEmbeddingProviderFromSovereignty,
@@ -156199,6 +156213,64 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
     ...mediaFetchTimeoutMs !== undefined ? { mediaFetchTimeoutMs } : {},
     ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
   });
+}
+function localPrivateEmbeddingTargets(input) {
+  const {
+    source,
+    sovereigntyEngine,
+    secureLocalPolicyEmbeddingProvider,
+    sourceCorpusRegistry: sourceCorpusRegistry2,
+    scopeRefs,
+    connectorStores,
+    fullCorpusDefinitions,
+    fileSourceScopeAuthority,
+    readScope: connectorStoreReadScope,
+    connectorStoreAccountScopes,
+    gmailAccountScope
+  } = input;
+  const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
+  if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
+    return [];
+  const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
+  corpusIds.add(source.corpusId);
+  const ref = scopeRefs.get(source.sourceId);
+  return connectorStores.flatMap((store) => {
+    if (store.trustDomain !== "secure_local" || !corpusIds.has(store.corpusId))
+      return [];
+    const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+    const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+    if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
+      return [];
+    if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
+      return [];
+    const scope = connectorStoreReadScope(store);
+    if (!scope.allowed || !scope.contentAllowed)
+      return [];
+    const mail = ref?.sourceId === "gmail.email" && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
+    const accountScope = mail ? gmailAccountScope?.trim() || "personal" : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
+    if (mail && !accountScope)
+      return [];
+    const filters = mail ? {
+      provider: "gmail",
+      observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+    } : scope.contentFilters;
+    const provider = ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref) : secureLocalPolicyEmbeddingProvider;
+    return [{
+      store,
+      provider,
+      ...accountScope ? { accountScope } : {},
+      ...filters ? { filters } : {}
+    }];
+  });
+}
+function loadSourceWorkerSovereignty(config2, env) {
+  const options = {
+    env,
+    migratePrivateMeaning: true,
+    ...config2.sovereignty?.policy ? { inlineConfig: config2.sovereignty.policy } : {},
+    ...config2.sovereignty?.configPath ? { configPath: config2.sovereignty.configPath } : {}
+  };
+  return loadSovereigntyEngine(options);
 }
 function createSourceIndexEmbeddingProviderFromSovereignty(engine, trustDomain, env = process.env, bootSecretResolver) {
   const resolved = engine.resolveEmbeddingProfile(trustDomain);
@@ -156934,12 +157006,7 @@ async function main() {
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
     env: process.env
   });
-  const sovereigntyEngine = loadSovereigntyEngine({
-    env: process.env,
-    migratePrivateMeaning: true,
-    ...olympusConfig.sovereignty?.policy ? { inlineConfig: olympusConfig.sovereignty.policy } : {},
-    ...olympusConfig.sovereignty?.configPath ? { configPath: olympusConfig.sovereignty.configPath } : {}
-  });
+  const sovereigntyEngine = loadSourceWorkerSovereignty(olympusConfig, process.env);
   const bootSecretResolver = new WorkerBootSecretResolver({
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env })
   });
@@ -157757,7 +157824,7 @@ async function main() {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
-      confirmStoredPrivateScope: secureLocalPolicyEmbeddingProvider?.provider === "built-in" && privateDefinition?.activationMode !== "lexical_only" && privateDefinition?.embeddingPolicy !== "disabled" && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_shadow" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_primary"),
+      confirmStoredPrivateScope: !!privateDefinition && secureLocalPolicyEmbeddingProvider?.provider === "built-in" && secureLocalPolicyEmbeddingProvider.backend === "local" && privateDefinition?.activationMode !== "lexical_only" && privateDefinition?.embeddingPolicy !== "disabled" && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_shadow" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_primary"),
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -158274,42 +158341,19 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       if (ref)
         scopeRefs.set(ref.sourceId, ref);
     }
-    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, (source) => {
-      const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
-      if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
-        return [];
-      const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
-      corpusIds.add(source.corpusId);
-      const ref = scopeRefs.get(source.sourceId);
-      return connectorStores.flatMap((store) => {
-        if (store.trustDomain !== "secure_local" || !corpusIds.has(store.corpusId))
-          return [];
-        const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
-        const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
-        if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
-          return [];
-        if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
-          return [];
-        const scope = connectorStoreReadScope(store);
-        if (!scope.allowed || !scope.contentAllowed)
-          return [];
-        const mail = ref?.sourceId === "gmail.email" && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
-        const accountScope = mail ? currentGmailHandle?.accountRole?.trim() || "personal" : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
-        if (mail && !accountScope)
-          return [];
-        const filters = mail ? {
-          provider: "gmail",
-          observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
-        } : scope.contentFilters;
-        const provider = ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref) : secureLocalPolicyEmbeddingProvider;
-        return [{
-          store,
-          provider,
-          ...accountScope ? { accountScope } : {},
-          ...filters ? { filters } : {}
-        }];
-      });
-    });
+    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, (source) => localPrivateEmbeddingTargets({
+      source,
+      sovereigntyEngine,
+      secureLocalPolicyEmbeddingProvider,
+      sourceCorpusRegistry: sourceCorpusRegistry2,
+      scopeRefs,
+      connectorStores,
+      fullCorpusDefinitions,
+      fileSourceScopeAuthority,
+      readScope: connectorStoreReadScope,
+      connectorStoreAccountScopes,
+      gmailAccountScope: currentGmailHandle?.accountRole
+    }));
     const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {
       decisions,
@@ -163517,7 +163561,7 @@ var VENICE_PITCH_TEXT = [
   `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS["local-first"]} tries your local lane first; ${PRIVACY_PRESET_LABELS["private-cloud-only"]} has no local-model requirement.`,
   "In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.",
   "Semantic search uses a small model built into Olympus: it downloads once, runs on this computer, and needs no account or key. Gemini, a local embedding server, or a Venice Private embedding model are opt-in; Private content never goes to ordinary cloud embedding providers.",
-  `Choosing ${PRIVACY_PRESET_LABELS["no-sensitive"]} is a deliberate choice after this screen.`
+  `Choosing ${PRIVACY_PRESET_LABELS["no-sensitive"]} keeps Private meaning search on this computer without configuring an agent answer lane.`
 ];
 function runSetupDependencyCheck(input = {}) {
   const platform2 = normalizeSetupPlatform(input.platform ?? process.platform);

@@ -167,7 +167,9 @@ describe('no existing embeddings are thrown away by a scope', () => {
       // the scheduler checkpoint survive a worker restart.
       const lane = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval, confirmStoredPrivateScope: true });
       const task = createGmailConnectorStoreSchedulerSource({ config: defaultConfig(), sync: lane })!.tasks.find(task => task.id === 'gmail.email_private_scope_confirmation_v1')!;
+      const before = client.formats.length;
       const result = await task.run({ sourceId: 'gmail.email', corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, taskId: task.id, attemptedAt: NOW.toISOString(), consecutiveFailures: 0, effectiveIntervalMs: 60_000, ...(checkpoint ? { checkpoint } : {}) });
+      expect(client.formats.length - before).toBeLessThanOrEqual(32);
       confirmations += result.counts?.private_scope_confirmed ?? 0;
       checkpoint = result.checkpoint ?? undefined;
       if (!result.continueSoon) break;

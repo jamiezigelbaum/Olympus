@@ -110,6 +110,9 @@ export interface GoogleGmailSourceConnectorOptions {
   now?: () => number;
 }
 
+/** Metadata reads for retained Private scope confirmation per connector pass. */
+export const GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32;
+
 /**
  * An approved mail scope, compiled (src/core/mail-source-scope.ts). The
  * connector only ANDs it with the operator's hidden query override and splits
@@ -333,6 +336,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
 
   async *listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
     const client = await this.clientForRequest();
+    let scopeConfirmationsFetched = 0;
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
@@ -380,9 +384,11 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         const stored = this.scope?.storedItem?.(message.id);
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent)) continue;
         if (stored && (metadataLeg || stored.hasContent)) {
-          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved
+            && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
             // Only unconfirmed Private copies need this request, once per
             // approval. It consumes the same bounded message/request budget.
+            scopeConfirmationsFetched += 1;
             messagesFetched += 1;
             this.providerRequests += 1;
             const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS });

@@ -695,8 +695,10 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    finances, or legal matters, the answer says Private sources were not
 >    searched instead of answering from them. Requires:
 >    nothing; Personal and Private content is indexed by the model built
->    into Olympus. Existing unmodified 1.0.0 defaults switch automatically
->    at engine start, with a dated backup; customized policies stay as they are.
+>    into Olympus. Standalone default-path policies with the shipped 1.0.0 Private retrieval
+>    block and built-in local embedding profile switch at engine start with a
+>    dated backup; other settings are preserved. Gateway-pinned policies are never rewritten.
+>    To stay keyword-only, set `retrieval.trustDomains.secure_local.activationMode: lexical_only`; this is never re-migrated.
 >    Trade-off: Private sources need the local panel until you add an agent answer lane.
 >
 > You can change this later — it's a config file, not a commitment
