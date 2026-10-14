@@ -66,6 +66,7 @@
         <li><strong>Services you choose to set up:</strong> Venice, for private answers and, if you choose, for labeling items, building search vectors and reading images and PDF pages; zkAPI and the AI model provider it reaches, for anonymous questions (see <a href="#anonymous">Anonymous questions</a>); any other provider you configure.</li>
         <li><strong>Our service providers:</strong> Hetzner Online GmbH (relay and website hosting, Germany), Cloudflare, Inc. (the page that returns you to Olympus after you sign in to Dropbox) and our email service provider (support email).</li>
         <li><strong>Download hosts:</strong> Hugging Face, GitHub, the Python Package Index, the npm registry and, if you use those features, the Tor Project and Go's module proxy see your computer's IP address when it downloads models and tools (see <a href="#third-parties">Third parties and recipients</a>).</li>
+        <li id="update-check"><strong>Update check:</strong> on a Mac or Omarchy computer, about once a day, Olympus checks olympusplugin.ai for a new version by downloading the public install script. The check sends no identifiers, cookies or query string; like any request to our website, it reaches our server from your computer's IP address. It is skipped when your computer uses a proxy, and <code>OLYMPUS_UPDATE_CHECK=off</code> turns it off.</li>
         <li><strong>Authorities</strong>, where the law requires, limited to information we hold.</li>
       </ul>
 
@@ -198,6 +199,7 @@
 
       <h3>Our website</h3>
       <p>Our website, olympusplugin.ai, uses no cookies, analytics or trackers, loads nothing from other sites, and is configured with access logging off.</p>
+      <p>On a Mac or Omarchy computer, Olympus also checks olympusplugin.ai about once a day for a new version, by downloading the public install script. That check sends no identifiers, cookies or query string; our server sees your computer's IP address, as with any request to the website. The check is skipped when your computer uses a proxy; set <code>OLYMPUS_UPDATE_CHECK=off</code> to turn it off.</p>
 
       <h2 id="purposes">Why we process data</h2>
       <ul>
