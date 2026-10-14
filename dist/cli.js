@@ -16370,7 +16370,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         expire(at);
         const existing = db.query("SELECT * FROM waiting_questions WHERE dedupe_key = ?").get(dedupeKey);
         let ref;
-        if (existing?.result) {
+        if (existing?.result && JSON.parse(existing.result).status === "answered") {
           db.query("UPDATE waiting_questions SET asked_at = ? WHERE id = ?").run(at, existing.id);
           return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
         }
@@ -16481,6 +16481,9 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         return true;
       }).immediate();
     },
+    refundAutoAnswer(ref, reservedAt) {
+      db.query("UPDATE auto_answer_budgets SET attempts = MAX(0, attempts - 1) WHERE connection_id = ? AND started_at <= ?").run(ref.connectionId, reservedAt);
+    },
     saveAnswer(ref, result, sent) {
       const serialized = JSON.stringify(result);
       if (utf8Length(serialized) + utf8Length(sent ?? "") > WAITING_QUESTION_LIMITS.answerBytes)
@@ -16512,10 +16515,11 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         }
         let count = rows.length - removed.size;
         let bytes = rows.filter((row) => !removed.has(row.id)).reduce((sum, row) => sum + row.bytes + RECORD_OVERHEAD_BYTES, 0);
+        const newcomer = !rows.some((row) => row.connection_id === ref.connectionId && row.id !== ref.id);
         for (const row of [...rows].reverse()) {
           if (count <= WAITING_QUESTION_LIMITS.answeredTotal && bytes <= WAITING_QUESTION_LIMITS.answeredBytes)
             break;
-          if (row.connection_id !== ref.connectionId || removed.has(row.id))
+          if (!newcomer && row.connection_id !== ref.connectionId || removed.has(row.id))
             continue;
           remove(row.id);
           count--;
@@ -30017,7 +30021,7 @@ function createConnectorStoreContentProvider(options) {
         return false;
       if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
         return false;
-      return store.contentServedNow(localItemId);
+      return store.contentServedNow(localItemId, request.throwOnUnavailable);
     },
     async fetchLocalContent(request) {
       if (request.trustDomain !== store.trustDomain) {
@@ -32255,7 +32259,7 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf) {
+    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false) {
       if (rows.length === 0)
         return [];
       let copies;
@@ -32264,7 +32268,9 @@ var init_local_index = __esm(() => {
         if (!ledger || !ledger.corpusHasCopies(this.corpusId))
           return [...rows];
         copies = ledger.copiesForMany(rows.map(identityOf));
-      } catch {
+      } catch (error) {
+        if (throwOnUnavailable)
+          throw error;
         return [];
       }
       return rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row)));
@@ -36925,7 +36931,7 @@ var init_local_index = __esm(() => {
         return false;
       }
     }
-    contentServedNow(localItemId) {
+    contentServedNow(localItemId, throwOnUnavailable = false) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
       FROM items WHERE local_item_id = ? AND tombstoned = 0
@@ -36949,7 +36955,7 @@ var init_local_index = __esm(() => {
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       };
-      return this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+      return this.tierVisibleRows([identity], (entry) => entry, () => "content", throwOnUnavailable).length > 0;
     }
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
@@ -108433,6 +108439,7 @@ function createBuiltInPrivateAnswerModel(options) {
           };
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
+            observe?.modelStarting?.();
             return model.complete(modelRequest);
           });
         }
@@ -108944,7 +108951,8 @@ async function answerOnThisComputer(input, options) {
     result = await options.model.answerPrivately(question, candidates, input.signal, {
       evidence: (stats) => {
         used = stats.used;
-      }
+      },
+      ...input.onModelCall ? { modelStarting: input.onModelCall } : {}
     }, { detail: input.detail === "full" ? "full" : "summary" });
   } catch (error2) {
     if (error2 instanceof NoPrivateEvidenceError)
@@ -109012,7 +109020,7 @@ async function checkLocalEvidenceItems(input) {
       if (!provider)
         return false;
       if (typeof provider.contentServable === "function") {
-        return provider.contentServable({ provenance, trustDomain }) === true;
+        return provider.contentServable({ provenance, trustDomain, throwOnUnavailable: input.throwOnUnavailable === true }) === true;
       }
       const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
       if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
@@ -109252,9 +109260,16 @@ function createLocalPrivateAnswers(options) {
             break;
           if (q.path === "anonymous" || q.path === "venice" || q.hasResult || q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
             continue;
+          let modelCalled = false;
           if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q)))
             continue;
-          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
+          const reservedAt = now();
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => {
+            modelCalled = true;
+          } }, true);
+          if (result.status === "no_model" || result.status === "model_downloading" || result.status === "failed" && !modelCalled) {
+            currentStore.refundAutoAnswer?.(refOf(q), reservedAt);
+          }
           if (!current2(q))
             continue;
           if (result.status === "answered" && await eligible(result.read) === "eligible" || result.status === "not_found") {

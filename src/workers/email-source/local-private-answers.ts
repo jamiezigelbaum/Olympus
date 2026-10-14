@@ -292,8 +292,13 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
           if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
           if (q.path === 'anonymous' || q.path === 'venice' || q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
+          let modelCalled = false;
           if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) continue;
-          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true);
+          const reservedAt = now();
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => { modelCalled = true; } }, true);
+          if (result.status === 'no_model' || result.status === 'model_downloading' || (result.status === 'failed' && !modelCalled)) {
+            currentStore.refundAutoAnswer?.(refOf(q), reservedAt);
+          }
           if (!current(q)) continue;
           if ((result.status === 'answered' && await eligible(result.read) === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;

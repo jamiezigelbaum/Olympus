@@ -96,6 +96,8 @@ export interface LocalAnswerRequest {
   signal?: AbortSignal;
   /** Owner inbox generation; checked at a remote dispatch, never accepted from the wire. */
   stillAuthorized?: () => boolean;
+  /** Marks the start of synthesis so pre-model failures do not spend the inbox budget. */
+  onModelCall?: () => void;
 }
 
 export interface LocalAnswerOptions {
@@ -191,6 +193,7 @@ export async function answerOnThisComputer(
       evidence: (stats) => {
         used = stats.used;
       },
+      ...(input.onModelCall ? { modelStarting: input.onModelCall } : {}),
     }, { detail: input.detail === 'full' ? 'full' : 'summary' });
   } catch (error) {
     if (error instanceof NoPrivateEvidenceError) return { status: 'failed' };
@@ -274,11 +277,11 @@ export async function checkLocalEvidenceItems(input: {
       if (!corpusId || !provenance?.sourceItem?.localItemId || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain)) return false;
       if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain) return false;
       const provider = lanes.contentProviders[corpusId] as
-        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }) => boolean })
+        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain; throwOnUnavailable?: boolean }) => boolean })
         | undefined;
       if (!provider) return false;
       if (typeof provider.contentServable === 'function') {
-        return provider.contentServable({ provenance, trustDomain }) === true;
+        return provider.contentServable({ provenance, trustDomain, throwOnUnavailable: input.throwOnUnavailable === true }) === true;
       }
       const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
       if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0) return false;

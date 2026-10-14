@@ -20899,7 +20899,7 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf) {
+    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false) {
       if (rows.length === 0)
         return [];
       let copies;
@@ -20908,7 +20908,9 @@ var init_local_index = __esm(() => {
         if (!ledger || !ledger.corpusHasCopies(this.corpusId))
           return [...rows];
         copies = ledger.copiesForMany(rows.map(identityOf));
-      } catch {
+      } catch (error) {
+        if (throwOnUnavailable)
+          throw error;
         return [];
       }
       return rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row)));
@@ -25569,7 +25571,7 @@ var init_local_index = __esm(() => {
         return false;
       }
     }
-    contentServedNow(localItemId) {
+    contentServedNow(localItemId, throwOnUnavailable = false) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
       FROM items WHERE local_item_id = ? AND tombstoned = 0
@@ -25593,7 +25595,7 @@ var init_local_index = __esm(() => {
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       };
-      return this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+      return this.tierVisibleRows([identity], (entry) => entry, () => "content", throwOnUnavailable).length > 0;
     }
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
