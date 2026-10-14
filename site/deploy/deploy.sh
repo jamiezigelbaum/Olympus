@@ -60,6 +60,14 @@ if ! bun "$SITE_DIR/../scripts/publish-release-to-site.ts" --check; then
   echo "Refusing to publish: run bun scripts/publish-release-to-site.ts first." >&2
   exit 1
 fi
+# The Linux installer is a build product too (gitignored): when a page offers
+# it, it must be here and check out, or --delete would leave every Omarchy
+# install command a 404.
+if grep -rqF '/install-linux.sh' --include='*.html' "$SITE_DIR" &&
+   ! bun "$SITE_DIR/../scripts/publish-release-to-site.ts" --linux --check; then
+  echo "Refusing to publish: the site offers install-linux.sh; run bun scripts/publish-release-to-site.ts --linux --artifact <artifact> first." >&2
+  exit 1
+fi
 
 SSH_CMD="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes"
 echo "Publishing $SITE_DIR to $TARGET:$REMOTE_DIR"
