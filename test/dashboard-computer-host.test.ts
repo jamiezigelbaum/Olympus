@@ -983,3 +983,14 @@ describe('the computer\'s Needs you line for waiting private questions', () => {
     }
   });
 });
+
+
+test('the computer names missing chosen folders; ChatGPT never renders computer-only paths', async () => {
+  const source = { id: 'dropbox.files', label: 'Dropbox', group: 'cloud' as const, status: 'Needs you' as const, progress: { stage: 'listing' as const, unit: 'files' as const, done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_root_missing' as any } };
+  const meta = { missingFolders: [{ sourceId: 'dropbox.files', paths: ['/Gone', '/Also gone'] }] };
+  const computer = await onHost(COMPUTER, model({ sources: [source] }), meta);
+  expect(computer.win.document.querySelector('.stall-line')!.textContent).toBe('A folder you chose is missing: /Gone, /Also gone');
+  const remote = await onHost(undefined, model({ sources: [source] }), meta);
+  expect(remote.win.document.querySelector('.stall-line')!.textContent).toBe('A folder you chose is missing');
+  expect(remote.win.document.body.textContent).not.toContain('/Gone');
+});

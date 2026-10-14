@@ -19,6 +19,8 @@ import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
+export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
+
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
 
 /** Section order on the home page: attention first, dormant last. */
@@ -414,6 +416,7 @@ export function dashboardAttentionLine(
     default:
       break;
   }
+  if (source.schedule?.degraded_reason === 'scope_root_missing' || (source.schedule?.missing_folders?.length ?? 0) > 0) return DASHBOARD_MISSING_FOLDER;
   // "Paused" is said only of a real pause — Olympus parked the lane on a budget
   // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
   // a failing task is stated as itself.
@@ -1586,6 +1589,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   stalledReasons: {
     waiting_for_credentials: 'Paused: Olympus needs you to sign in to {source} again',
     scope_pending: 'Paused until you choose folders',
+    scope_root_missing: DASHBOARD_MISSING_FOLDER,
     provider_unavailable: 'Paused: {source} isn\'t responding; Olympus will retry',
     model_downloading: 'Waiting for the search model to finish downloading',
   },

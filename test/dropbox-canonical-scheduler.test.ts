@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { OlympusConfig } from '../src/core/config.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { DROPBOX_EMBED_MAX_CHUNKS_PER_PASS, createCanonicalDropboxSchedulerSource } from '../src/workers/source-scheduler.ts';
-import { SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
+import { SourceScheduler, SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
 import type { DropboxProviderStoreSyncHandler } from '../src/workers/dropbox-files/index.ts';
 import type {
   ExtractionPlanRequest,
@@ -280,3 +280,46 @@ function schedulerConfig(): OlympusConfig {
     },
   } as OlympusConfig;
 }
+
+
+test('a missing root takes the daily lane, names its chosen path, and leaves other scopes syncing', async () => {
+  let now = new Date('2026-10-14T08:00:00Z');
+  let restored = false;
+  const stateStore = new (await import('../src/workers/source-scheduler-state.ts')).LocalSourceSchedulerStateStore(':memory:');
+  const calls: string[] = [];
+  const policy = defaultDropboxIngestionPolicy();
+  policy.roots = ['/Gone', '/Here'].map(path => ({ path, approved_scope_key: `dropbox.personal:${path}`, default_action: 'metadata_only' as const }));
+  const client = new (await import('../src/workers/dropbox-files/provider-client.ts')).DropboxApiMetadataClient({ token: 'test', fetch: async () => restored ? Response.json({ entries: [], cursor: 'restored', has_more: false }) : new Response(JSON.stringify({ error: { '.tag': 'path', path: { '.tag': 'not_found' } } }), { status: 409 }) });
+  const sync = { ...stubProviderSync(), async pull(request: any) {
+    calls.push(request.approved_scope_key);
+    if (request.approved_scope_key.endsWith('/Gone')) await client.listFolder({ path: '/Gone', recursive: true, limit: 10 });
+    return stubProviderSync().pull(request);
+  } } as DropboxProviderStoreSyncHandler;
+  const source = createCanonicalDropboxSchedulerSource({ policy, config: schedulerConfig(), providerSync: sync, store: { lastCompletedSyncRun: () => undefined } as unknown as LocalConnectorStore })!;
+  const options = { enabled: true, tickMs: 1000, errorBackoffMs: 5000, maxTransientRetries: 2, now: () => now, sources: [source], stateStore };
+  let scheduler = new SourceScheduler(options);
+  try {
+    const status = await scheduler.runDueTasks();
+    const missing = status.sources[0]!.tasks.find(t => t.last_error_kind === 'scope_root_missing')!;
+    expect(missing).toBeDefined();
+    expect(missing.missing_scope_path).toBe('/Gone');
+    expect(missing.effective_interval_seconds).toBe(86400);
+    expect(missing.next_run_at).toBe('2026-10-15T08:00:00.000Z');
+    expect(calls).toEqual(['dropbox.personal:/Gone', 'dropbox.personal:/Here']);
+    now = new Date('2026-10-14T08:06:00Z');
+    await scheduler.runDueTasks();
+    expect(calls.filter(c => c.endsWith('/Gone'))).toHaveLength(1);
+    expect(calls.filter(c => c.endsWith('/Here'))).toHaveLength(2);
+    scheduler.stop();
+    scheduler = new SourceScheduler(options);
+    await scheduler.runDueTasks();
+    expect(calls.filter(c => c.endsWith('/Gone'))).toHaveLength(1);
+    expect(scheduler.status().sources[0]!.tasks[0]!.missing_scope_path).toBe('/Gone');
+    restored = true;
+    now = new Date('2026-10-15T08:00:00Z');
+    const recovered = await scheduler.runDueTasks();
+    expect(recovered.sources[0]!.tasks[0]!.missing_scope_path).toBeUndefined();
+    expect(recovered.sources[0]!.tasks[0]!.effective_interval_seconds).toBe(300);
+    expect(calls.filter(c => c.endsWith('/Gone'))).toHaveLength(2);
+  } finally { scheduler.stop(); stateStore.close(); }
+});

@@ -1289,6 +1289,11 @@ export function chatgptDashboardClient(
   function stalledSentence(progress: Any, source: Any): string {
     if (!progress.stalled || !progress.stalledReason) return '';
     const words = (P.stalledReasons as Any)[progress.stalledReason];
+    if (progress.stalledReason === 'scope_root_missing' && onComputer()) {
+      const missing = state.computerMeta?.missingFolders;
+      const paths = Array.isArray(missing) ? missing.find((entry: Any) => entry.sourceId === source.id)?.paths : undefined;
+      if (Array.isArray(paths) && paths.length) return String(words) + ': ' + paths.filter((path: Any) => typeof path === 'string').join(', ');
+    }
     return typeof words === 'string' ? fill(words, { source: String(source.label || '') }) : '';
   }
 
