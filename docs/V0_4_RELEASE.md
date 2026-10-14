@@ -162,6 +162,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-14 — Omarchy qualified for 1.0.0; Linux publication unblocked.**
+  Owner decision. The owner's Omarchy x64 laptop (glibc 2.44, SSE4.2) ran the
+  full 1.0.0 release test on the pinned Bun 1.3.14 executable, under the real
+  systemd user service and Hyprland desktop, so `config/linux-runtime-pins.json`
+  records `qualified-omarchy` and `install-linux.sh` is published with the
+  release. Second-UID isolation and logout/reboot were not exercised separately;
+  the owner accepted that for 1.0.0, and 1.0.1 keeps the owner-bridge port bound
+  across restarts and revokes its sessions on logout. Supersedes "public Linux
+  publication remains blocked pending qualification" in the 2026-10-12 entries.
+
 - **2026-10-13 — Grok Bot is in 1.0.** Owner decision, superseding the
   Grok Bot part of the 2026-10-12 Claude and Grok decision below. Grok Bot
   needs no connector of its own: once Olympus is connected on grok.com, it
