@@ -62,9 +62,10 @@
         });
         // OLY.ready waits for the fonts, then the scene registers its timeline. The home page drives it from its own
         // clock (seek, never play), so a frame the browser throttles can't stall a scene halfway.
+        var tries = 0;
         (function wait() {
           var tl = window.__timelines[id];
-          if (!tl) return setTimeout(wait, 16);
+          if (!tl) return ++tries < 1900 ? setTimeout(wait, 16) : undefined;   // a scene that never registers: give up after ~30 s
           tl.pause();
 
           // In the film each page enters as part of the cut from the page before (rising, sliding in from the
