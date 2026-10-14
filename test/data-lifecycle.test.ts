@@ -199,6 +199,7 @@ describe('Olympus data lifecycle', () => {
         },
         secretRef: 'env:DROPBOX_TOKEN',
       }));
+      mkdirSync(join(homeDir, '.olympus'), { recursive: true });
       writeFileSync(join(homeDir, '.olympus', 'config.json'), JSON.stringify({
         worker: { authToken: 'worker-secret' },
         gcp: {
@@ -209,7 +210,7 @@ describe('Olympus data lifecycle', () => {
           },
         },
       }));
-      writeFileSync(join(homeDir, '.olympus', 'sovereignty.json'), JSON.stringify({
+      writeFileSync(join(homeDir, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json'), JSON.stringify({
         schemaVersion: 1,
         modelProfiles: {
           private: {

@@ -33,7 +33,8 @@
   },
   "olympus": {
     "linuxApprovalTransport": "owner-unix-socket-v1",
-    "linuxStateCompatibility": 1
+    "linuxStateCompatibility": 1,
+    "linuxSettingsLayout": "receipt-v1"
   },
   "scripts": {
     "prepack": "bun scripts/standard-pack-guard.ts",

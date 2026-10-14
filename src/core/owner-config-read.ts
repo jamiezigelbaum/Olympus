@@ -13,7 +13,33 @@
 // The caller decides what a refusal means; the classifiers treat it as
 // "hold everything pending", never as "no policy".
 
-import { readFileSync, statSync, type Stats } from 'node:fs';
+import { readFileSync, statSync, lstatSync, type Stats } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { LEGACY_LINUX_POLICY_FILES, resolveLinuxEngineLayout, readLinuxEngineReceipt } from './linux-engine-layout.ts';
+
+/** Only receipt-owned or explicitly standalone processes use the install layout.
+ * Unreceipted CLI and OpenClaw policies keep their existing roots; sovereignty
+ * already uses XDG, so its writer, loader and dispatch guard must agree. */
+export function linuxOwnerConfigPath(name: string, env: Record<string, string | undefined> = process.env): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const layout = resolveLinuxEngineLayout(env);
+  const owned = !!readLinuxEngineReceipt(layout.receiptPath) || env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1';
+  if (!owned && name !== 'sovereignty.json') return join(layout.home, '.olympus', name);
+  if ((owned ? [name, ...LEGACY_LINUX_POLICY_FILES] : [name]).some(file => lstatSync(join(layout.home, '.olympus', file), { throwIfNoEntry: false }))) {
+    throw new Error('Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.');
+  }
+  return join(layout.configDir, name);
+}
+/** Owner policy files share the installed Linux layout; Mac keeps its historical root. */
+export function defaultOwnerConfigPath(name: string, env: Record<string, string | undefined> = process.env): string {
+  return linuxOwnerConfigPath(name, env) ?? join(homedir(), '.olympus', name);
+}
+
+/** Sovereignty has one default for CLI publication, loading and endpoint guards. */
+export function defaultSovereigntyConfigPath(env: Record<string, string | undefined> = process.env): string {
+  return linuxOwnerConfigPath('sovereignty.json', env) ?? join(env.HOME?.trim() || homedir(), '.olympus', 'sovereignty.json');
+}
 
 export type OwnerConfigRead =
   | { status: 'missing' }

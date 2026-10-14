@@ -47,6 +47,7 @@ const homes: string[] = [];
 
 function tempHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'olympus-consult-settings-'));
+  if (process.platform === 'linux') mkdirSync(join(home, '.config'), { mode: 0o700 });
   homes.push(home);
   return home;
 }

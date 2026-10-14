@@ -750,8 +750,8 @@ describe('evidence adapters refuse a zkAPI daemon endpoint where they dispatch',
 
   test('the guard reads the owner\'s policy itself: no validation needed first, and an unreadable policy fails closed', async () => {
     const [port, otherPort] = freePorts(2) as [number, number];
-    mkdirSync(join(root, '.olympus'), { recursive: true });
-    const policyPath = join(root, '.olympus', 'sovereignty.json');
+    mkdirSync(join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true });
+    const policyPath = join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
     const config = baseConfig();
     config.modelProfiles.zk = zkapiProfile({ baseUrl: `http://127.0.0.1:${port}/v1` });
     writeFileSync(policyPath, JSON.stringify(config));
@@ -779,7 +779,7 @@ describe('evidence adapters refuse a zkAPI daemon endpoint where they dispatch',
   });
 
   test('policy refresh fails closed on every read error, never caches a failure, and sees same-size same-time replacements', async () => {
-    const dir = join(root, '.olympus');
+    const dir = join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus');
     mkdirSync(dir, { recursive: true });
     const policyPath = join(dir, 'sovereignty.json');
     const localModel = `http://127.0.0.1:${freePort()}/v1/chat/completions`;
@@ -833,14 +833,14 @@ describe('evidence adapters refuse a zkAPI daemon endpoint where they dispatch',
       homeDir: root,
       envPath: join(root, 'worker.env'),
     })).rejects.toMatchObject({ name: 'ZkapiDaemonEndpointRefusal', reason: 'daemon_port', suggestion: expect.stringContaining('zkAPI daemon') });
-    mkdirSync(join(root, '.olympus'), { recursive: true });
-    writeFileSync(join(root, '.olympus', 'sovereignty.json'), '{ broken');
+    mkdirSync(join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true });
+    writeFileSync(join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json'), '{ broken');
     try {
       expect(() => assertNotZkapiDaemonEndpoint('http://127.0.0.1:28090/v1', 'probe')).toThrow(
-        expect.objectContaining({ suggestion: expect.stringContaining(join(root, '.olympus', 'sovereignty.json')) }),
+        expect.objectContaining({ suggestion: expect.stringContaining(join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json')) }),
       );
     } finally {
-      rmSync(join(root, '.olympus', 'sovereignty.json'));
+      rmSync(join(root, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json'));
     }
   });
 

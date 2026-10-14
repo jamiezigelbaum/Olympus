@@ -1,3 +1,4 @@
+import { defaultSovereigntyConfigPath } from './owner-config-read.ts';
 // Owner-declared settings for the zkAPI route used by anonymous answers
 // (design: docs/design/frontier-consult-lane.md, track Z).
 //
@@ -13,8 +14,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { OperationError } from './operation-error.ts';
 
 /** `zkapi-clientd` listens here unless its owner chose another loopback port. */
@@ -289,7 +288,7 @@ export function zkapiDaemonPortSet(): ReadonlySet<number> {
 export function sovereigntyPolicyPath(env: Record<string, string | undefined> = process.env): string {
   return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()
-    || join(env.HOME?.trim() || homedir(), '.olympus', 'sovereignty.json');
+    || defaultSovereigntyConfigPath(env);
 }
 
 /** The policy file that currently cannot be read, if any. */
@@ -304,7 +303,15 @@ export function unreadableSovereigntyPolicy(): string | undefined {
  * status-change times (a rewrite always moves the status-change time).
  */
 export function refreshZkapiPortsFromPolicyFile(env: Record<string, string | undefined> = process.env): void {
-  const path = sovereigntyPolicyPath(env);
+  let path: string;
+  try { path = sovereigntyPolicyPath(env); }
+  catch {
+    // Receipt discovery or migration refusal cannot become an absent policy.
+    // Keep endpoint refusals typed, and retry layout discovery on every use.
+    policyFile.seen = undefined;
+    policyFile.unreadable = 'the sovereignty settings (layout discovery refused)';
+    return;
+  }
   let stamp: string;
   try {
     const stat = statSync(path);

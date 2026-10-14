@@ -153,6 +153,54 @@ export function linuxEngineEnvironment(layout: LinuxEngineLayout): Record<string
   return { HOME: layout.home, XDG_CONFIG_HOME: layout.configHome, XDG_DATA_HOME: layout.dataHome, XDG_STATE_HOME: layout.stateHome,
     XDG_CACHE_HOME: layout.cacheHome, XDG_RUNTIME_DIR: layout.runtimeHome, OLYMPUS_SOVEREIGNTY_CONFIG: layout.sovereigntyPath };
 }
+export const LEGACY_LINUX_POLICY_FILES = ['privacy.json', 'tier-rules.json', 'consult.json',
+  'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json'] as const;
+/** The language-pack installer uses manifest.json.<positive PID>.tmp. */
+export function legacyLinuxManifestTemporaryPid(name: string): number | undefined {
+  const match = name.match(/^consult\/vocabulary\/manifest[.]json[.]([1-9][0-9]*)[.]tmp$/);
+  if (!match) return undefined;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid <= 2147483647 ? pid : undefined;
+}
+/** Files the pre-XDG Linux writers could create. Never adopt an arbitrary tree. */
+export function isLegacyLinuxSetting(name: string): boolean {
+  if (legacyLinuxManifestTemporaryPid(name) !== undefined) return true;
+  const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
+  if (temporary) return isLegacyLinuxSetting(temporary[1]!);
+  return ['privacy.json', 'tier-rules.json', 'consult.json', 'consult.json.lock', 'consult.json.lock.commit', 'sovereignty.json',
+    'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json',
+    'consult/vocabulary/manifest.json', 'consult/vocabulary/de-hunspell.txt.gz', 'consult/vocabulary/it-hunspell.txt.gz'].includes(name)
+    || /^consult\/vocabulary\/[a-z]{2}(?:[.]txt[.]gz|[.]LICENSE[.]txt)$/.test(name)
+    || /^pending-oauth\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.-]+[.]json(?:[.]request[.][0-9]+[.][0-9]+[.]json)?$/.test(name)
+    || /^logs\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.:-]+[.][0-9TZ-]+[.]log$/.test(name);
+}
+export const LEGACY_LINUX_SETTINGS_DIRECTORIES = ['sources', 'consult', 'consult/vocabulary', 'pending-oauth', 'logs'] as const;
+/** Read-only inventory. Receipt custody is required even for an empty legacy directory. */
+export function legacyLinuxSettings(layout: LinuxEngineLayout): string[] {
+  const root = join(layout.home, '.olympus');
+  if (!stat(root)) return [];
+  const receipt = readLinuxEngineReceipt(layout.receiptPath);
+  if (receipt?.installationState !== 'installed' || !linuxEngineLayoutsEqual(receipt.layout, layout)) {
+    throw new Error(`Existing Olympus data or competing custodian: ${root}. Explicitly back up and move it before a fresh install. Nothing was changed.`);
+  }
+  const files: string[] = [];
+  const visit = (directory: string) => {
+    const path = join(root, directory); assertLinuxManagedPath(path, process.getuid!(), 'directory');
+    if ((lstatSync(path).mode & 0o077) !== 0) throw new Error(`${path} must be private (0700).`);
+    for (const entry of readdirSync(path).sort()) {
+      const name = directory ? `${directory}/${entry}` : entry;
+      const child = join(root, name), info = lstatSync(child);
+      if (info.isDirectory() && (LEGACY_LINUX_SETTINGS_DIRECTORIES as readonly string[]).includes(name)) visit(name);
+      else {
+        if (!isLegacyLinuxSetting(name)) throw new Error(`Unrecognized legacy Olympus data: ${child}. Nothing was changed.`);
+        assertLinuxManagedPath(child);
+        if (info.nlink !== 1) throw new Error(`${child} must be singly linked.`);
+        files.push(name);
+      }
+    }
+  };
+  visit(''); return files;
+}
 export function preflightLinuxEngineLayout(layout: LinuxEngineLayout, options: { uid?: number; fresh?: boolean } = {}): void {
   const uid = options.uid ?? process.getuid!();
   for (const path of [layout.configDir, layout.dataDir, layout.stateDir, layout.cacheDir, layout.packageDir]) {
@@ -189,6 +237,7 @@ export function preflightLinuxEngineLayout(layout: LinuxEngineLayout, options: {
       if (!info?.isSymbolicLink() || info.uid !== uid) return false;
       try { assertLinuxManagedPath(dirname(p), uid, 'directory'); return realpathSync(p) === layout.unitPath; } catch { return false; }
     };
+    if (owned && stat(join(layout.home, '.olympus'))) { legacyLinuxSettings(layout); managed.add(join(layout.home, '.olympus')); }
     const conflicts = [...new Set(candidates)].filter(p => stat(p) && !(owned && managed.has(p)) && !ownedRegistration(p) && !recoverableEmptyDirectory(p));
     if (conflicts.length) throw new Error(`Existing Olympus data or competing custodian: ${conflicts.join(', ')}. Keep using the existing installation, or stop its custodian and explicitly back up and move the listed Olympus-owned data aside before retrying a fresh install. Nothing was changed.`);
   }
