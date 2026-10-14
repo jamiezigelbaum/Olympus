@@ -687,11 +687,12 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    for Private answers and embeddings, on that provider's word rather than on
 >    encryption.
 >
-> 4. **Don't ingest Private data** (`no-sensitive`) — Olympus
->    keeps its hands off Private data entirely: it is not imported, not
->    indexed, and no model — local, private cloud, or ordinary cloud —
->    sees it. When a question touches health, finances, or legal matters,
->    you get an honest "that's not indexed" instead of an answer. Requires:
+> 4. **Private kept local, keyword search only** (`no-sensitive`) — Olympus
+>    stores Private items on this computer and finds them there by keyword,
+>    but never embeds them, and no answer lane (local, private cloud or
+>    ordinary cloud) is set up for them. When a question touches health,
+>    finances, or legal matters, the answer says Private sources were not
+>    searched instead of answering from them. Requires:
 >    nothing; Personal content is indexed by the model built
 >    into Olympus.
 >    Trade-off: a real hole in what your assistant can do, in exchange for
@@ -747,10 +748,10 @@ not ask for.
 
 **Reading the summary: an honest gap looks like a leak until you know the
 shape.** On `no-sensitive` the summary and later `olympus doctor` output
-still show the Private corpora as configured with nothing in them, and the
+still show the Private corpora as configured with no search vectors in them, and the
 sovereignty policy shows `secure_local` with `"mode": "disabled"` and an
 empty pool. That is `no-sensitive` working: the tier exists so Olympus can
-answer "that's not indexed" honestly, and it is routed nowhere. Do not
+say honestly that Private sources were not searched, and it is routed nowhere. Do not
 report it to the operator as a problem, and do not try to "fix" it by
 adding a lane they did not choose.
 
@@ -1918,8 +1919,8 @@ https://my.telegram.org, then phone/code/2FA entry; it needs Python with
 Telethon. WhatsApp needs Go and a C compiler for the packaged bridge build;
 the command builds into an Olympus cache, never into the managed plugin.
 WhatsApp shows a scannable QR in the private terminal. This guided pairing
-flow treats messaging as Private data; it refuses under Don't ingest Private
-data rather than capturing it outside that policy. Pairing is verified
+flow treats messaging as Private data; it refuses under `no-sensitive`
+(Private kept local) rather than capturing it outside that policy. Pairing is verified
 before the operator approves chat/account capture scope. The command then
 registers the verified session and starts capture through the managed worker.
 
