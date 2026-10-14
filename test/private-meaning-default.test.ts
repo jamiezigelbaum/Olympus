@@ -295,3 +295,12 @@ test('seeded default through worker target wiring gives a Private item a local v
     expect(withLocalPrivateEmbeddingBackfill([source], () => [])[0]).toBe(source);
   } finally { provider.embed = embed; s.close(); }
 });
+
+test('every Private corpus can take local meaning vectors; none is pinned keyword-only by the registry', () => {
+  const secure = createSourceCorpusRegistry().definitions().filter(definition => definition.trustDomain === 'secure_local');
+  expect(secure.map(definition => definition.corpusId)).toContain('secure_local.drive.docs');
+  for (const definition of secure) {
+    expect({ corpusId: definition.corpusId, lexicalOnly: definition.activationMode === 'lexical_only', disabled: definition.embeddingPolicy === 'disabled' })
+      .toEqual({ corpusId: definition.corpusId, lexicalOnly: false, disabled: false });
+  }
+});
