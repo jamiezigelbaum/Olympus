@@ -16,12 +16,14 @@
 import { readFileSync, statSync, lstatSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { LEGACY_LINUX_POLICY_FILES, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { LEGACY_LINUX_POLICY_FILES, resolveLinuxEngineLayout, readLinuxEngineReceipt } from './linux-engine-layout.ts';
 
-/** Never silently drop a hosted/pre-receipt Linux installation's existing policy. */
+/** Only receipt-owned or explicitly standalone processes use the install layout.
+ * Unreceipted CLI and OpenClaw callers keep reading their existing policies. */
 export function linuxOwnerConfigPath(name: string, env: Record<string, string | undefined> = process.env): string | undefined {
   if (process.platform !== 'linux') return undefined;
   const layout = resolveLinuxEngineLayout(env);
+  if(!readLinuxEngineReceipt(layout.receiptPath)&&env.OLYMPUS_ENGINE_HOST!=='1'&&env.OLYMPUS_STANDALONE!=='1')return join(layout.home,'.olympus',name);
   if ([name, ...LEGACY_LINUX_POLICY_FILES].some(file => lstatSync(join(layout.home, '.olympus', file), { throwIfNoEntry: false }))) {
     throw new Error('Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.');
   }
