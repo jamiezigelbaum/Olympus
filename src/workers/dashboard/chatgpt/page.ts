@@ -309,7 +309,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .reason.error{color:var(--danger)}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
-.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+.sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
