@@ -7788,7 +7788,8 @@ function proofPage() {
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
  // header-only worker CSP directives cannot be carried through document.write.
- const documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});
+ // The ticket is spent now, so a worker restart here must wait, not fail.
+ let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
  if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
  if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();

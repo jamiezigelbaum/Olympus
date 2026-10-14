@@ -48,9 +48,13 @@ for (const kind of ['chromium', 'firefox']) {
     const callback = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('OAUTH CALLBACK COMPLETE') });
     try {
       const entry = `http://127.0.0.1:${listener.port}`;
+      // Set to simulate a worker restart right after the ticket is spent.
+      let restartAfterProof = false;
       const establishDashboard = async () => {
         const r = await fetch(entry + '/dashboard/control/session', { unix: socketPath, method: 'POST', headers: { Authorization: `Bearer ${token}`, Origin: entry } } as RequestInit);
-        expect(r.ok).toBe(true); await r.body?.cancel(); return r.headers.getSetCookie();
+        expect(r.ok).toBe(true); await r.body?.cancel();
+        if (restartAfterProof) { restartAfterProof = false; workerReady = false; setTimeout(() => { workerReady = true; }, 1_500); }
+        return r.headers.getSetCookie();
       };
       const hostile = await context.newPage();
       await hostile.goto(entry);
@@ -138,6 +142,9 @@ for (const kind of ['chromium', 'firefox']) {
       // A held listener also retains its ticket-opening rate limit.
       await Bun.sleep(10_001);
       await bridge.openTicket('/dashboard');
+      // The worker restarts after the single-use ticket is spent: the opening
+      // view waits for it and still lands on the dashboard.
+      restartAfterProof = true;
       await fresh.goto(pathToFileURL(ticketPath).href);
       await fresh.waitForURL(bridge.origin + '/dashboard');
       await fresh.waitForFunction(() => document.body.dataset.loaded === 'yes');
