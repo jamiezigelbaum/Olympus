@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 - 2026-10-13
+## 1.0.0 - 2026-10-14
 
 - ChatGPT connection steps now start in Plugins and explain when to turn on Developer mode.
 - Anonymous answers show Add zkAPI before the turn-on switch when zkAPI is not set up; adding it asks you to finish setup without repeating the key step.
@@ -56,6 +56,8 @@
   their Public tier unchanged; Olympus does not rewrite an existing privacy
   policy, and the operator drift check no longer counts that kept tier as
   drift.
+
+- Known issue, fixed in 1.0.1: if an AI app read an item while it was Personal and the check then moves it to Private, an answer already being prepared can still be delivered, and a copy made on your computer stays there (it is never sent anywhere).
 
 ## 1.0.0-rc.6 - 2026-10-12
 

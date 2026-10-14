@@ -64436,10 +64436,10 @@ sudo apparmor_parser -r /etc/apparmor.d/olympus-zkapi-confine
 Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus-zkapi-confine && sudo rm /etc/apparmor.d/olympus-zkapi-confine /usr/local/libexec/olympus/zkapi-confine`;
     for (const p of ["/proc/sys/user/max_user_namespaces", "/proc/sys/kernel/unprivileged_userns_clone"])
       if (sysctls[p]?.trim() === "0")
-        return `${p} is 0. Private answers are unavailable on this computer.`;
-    return "This environment does not allow the required isolated network space. Private answers are unavailable on this computer.";
+        return `${p} is 0. Anonymous answers are unavailable on this computer.`;
+    return "This environment does not allow the required isolated network space. Anonymous answers are unavailable on this computer.";
   }
-  return "The private-answer helper could not establish its protections. Private answers are unavailable on this computer.";
+  return "The private-answer helper could not establish its protections. Anonymous answers are unavailable on this computer.";
 }
 async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
