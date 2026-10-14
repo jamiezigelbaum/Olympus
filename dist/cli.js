@@ -64810,6 +64810,9 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
           handle.childExited = true;
           report();
         } else {
+          if (role === "daemon" && line.includes("zkAPI service stopped unexpectedly; run zkapi-clientd config to check the installation")) {
+            handle.failureReason = "wallet_companion_exited";
+          }
           onLine(line);
         }
         pending = pending.slice(index + 1);
@@ -65719,6 +65722,8 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     if (!exited)
       return;
     const handle = groups.find((group) => group.role === exited.role);
+    if (handle?.failureReason && exited.role === "daemon")
+      exited.reason = handle.failureReason;
     if (handle?.exit?.code !== undefined && exited.code === undefined)
       exited.code = handle.exit.code;
     if (handle?.exit?.signal && !exited.signal)
@@ -66134,6 +66139,9 @@ function zkapiProcessExitMessage(exit) {
   const who = exit.role === "tor" ? "The Tor client" : "The zkAPI daemon";
   const how = exit.signal ? ` (signal ${exit.signal})` : exit.code !== undefined ? ` (exit code ${exit.code})` : "";
   const when = exit.stage && EXIT_STAGE_NAMES[exit.stage] ? ` ${EXIT_STAGE_NAMES[exit.stage]}` : "";
+  if (exit.role === "daemon" && exit.reason === "wallet_companion_exited") {
+    return `The zkAPI wallet companion stopped, causing this session's daemon to exit${how}${when}. Check the zkAPI installation and Tor connection before retrying.`;
+  }
   const outside = exit.signal ? " Something else on this computer stopped it." : "";
   return `${who} of this session stopped unexpectedly${how}${when}.${outside}`;
 }
