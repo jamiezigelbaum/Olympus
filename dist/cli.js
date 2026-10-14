@@ -48349,10 +48349,10 @@ class GoogleGmailSourceConnector {
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    const metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
+    let metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
-    const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
     const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
@@ -48429,7 +48429,7 @@ class GoogleGmailSourceConnector {
       pageToken = page2.nextPageToken;
       const pageTruncated = messagesExamined < listed.length;
       const legDone = !pageToken && !pageTruncated;
-      const enterMetadataLeg = legDone && splitsAtCutoff;
+      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
       const done = legDone && !enterMetadataLeg;
       const promoted = promotedWatermark({
         highWaterMs,
@@ -48454,7 +48454,13 @@ class GoogleGmailSourceConnector {
         ...nextCursor ? { nextCursor } : {},
         done
       };
-      if (done || !pageToken || items.length === 0 && messagesFetched > 0 || pageTruncated)
+      if (done || pageTruncated)
+        break;
+      if (enterMetadataLeg) {
+        metadataLeg = true;
+        query = this.metadataLegQuery(cutoffMs);
+        requestedPageTokens.clear();
+      } else if (!pageToken)
         break;
     }
   }
@@ -72064,7 +72070,7 @@ var init_vocabulary = __esm(() => {
     askLabel: "Ask privately",
     askPlaceholder: "Ask about your private things",
     ask: "Ask",
-    waitingTitle: "Waiting",
+    waitingTitle: "Questions waiting for you",
     waitingIntro: "Agents asked these, and the answer needs your private things. Answer them here.",
     noneWaiting: "Nothing is waiting.",
     olderRemoved: "Older questions were removed.",
@@ -74890,7 +74896,11 @@ function schedulerTaskCounts(scheduler) {
   return output;
 }
 function metadataTraversalCompleteFromSchedulers(schedulers) {
-  const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "sync"));
+  const tasks = schedulers.flatMap((scheduler) => {
+    const sync = scheduler.tasks.filter((task) => task.kind === "sync");
+    const primary = sync.filter((task) => task.metadata_walk_role === "primary");
+    return primary.length > 0 ? primary : sync;
+  });
   if (tasks.length === 0)
     return;
   const walks = [];
@@ -119404,6 +119414,15 @@ var init_theme = __esm(() => {
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
+/* Text can wrap inside the window; intrinsic grid/flex minima must not
+   widen a page for a filename, URL, or diagnostic. */
+body { overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+input, select, textarea { max-width: 100%; min-width: 0; }
+.top { flex-wrap: wrap; }
+.attncard .grow, .card, .kpi, .setrow > *, .rowform { min-width: 0; }
+.btn { max-width: 100%; white-space: normal; }
+
 /* No card around the page: the page is the surface, as wide as a reading
    layout allows, and every row below shares its left and right edges. */
 .frame { max-width: 1120px; margin: 0 auto; }
@@ -119464,7 +119483,7 @@ a.attncard.rowzone .go { color: var(--t3); font-size: var(--fs-body); }
 .hint { color: var(--t3); font-size: var(--fs-caption); }
 /* Two button styles and no third: filled for the row's one main action,
    outlined for everything else. Links are for navigation only. */
-.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: nowrap; }
+.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: normal; }
 .btn:hover { background: var(--panel2); }
 .btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
@@ -119494,8 +119513,8 @@ details.howto > summary { color: var(--link); font-size: var(--fs-caption); curs
 details.howto > summary:hover { text-decoration: underline; }
 details.howto[open] > summary { margin-bottom: 6px; }
 details.howto p { margin: 0 0 6px; }
-.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
-.cards.four { grid-template-columns: repeat(4, 1fr); }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 22px; }
+.cards.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .card .hd { display: flex; gap: 9px; align-items: center; font-weight: 600; font-size: var(--fs-row); }
 .card .ln { color: var(--t3); font-size: var(--fs-caption); margin-top: 6px; }
@@ -119510,7 +119529,7 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
 .bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
-.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .kpi .u { font-size: var(--fs-caption); color: var(--t3); }
 .kpi .n { font-size: var(--fs-section); font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
@@ -119544,13 +119563,13 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .evidence[open] > summary { margin-bottom: 4px; }
 .ok { color: var(--good); }
 .no { color: var(--bad); }
-table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
+table { table-layout: fixed; border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
 /* A not-connected source: one flat list row, like the source rows above it. */
-.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
+.setrow { display: grid; grid-template-columns: 20px minmax(0, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
-.setrow.noblurb { grid-template-columns: 20px 1fr auto; }
+.setrow.noblurb { grid-template-columns: 20px minmax(0, 1fr) auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
 .setrow a.name { text-decoration: none; }
 .setrow a.name:hover { color: var(--link); text-decoration: underline; }
@@ -119601,9 +119620,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 @media (max-width: 700px) {
   body { padding: 0 16px 60px; }
   .page { padding: 20px 0 28px; }
-  .cards, .cards.four { grid-template-columns: 1fr 1fr; }
-  .kpis { grid-template-columns: 1fr 1fr; }
-  .setrow { grid-template-columns: 20px 1fr auto; }
+  .cards, .cards.four { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .kpis { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .setrow { grid-template-columns: 20px minmax(0, 1fr) auto; }
   .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
   .setrow .btn { justify-self: end; width: max-content; }
   /* A row's control and its hint wrap under the reason rather than squeezing
@@ -125324,7 +125343,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .reason.error{color:var(--danger)}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
-.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+.sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
@@ -125755,7 +125774,7 @@ var init_host_page = __esm(() => {
 @media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
 *{box-sizing:border-box}
 html,body{height:100%}
-body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
 .update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
 .update p{margin:0 0 0.5rem}
 .update code{overflow-wrap:anywhere;white-space:pre-wrap}
@@ -125766,7 +125785,7 @@ body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(
 .gate .title{font-weight:600}
 .gate .line{color:var(--muted);font-size:0.875rem}
 .gate .line .btn{margin-right:0.25rem}
-.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:nowrap}
+.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:pre-wrap}
 a.btn{display:inline-flex;align-items:center;text-decoration:none}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
 .btn.plain{background:transparent}
@@ -125780,7 +125799,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
 details{margin-top:0.5rem}
 summary{cursor:pointer;color:var(--muted);font-size:0.875rem}
 form{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem}
-input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:12rem}
+input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:0;max-width:100%}
 .status{color:var(--muted);font-size:0.875rem}
 `;
   COMPUTER_HOST_PAGE_CSP = [
@@ -126531,7 +126550,7 @@ var LOCAL_PAGE_CSS = `
 .outside .ohsect-sum:empty { display: none; }
 .outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
 .outside .ohsect-body { padding: 0 0 16px 18px; }
-.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0 16px; margin: 0 0 8px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 0 16px; margin: 0 0 8px; }
 .outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
 .outside .ohform.ohinline { margin: 0 0 12px; }
 .outside .ohform .keyfield { width: 100%; max-width: 220px; }
@@ -126734,6 +126753,261 @@ var init_local = __esm(() => {
   W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 });
 
+// src/workers/dashboard/chatgpt/markdown.ts
+function chatgptMarkdownRender(doc2, container, text3) {
+  const lines = text3.replace(/\r\n?/g, `
+`).split(`
+`);
+  let i = 0;
+  const node = (tag, parent, cls) => {
+    const made = doc2.createElement(tag);
+    if (cls)
+      made.className = cls;
+    parent.appendChild(made);
+    return made;
+  };
+  const isBlank = (line) => line === undefined || !line.trim();
+  const fence = (line) => {
+    const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    return m ? m[1] : null;
+  };
+  const tableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
+  const tableRule = (line) => /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line) || /^\s*\|(\s*:?-{3,}:?\s*\|)+\s*$/.test(line);
+  const listItem = (line) => {
+    const m = /^(\s*)(?:([-*+])|(\d{1,3}[.)]))\s+(.*)$/.exec(line);
+    if (!m)
+      return null;
+    return { indent: m[1].length, ordered: m[3] !== undefined, text: m[4] };
+  };
+  const cells = (line) => {
+    const trimmed2 = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+    const out = [];
+    let cur = "";
+    for (let k = 0;k < trimmed2.length; k++) {
+      const ch = trimmed2[k];
+      if (ch === "\\" && trimmed2[k + 1] === "|") {
+        cur += "|";
+        k++;
+        continue;
+      }
+      if (ch === "|") {
+        out.push(cur.trim());
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    out.push(cur.trim());
+    return out;
+  };
+  const inline = (parent, src) => {
+    let buf = "";
+    const flush = () => {
+      if (buf) {
+        parent.appendChild(doc2.createTextNode(buf));
+        buf = "";
+      }
+    };
+    let k = 0;
+    while (k < src.length) {
+      const ch = src[k];
+      if (ch === "\\" && k + 1 < src.length && /[\\`*_[\]()#+\-.!|>~]/.test(src[k + 1])) {
+        buf += src[k + 1];
+        k += 2;
+        continue;
+      }
+      if (ch === "`") {
+        const run = /^`+/.exec(src.slice(k))[0];
+        const close = src.indexOf(run, k + run.length);
+        if (close > 0) {
+          flush();
+          const span = src.slice(k + run.length, close);
+          node("code", parent).textContent = span.length > 2 && span[0] === " " && span[span.length - 1] === " " ? span.slice(1, -1) : span;
+          k = close + run.length;
+          continue;
+        }
+      }
+      if (ch === "[") {
+        const m = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/.exec(src.slice(k));
+        if (m) {
+          flush();
+          const a = node("a", parent);
+          a.setAttribute("href", m[2]);
+          a.setAttribute("target", "_blank");
+          a.setAttribute("rel", "noopener noreferrer");
+          inline(a, m[1]);
+          k += m[0].length;
+          continue;
+        }
+      }
+      if (ch === "*" || ch === "_") {
+        const double = src[k + 1] === ch;
+        const mark = double ? ch + ch : ch;
+        const rest = src.slice(k + mark.length);
+        if (rest && !/^\s/.test(rest)) {
+          let close = -1;
+          let from = 0;
+          for (;; ) {
+            const at = rest.indexOf(mark, from);
+            if (at < 0)
+              break;
+            if (at > 0 && !/\s/.test(rest[at - 1]) && (ch === "*" || !/\w/.test(rest[at + mark.length] || ""))) {
+              close = at;
+              break;
+            }
+            from = at + 1;
+          }
+          if (close > 0) {
+            flush();
+            inline(node(double ? "strong" : "em", parent), rest.slice(0, close));
+            k += mark.length + close + mark.length;
+            continue;
+          }
+        }
+      }
+      buf += ch;
+      k++;
+    }
+    flush();
+  };
+  const blocks = (parent, stop) => {
+    let para = [];
+    const endPara = () => {
+      if (!para.length)
+        return;
+      inline(node("p", parent), para.join(" ").replace(/\s+/g, " ").trim());
+      para = [];
+    };
+    while (i < lines.length) {
+      const line = lines[i];
+      if (stop(line))
+        break;
+      if (isBlank(line)) {
+        endPara();
+        i++;
+        continue;
+      }
+      const open7 = fence(line);
+      if (open7) {
+        endPara();
+        i++;
+        const body = [];
+        while (i < lines.length && !(fence(lines[i]) && fence(lines[i])[0] === open7[0] && fence(lines[i]).length >= open7.length))
+          body.push(lines[i++]);
+        if (i < lines.length)
+          i++;
+        node("code", node("pre", parent)).textContent = body.join(`
+`);
+        continue;
+      }
+      const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (heading) {
+        endPara();
+        inline(node("h" + Math.min(6, heading[1].length + 2), parent), heading[2]);
+        i++;
+        continue;
+      }
+      if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+        endPara();
+        node("hr", parent);
+        i++;
+        continue;
+      }
+      if (/^\s{0,3}>/.test(line)) {
+        endPara();
+        const quoted = [];
+        while (i < lines.length && /^\s{0,3}>/.test(lines[i]))
+          quoted.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
+        chatgptMarkdownRender(doc2, node("blockquote", parent), quoted.join(`
+`));
+        continue;
+      }
+      if (tableRow(line) && i + 1 < lines.length && tableRule(lines[i + 1])) {
+        endPara();
+        const table = node("table", parent);
+        const headRow = node("tr", node("thead", table));
+        for (const cell of cells(line))
+          inline(node("th", headRow), cell);
+        i += 2;
+        const tbody = node("tbody", table);
+        while (i < lines.length && tableRow(lines[i])) {
+          const row = node("tr", tbody);
+          for (const cell of cells(lines[i]))
+            inline(node("td", row), cell);
+          i++;
+        }
+        continue;
+      }
+      const item = listItem(line);
+      if (item && (para.length === 0 || item.indent === 0)) {
+        endPara();
+        list(parent, item.indent, item.ordered);
+        continue;
+      }
+      if (/^(?: {4}|\t)/.test(line) && para.length === 0) {
+        const body = [];
+        while (i < lines.length && (/^(?: {4}|\t)/.test(lines[i]) || isBlank(lines[i]) && i + 1 < lines.length && /^(?: {4}|\t)/.test(lines[i + 1])))
+          body.push(lines[i++].replace(/^(?: {4}|\t)/, ""));
+        node("code", node("pre", parent)).textContent = body.join(`
+`);
+        continue;
+      }
+      para.push(line.trim());
+      i++;
+    }
+    endPara();
+  };
+  const list = (parent, indent, ordered) => {
+    const wrap = node(ordered ? "ol" : "ul", parent);
+    while (i < lines.length) {
+      const item = listItem(lines[i]);
+      if (!item || item.indent < indent)
+        break;
+      if (item.indent >= indent + 2) {
+        const last = wrap.lastElementChild;
+        if (!last)
+          break;
+        list(last, item.indent, item.ordered);
+        continue;
+      }
+      if (item.ordered !== ordered)
+        break;
+      i++;
+      const li = node("li", wrap);
+      const text4 = [item.text];
+      while (i < lines.length && !isBlank(lines[i]) && !listItem(lines[i]) && /^\s/.test(lines[i]))
+        text4.push(lines[i++].trim());
+      inline(li, text4.join(" "));
+      if (i < lines.length && isBlank(lines[i]) && i + 1 < lines.length) {
+        const next = listItem(lines[i + 1]);
+        if (next && next.indent >= indent)
+          i++;
+      }
+    }
+  };
+  blocks(container, () => false);
+}
+var CHATGPT_MARKDOWN_CSS = `
+.answer.md{white-space:normal;display:block}
+.answer.md>*{margin:0 0 0.625rem}
+.answer.md>*:last-child{margin-bottom:0}
+.answer.md h3,.answer.md h4,.answer.md h5,.answer.md h6{font-size:1rem;font-weight:650;line-height:1.35;margin-top:0.875rem}
+.answer.md h3{font-size:1.0625rem}
+.answer.md>h3:first-child,.answer.md>h4:first-child{margin-top:0}
+.answer.md ul,.answer.md ol{padding-left:1.375rem}
+.answer.md li{margin:0.25rem 0}
+.answer.md li>ul,.answer.md li>ol{margin:0.25rem 0 0}
+.answer.md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875em;background:var(--code-bg,rgba(128,128,128,0.14));border-radius:4px;padding:0.1em 0.3em}
+.answer.md pre{background:var(--code-bg,rgba(128,128,128,0.14));border-radius:8px;padding:0.625rem 0.75rem;overflow-x:auto}
+.answer.md pre code{background:none;padding:0;font-size:0.8125rem;line-height:1.5}
+.answer.md blockquote{margin:0 0 0.625rem;padding:0 0 0 0.75rem;border-left:3px solid var(--rule,rgba(128,128,128,0.35));opacity:0.9}
+.answer.md hr{border:0;border-top:1px solid var(--rule,rgba(128,128,128,0.35));margin:0.75rem 0}
+.answer.md table{border-collapse:collapse;width:100%;font-size:0.875rem;display:block;overflow-x:auto}
+.answer.md th,.answer.md td{border:1px solid var(--rule,rgba(128,128,128,0.35));padding:0.375rem 0.5rem;text-align:left;vertical-align:top}
+.answer.md th{font-weight:650}
+.answer.md a{color:inherit;text-decoration:underline}
+`;
+
 // src/workers/dashboard/pages/private-answers.ts
 function renderDashboardPrivateAnswersPage(options) {
   const basePath = options?.basePath;
@@ -126743,7 +127017,7 @@ function renderDashboardPrivateAnswersPage(options) {
     ...basePath === undefined ? {} : { basePath },
     meta: "",
     body: renderPrivateAnswersBody(options),
-    styles: [LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS]
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS]
   });
 }
 function readToken(basePath) {
@@ -126777,13 +127051,13 @@ function renderPrivateAnswersBody(options) {
   return `<div class="privacy pa" data-private-answers>${parts.join("")}</div>${script2}`;
 }
 function renderAsk() {
-  return `<form class="paask" data-pa-ask>` + `<label class="plabel" for="pa-question">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</label>` + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form>`;
+  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</h3><form class="paask" data-pa-ask>` + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form></section>`;
 }
 function renderWaiting(waiting, now) {
-  const parts = [`<div class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</div>`];
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
-    return parts.join("");
+    return parts.join("") + "</section>";
   }
   if (waiting.questions.length === 0) {
     parts.push(`<p class="pnote" data-pa-none>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
@@ -126802,7 +127076,7 @@ function renderWaiting(waiting, now) {
   }
   if (waiting.olderRemoved)
     parts.push(`<p class="pnote hint" data-pa-older-removed>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
-  return parts.join("");
+  return parts.join("") + "</section>";
 }
 function renderAnonymous(options, csrfToken) {
   const status = options?.outsideHelp;
@@ -126822,7 +127096,7 @@ function renderAnonymous(options, csrfToken) {
       ...options?.basePath === undefined ? {} : { basePath: options.basePath }
     });
   }
-  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>` + `<summary><span class="paanon-title">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</span><span class="paanon-sum">${escapeHtml2(sum2)}</span></summary>` + `<div class="paanon-body">${body}</div></details>`;
+  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>` + `<summary><h3 class="paanon-title">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3><span class="paanon-sum">${escapeHtml2(sum2)}</span></summary>` + `<div class="paanon-body">${body}</div></details>`;
 }
 function privateAnswersClientScript(input) {
   const config2 = {
@@ -126847,7 +127121,8 @@ function privateAnswersClientScript(input) {
       dismissAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.dismissAllConfirm
     }
   };
-  return `(function () {
+  return `window.olympusMarkdown=(${chatgptMarkdownRender.toString()});
+(function () {
   var config = ${escapeScriptJson(JSON.stringify(config2))};
   var root = document.querySelector('[data-private-answers]');
   if (!root) return;
@@ -126898,11 +127173,20 @@ function privateAnswersClientScript(input) {
     if (text !== undefined) node.textContent = text;
     return node;
   }
-  function message(out, text, bad) {
+  function panel(out, question) {
     out.textContent = '';
+    var card = el('div', 'pacard');
+    var heading = el('p', 'paquestion');
+    heading.appendChild(el('strong', '', question));
+    card.appendChild(heading);
+    out.appendChild(card);
+    return card;
+  }
+  function message(out, text, bad, question) {
+    var card = panel(out, question || '');
     var line = el('p', 'pamsg', text);
     if (bad) line.setAttribute('data-state', 'error');
-    out.appendChild(line);
+    card.appendChild(line);
   }
   function errorText(outcome) {
     var error = outcome.result && outcome.result.error;
@@ -126916,19 +127200,21 @@ function privateAnswersClientScript(input) {
       if (!outcome.ok) { button.textContent = errorText(outcome); button.disabled = true; }
     });
   }
-  // The answer, drawn in place with plain text nodes: nothing from the model is parsed as HTML.
-  function render(out, result) {
-    out.textContent = '';
+  // Shared Markdown builds text-only DOM nodes; no model HTML is interpreted.
+  function render(out, result, question) {
+    var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
     if (status === 'answered') {
-      var card = el('div', 'pacard');
-      var box = el('div', 'paanswer');
-      String(result.answer || '').split(/\\n{2,}/).forEach(function (para) {
-        if (para.trim() !== '') box.appendChild(el('p', '', para.trim()));
-      });
+      var box = el('div', 'paanswer answer');
+      var markdown = window.olympusMarkdown;
+      if (typeof markdown === 'function') {
+        box.classList.add('md');
+        markdown(document, box, String(result.answer || ''));
+      } else {
+        box.textContent = String(result.answer || '');
+      }
       card.appendChild(box);
-      out.appendChild(card);
       var meta = el('div', 'pameta');
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
@@ -126963,15 +127249,16 @@ function privateAnswersClientScript(input) {
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
     } else if (status === 'not_found') {
-      out.appendChild(el('p', 'pamsg', config.copy.notFound));
+      card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
       var words = status === 'no_model' ? config.copy.noModel
         : status === 'model_downloading' ? config.copy.downloading
         : status === 'changed' ? config.copy.changed
         : config.copy.failed;
-      message(out, words, true);
+      message(out, words, true, question);
+      card = out.firstChild;
     }
-    if (leftOut.length > 0) out.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+    if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
   var ask = root.querySelector('form[data-pa-ask]');
   if (ask) {
@@ -126983,15 +127270,16 @@ function privateAnswersClientScript(input) {
       var question = field ? String(field.value || '').trim() : '';
       if (!question || !out) return;
       if (button) button.disabled = true;
-      message(out, config.copy.answering, false);
+      message(out, config.copy.answering, false, question);
       var outcome = await send({ action: 'ask', question: question });
       if (button) button.disabled = false;
-      if (!outcome.ok) { message(out, errorText(outcome), true); return; }
-      render(out, outcome.result);
+      if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
+      render(out, outcome.result, question);
     });
   }
   root.querySelectorAll('[data-pa-question]').forEach(function (row) {
     var id = row.getAttribute('data-pa-question');
+    var question = row.querySelector('.paq').textContent;
     var out = row.querySelector('[data-pa-out]');
     var actions = row.querySelector('.sact');
     var answer = row.querySelector('[data-pa-answer]');
@@ -127002,14 +127290,14 @@ function privateAnswersClientScript(input) {
     }
     if (answer) answer.addEventListener('click', async function () {
       busy(true);
-      message(out, config.copy.answering, false);
+      message(out, config.copy.answering, false, question);
       var outcome = await send({ action: 'answer', id: id });
       if (!outcome.ok) {
-        message(out, errorText(outcome), true);
+        message(out, errorText(outcome), true, question);
         if (outcome.status === 410 && actions) actions.remove(); else busy(false);
         return;
       }
-      render(out, outcome.result);
+      render(out, outcome.result, question);
       if (outcome.result.status === 'answered') row.classList.add('answered');
       // The answer is on screen: only now may the question be cleared.
       if (typeof outcome.result.ack === 'string') {
@@ -127021,7 +127309,7 @@ function privateAnswersClientScript(input) {
     if (dismiss) dismiss.addEventListener('click', async function () {
       busy(true);
       var outcome = await send({ action: 'dismiss', id: id });
-      if (!outcome.ok) { message(out, errorText(outcome), true); busy(false); return; }
+      if (!outcome.ok) { message(out, errorText(outcome), true, question); busy(false); return; }
       row.remove();
     });
   });
@@ -127036,6 +127324,13 @@ function privateAnswersClientScript(input) {
 })();`;
 }
 var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
+.pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
+.pa .pasection > .sect { margin: 0 0 12px; }
+.pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
+.pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
+.pa .paanswer:not(.md) { white-space: pre-wrap; }
+.pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer table { table-layout: fixed; display: table; }
 .pa .paask { display: grid; gap: 8px; margin: 0 0 8px; }
 .pa .paask textarea { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 8px 10px; min-height: 64px; resize: vertical; width: 100%; box-sizing: border-box; }
 .pa .paask textarea:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
@@ -127046,7 +127341,7 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .paout:empty { display: none; }
 .pa .srow.answered .paq { font-weight: 600; }
 .pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-.pa .paanswer p { margin: 0 0 10px; color: var(--t1); line-height: 1.55; max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer p { margin: 0 0 10px; max-width: 72ch; overflow-wrap: anywhere; }
 .pa .paanswer p:last-child { margin-bottom: 0; }
 .pa .pameta { margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); color: var(--t3); font-size: var(--fs-body); }
 .pa .pameta .palabel { margin: 0 0 4px; color: var(--t3); }
@@ -127065,7 +127360,7 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa details.paanon > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
 .pa details.paanon[open] > summary::before { content: '\\25BE'; }
 .pa details.paanon > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.pa .paanon-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.pa .paanon-title { margin: 0; font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
 .pa .paanon-sum { color: var(--t3); font-size: var(--fs-body); }
 .pa .paanon-body { padding: 0 0 16px; }
 `;
@@ -133656,6 +133951,7 @@ ${request.taskId}`);
     return {
       id: state.task.id,
       kind: state.task.kind,
+      ...state.task.metadataWalkRole ? { metadata_walk_role: state.task.metadataWalkRole } : {},
       ...state.lastErrorKind === "scope_root_missing" && state.task.scopePath ? { missing_scope_path: state.task.scopePath } : {},
       interval_seconds: Math.round(configuredIntervalMs / 1000),
       effective_interval_seconds: Math.round(effectiveIntervalMs / 1000),
@@ -134175,6 +134471,7 @@ function createGmailConnectorStoreSchedulerSource(input) {
       {
         id: "gmail.email_store_pull",
         kind: "sync",
+        metadataWalkRole: "primary",
         writer: true,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
@@ -134195,6 +134492,7 @@ function createGmailConnectorStoreSchedulerSource(input) {
       {
         id: "gmail.email_store_reconcile",
         kind: "sync",
+        metadataWalkRole: "maintenance",
         writer: true,
         intervalMs: liveConfig.storeReconcileIntervalMs,
         freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,
@@ -138401,261 +138699,6 @@ var init_private_answer_contract = __esm(() => {
     }
   };
 });
-
-// src/workers/dashboard/chatgpt/markdown.ts
-function chatgptMarkdownRender(doc2, container, text3) {
-  const lines = text3.replace(/\r\n?/g, `
-`).split(`
-`);
-  let i = 0;
-  const node = (tag, parent, cls) => {
-    const made = doc2.createElement(tag);
-    if (cls)
-      made.className = cls;
-    parent.appendChild(made);
-    return made;
-  };
-  const isBlank = (line) => line === undefined || !line.trim();
-  const fence = (line) => {
-    const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
-    return m ? m[1] : null;
-  };
-  const tableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
-  const tableRule = (line) => /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line) || /^\s*\|(\s*:?-{3,}:?\s*\|)+\s*$/.test(line);
-  const listItem = (line) => {
-    const m = /^(\s*)(?:([-*+])|(\d{1,3}[.)]))\s+(.*)$/.exec(line);
-    if (!m)
-      return null;
-    return { indent: m[1].length, ordered: m[3] !== undefined, text: m[4] };
-  };
-  const cells = (line) => {
-    const trimmed2 = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-    const out = [];
-    let cur = "";
-    for (let k = 0;k < trimmed2.length; k++) {
-      const ch = trimmed2[k];
-      if (ch === "\\" && trimmed2[k + 1] === "|") {
-        cur += "|";
-        k++;
-        continue;
-      }
-      if (ch === "|") {
-        out.push(cur.trim());
-        cur = "";
-        continue;
-      }
-      cur += ch;
-    }
-    out.push(cur.trim());
-    return out;
-  };
-  const inline = (parent, src) => {
-    let buf = "";
-    const flush = () => {
-      if (buf) {
-        parent.appendChild(doc2.createTextNode(buf));
-        buf = "";
-      }
-    };
-    let k = 0;
-    while (k < src.length) {
-      const ch = src[k];
-      if (ch === "\\" && k + 1 < src.length && /[\\`*_[\]()#+\-.!|>~]/.test(src[k + 1])) {
-        buf += src[k + 1];
-        k += 2;
-        continue;
-      }
-      if (ch === "`") {
-        const run = /^`+/.exec(src.slice(k))[0];
-        const close = src.indexOf(run, k + run.length);
-        if (close > 0) {
-          flush();
-          const span = src.slice(k + run.length, close);
-          node("code", parent).textContent = span.length > 2 && span[0] === " " && span[span.length - 1] === " " ? span.slice(1, -1) : span;
-          k = close + run.length;
-          continue;
-        }
-      }
-      if (ch === "[") {
-        const m = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/.exec(src.slice(k));
-        if (m) {
-          flush();
-          const a = node("a", parent);
-          a.setAttribute("href", m[2]);
-          a.setAttribute("target", "_blank");
-          a.setAttribute("rel", "noopener noreferrer");
-          inline(a, m[1]);
-          k += m[0].length;
-          continue;
-        }
-      }
-      if (ch === "*" || ch === "_") {
-        const double = src[k + 1] === ch;
-        const mark = double ? ch + ch : ch;
-        const rest = src.slice(k + mark.length);
-        if (rest && !/^\s/.test(rest)) {
-          let close = -1;
-          let from = 0;
-          for (;; ) {
-            const at = rest.indexOf(mark, from);
-            if (at < 0)
-              break;
-            if (at > 0 && !/\s/.test(rest[at - 1]) && (ch === "*" || !/\w/.test(rest[at + mark.length] || ""))) {
-              close = at;
-              break;
-            }
-            from = at + 1;
-          }
-          if (close > 0) {
-            flush();
-            inline(node(double ? "strong" : "em", parent), rest.slice(0, close));
-            k += mark.length + close + mark.length;
-            continue;
-          }
-        }
-      }
-      buf += ch;
-      k++;
-    }
-    flush();
-  };
-  const blocks = (parent, stop) => {
-    let para = [];
-    const endPara = () => {
-      if (!para.length)
-        return;
-      inline(node("p", parent), para.join(" ").replace(/\s+/g, " ").trim());
-      para = [];
-    };
-    while (i < lines.length) {
-      const line = lines[i];
-      if (stop(line))
-        break;
-      if (isBlank(line)) {
-        endPara();
-        i++;
-        continue;
-      }
-      const open7 = fence(line);
-      if (open7) {
-        endPara();
-        i++;
-        const body = [];
-        while (i < lines.length && !(fence(lines[i]) && fence(lines[i])[0] === open7[0] && fence(lines[i]).length >= open7.length))
-          body.push(lines[i++]);
-        if (i < lines.length)
-          i++;
-        node("code", node("pre", parent)).textContent = body.join(`
-`);
-        continue;
-      }
-      const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
-      if (heading) {
-        endPara();
-        inline(node("h" + Math.min(6, heading[1].length + 2), parent), heading[2]);
-        i++;
-        continue;
-      }
-      if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
-        endPara();
-        node("hr", parent);
-        i++;
-        continue;
-      }
-      if (/^\s{0,3}>/.test(line)) {
-        endPara();
-        const quoted = [];
-        while (i < lines.length && /^\s{0,3}>/.test(lines[i]))
-          quoted.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
-        chatgptMarkdownRender(doc2, node("blockquote", parent), quoted.join(`
-`));
-        continue;
-      }
-      if (tableRow(line) && i + 1 < lines.length && tableRule(lines[i + 1])) {
-        endPara();
-        const table = node("table", parent);
-        const headRow = node("tr", node("thead", table));
-        for (const cell of cells(line))
-          inline(node("th", headRow), cell);
-        i += 2;
-        const tbody = node("tbody", table);
-        while (i < lines.length && tableRow(lines[i])) {
-          const row = node("tr", tbody);
-          for (const cell of cells(lines[i]))
-            inline(node("td", row), cell);
-          i++;
-        }
-        continue;
-      }
-      const item = listItem(line);
-      if (item && (para.length === 0 || item.indent === 0)) {
-        endPara();
-        list(parent, item.indent, item.ordered);
-        continue;
-      }
-      if (/^(?: {4}|\t)/.test(line) && para.length === 0) {
-        const body = [];
-        while (i < lines.length && (/^(?: {4}|\t)/.test(lines[i]) || isBlank(lines[i]) && i + 1 < lines.length && /^(?: {4}|\t)/.test(lines[i + 1])))
-          body.push(lines[i++].replace(/^(?: {4}|\t)/, ""));
-        node("code", node("pre", parent)).textContent = body.join(`
-`);
-        continue;
-      }
-      para.push(line.trim());
-      i++;
-    }
-    endPara();
-  };
-  const list = (parent, indent, ordered) => {
-    const wrap = node(ordered ? "ol" : "ul", parent);
-    while (i < lines.length) {
-      const item = listItem(lines[i]);
-      if (!item || item.indent < indent)
-        break;
-      if (item.indent >= indent + 2) {
-        const last = wrap.lastElementChild;
-        if (!last)
-          break;
-        list(last, item.indent, item.ordered);
-        continue;
-      }
-      if (item.ordered !== ordered)
-        break;
-      i++;
-      const li = node("li", wrap);
-      const text4 = [item.text];
-      while (i < lines.length && !isBlank(lines[i]) && !listItem(lines[i]) && /^\s/.test(lines[i]))
-        text4.push(lines[i++].trim());
-      inline(li, text4.join(" "));
-      if (i < lines.length && isBlank(lines[i]) && i + 1 < lines.length) {
-        const next = listItem(lines[i + 1]);
-        if (next && next.indent >= indent)
-          i++;
-      }
-    }
-  };
-  blocks(container, () => false);
-}
-var CHATGPT_MARKDOWN_CSS = `
-.answer.md{white-space:normal;display:block}
-.answer.md>*{margin:0 0 0.625rem}
-.answer.md>*:last-child{margin-bottom:0}
-.answer.md h3,.answer.md h4,.answer.md h5,.answer.md h6{font-size:1rem;font-weight:650;line-height:1.35;margin-top:0.875rem}
-.answer.md h3{font-size:1.0625rem}
-.answer.md>h3:first-child,.answer.md>h4:first-child{margin-top:0}
-.answer.md ul,.answer.md ol{padding-left:1.375rem}
-.answer.md li{margin:0.25rem 0}
-.answer.md li>ul,.answer.md li>ol{margin:0.25rem 0 0}
-.answer.md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875em;background:var(--code-bg,rgba(128,128,128,0.14));border-radius:4px;padding:0.1em 0.3em}
-.answer.md pre{background:var(--code-bg,rgba(128,128,128,0.14));border-radius:8px;padding:0.625rem 0.75rem;overflow-x:auto}
-.answer.md pre code{background:none;padding:0;font-size:0.8125rem;line-height:1.5}
-.answer.md blockquote{margin:0 0 0.625rem;padding:0 0 0 0.75rem;border-left:3px solid var(--rule,rgba(128,128,128,0.35));opacity:0.9}
-.answer.md hr{border:0;border-top:1px solid var(--rule,rgba(128,128,128,0.35));margin:0.75rem 0}
-.answer.md table{border-collapse:collapse;width:100%;font-size:0.875rem;display:block;overflow-x:auto}
-.answer.md th,.answer.md td{border:1px solid var(--rule,rgba(128,128,128,0.35));padding:0.375rem 0.5rem;text-align:left;vertical-align:top}
-.answer.md th{font-weight:650}
-.answer.md a{color:inherit;text-decoration:underline}
-`;
 
 // src/workers/dashboard/chatgpt/private-answer.ts
 function chatgptPrivateAnswerProgram(config2) {

@@ -14,6 +14,7 @@
  * boundary. Neither ChatGPT nor the OpenClaw Control UI tab opens this page.
  */
 import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } from '../components.ts';
+import { chatgptMarkdownRender, CHATGPT_MARKDOWN_CSS } from '../chatgpt/markdown.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard, summaryOf } from '../outside-help.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts';
@@ -29,6 +30,13 @@ export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous';
 const POST_PATH = '/dashboard/private-answers';
 
 const PRIVATE_ANSWERS_CSS = `
+.pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
+.pa .pasection > .sect { margin: 0 0 12px; }
+.pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
+.pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
+.pa .paanswer:not(.md) { white-space: pre-wrap; }
+.pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer table { table-layout: fixed; display: table; }
 .pa .paask { display: grid; gap: 8px; margin: 0 0 8px; }
 .pa .paask textarea { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 8px 10px; min-height: 64px; resize: vertical; width: 100%; box-sizing: border-box; }
 .pa .paask textarea:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
@@ -39,7 +47,7 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .paout:empty { display: none; }
 .pa .srow.answered .paq { font-weight: 600; }
 .pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-.pa .paanswer p { margin: 0 0 10px; color: var(--t1); line-height: 1.55; max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer p { margin: 0 0 10px; max-width: 72ch; overflow-wrap: anywhere; }
 .pa .paanswer p:last-child { margin-bottom: 0; }
 .pa .pameta { margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); color: var(--t3); font-size: var(--fs-body); }
 .pa .pameta .palabel { margin: 0 0 4px; color: var(--t3); }
@@ -58,7 +66,7 @@ const PRIVATE_ANSWERS_CSS = `
 .pa details.paanon > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
 .pa details.paanon[open] > summary::before { content: '\\25BE'; }
 .pa details.paanon > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.pa .paanon-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.pa .paanon-title { margin: 0; font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
 .pa .paanon-sum { color: var(--t3); font-size: var(--fs-body); }
 .pa .paanon-body { padding: 0 0 16px; }
 `;
@@ -71,7 +79,7 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     ...(basePath === undefined ? {} : { basePath }),
     meta: '',
     body: renderPrivateAnswersBody(options),
-    styles: [LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS],
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS],
     // No shared controller and no poll: the page carries its own small
     // script, and the answer appears in place.
   });
@@ -113,18 +121,17 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
 }
 
 function renderAsk(): string {
-  return `<form class="paask" data-pa-ask>`
-    + `<label class="plabel" for="pa-question">${escapeHtml(W.askLabel)}</label>`
-    + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"></textarea>`
+  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml(W.askLabel)}</h3><form class="paask" data-pa-ask>`
+    + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"></textarea>`
     + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(W.ask)}</button></div>`
-    + `<div class="paout" data-pa-out aria-live="polite"></div></form>`;
+    + `<div class="paout" data-pa-out aria-live="polite"></div></form></section>`;
 }
 
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
-  const parts: string[] = [`<div class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</div>`];
+  const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(W.unavailable)}</p>`);
-    return parts.join('');
+    return parts.join('') + '</section>';
   }
   if (waiting.questions.length === 0) {
     parts.push(`<p class="pnote" data-pa-none>${escapeHtml(W.noneWaiting)}</p>`);
@@ -146,7 +153,7 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     }
   }
   if (waiting.olderRemoved) parts.push(`<p class="pnote hint" data-pa-older-removed>${escapeHtml(W.olderRemoved)}</p>`);
-  return parts.join('');
+  return parts.join('') + '</section>';
 }
 
 /** Anonymous answers (zkAPI): outside help, collapsed beneath, never fed by waiting questions. */
@@ -170,7 +177,7 @@ function renderAnonymous(options: DashboardPageOptions | undefined, csrfToken: s
     });
   }
   return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>`
-    + `<summary><span class="paanon-title">${escapeHtml(W.anonymousTitle)}</span><span class="paanon-sum">${escapeHtml(sum)}</span></summary>`
+    + `<summary><h3 class="paanon-title">${escapeHtml(W.anonymousTitle)}</h3><span class="paanon-sum">${escapeHtml(sum)}</span></summary>`
     + `<div class="paanon-body">${body}</div></details>`;
 }
 
@@ -202,7 +209,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       dismissAllConfirm: W.dismissAllConfirm,
     },
   };
-  return `(function () {
+  return `window.olympusMarkdown=(${chatgptMarkdownRender.toString()});
+(function () {
   var config = ${escapeScriptJson(JSON.stringify(config))};
   var root = document.querySelector('[data-private-answers]');
   if (!root) return;
@@ -253,11 +261,20 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     if (text !== undefined) node.textContent = text;
     return node;
   }
-  function message(out, text, bad) {
+  function panel(out, question) {
     out.textContent = '';
+    var card = el('div', 'pacard');
+    var heading = el('p', 'paquestion');
+    heading.appendChild(el('strong', '', question));
+    card.appendChild(heading);
+    out.appendChild(card);
+    return card;
+  }
+  function message(out, text, bad, question) {
+    var card = panel(out, question || '');
     var line = el('p', 'pamsg', text);
     if (bad) line.setAttribute('data-state', 'error');
-    out.appendChild(line);
+    card.appendChild(line);
   }
   function errorText(outcome) {
     var error = outcome.result && outcome.result.error;
@@ -271,19 +288,21 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (!outcome.ok) { button.textContent = errorText(outcome); button.disabled = true; }
     });
   }
-  // The answer, drawn in place with plain text nodes: nothing from the model is parsed as HTML.
-  function render(out, result) {
-    out.textContent = '';
+  // Shared Markdown builds text-only DOM nodes; no model HTML is interpreted.
+  function render(out, result, question) {
+    var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
     if (status === 'answered') {
-      var card = el('div', 'pacard');
-      var box = el('div', 'paanswer');
-      String(result.answer || '').split(/\\n{2,}/).forEach(function (para) {
-        if (para.trim() !== '') box.appendChild(el('p', '', para.trim()));
-      });
+      var box = el('div', 'paanswer answer');
+      var markdown = window.olympusMarkdown;
+      if (typeof markdown === 'function') {
+        box.classList.add('md');
+        markdown(document, box, String(result.answer || ''));
+      } else {
+        box.textContent = String(result.answer || '');
+      }
       card.appendChild(box);
-      out.appendChild(card);
       var meta = el('div', 'pameta');
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
@@ -318,15 +337,16 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
     } else if (status === 'not_found') {
-      out.appendChild(el('p', 'pamsg', config.copy.notFound));
+      card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
       var words = status === 'no_model' ? config.copy.noModel
         : status === 'model_downloading' ? config.copy.downloading
         : status === 'changed' ? config.copy.changed
         : config.copy.failed;
-      message(out, words, true);
+      message(out, words, true, question);
+      card = out.firstChild;
     }
-    if (leftOut.length > 0) out.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+    if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
   var ask = root.querySelector('form[data-pa-ask]');
   if (ask) {
@@ -338,15 +358,16 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       var question = field ? String(field.value || '').trim() : '';
       if (!question || !out) return;
       if (button) button.disabled = true;
-      message(out, config.copy.answering, false);
+      message(out, config.copy.answering, false, question);
       var outcome = await send({ action: 'ask', question: question });
       if (button) button.disabled = false;
-      if (!outcome.ok) { message(out, errorText(outcome), true); return; }
-      render(out, outcome.result);
+      if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
+      render(out, outcome.result, question);
     });
   }
   root.querySelectorAll('[data-pa-question]').forEach(function (row) {
     var id = row.getAttribute('data-pa-question');
+    var question = row.querySelector('.paq').textContent;
     var out = row.querySelector('[data-pa-out]');
     var actions = row.querySelector('.sact');
     var answer = row.querySelector('[data-pa-answer]');
@@ -357,14 +378,14 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     }
     if (answer) answer.addEventListener('click', async function () {
       busy(true);
-      message(out, config.copy.answering, false);
+      message(out, config.copy.answering, false, question);
       var outcome = await send({ action: 'answer', id: id });
       if (!outcome.ok) {
-        message(out, errorText(outcome), true);
+        message(out, errorText(outcome), true, question);
         if (outcome.status === 410 && actions) actions.remove(); else busy(false);
         return;
       }
-      render(out, outcome.result);
+      render(out, outcome.result, question);
       if (outcome.result.status === 'answered') row.classList.add('answered');
       // The answer is on screen: only now may the question be cleared.
       if (typeof outcome.result.ack === 'string') {
@@ -376,7 +397,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     if (dismiss) dismiss.addEventListener('click', async function () {
       busy(true);
       var outcome = await send({ action: 'dismiss', id: id });
-      if (!outcome.ok) { message(out, errorText(outcome), true); busy(false); return; }
+      if (!outcome.ok) { message(out, errorText(outcome), true, question); busy(false); return; }
       row.remove();
     });
   });

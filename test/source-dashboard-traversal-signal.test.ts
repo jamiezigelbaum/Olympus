@@ -13,7 +13,8 @@
 import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
-import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { buildSourceDashboardViewModel, type DashboardSourceCard, type SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
@@ -21,9 +22,10 @@ import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
 const NOW = new Date('2026-07-28T12:00:00.000Z');
 
 type Corpus = SourceIndexStatusResult['corpora'][number];
+type IndexedCorpus = Extract<Corpus, { counts: unknown }>;
 type TaskResult = { status: 'progress' | 'idle' | 'failed'; counts?: Record<string, number> } | undefined;
 
-function corpus(input: { id: string; family: string; provider: string; items: number }): Corpus {
+function corpus(input: { id: string; family: string; provider: string; items: number }): IndexedCorpus {
   return {
     corpus_id: input.id,
     family: input.family,
@@ -43,10 +45,10 @@ function corpus(input: { id: string; family: string; provider: string; items: nu
     },
     item_metadata_returned: false,
     skipped_item_metadata_reason: 'connector_store_item_metadata_not_exposed_to_castor',
-  } as unknown as Corpus;
+  } as unknown as IndexedCorpus;
 }
 
-function build(input: { corpus: Corpus; sourceId: string; tasks: Array<{ id: string; last_result?: TaskResult }>; handles?: ConnectedHandleRegistry }) {
+function build(input: { corpus: Corpus; sourceId: string; tasks: Array<{ id: string; last_result?: TaskResult; at?: string; role?: 'primary' | 'maintenance' }>; handles?: ConnectedHandleRegistry }) {
   const status: SourceIndexStatusResult = {
     kind: 'source_index_status',
     generated_at: NOW.toISOString(),
@@ -76,10 +78,11 @@ function build(input: { corpus: Corpus; sourceId: string; tasks: Array<{ id: str
       tasks: input.tasks.map((task) => ({
         id: task.id,
         kind: 'sync' as const,
+        ...(task.role ? { metadata_walk_role: task.role } : {}),
         running: false,
         consecutive_failures: 0,
-        last_success_at: '2026-07-28T11:05:00.000Z',
-        last_attempt_at: '2026-07-28T11:05:00.000Z',
+        last_success_at: task.at ?? '2026-07-28T11:05:00.000Z',
+        last_attempt_at: task.at ?? '2026-07-28T11:05:00.000Z',
         ...(task.last_result ? { last_result: task.last_result } : {}),
       })),
     }],
@@ -100,7 +103,7 @@ function build(input: { corpus: Corpus; sourceId: string; tasks: Array<{ id: str
     now: NOW,
   });
   const card = view.sources.find((source) => source.source_id === input.sourceId)!;
-  return { card, progress: dashboardSourceProgress(card) };
+  return { card, progress: dashboardSourceProgress(card, { now: NOW }) };
 }
 
 const X_HANDLES: ConnectedHandleRegistry = {
@@ -122,6 +125,11 @@ const xReconcile = (exhausted: number | undefined) => ({
   last_result: { status: 'idle' as const, counts: { api_requests: 12, items_seen: 812, items_indexed: 812, ...(exhausted === undefined ? {} : { global_traversal_exhausted: exhausted }) } },
 });
 const xCorpus = () => corpus({ id: 'internal.x.bookmarks', family: 'x', provider: 'x', items: 812 });
+
+function panelSource(card: DashboardSourceCard) {
+  return buildChatGptDashboardViewModel({ sources: [card], generated_at: NOW.toISOString() } as SourceDashboardViewModel,
+    { now: NOW }).sources.find((source) => source.label === 'Gmail')!;
+}
 
 describe('X bookmarks: its own completion signal', () => {
   test('a reconcile that exhausted the provider list settles the card (no listing, a known total)', () => {
@@ -179,6 +187,75 @@ describe('a source with no provider walk (Telegram)', () => {
 describe('sources that do report the walk keep their verdict', () => {
   const gmail = () => corpus({ id: 'internal.email', family: 'email', provider: 'gmail', items: 40 });
   const counted = (id: string, traversal: number) => ({ id, last_result: { status: 'progress' as const, counts: { items_seen: 10, traversal_complete: traversal } } });
+
+  test('a newer completed pull supersedes an older incomplete reconcile on the Sources row', () => {
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+      { ...counted('gmail.email_store_reconcile:scope:test', 0), role: 'maintenance', at: '2026-07-27T18:00:00.000Z' },
+      { ...counted('gmail.email_store_pull:scope:test', 1), role: 'primary', at: '2026-07-28T11:30:00.000Z' },
+    ] });
+    card.movement = { ...card.movement, metadata_sync_at: '2026-07-27T18:00:00.000Z' };
+    const metadata = dashboardSourceProgress(card, { now: NOW }).phases[0]!;
+    expect(metadata.state).toBe('done');
+    expect(metadata.measure).toMatchObject({ kind: 'ratio', done: 40, total: 40 });
+    expect(panelSource(card).progress?.stage).not.toBe('listing');
+    expect(panelSource(card).progress?.stall?.stage).not.toBe('listing');
+  });
+
+  test('a newer genuinely incomplete pull still stalls after an hour without movement', () => {
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+      { ...counted('gmail.email_store_reconcile:scope:test', 1), role: 'maintenance', at: '2026-07-26T18:00:00.000Z' },
+      { ...counted('gmail.email_store_pull:scope:test', 0), role: 'primary', at: '2026-07-27T18:00:00.000Z' },
+    ] });
+    card.movement = { ...card.movement, metadata_sync_at: '2026-07-27T18:00:00.000Z' };
+    const metadata = dashboardSourceProgress(card, { now: NOW }).phases[0]!;
+    expect(metadata.state).toBe('stalled');
+    expect(metadata.measure.kind).toBe('indeterminate');
+    expect(panelSource(card).progress).toMatchObject({ stage: 'listing', stalled: true });
+  });
+
+  test('a newer capped maintenance walk cannot reopen listing after a complete pull', () => {
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+      { ...counted('gmail.email_store_pull:scope:test', 1), role: 'primary', at: '2026-07-28T10:30:00.000Z' },
+      { ...counted('gmail.email_store_reconcile:scope:test', 0), role: 'maintenance', at: '2026-07-28T11:30:00.000Z' },
+    ] });
+    card.movement = { ...card.movement, metadata_sync_at: '2026-07-27T18:00:00.000Z' };
+    expect(dashboardSourceProgress(card, { now: NOW }).phases[0]!.state).toBe('done');
+  });
+
+  test('a maintenance walk cannot settle a primary pull that has never reported', () => {
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+      { id: 'gmail.email_store_pull:scope:test', role: 'primary' },
+      { ...counted('gmail.email_store_reconcile:scope:test', 1), role: 'maintenance' },
+    ] });
+    expect(dashboardSourceProgress(card, { now: NOW }).phases[0]!.measure.kind).toBe('indeterminate');
+  });
+
+  test('finishing listing does not forgive four unread items in a known eleven-item population', () => {
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+      { ...counted('gmail.email_store_pull:scope:test', 1), role: 'primary' },
+      { ...counted('gmail.email_store_reconcile:scope:test', 0), role: 'maintenance' },
+    ] });
+    card.coverage = { ...card.coverage, indexed_items: 11, content_ready_items: 7,
+      answer_ready_eligible_items: 11, not_read_by_policy_items: 0 };
+    card.movement = { ...card.movement, extraction_at: '2026-07-27T18:00:00.000Z' };
+    const phases = dashboardSourceProgress(card, { now: NOW }).phases;
+    expect(phases[0]!.state).toBe('done');
+    expect(phases[1]!.measure).toEqual({ kind: 'ratio', done: 7, total: 11, percent: 63.6 });
+    expect(phases[1]!.state).toBe('stalled');
+  });
+
+  test('a source that has never run still waits for its first sync', () => {
+    const fresh = gmail();
+    fresh.counts = { ...fresh.counts, indexed_items: 0, chunks: 0, embedded_chunks: 0, sync_runs: 0 };
+    delete fresh.last_refresh;
+    const { card } = build({ corpus: fresh, sourceId: 'gmail.email', tasks: [{ id: 'gmail.email_store_pull:scope:test', role: 'primary' }] });
+    card.connection.state = 'waiting_for_first_sync';
+    card.connection.connected_at = '2026-07-28T11:45:00.000Z';
+    delete card.schedule;
+    const metadata = dashboardSourceProgress(card, { now: NOW }).phases[0]!;
+    expect(metadata.measure.kind).toBe('indeterminate');
+    expect(metadata.state_words).toBe('Waiting for the first sync');
+  });
 
   test('traversal_complete 0 on any task means not finished, even beside a finished one', () => {
     expect(build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [counted('gmail.pull', 1), counted('gmail.reconcile', 0)] }).card.last_run?.traversal_complete).toBe(false);

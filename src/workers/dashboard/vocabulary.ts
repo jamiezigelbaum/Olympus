@@ -2320,7 +2320,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   askLabel: 'Ask privately',
   askPlaceholder: 'Ask about your private things',
   ask: 'Ask',
-  waitingTitle: 'Waiting',
+  waitingTitle: 'Questions waiting for you',
   waitingIntro: 'Agents asked these, and the answer needs your private things. Answer them here.',
   noneWaiting: 'Nothing is waiting.',
   olderRemoved: 'Older questions were removed.',
