@@ -242,6 +242,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
       ...('error' in remoteMode ? { remote_error: remoteMode.error } : {}),
     },
     worker: { base_url: baseUrl, ...worker },
+    ...(worker.update_available ? { update_available: worker.update_available } : {}),
     relay: relayStatus
       ? { mode: relayStatus.mode, running: relayRunning, state: relayStatus.relay?.state ?? null, reason: relayStatus.relay?.reason ?? null, public_base_url: relayStatus.public_base_url ?? null }
       : null,
@@ -263,14 +264,14 @@ function readEngineStatusFile(env: Record<string, string | undefined>): EngineSt
   }
 }
 
-async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<{ reachable: boolean; detail: string; built_in_models?: unknown; desktop_bridge?: unknown }> {
+async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<{ reachable: boolean; detail: string; built_in_models?: unknown; desktop_bridge?: unknown; update_available?: { version: string } }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1_500);
   try {
     const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal, ...(socket ? { unix: socket } : {}) });
-    const health = socket && response.ok ? await response.json() as { built_in_models?: unknown; desktop_bridge?: unknown } : undefined;
+    const health = response.ok ? await response.json().catch(() => undefined) as { built_in_models?: unknown; desktop_bridge?: unknown; update_available?: { version?: unknown } } : undefined;
     await response.body?.cancel().catch(() => undefined);
-    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...(health?.built_in_models ? { built_in_models: health.built_in_models } : {}), ...(health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {}) };
+    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...(health?.built_in_models ? { built_in_models: health.built_in_models } : {}), ...(health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {}), ...(typeof health?.update_available?.version === 'string' ? { update_available: { version: health.update_available.version } } : {}) };
   } catch {
     return { reachable: false, detail: 'no answer' };
   } finally {

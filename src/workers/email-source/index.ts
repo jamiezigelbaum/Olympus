@@ -1,3 +1,4 @@
+import type { UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import {
   GOOGLE_SIGNIN_FULL_CODE,
@@ -403,6 +404,9 @@ export interface EmailSourceConnector {
 }
 
 export interface EmailSourceWorkerOptions {
+  /** Content-free, in-memory installer version; local surfaces only. */
+  updateAvailable?: () => UpdateAvailable | undefined;
+  platform?: string;
   /** Local Linux notices, outside the frozen ChatGPT panel bundle. */
   localModelReadiness?: () => readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   connector?: EmailSourceConnector;
@@ -945,7 +949,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             ? withCredentialDegradations(await connector.health(), degradedCredentials)
             : cheapWorkerHealth(connector, degradedCredentials);
           assertNoRawEmailFields(health);
-          return json(health);
+          const update = options.updateAvailable?.();
+          return json({ ...health, ...(update ? { update_available: update } : {}) });
         }
 
         if (request.method === 'GET' && url.pathname === `${basePath}/health/dependencies`) {
@@ -1262,6 +1267,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (page === 'host') {
             return new Response(renderComputerHostPage({
               panelHtml: dashboardResourceHtml(),
+              updateAvailable: options.updateAvailable?.(),
+              platform: options.platform ?? process.platform,
               ...(options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {}),
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),

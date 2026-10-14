@@ -29010,6 +29010,9 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/core/package-root.ts
+var init_package_root = () => {};
+
 // src/core/open-targets.ts
 function allOpenTargets() {
   return [
@@ -29661,9 +29664,6 @@ function metadataStringArray2(metadata, key2) {
     return [];
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
-
-// src/core/package-root.ts
-var init_package_root = () => {};
 
 // src/workers/credential-broker/unpaired-sources.ts
 var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
@@ -37549,6 +37549,10 @@ import { createHash as createHash23 } from "node:crypto";
 import { existsSync as existsSync19, lstatSync as lstatSync7, mkdirSync as mkdirSync15, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname22, isAbsolute as isAbsolute9 } from "node:path";
 
+// src/core/update-check.ts
+init_package_root();
+var UPDATE_MAX_BYTES = 512 * 1024;
+
 // src/workers/email-source/server.ts
 init_open_targets();
 
@@ -39054,6 +39058,9 @@ var HOST_CSS = `
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
+.update p{margin:0 0 0.5rem}
+.update code{overflow-wrap:anywhere;white-space:pre-wrap}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}

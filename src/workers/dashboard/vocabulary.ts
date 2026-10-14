@@ -19,6 +19,13 @@ import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
+export const DASHBOARD_UPDATE_COPY = {
+  notice: (version: string) => `Olympus ${version} is available. To update, run this in Terminal:`,
+  copy: 'Copy command',
+  copied: 'Copied',
+  copyFailed: 'Select the command and copy it.',
+};
+
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
