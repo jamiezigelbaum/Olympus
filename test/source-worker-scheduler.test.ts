@@ -1754,6 +1754,7 @@ describe('source worker scheduler', () => {
       tasks: [
         {
           id: 'gmail.email_store_pull',
+          metadata_walk_role: 'primary',
           last_result: {
             status: 'progress',
             counts: {
@@ -1764,7 +1765,7 @@ describe('source worker scheduler', () => {
             },
           },
         },
-        { id: 'gmail.email_store_reconcile', last_result: { status: 'progress' } },
+        { id: 'gmail.email_store_reconcile', metadata_walk_role: 'maintenance', last_result: { status: 'progress' } },
       ],
     });
     // The pull carries the host bound; the reconcile deliberately carries none,

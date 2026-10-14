@@ -28,6 +28,7 @@ import {
 import { sweepOwnerRuleRaises, sweepLabelRuleRaises, LabelPageRejectedError } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import {
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -43,6 +44,7 @@ import type {
 } from '../src/workers/google-connectors/gmail.ts';
 
 const ACCOUNT = 'personal';
+const OFFLINE_BROKER = { async issueSession() { throw new Error('Unexpected credential request in offline Gmail fixture'); } } as unknown as CredentialBroker;
 const NOW = new Date('2026-10-13T12:00:00.000Z');
 const DAY = 86_400_000;
 const LABEL_STATE_KEY = `owner_rules_label_sweep:gmail:${ACCOUNT}`;
@@ -165,7 +167,7 @@ function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } =
     secureStore,
     tierSet,
     account: ACCOUNT,
-    apiClient: client,
+    credentialBroker: OFFLINE_BROKER, apiClient: client,
     env: {},
     // The runtime lane always runs under an approved scope: held mail is never listed again.
     scope: { ...(ownerRules.length > 0 ? { ownerTierRules: ownerRules } : {}) },

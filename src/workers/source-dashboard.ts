@@ -4575,7 +4575,11 @@ function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined)
 
 /**
  * Whether the metadata walk of this source finished, from what its sync tasks
- * last reported; undefined when they say nothing either way.
+ * last reported; undefined when they say nothing either way. A scheduler
+ * declaring primary walks takes its discovery verdict from those tasks:
+ * a bounded maintenance snapshot cannot reopen a completed regular listing
+ * or finish a primary walk that has never reported. Roles come from the
+ * current task definitions, so older persisted counts heal on the next read.
  *
  * A task speaks through `traversal_complete`, or, for X bookmarks, whose
  * reconcile walks the provider's whole list and reports no such counter,
@@ -4592,7 +4596,11 @@ function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined)
 function metadataTraversalCompleteFromSchedulers(
   schedulers: readonly SourceSchedulerSourceStatus[],
 ): boolean | undefined {
-  const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'sync'));
+  const tasks = schedulers.flatMap((scheduler) => {
+    const sync = scheduler.tasks.filter((task) => task.kind === 'sync');
+    const primary = sync.filter((task) => task.metadata_walk_role === 'primary');
+    return primary.length > 0 ? primary : sync;
+  });
   if (tasks.length === 0) return undefined;
   const walks: boolean[] = [];
   let unreported = false;
