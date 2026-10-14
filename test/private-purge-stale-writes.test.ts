@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import { expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import type { RawItem } from '../src/core/contracts.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
-import { connectorStoreChunkText, connectorStoreHashString, type LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import type { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, fixtureItem, identityOf, localId, openTierFixture, snapshotStore, tempDir } from './helpers/tier-fixtures.ts';
 
@@ -11,13 +12,14 @@ const late = { ...original, name: 'Old Personal extraction title', text: 'Late e
 
 function restore(store: LocalConnectorStore, item: RawItem) {
   const text = item.content.kind === 'text' ? item.content.text : '';
+  const hash = createHash('sha256').update(text).digest('hex');
   return store.restoreItemRepresentations({
     syncConnectorId: 'late-extraction', ownerConnectorId: 'fixture_lane', ownershipKind: 'observed',
     classify: () => buildSourceSensitivity({ trustTier: store.trustDomain === 'secure_local' ? 'S4' : 'S3', trustDomain: store.trustDomain }),
     items: [{ item, expectation: {
       sourceItem: item.identity, sourceVersion: item.identity.sourceVersion,
-      contentHash: connectorStoreHashString(text),
-      chunkContentHashes: connectorStoreChunkText(text, 1800).map(connectorStoreHashString),
+      contentHash: hash,
+      chunkContentHashes: [hash],
     } }],
   });
 }

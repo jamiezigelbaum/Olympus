@@ -7676,9 +7676,9 @@ export class LocalConnectorStore {
       const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
       if (!state || !state.record.routed) return true;
       const { record, copies } = state;
-      if (record.state === 'moving' || record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;
+      if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;
       const here = copies.find((copy) => copy.corpusId === this.corpusId
-        && (copy.state === 'current' || (copy.state === 'staged' && !record.contentRead && copy.generation === record.generation)));
+        && (copy.state === 'current' || (copy.state === 'staged' && record.state !== 'moving' && !record.contentRead && copy.generation === record.generation)));
       if (!here) return false;
       // Content copies legitimately carry their names at the higher tier too.
       if (layer === 'metadata') return true;
@@ -7687,7 +7687,7 @@ export class LocalConnectorStore {
       // content tier. It may never widen a lower names-only copy after a raise.
       const contentDomain = record.contentTier === 'public' ? 'public_safe'
         : record.contentTier === 'private' ? 'internal' : 'secure_local';
-      return !record.contentRead && contentDomain === this.trustDomain;
+      return record.state !== 'moving' && !record.contentRead && contentDomain === this.trustDomain;
     } catch {
       return false;
     }

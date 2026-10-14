@@ -203,3 +203,25 @@ test('vector visibility uses full row identity when a hidden and a Personal item
   f.cloud.embed = async () => [[1, 0.8, 0, 0]];
   expect((await lower.vectorSearchItems('garden', f.cloud, 1)).map(row => row.sourceItem.providerItemId)).toEqual(['safe']);
 });
+
+test('a stale second executor cannot copy an emptied source over a completed destination', async () => {
+  const x = await fixture(); const f = x.f;
+  let first!: Promise<unknown>;
+  await expect(moveTieredItem({ set: f.set, identity: x.identity, target, beforeCopy: () => {
+    first = moveTieredItem({ set: f.set, identity: x.identity, target });
+  } })).rejects.toMatchObject({ name: 'TierLedgerGenerationConflictError' });
+  await first;
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+  expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+});
+
+test('a second executor resumes a first executor partial purge instead of recopying its emptied source', async () => {
+  const x = await fixture(); const f = x.f;
+  let first!: Promise<unknown>;
+  await moveTieredItem({ set: f.set, identity: x.identity, target, beforeCopy: () => {
+    first = moveTieredItem({ set: f.set, identity: x.identity, target, afterPurge: () => { throw new Error('crash'); } }).catch(error => error);
+  } });
+  expect(await first).toBeInstanceOf(Error);
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+  expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+});

@@ -126,6 +126,8 @@ export interface TierMoveOptions {
    * before the flip (another process's ledger write landing in between).
    */
   beforeFlip?: () => void;
+  /** @internal Pause before the fenced copy phase (concurrent executor test). */
+  beforeCopy?: () => void;
   /** @internal Crash-injection hooks, after durable verification / after purge. */
   afterVerified?: () => void;
   afterPurge?: () => void;
@@ -271,74 +273,113 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   });
 
   // 2. Write what each destination lacks, from the source stores.
-  const destinations: TierMoveDestination[] = [];
-  for (const planned of placement.copies) {
-    const kept = sources.find((source) => source.corpusId === planned.corpusId);
-    if (kept && layersCover(kept.layers, planned.layers)) {
-      const keptChunks = planned.layers === 'metadata' ? 0 : (exportFrom(kept)?.chunks.length ?? 0);
-      destinations.push({
-        corpusId: planned.corpusId,
-        trustDomain: planned.trustDomain,
-        layers: planned.layers,
-        relayeredOnly: true,
-        chunksWritten: 0,
-        chunksKept: keptChunks,
-        vectorsCopied: 0,
-        chunksToEmbed: 0,
-      });
-      continue;
+  let destinations: TierMoveDestination[] = [];
+  options.beforeCopy?.();
+  const receipt = ledger.withGenerationFence(identity, record.generation, () => {
+    // Another executor may have copied/purged since our entry-time read.
+    // Re-read under the writer lock, before touching any destination store.
+    const alreadyVerified = readVerifiedMove(ledger, identity);
+    if (alreadyVerified) {
+      if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
+        throw new TierLedgerGenerationConflictError();
+      }
+      return alreadyVerified;
     }
-    const wantsContent = planned.layers !== 'metadata';
-    const from = copyServingLayer(sources, wantsContent ? 'content' : 'metadata') ?? sources[0]!;
-    const exported = exportFrom(from);
-    if (!exported) throw new Error('The source store no longer holds an active copy of the item.');
-    const payload: ConnectorStoreItemCopy = wantsContent
-      ? exported
-      : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
-    const store = set.store(planned.trustDomain, { create: true })!;
-    store.bindTierSet(ledger);
-    const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
-    const written = store.importItemCopy(payload, {
-      trustTier: defaultStoreTrustTier(planned.trustDomain),
-      syncConnectorId: TIER_MOVE_CONNECTOR_ID,
-      layers: planned.layers,
-      ...(vectorIdentity ? { vectorProvider: vectorIdentity } : {}),
-    });
-    destinations.push({
-      corpusId: planned.corpusId,
-      trustDomain: planned.trustDomain,
-      layers: planned.layers,
-      relayeredOnly: false,
-      chunksWritten: written.chunksWritten,
-      chunksKept: written.chunksKept,
-      vectorsCopied: written.vectorsCopied,
-      chunksToEmbed: wantsContent ? Math.max(0, payload.chunks.length - written.vectorsCopied) : 0,
-    });
-  }
+    const now = ledger.getCurrent(identity)!;
+    if (now.state !== 'moving' || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
+      throw new TierLedgerGenerationConflictError();
+    }
+    const copyWithLockedSources = (index: number): VerifiedMove => {
+      const source = sources[index];
+      if (source) {
+        const domain = set.domainForCorpus(source.corpusId);
+        const store = domain ? set.store(domain) : undefined;
+        if (!store) throw new Error('Source store unavailable.');
+        return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
+      }
+      exports.clear();
+      if (contentSource && contentDestination
+        && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+        const exported = exportFrom(contentSource);
+        const evidence = decision ?? now;
+        const digest = exported && contentDigestReason(exported.chunks.map(chunk => chunk.boundedText).join(''));
+        const receipts = evidence.reasons.filter(reason => reason.startsWith('content:sha256:'));
+        if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
+          throw new TierMoveContentChangedError('Stored content changed before the fenced copy.');
+        }
+      }
+      for (const planned of placement.copies) {
+        const kept = sources.find((source) => source.corpusId === planned.corpusId);
+        if (kept && layersCover(kept.layers, planned.layers)) {
+          const keptChunks = planned.layers === 'metadata' ? 0 : (exportFrom(kept)?.chunks.length ?? 0);
+          destinations.push({
+            corpusId: planned.corpusId,
+            trustDomain: planned.trustDomain,
+            layers: planned.layers,
+            relayeredOnly: true,
+            chunksWritten: 0,
+            chunksKept: keptChunks,
+            vectorsCopied: 0,
+            chunksToEmbed: 0,
+          });
+          continue;
+        }
+        const wantsContent = planned.layers !== 'metadata';
+        const from = copyServingLayer(sources, wantsContent ? 'content' : 'metadata') ?? sources[0]!;
+        const exported = exportFrom(from);
+        if (!exported) throw new Error('The source store no longer holds an active copy of the item.');
+        const payload: ConnectorStoreItemCopy = wantsContent
+          ? exported
+          : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
+        const store = set.store(planned.trustDomain, { create: true })!;
+        store.bindTierSet(ledger);
+        const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
+        const written = store.importItemCopy(payload, {
+          trustTier: defaultStoreTrustTier(planned.trustDomain),
+          syncConnectorId: TIER_MOVE_CONNECTOR_ID,
+          layers: planned.layers,
+          ...(vectorIdentity ? { vectorProvider: vectorIdentity } : {}),
+        });
+        destinations.push({
+          corpusId: planned.corpusId,
+          trustDomain: planned.trustDomain,
+          layers: planned.layers,
+          relayeredOnly: false,
+          chunksWritten: written.chunksWritten,
+          chunksKept: written.chunksKept,
+          vectorsCopied: written.vectorsCopied,
+          chunksToEmbed: wantsContent ? Math.max(0, payload.chunks.length - written.vectorsCopied) : 0,
+        });
+      }
 
-  // 3. Flip.
+      // The verified receipt carries the exact flip this copy authorizes.
+      const flipOptions: Parameters<TierLedger['completeMove']>[1] = {
+        expectedGeneration: record.generation,
+        destination: placement.copies,
+        embedHold: placement.embedHold === true,
+        ...(decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}),
+        ...(ownerOverride ? { decidedBy: 'override' as const, reasons: record.reasons } : {}),
+      };
+      const verified: VerifiedMove = {
+        generation: record.generation, target, raise, sources, destinations,
+        placement: placement.copies, flipOptions,
+        // Store hashes, not text: verification survives a source purge and restart.
+        fingerprints: Object.fromEntries(placement.copies.map(copy => {
+          const exported = set.store(copy.trustDomain)?.exportItemCopy(identity);
+          if (!exported) throw new Error('Destination verification failed.');
+          const wanted = copy.layers === 'metadata' ? undefined : exportFrom(contentSource ?? sources[0]!);
+          if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index) =>
+            chunk.chunkIndex === wanted.chunks[index]!.chunkIndex && chunk.boundedText === wanted.chunks[index]!.boundedText))) throw new Error('Destination content verification failed.');
+          return [copy.corpusId, copyFingerprint(exported, copy.layers)];
+        })),
+      };
+      ledger.writeMeta(receiptKey, JSON.stringify(verified));
+      return verified;
+    };
+    return copyWithLockedSources(0);
+  });
+  destinations = receipt.destinations;
   options.beforeFlip?.();
-  const flipOptions: Parameters<TierLedger['completeMove']>[1] = {
-    expectedGeneration: record.generation,
-    destination: placement.copies,
-    embedHold: placement.embedHold === true,
-    ...(decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}),
-    ...(ownerOverride ? { decidedBy: 'override' as const, reasons: record.reasons } : {}),
-  };
-  const receipt: VerifiedMove = {
-    generation: record.generation, target, raise, sources, destinations,
-    placement: placement.copies, flipOptions,
-    // Store hashes, not text: verification survives a source purge and restart.
-    fingerprints: Object.fromEntries(placement.copies.map(copy => {
-      const exported = set.store(copy.trustDomain)?.exportItemCopy(identity);
-      if (!exported) throw new Error('Destination verification failed.');
-      const wanted = copy.layers === 'metadata' ? undefined : exportFrom(contentSource ?? sources[0]!);
-      if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index) =>
-        chunk.chunkIndex === wanted.chunks[index]!.chunkIndex && chunk.boundedText === wanted.chunks[index]!.boundedText))) throw new Error('Destination content verification failed.');
-      return [copy.corpusId, copyFingerprint(exported, copy.layers)];
-    })),
-  };
-  ledger.withGenerationFence(identity, record.generation, () => ledger.writeMeta(receiptKey, JSON.stringify(receipt)));
   options.afterVerified?.();
   const result = finishVerifiedMove(options, receipt);
   const flipped = { generation: result.generation };
