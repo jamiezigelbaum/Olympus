@@ -27487,7 +27487,9 @@ function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
         db.query(`
           INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
           SELECT job_id FROM extraction_jobs
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND status = 'indexed'
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+            AND (status = 'indexed'
+              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
         `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };

@@ -23,7 +23,8 @@
 - **An item that becomes Secret keeps only a record of where it is** in
   Olympus's index (its location, a screened title and the kinds of secret
   found), so you can still find it. If you mark it not Secret, what
-  Olympus hid comes back.
+  Olympus hid comes back, including unchanged files whose reading stopped
+  because it found a Secret.
 - **Remote document reading rechecks privacy after local OCR and model preparation.**
   An item that becomes Secret during that work is withheld from the model.
 - **Model downloads use bounded memory.** The private and search models

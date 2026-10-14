@@ -226,15 +226,17 @@ export function retireExtractionJobRedaction(
         DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
         WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      // Its indexed jobs lost their artifacts (and its store copies their
-      // extracted text) when it became Secrets: each is read again at its
-      // next enqueue, which a plan pass makes only once the restored store
-      // copy exists (queued now, a worker could find no copy to land in).
+      // Indexed jobs lost their artifacts; jobs whose extraction found a
+      // Secret were blocked by the sink. Both need a reread after restoration,
+      // but other policy blocks stay settled. Wait for the next enqueue, once
+      // the restored store copy exists, so the worker has a copy to land in.
       if (retired > 0 && rereadsTableExists(db)) {
         db.query(`
           INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
           SELECT job_id FROM extraction_jobs
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND status = 'indexed'
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+            AND (status = 'indexed'
+              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
         `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };
