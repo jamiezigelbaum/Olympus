@@ -161,7 +161,7 @@ export function isLegacyLinuxSetting(name: string): boolean {
   if (temporary) return isLegacyLinuxSetting(temporary[1]!);
   return ['privacy.json', 'tier-rules.json', 'consult.json', 'sovereignty.json',
     'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json',
-    'consult/vocabulary/manifest.json'].includes(name)
+    'consult/vocabulary/manifest.json', 'consult/vocabulary/de-hunspell.txt.gz', 'consult/vocabulary/it-hunspell.txt.gz'].includes(name)
     || /^consult\/vocabulary\/[a-z]{2}(?:[.]txt[.]gz|[.]LICENSE[.]txt)$/.test(name)
     || /^pending-oauth\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.-]+[.]json(?:[.]request[.][0-9]+[.][0-9]+[.]json)?$/.test(name)
     || /^logs\/[a-zA-Z0-9_-]+[.][a-zA-Z0-9_.:-]+[.][0-9TZ-]+[.]log$/.test(name);

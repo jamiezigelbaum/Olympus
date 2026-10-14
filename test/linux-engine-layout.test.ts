@@ -218,3 +218,11 @@ test('owned preflight accepts an abandoned OAuth state after its writer has died
  writeFileSync(join(dir,'gmail.personal.json'),JSON.stringify({status:'pending',pid:2147483647}),{mode:0o600});
  expect(()=>preflightLinuxEngineLayout(layout)).not.toThrow();
 });
+
+test('legacy migration accepts exactly the optional installer pack names',()=>{
+ const {home,env}=fixture();const l=resolveLinuxEngineLayout(env);publishLinuxEngineReceipt(l);
+ const dir=join(home,'.olympus/consult/vocabulary');mkdirSync(dir,{recursive:true,mode:0o700});
+ for(const name of ['de-hunspell.txt.gz','it-hunspell.txt.gz'])writeFileSync(join(dir,name),'synthetic',{mode:0o600});
+ expect(()=>preflightLinuxEngineLayout(l)).not.toThrow();
+ writeFileSync(join(dir,'xx-hunspell.txt.gz'),'unknown',{mode:0o600});expect(()=>preflightLinuxEngineLayout(l)).toThrow('Unrecognized legacy');
+});
