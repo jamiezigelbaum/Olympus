@@ -70,7 +70,7 @@ function installed(initialEnablement: 'enabled' | 'enabled-runtime' = 'enabled')
  const calls:string[][]=[]; let active=true,enabled: string | false=initialEnablement;
  const exec:EngineExec=(c,a)=>{ calls.push([c,...a]);
   if(a.includes('show'))return good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled || 'disabled'}\nMainPID=${active?42:0}\nControlGroup=/user.slice/engine\nResult=success\nExecMainStatus=0\nFragmentPath=${l.unitPath}\n`);
-  if(a.includes('disable')){enabled=false;active=false;} if(a.includes('enable'))enabled=a.includes('--runtime')?'enabled-runtime':'enabled';if(a.includes('start')||a.includes('restart'))active=true;
+  if(a.includes('disable')){enabled=false;active=false;} if(a.includes('enable'))enabled=a.includes('--runtime')?'enabled-runtime':'enabled';if(a.includes('start')||a.includes('restart'))active=true;if(a.includes('stop'))active=false;
   return good(); };
  return {l,calls,exec,options:{platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),exec,consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true}};
 }
@@ -124,7 +124,7 @@ test.skipIf(process.platform!=='linux')('kernel lifecycle lock reuses only an in
  expect(closed.status).not.toBe(0);expect(closed.stdout).not.toContain('held');
  expect(withLinuxEngineLifecycleLock(l,()=>statSync(l.lifecycleLockPath).mode&0o777)).toBe(0o600);
 });
-function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);mkdirSync(join(dir,'assets'));copyFileSync(join(import.meta.dir,'../assets/app-icon.png'),join(dir,'assets/app-icon.png'));return dir;}
+function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1,linuxSettingsLayout:'receipt-v1'}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);mkdirSync(join(dir,'assets'));copyFileSync(join(import.meta.dir,'../assets/app-icon.png'),join(dir,'assets/app-icon.png'));return dir;}
 function runtimeAt(root:string){const dir=join(root,`fixture-runtime-${Math.random().toString(16).slice(2)}`),runtime=join(dir,'bun');mkdirSync(dir,{mode:0o700});copyFileSync(realpathSync(process.execPath),runtime);chmodSync(runtime,0o700);return runtime;}
 test('install refuses an unintegrated approval package before enabling linger or writing config',()=>{
  const l=layout(),checkout=packageAt(l.home,'v1',false);const calls:string[][]=[];
@@ -280,3 +280,99 @@ for (const failure of ['none', 'link', 'start', 'health', 'parent', 'replacement
   }
  },20_000);
 }
+
+for (const failure of [false, true, 'edited', 'new-rule', 'first-rule'] as const) test(`legacy privacy migration ${failure === 'first-rule' ? 'preserves the first rule from a previously unused old engine' : failure === 'new-rule' ? 'preserves newly created tier rules on recovery' : failure === 'edited' ? 'preserves later owner edits on recovery' : failure ? 'rolls back after failed health' : 'survives a successful upgrade'}`, async () => {
+ const l=layout();publishLinuxEngineReceipt(l);
+ const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
+ let original=JSON.stringify({schemaVersion:1,description:'Synthetic health preference',rules:[],updatedAt:'2026-10-14T00:00:00Z'});
+ if(failure!=='first-rule')writeFileSync(join(legacy,'privacy.json'),original,{mode:0o600});
+ let linked=false,active=false,enabled=false;
+ const exec:EngineExec=(command,args)=>{
+  if(command==='systemctl'&&args[0]==='--version')return good('systemd 256');
+  if(command==='loginctl')return good('yes');if(command==='systemd-analyze')return good();
+  if(args.includes('olympus-worker.service'))return good('LoadState=not-found');if(args.includes('--property=Version'))return good('256');
+  if(args.includes('show'))return linked?good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled?'enabled':'disabled'}\nMainPID=${active?42:0}\nControlGroup=\nFragmentPath=${l.unitPath}\n`):good('LoadState=not-found');
+  if(args.includes('link'))linked=true;if(args.includes('enable'))enabled=true;if(args.includes('disable')){enabled=false;active=false;}if(args.includes('start'))active=true;if(args.includes('stop'))active=false;
+  return good();
+ };
+ const options={platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home),consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true};
+ const result=installEngine(options);
+ const target=join(l.configDir,'privacy.json');
+ if(failure!=='first-rule'){expect(readFileSync(target,'utf8')).toBe(original);expect(statSync(target).mode&0o777).toBe(0o600);}
+ expect(existsSync(join(legacy,'privacy.json'))).toBe(false);
+ const read=Bun.spawnSync([process.execPath,'-e',`const { readPrivacyProfile } = await import('./src/workers/classification/privacy-profile.ts');console.log(JSON.stringify(readPrivacyProfile()));`],{env:linuxEngineEnvironment(l),stdout:'pipe',stderr:'pipe'});
+ if(failure!=='first-rule'){expect(read.exitCode).toBe(0);expect(JSON.parse(read.stdout.toString()).description).toBe('Synthetic health preference');}
+ if(failure==='new-rule'||failure==='first-rule'){const {writePrivacyProfile}=await import('../src/workers/classification/privacy-profile.ts');writePrivacyProfile({description:'New rule',rules:[{kind:'sender',source_id:'gmail.email',value:'@example.test'}]},{env:linuxEngineEnvironment(l)});original=readFileSync(target,'utf8');}
+ if(failure==='edited'){original=JSON.stringify({schemaVersion:1,description:'Updated synthetic preference',rules:[]});writeFileSync(target,original,{mode:0o600});}
+ await settleLinuxEngineInstall(options,{ok:!failure,expected_build:result.program.build??null,running_build:result.program.build??null,pid:42,worker:'ok',waited_ms:0});
+ if(failure==='new-rule'||failure==='first-rule'){expect(existsSync(join(legacy,'tier-rules.json'))).toBe(true);expect(existsSync(join(l.configDir,'tier-rules.json'))).toBe(false);}
+ if(failure){expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe(original);expect(existsSync(target)).toBe(false);}
+ else{expect(readFileSync(target,'utf8')).toBe(original);expect(existsSync(legacy)).toBe(false);}
+},30_000);
+
+test('legacy privacy migration refuses a destination conflict without changing either file', () => {
+ const l=layout();publishLinuxEngineReceipt(l);const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
+ writeFileSync(join(legacy,'privacy.json'),'old',{mode:0o600});writeFileSync(join(l.configDir,'privacy.json'),'new',{mode:0o600});
+ const exec:EngineExec=(command,args)=>command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):good('LoadState=not-found');
+ expect(()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)})).toThrow();
+ expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe('old');expect(readFileSync(join(l.configDir,'privacy.json'),'utf8')).toBe('new');
+ expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
+},15_000);
+
+test('rollback refuses a previous generation that cannot read receipt-owned privacy settings before stopping the engine', async () => {
+ const {l,options,calls}=installed();
+ const old=packageAt(l.home,'old-layout');const manifest=JSON.parse(readFileSync(join(old,'package.json'),'utf8'));delete manifest.olympus.linuxSettingsLayout;writeFileSync(join(old,'package.json'),JSON.stringify(manifest));
+ writeFileSync(join(l.stateDir,'service-previous.json'),JSON.stringify({program:{workingDirectory:old}}),{mode:0o600});
+ const exec:EngineExec=(command,args)=>command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):args.includes('olympus-worker.service')?good('LoadState=not-found'):options.exec(command,args);
+ await expect(rollbackEngine({...options,exec,uid:process.getuid!()})).rejects.toThrow('cannot read receipt-owned settings');
+ expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);
+ expect(readFileSync(l.unitPath,'utf8')).toBe('unit');
+ expect(()=>installEngine({...options,exec,uid:process.getuid!(),fromCheckout:old,bunBin:runtimeAt(l.home)})).toThrow('cannot read receipt-owned settings');
+});
+
+for (const [key,name] of [['OLYMPUS_TIER_RULES_PATH','tier-rules.json'],['OLYMPUS_PRIVACY_PROFILE_PATH','privacy.json'],['OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH','sources/ingestion-exclusions.json'],['OLYMPUS_CONSULT_VOCABULARY_DIR','consult/vocabulary']] as const) test(`migration refuses an effective ${key} before stopping`,()=>{
+ const l=layout();publishLinuxEngineReceipt(l);const legacy=join(l.home,'.olympus');
+ const file=name==='consult/vocabulary'?join(name,'manifest.json'):name;
+ mkdirSync(dirname(join(legacy,file)),{recursive:true,mode:0o700});writeFileSync(join(legacy,file),'{}',{mode:0o600});
+ writeFileSync(l.workerEnvPath,`${key}='${join(legacy,name)}'\n`,{mode:0o600});
+ const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);return command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):good('LoadState=not-found');};
+ expect(()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)})).toThrow(`Set ${key} to ${join(l.configDir,name)}`);
+ expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);
+ expect(existsSync(join(legacy,file))).toBe(true);
+ expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
+},15_000);
+
+for(const live of [false,true])test(`legacy consult lease ${live?'refuses a live writer':'reclaims abandoned sidecars'}`,()=>{
+ const l=layout();publishLinuxEngineReceipt(l);const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
+ writeFileSync(join(legacy,'consult.json'),'{}',{mode:0o600});
+ const record={version:1,token:'synthetic',pid:live?process.pid:2147483647,acquiredAt:new Date().toISOString()};
+ for(const suffix of ['.lock','.lock.commit'])writeFileSync(join(legacy,'consult.json'+suffix),JSON.stringify(record),{mode:0o600});
+ let linked=false;const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);if(command==='loginctl')return good('yes');if(args.includes('--version'))return good('systemd 256');if(args.includes('--property=Version'))return good('256');if(args.includes('olympus-worker.service'))return good('LoadState=not-found');if(args.includes('show'))return good(linked?`LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\nMainPID=0\nFragmentPath=${l.unitPath}`:'LoadState=not-found');if(args.includes('link'))linked=true;return good();};
+ const run=()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)});
+ if(live){expect(run).toThrow('Finish saving Olympus settings');expect(calls.some(args=>args.includes('stop'))).toBe(false);}
+ else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult.json'),'utf8')).toBe('{}');for(const suffix of ['.lock','.lock.commit'])expect(existsSync(join(legacy,'consult.json'+suffix))).toBe(false);}
+},15_000);
+
+for (const replacement of ['new-content', 'same-content', 'in-place'] as const) test(`legacy migration rolls back a concurrent ${replacement} writer before unlink`, () => {
+ const {l,options,calls}=installed();
+ const source=join(l.home,'.olympus/privacy.json');mkdirSync(dirname(source),{mode:0o700});writeFileSync(source,'original synthetic policy',{mode:0o600});
+ const next=replacement==='same-content'?'original synthetic policy':'newer synthetic policy'; let replaced=false;
+ const exec:EngineExec=(command,args)=>command==='loginctl'?good('yes'):args.includes('--version')?good('systemd 256'):args.includes('--property=Version')?good('256'):args.includes('olympus-worker.service')?good('LoadState=not-found'):options.exec(command,args);
+ expect(()=>installEngine({...options,exec,uid:process.getuid!(),fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home),lifecycleCheckpoint:(name)=>{
+  if(name==='legacy_setting_published'&&!replaced){replaced=true;if(replacement==='in-place')writeFileSync(source,next);else{writeFileSync(source+'.replacement',next,{mode:0o600});renameSync(source+'.replacement',source);}}
+ }})).toThrow('Legacy Olympus settings changed during migration');
+ expect(replaced).toBe(true);expect(readFileSync(source,'utf8')).toBe(next);
+ expect(existsSync(join(l.configDir,'privacy.json'))).toBe(false);
+ expect(readFileSync(l.unitPath,'utf8')).toBe('unit');
+ expect(JSON.parse(readFileSync(join(l.stateDir,'install-transaction.json'),'utf8')).phase).toBe('rollback_required');
+ expect(calls.filter(args=>args.includes('restart'))).toHaveLength(1);
+},15_000);
+
+for(const live of [false,true])test(`language-pack manifest PID temporary ${live?'refuses a live writer':'is reclaimed after its writer dies'}`,()=>{
+ const l=layout();publishLinuxEngineReceipt(l);const dir=join(l.home,'.olympus/consult/vocabulary');mkdirSync(dir,{recursive:true,mode:0o700});
+ const name=`manifest.json.${live?process.pid:2147483647}.tmp`;writeFileSync(join(dir,name),'incomplete synthetic manifest',{mode:0o600});writeFileSync(join(dir,'manifest.json'),'{"schema":1,"packs":{}}',{mode:0o600});
+ let linked=false;const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);if(command==='loginctl')return good('yes');if(args.includes('--version'))return good('systemd 256');if(args.includes('--property=Version'))return good('256');if(args.includes('olympus-worker.service'))return good('LoadState=not-found');if(args.includes('show'))return good(linked?`LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\nMainPID=0\nFragmentPath=${l.unitPath}`:'LoadState=not-found');if(args.includes('link'))linked=true;return good();};
+ const run=()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)});
+ if(live){expect(run).toThrow('language-pack installer is still running');expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);expect(existsSync(join(dir,name))).toBe(true);}
+ else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult/vocabulary/manifest.json'),'utf8')).toBe('{"schema":1,"packs":{}}');expect(existsSync(join(dir,name))).toBe(false);expect(existsSync(join(l.configDir,'consult/vocabulary',name))).toBe(false);}
+},15_000);

@@ -51,7 +51,7 @@ function tempHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'olympus-outside-help-'));
   cleanups.push(() => {
     try {
-      chmodSync(join(home, '.olympus'), 0o700);
+      chmodSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), 0o700);
     } catch {
       // not always present
     }
@@ -845,7 +845,8 @@ function adapter(input: {
   /** This computer's network confinement; default: a confined platform (never the host's). */
   confinement?: ZkapiConfinement;
 }) {
-  const path = join(input.home, '.olympus', 'sovereignty.json');
+  const path = join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
+  mkdirSync(join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
   mkdirSync(join(input.home, '.olympus'), { recursive: true, mode: 0o700 });
   const config = policyWith(input.zkapi ?? true, input.profileOverrides);
   writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
@@ -859,7 +860,7 @@ function adapter(input: {
     secretPresent: (ref) => ref === 'env:OLYMPUS_ZKAPI_API_KEY' && env.OLYMPUS_ZKAPI_API_KEY !== undefined,
     requestReload: () => { reloads.push(1); return input.reload ?? true; },
     env,
-    statePath: join(input.home, '.olympus', 'zkapi-consult-state.json'),
+    statePath: join(input.home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'),
     now: () => new Date('2026-10-07T12:00:00.000Z'),
     readiness: async (options) => { probes.push(options); if (input.probeConfinement) await options.confinement?.check?.(); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
@@ -1043,7 +1044,7 @@ describe('the adapter: status', () => {
     expect(summaryOf(await second.backend.status())).toEqual({ state: 'invalid' });
     const third = tempHome();
     const { backend, env } = adapter({ home: third });
-    writeFileSync(join(third, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/w' } } }), { mode: 0o600 });
+    writeFileSync(join(third, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/w' } } }), { mode: 0o600 });
     expect(summaryOf(await backend.status())).toEqual({ state: 'fence_held' });
     const value = await backend.status();
     expect(value.route.state === 'configured' && value.route.readiness?.fences).toEqual([{ scope: zkapiFenceScope({ env }), at: '2026-10-07T10:00:00.000Z', thisWallet: true }]);
@@ -1051,8 +1052,8 @@ describe('the adapter: status', () => {
 
   test('a failing probe reads as readiness unavailable, never as ready', async () => {
     const home = tempHome();
-    mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
-    const path = join(home, '.olympus', 'sovereignty.json');
+    mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true, mode: 0o700 });
+    const path = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json');
     const config = policyWith(true);
     writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
     const backend = createDashboardConsultAdapter({
@@ -1316,7 +1317,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     }
     expect(readFileSync(path, 'utf8')).toBe(before);
     expect(reloads).toEqual([]);
-    expect(readdirSync(join(home, '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
+    expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
     // Once the disk cooperates the same save goes through, atomically.
     expect((await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' })).ok).toBe(true);
     expect((JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig).modelProfiles['zkapi-consult']?.zkapi?.fundingDate).toBe('2026-10-05');
@@ -1360,7 +1361,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     const { backend, recoveries, env } = adapter({ home, secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'clear', settlement: 'confirmed' } as never, elapsedMs: 1 } });
     expect(await backend.recover({})).toMatchObject({ ok: false, code: 'confirmation_required' });
     expect(await backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 409, code: 'no_unresolved_session' });
-    const statePath = join(home, '.olympus', 'zkapi-consult-state.json');
+    const statePath = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json');
     const other = 'b'.repeat(32);
     writeFileSync(statePath, JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [other]: { at: '2026-10-06T09:00:00.000Z', configDir: '/other' } } }), { mode: 0o600 });
     expect(await backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 409, code: 'unresolved_session_other_wallet' });
@@ -1374,17 +1375,17 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     expect((recoveries[0] as { secretRef?: string }).secretRef).toBe('env:OLYMPUS_ZKAPI_API_KEY');
     // Settlement not confirmed: the fence is still held, and the message says so.
     const pending = adapter({ home: tempHome(), secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'held', settlement: 'pending' } as never, elapsedMs: 1 } });
-    writeFileSync(join(pending.env.HOME, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: pending.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
+    writeFileSync(join(pending.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: pending.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
     expect(await pending.backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 502, code: 'recovery_incomplete' });
     const failed = adapter({ home: tempHome(), secret: 'k' });
-    writeFileSync(join(failed.env.HOME, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: failed.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
+    writeFileSync(join(failed.env.HOME, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: failed.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
     expect(await failed.backend.recover({ confirm: true })).toMatchObject({ ok: false, httpStatus: 502, code: 'transport_failed' });
   });
 
   test('abandon marks exactly the named fence abandoned, with confirmation, and keeps it as a record', async () => {
     const home = tempHome();
     const { backend } = adapter({ home });
-    const statePath = join(home, '.olympus', 'zkapi-consult-state.json');
+    const statePath = join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'zkapi-consult-state.json');
     const scope = 'c'.repeat(32);
     writeFileSync(statePath, JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [scope]: { at: '2026-10-06T09:00:00.000Z', configDir: '/other' } } }), { mode: 0o600 });
     expect(await backend.abandon({ scope })).toMatchObject({ ok: false, code: 'confirmation_required' });

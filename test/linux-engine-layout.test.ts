@@ -196,3 +196,44 @@ test('the standalone engine keeps Telegram stores under its own data root, never
     expect(path).not.toContain('openclaw');
   }
 });
+
+test('owned Linux install accepts its legacy privacy file, but not unknown files or symlinks', () => {
+  const { home, env } = fixture(); const layout = resolveLinuxEngineLayout(env); publishLinuxEngineReceipt(layout);
+  const legacy = join(home, '.olympus'); mkdirSync(legacy, { mode: 0o700 });
+  writeFileSync(join(legacy, 'privacy.json'), JSON.stringify({ schemaVersion: 1, description: 'synthetic', rules: [] }), { mode: 0o600 });
+  expect(() => preflightLinuxEngineLayout(layout)).not.toThrow();
+  const receipt = readFileSync(layout.receiptPath); rmSync(layout.receiptPath);
+  expect(() => preflightLinuxEngineLayout(layout)).toThrow('Existing Olympus data');
+  writeFileSync(layout.receiptPath, receipt, { mode: 0o600 });
+  writeFileSync(join(legacy, 'unrelated'), 'keep', { mode: 0o600 });
+  expect(() => preflightLinuxEngineLayout(layout)).toThrow();
+  rmSync(join(legacy, 'unrelated')); rmSync(join(legacy, 'privacy.json'));
+  symlinkSync(join(home, 'elsewhere'), join(legacy, 'privacy.json'));
+  expect(() => preflightLinuxEngineLayout(layout)).toThrow();
+});
+
+test('owned preflight accepts an abandoned OAuth state after its writer has died', () => {
+ const {home,env}=fixture();const layout=resolveLinuxEngineLayout(env);publishLinuxEngineReceipt(layout);
+ const dir=join(home,'.olympus/pending-oauth');mkdirSync(dir,{recursive:true,mode:0o700});
+ writeFileSync(join(dir,'gmail.personal.json'),JSON.stringify({status:'pending',pid:2147483647}),{mode:0o600});
+ expect(()=>preflightLinuxEngineLayout(layout)).not.toThrow();
+});
+
+test('legacy migration accepts exactly the optional installer pack names',()=>{
+ const {home,env}=fixture();const l=resolveLinuxEngineLayout(env);publishLinuxEngineReceipt(l);
+ const dir=join(home,'.olympus/consult/vocabulary');mkdirSync(dir,{recursive:true,mode:0o700});
+ for(const name of ['de-hunspell.txt.gz','it-hunspell.txt.gz'])writeFileSync(join(dir,name),'synthetic',{mode:0o600});
+ expect(()=>preflightLinuxEngineLayout(l)).not.toThrow();
+ writeFileSync(join(dir,'xx-hunspell.txt.gz'),'unknown',{mode:0o600});expect(()=>preflightLinuxEngineLayout(l)).toThrow('Unrecognized legacy');
+});
+
+test('legacy inventory accepts only the language-pack installer manifest PID temporary',()=>{
+ const {home,env}=fixture();const l=resolveLinuxEngineLayout(env);publishLinuxEngineReceipt(l);
+ const dir=join(home,'.olympus/consult/vocabulary');mkdirSync(dir,{recursive:true,mode:0o700});
+ const valid=join(dir,'manifest.json.2147483647.tmp');writeFileSync(valid,'synthetic',{mode:0o600});
+ expect(()=>preflightLinuxEngineLayout(l)).not.toThrow();rmSync(valid);
+ for(const name of ['manifest.json.0.tmp','manifest.json.-1.tmp','manifest.json.abc.tmp','de-hunspell.txt.gz.123.tmp']){
+  const path=join(dir,name);writeFileSync(path,'synthetic',{mode:0o600});expect(()=>preflightLinuxEngineLayout(l)).toThrow('Unrecognized legacy');rmSync(path);
+ }
+ symlinkSync(join(home,'elsewhere'),valid);expect(()=>preflightLinuxEngineLayout(l)).toThrow();
+});

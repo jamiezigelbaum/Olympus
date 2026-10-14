@@ -324,7 +324,7 @@ export interface EngineServiceOptions {
 }
 export type EngineLifecycleCheckpoint =
   | 'linger_receipt_published' | 'linger_enabled' | 'receipt_published' | 'journal_published' | 'staging_identity_published'
-  | 'generation_identity_published' | 'generation_renamed' | 'activating_published'
+  | 'legacy_setting_published' | 'generation_identity_published' | 'generation_renamed' | 'activating_published'
   | 'launcher_published' | 'config_published' | 'unit_published' | 'current_published'
   | 'qualified_published' | 'receipt_finalized' | 'backup_removed' | 'journal_removed';
 

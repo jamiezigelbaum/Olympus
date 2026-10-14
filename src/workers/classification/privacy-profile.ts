@@ -27,11 +27,10 @@
 
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
+import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
 import type { OwnerTierRule } from './tier-classifier.ts';
 import { loadOwnerTierRules, writeOwnerTierRules } from './tier-rules.ts';
 
@@ -93,13 +92,13 @@ export interface PrivacyProfilePathOptions {
   env?: Record<string, string | undefined>;
 }
 
-export function defaultPrivacyProfilePath(): string {
-  return join(homedir(), '.olympus', 'privacy.json');
+export function defaultPrivacyProfilePath(env: Record<string, string | undefined> = process.env): string {
+  return defaultOwnerConfigPath('privacy.json', env);
 }
 
 export function resolvePrivacyProfilePath(options: PrivacyProfilePathOptions = {}): string {
   const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_PRIVACY_PROFILE_ENV]?.trim() || defaultPrivacyProfilePath();
+  return options.path?.trim() || env[OLYMPUS_PRIVACY_PROFILE_ENV]?.trim() || defaultPrivacyProfilePath(env);
 }
 
 /** The file's modification stamp, for callers that re-read only when it changes. */

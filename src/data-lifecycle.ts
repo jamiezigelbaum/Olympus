@@ -1565,12 +1565,12 @@ function isSameOrInsidePath(path: string, root: string): boolean {
 }
 
 function defaultSovereigntyConfigPathForHome(homeDir: string | undefined): string {
-  if (!homeDir) return defaultSovereigntyConfigPath();
+  if (!homeDir || process.platform === 'linux') return defaultSovereigntyConfigPath(envForHome(homeDir));
   return join(homeDir, '.olympus', 'sovereignty.json');
 }
 
 function defaultDropboxIngestionPolicyPathForHome(homeDir: string | undefined): string {
-  if (!homeDir) return defaultDropboxIngestionPolicyPath();
+  if (!homeDir || process.platform === 'linux') return defaultDropboxIngestionPolicyPath(envForHome(homeDir));
   return join(homeDir, '.olympus', 'sources', 'dropbox.personal.ingestion.json');
 }
 

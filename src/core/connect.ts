@@ -1,3 +1,5 @@
+import { linuxOwnerConfigPath } from './owner-config-read.ts';
+import { readLinuxEngineReceipt, resolveLinuxEngineLayout, isLegacyLinuxSetting } from './linux-engine-layout.ts';
 import { isRetiredGoogleHandle } from './google-handle-compatibility.ts';
 import { modelEndpointFetch } from './model-transport.ts';
 import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
@@ -2316,11 +2318,15 @@ function oauthErrorCodeFromBody(text: string): string | undefined {
   }
 }
 
-export function defaultDetachedOAuthStateDir(): string {
+export function defaultDetachedOAuthStateDir(env: Record<string, string | undefined> = process.env): string {
+  const linuxPath = linuxOwnerConfigPath('pending-oauth', env);
+  if (linuxPath) return linuxPath;
   return join(homedir(), '.olympus', 'pending-oauth');
 }
 
-export function defaultDetachedOAuthLogDir(): string {
+export function defaultDetachedOAuthLogDir(env: Record<string, string | undefined> = process.env): string {
+  const linuxPath = linuxOwnerConfigPath('logs', env);
+  if (linuxPath) return linuxPath;
   return join(homedir(), '.olympus', 'logs');
 }
 
@@ -2342,7 +2348,16 @@ export function writeDetachedOAuthState(path: string, state: DetachedOAuthState)
 
 export function readDetachedOAuthState(path: string): DetachedOAuthState | undefined {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync(path, 'utf8')) as DetachedOAuthState);
+    const state=sanitizeDetachedOAuthState(JSON.parse(readFileSync(path, 'utf8')) as DetachedOAuthState);
+    if(process.platform==='linux'&&state.logPath){
+      const layout=resolveLinuxEngineLayout();
+      const legacyLogs=join(layout.home,'.olympus/logs')+'/';
+      if(readLinuxEngineReceipt(layout.receiptPath)&&dirname(path)===join(layout.configDir,'pending-oauth')&&state.logPath.startsWith(legacyLogs)){
+        const name=state.logPath.slice(legacyLogs.length);
+        if(isLegacyLinuxSetting(`logs/${name}`))state.logPath=join(layout.configDir,'logs',name);
+      }
+    }
+    return state;
   } catch {
     return undefined;
   }

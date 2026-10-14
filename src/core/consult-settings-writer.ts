@@ -129,7 +129,9 @@ export const CONSULT_SETTINGS_LEASE_TIMEOUT_MS = 2_000;
  * the settings as they read back from the file after the write.
  */
 export function writeConsultSettings(input: ConsultSettingsWriteInput, location: ConsultSettingsLocation = {}): ConsultSettingsWriteResult {
-  const path = location.path ?? consultSettingsPath(location.env ?? process.env);
+  let path: string | undefined;
+  try { path = location.path ?? consultSettingsPath(location.env ?? process.env); }
+  catch { return { ok: false, reason: 'directory_unavailable' }; }
   if (path === undefined || !isAbsolute(path)) return { ok: false, reason: 'no_home' };
   const nextRevision = input.expectedRevision + 1;
   const candidate = parseConsultSettings({
