@@ -70637,11 +70637,17 @@ function degradedInput(degraded) {
 function unknownStatus(value2) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value2 };
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
   init_scheduler_markers();
+  DASHBOARD_UPDATE_COPY = {
+    notice: (version) => `Olympus ${version} is available. To update, run this in Terminal:`,
+    copy: "Copy command",
+    copied: "Copied",
+    copyFailed: "Select the command and copy it."
+  };
   DASHBOARD_STATUS_PRESENTATION = {
     Fresh: { label: "Fresh", colorToken: "good", glyphKind: "dot" },
     Working: { label: "Working", colorToken: "run", glyphKind: "donut" },
@@ -105567,6 +105573,167 @@ var init_remote_relay_runtime = __esm(() => {
   init_remote_access();
 });
 
+// src/core/update-check.ts
+import { readFileSync as readFileSync59 } from "node:fs";
+import { join as join88 } from "node:path";
+function installerForPlatform(platform2) {
+  return platform2 === "darwin" ? {
+    url: "https://olympusplugin.ai/install.sh",
+    command: "curl -fsSL https://olympusplugin.ai/install.sh | sh"
+  } : undefined;
+}
+function semver(version2) {
+  if (version2.length > 64 || !VERSION_PATTERN.test(version2))
+    return;
+  const [core2, suffix] = version2.split("-");
+  const numbers = core2.split(".");
+  const pre = suffix?.split(".") ?? [];
+  if ([...numbers, ...pre.filter((part) => /^\d+$/.test(part))].some((part) => part.length > 1 && part.startsWith("0")))
+    return;
+  return { core: numbers.map(BigInt), pre };
+}
+function parseInstallerVersion(script2) {
+  if (new TextEncoder().encode(script2).byteLength > UPDATE_MAX_BYTES)
+    return;
+  const version2 = /^OLYMPUS_VERSION=([^\r\n]*)\r?$/m.exec(script2)?.[1];
+  return version2 && semver(version2) ? version2 : undefined;
+}
+function newerVersion(remote, running) {
+  const next = semver(remote);
+  const current2 = semver(running);
+  if (!next || !current2 || current2.pre.length === 0 && next.pre.length > 0)
+    return false;
+  for (let i = 0;i < 3; i++) {
+    if (next.core[i] !== current2.core[i])
+      return next.core[i] > current2.core[i];
+  }
+  if (next.pre.length === 0 || current2.pre.length === 0)
+    return next.pre.length === 0 && current2.pre.length > 0;
+  for (let i = 0;i < Math.max(next.pre.length, current2.pre.length); i++) {
+    const a = next.pre[i], b = current2.pre[i];
+    if (a === undefined || b === undefined)
+      return b === undefined;
+    if (a === b)
+      continue;
+    const an = /^\d+$/.test(a), bn = /^\d+$/.test(b);
+    return an && bn ? BigInt(a) > BigInt(b) : an !== bn ? !an : a > b;
+  }
+  return false;
+}
+function runningOlympusVersion() {
+  try {
+    const value2 = JSON.parse(readFileSync59(join88(olympusPackageRoot(), "package.json"), "utf8")).version;
+    return typeof value2 === "string" ? value2 : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+function createUpdateChecker(options) {
+  const installer = installerForPlatform(options.platform);
+  const schedule = options.schedule ?? ((callback, delay2) => {
+    const timer = setTimeout(callback, delay2);
+    timer.unref();
+    return () => clearTimeout(timer);
+  });
+  let result;
+  let cancelTimer;
+  let controller;
+  let started = false;
+  let stopped = false;
+  const proxied = () => ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].some((key2) => Boolean(options.env[key2]?.trim()));
+  const off = (value2) => ["off", "0", "false", "no"].includes(value2?.trim().toLowerCase() ?? "");
+  const enabled = () => Boolean(installer) && !proxied() && !off(options.env.OLYMPUS_UPDATE_CHECK) && !off(options.fileEnv()?.OLYMPUS_UPDATE_CHECK);
+  async function check() {
+    if (controller)
+      return;
+    let reader;
+    let timeout;
+    try {
+      if (stopped || !enabled()) {
+        result = undefined;
+        return;
+      }
+      controller = new AbortController;
+      timeout = setTimeout(() => controller?.abort(), options.timeoutMs ?? UPDATE_TIMEOUT_MS);
+      const response = await (options.fetchImpl ?? fetch)(installer.url, {
+        method: "GET",
+        headers: { "User-Agent": "Olympus" },
+        credentials: "omit",
+        redirect: "error",
+        signal: controller.signal
+      });
+      reader = response.body?.getReader();
+      if (!response.ok || Number(response.headers.get("content-length")) > UPDATE_MAX_BYTES || !reader)
+        throw new Error("unavailable");
+      const chunks2 = [];
+      let size = 0;
+      for (;; ) {
+        const { done, value: value2 } = await reader.read();
+        if (done)
+          break;
+        size += value2.byteLength;
+        if (size > UPDATE_MAX_BYTES)
+          throw new Error("oversized");
+        chunks2.push(value2);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks2) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      const version2 = parseInstallerVersion(new TextDecoder().decode(bytes));
+      result = !stopped && enabled() && version2 && newerVersion(version2, options.runningVersion) ? { version: version2 } : undefined;
+    } catch {
+      result = undefined;
+      try {
+        options.debug?.("[update] check unavailable");
+      } catch {}
+    } finally {
+      if (timeout)
+        clearTimeout(timeout);
+      reader?.cancel().catch(() => {
+        return;
+      });
+      controller = undefined;
+    }
+  }
+  function tick() {
+    check().finally(() => {
+      if (!stopped)
+        cancelTimer = schedule(tick, 86400000 * (0.95 + (options.random ?? Math.random)() * 0.1));
+    });
+  }
+  return {
+    check,
+    available() {
+      try {
+        return enabled() && !stopped ? result : undefined;
+      } catch {
+        return;
+      }
+    },
+    start() {
+      if (started || stopped || !installer)
+        return;
+      started = true;
+      cancelTimer = schedule(tick, 120000);
+    },
+    stop() {
+      stopped = true;
+      result = undefined;
+      cancelTimer?.();
+      controller?.abort();
+    }
+  };
+}
+var VERSION_PATTERN, UPDATE_MAX_BYTES, UPDATE_TIMEOUT_MS = 1e4;
+var init_update_check = __esm(() => {
+  init_package_root();
+  VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
+  UPDATE_MAX_BYTES = 512 * 1024;
+});
+
 // src/workers/source-index/built-in-reasoning/manifest.ts
 function unslothQwen(size, revision, bytes, sha2565) {
   const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
@@ -105703,7 +105870,7 @@ import {
   existsSync as existsSync58,
   mkdirSync as mkdirSync43,
   openSync as openSync17,
-  readFileSync as readFileSync59,
+  readFileSync as readFileSync60,
   readdirSync as readdirSync14,
   renameSync as renameSync17,
   rmSync as rmSync21,
@@ -105713,33 +105880,33 @@ import {
   writeSync as writeSync5
 } from "node:fs";
 import { homedir as homedir54 } from "node:os";
-import { dirname as dirname63, isAbsolute as isAbsolute25, join as join88 } from "node:path";
+import { dirname as dirname63, isAbsolute as isAbsolute25, join as join89 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
     root,
-    modelDir: join88(root, model.modelId),
+    modelDir: join89(root, model.modelId),
     runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
-    statusPath: join88(root, "status.json"),
-    lockPath: join88(root, "install.lock"),
-    runtimeLockPath: join88(root, "runtime.lock")
+    statusPath: join89(root, "status.json"),
+    lockPath: join89(root, "install.lock"),
+    runtimeLockPath: join89(root, "runtime.lock")
   };
 }
 function builtInReasoningRoot(env) {
-  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join88(olympusModelsDir(env), "built-in-reasoning");
+  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join89(olympusModelsDir(env), "built-in-reasoning");
   if (!isAbsolute25(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return root;
 }
 function olympusModelsDir(env = process.env) {
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join88(env.HOME?.trim() || homedir54(), ".local", "share");
-  return join88(standaloneLinuxDataDir(env) ?? join88(dataRoot, "openclaw", "olympus"), "models");
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join89(env.HOME?.trim() || homedir54(), ".local", "share");
+  return join89(standaloneLinuxDataDir(env) ?? join89(dataRoot, "openclaw", "olympus"), "models");
 }
 function llamaServerRuntimeDir(env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  return join88(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
+  return join89(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
 }
 function llamaServerRuntimeLockPath(env = process.env) {
-  return join88(builtInReasoningRoot(env), "runtime.lock");
+  return join89(builtInReasoningRoot(env), "runtime.lock");
 }
 function currentPlatform2() {
   return `${process.platform}-${process.arch}`;
@@ -105758,7 +105925,7 @@ function readPinnedModelStatus(statusPath, modelId, noun) {
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync59(statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync60(statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -105781,7 +105948,7 @@ async function installPinnedModel(options) {
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
   const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
-  const files = bundle.files.map((file) => ({ file, path: join88(paths.modelDir, file.name) }));
+  const files = bundle.files.map((file) => ({ file, path: join89(paths.modelDir, file.name) }));
   const filesPresent = () => files.every(({ path }) => existsSync58(path));
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
@@ -105935,7 +106102,7 @@ function reportPinnedModelState(target, state, failure2) {
 function findServerBinary(runtimeDir) {
   const marker = readRuntimeMarker(runtimeDir);
   if (marker?.serverPath)
-    return join88(runtimeDir, marker.serverPath);
+    return join89(runtimeDir, marker.serverPath);
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
 async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
@@ -105955,20 +106122,20 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync59(join88(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync60(join89(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
 }
 function runtimeInstalled2(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync58(join88(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync58(join89(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
   const staging = `${runtimeDir}.staging-${randomUUID23()}`;
   ensureDirectory2(staging);
   try {
-    const archivePath = join88(staging, archive.name);
+    const archivePath = join89(staging, archive.name);
     await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
@@ -105985,7 +106152,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync21(join88(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync21(join89(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync21(runtimeDir, { recursive: true, force: true });
     renameSync17(staging, runtimeDir);
@@ -106008,14 +106175,14 @@ function extractWithTar(archivePath, targetDir) {
 function locateFile(root, name, depth2 = 0, prefix = "") {
   let entries;
   try {
-    entries = readdirSync14(join88(root, prefix));
+    entries = readdirSync14(join89(root, prefix));
   } catch {
     return;
   }
   if (entries.includes(name)) {
     const relative9 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync28(join88(root, relative9)).isFile())
+      if (statSync28(join89(root, relative9)).isFile())
         return relative9;
     } catch {}
   }
@@ -106024,7 +106191,7 @@ function locateFile(root, name, depth2 = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync28(join88(root, child)).isDirectory())
+      if (!statSync28(join89(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -106109,7 +106276,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
 }
 function lockHolder(lockPath) {
   try {
-    return JSON.parse(readFileSync59(lockPath, "utf8"));
+    return JSON.parse(readFileSync60(lockPath, "utf8"));
   } catch {
     return;
   }
@@ -106139,7 +106306,7 @@ function tryAcquireLock2(lockPath, token) {
 }
 function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync59(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync60(lockPath, "utf8"));
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
@@ -106862,19 +107029,19 @@ var init_analyst_built_in = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { accessSync as accessSync9, constants as constants9, readFileSync as readFileSync60 } from "node:fs";
-import { delimiter as delimiter8, isAbsolute as isAbsolute26, join as join89 } from "node:path";
+import { accessSync as accessSync9, constants as constants9, readFileSync as readFileSync61 } from "node:fs";
+import { delimiter as delimiter8, isAbsolute as isAbsolute26, join as join90 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join89(olympusModelsDir(env), "built-in-transcription");
+  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join90(olympusModelsDir(env), "built-in-transcription");
   if (!isAbsolute26(root))
     throw new TypeError("The built-in transcription directory must be an absolute path.");
   return {
     root,
-    modelDir: join89(root, model.modelId),
+    modelDir: join90(root, model.modelId),
     runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
     runtimeLockPath: llamaServerRuntimeLockPath(env),
-    statusPath: join89(root, "status.json"),
-    lockPath: join89(root, "install.lock"),
+    statusPath: join90(root, "status.json"),
+    lockPath: join90(root, "install.lock"),
     noun: BUILT_IN_TRANSCRIPTION_NOUN
   };
 }
@@ -106905,7 +107072,7 @@ function readBuiltInTranscriptionStatusFile(env = process.env, model = QWEN3_ASR
   const status = readBuiltInTranscriptionStatus(env, model);
   let raw;
   try {
-    raw = readFileSync60(builtInTranscriptionLayout(model, env).statusPath, "utf8");
+    raw = readFileSync61(builtInTranscriptionLayout(model, env).statusPath, "utf8");
   } catch (error2) {
     return { file: error2.code === "ENOENT" ? "missing" : "unreadable", status };
   }
@@ -106946,7 +107113,7 @@ function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) 
   };
   if (platform2.startsWith("darwin-"))
     return executable("/usr/bin/afconvert");
-  return (env.PATH ?? "").split(delimiter8).some((dir) => dir.length > 0 && isAbsolute26(dir) && executable(join89(dir, "ffmpeg")));
+  return (env.PATH ?? "").split(delimiter8).some((dir) => dir.length > 0 && isAbsolute26(dir) && executable(join90(dir, "ffmpeg")));
 }
 function modelLoadFailedReason(message2) {
   const text2 = message2 ?? "";
@@ -107405,10 +107572,10 @@ function createModelKeyReload(options) {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes20 } from "node:crypto";
-import { chmodSync as chmodSync26, lstatSync as lstatSync33, mkdirSync as mkdirSync44, readFileSync as readFileSync61 } from "node:fs";
-import { dirname as dirname64, join as join90 } from "node:path";
+import { chmodSync as chmodSync26, lstatSync as lstatSync33, mkdirSync as mkdirSync44, readFileSync as readFileSync62 } from "node:fs";
+import { dirname as dirname64, join as join91 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
-  return join90(dirname64(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
+  return join91(dirname64(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
 }
 function newDashboardSessionSecret() {
   return randomBytes20(32).toString("base64url");
@@ -107430,7 +107597,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     else if ((stats.mode & 63) !== 0)
       existing = "invalid";
     else {
-      const text2 = readFileSync61(path, "utf8").trim();
+      const text2 = readFileSync62(path, "utf8").trim();
       if (SECRET_PATTERN.test(text2))
         return { secret: text2, source: "file", path };
       existing = "invalid";
@@ -110148,7 +110315,7 @@ var init_document_formats = __esm(() => {
 // src/workers/file-extraction/extractors/image-prepare.ts
 import { mkdtemp as mkdtemp3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
-import { join as join91 } from "node:path";
+import { join as join92 } from "node:path";
 function imageDecoderUnavailableWarning(format) {
   return `image_decoder_unavailable_${format}`;
 }
@@ -110187,9 +110354,9 @@ function createImagePreparation(options) {
     if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
       return { kind: "too_small" };
     }
-    const tempDir = await mkdtemp3(join91(tmpdir8(), TEMP_DIR_PREFIX2));
+    const tempDir = await mkdtemp3(join92(tmpdir8(), TEMP_DIR_PREFIX2));
     try {
-      const inputPath = join91(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+      const inputPath = join92(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
       await writeFile3(inputPath, input.bytes, { mode: 384 });
       let prepared;
       try {
@@ -110256,7 +110423,7 @@ var init_image_prepare = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp4, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir9 } from "node:os";
-import { dirname as dirname66, join as join92 } from "node:path";
+import { dirname as dirname66, join as join93 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -110615,9 +110782,9 @@ function pdfTextLooksUndecoded(text2) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp4(join92(tmpdir9(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp4(join93(tmpdir9(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join92(tempDir, "input.pdf");
+    const inputPath = join93(tempDir, "input.pdf");
     await writeFile4(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
@@ -110877,7 +111044,7 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/pdf-raster-ocr.ts
 import { mkdtemp as mkdtemp5, readdir as readdir3, rm as rm6 } from "node:fs/promises";
 import { tmpdir as tmpdir10 } from "node:os";
-import { join as join93 } from "node:path";
+import { join as join94 } from "node:path";
 function parseSizePoints(text2) {
   const [first, second] = text2.split("x");
   const width = Number.parseFloat(first ?? "");
@@ -110961,7 +111128,7 @@ async function rasterPdfOcr(input, options) {
   const now = options.now ?? Date.now;
   const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
   const info = await readPdfInfo({ inputPath: input.inputPath, maxPages, options });
-  const tempDir = await mkdtemp5(join93(tmpdir10(), RASTER_TEMP_PREFIX));
+  const tempDir = await mkdtemp5(join94(tmpdir10(), RASTER_TEMP_PREFIX));
   const pages = [];
   let attempted = 0;
   let failed = 0;
@@ -111002,7 +111169,7 @@ async function rasterPdfOcr(input, options) {
                 "-gray",
                 "-png",
                 input.inputPath,
-                join93(tempDir, RASTER_PAGE_PREFIX)
+                join94(tempDir, RASTER_PAGE_PREFIX)
               ],
               timeoutMs: Math.min(options.timeoutMs, renderLeftMs)
             });
@@ -111035,7 +111202,7 @@ async function rasterPdfOcr(input, options) {
             break rangeLoop;
           }
           attempted += 1;
-          const path = join93(tempDir, file.name);
+          const path = join94(tempDir, file.name);
           try {
             const { stdout } = await options.commandRunner({
               command: TESSERACT_COMMAND,
@@ -111153,7 +111320,7 @@ var init_pdf_raster_ocr = __esm(() => {
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp6, readFile as readFile10, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir11 } from "node:os";
-import { join as join94 } from "node:path";
+import { join as join95 } from "node:path";
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -111406,9 +111573,9 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp6(join94(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join95(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join94(tempDir, `input${extension}`);
+    const inputPath = join95(tempDir, `input${extension}`);
     await writeFile5(inputPath, bytes);
     return await read(inputPath);
   } finally {
@@ -111428,11 +111595,11 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp6(join94(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join95(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join94(tempDir, "input.pdf");
-    const outputPath = join94(tempDir, "output.pdf");
-    const sidecarPath = join94(tempDir, "sidecar.txt");
+    const inputPath = join95(tempDir, "input.pdf");
+    const outputPath = join95(tempDir, "output.pdf");
+    const sidecarPath = join95(tempDir, "sidecar.txt");
     await writeFile5(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -111474,9 +111641,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp6(join94(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join95(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join94(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join95(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile5(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -111931,7 +112098,7 @@ var init_audio_wav = __esm(() => {
 import { existsSync as existsSync59 } from "node:fs";
 import { mkdtemp as mkdtemp7, readFile as readFile11, rm as rm8 } from "node:fs/promises";
 import { tmpdir as tmpdir12, totalmem as totalmem3 } from "node:os";
-import { join as join95 } from "node:path";
+import { join as join96 } from "node:path";
 function defaultAudioConverter(platform2, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
   const darwin = platform2.startsWith("darwin-");
   return async (inputPath, outputPath) => {
@@ -111996,7 +112163,7 @@ function createBuiltInTranscriber(options = {}) {
   const filesOnDisk = options.filesOnDisk ?? (() => {
     try {
       const layout = builtInTranscriptionLayout(model, env, options.installOptions?.runtime, platform2);
-      return model.files.every((file) => existsSync59(join95(layout.modelDir, file.name)));
+      return model.files.every((file) => existsSync59(join96(layout.modelDir, file.name)));
     } catch {
       return false;
     }
@@ -112115,9 +112282,9 @@ function createBuiltInTranscriber(options = {}) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
       const paths = installed;
-      const tempDir = await mkdtemp7(join95(tmpdir12(), TEMP_DIR_PREFIX5));
+      const tempDir = await mkdtemp7(join96(tmpdir12(), TEMP_DIR_PREFIX5));
       try {
-        const wavPath = join95(tempDir, "audio.wav");
+        const wavPath = join96(tempDir, "audio.wav");
         try {
           await convert(input.inputPath, wavPath);
         } catch (error2) {
@@ -112270,7 +112437,7 @@ var init_built_in_transcriber = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp8, readFile as readFile12, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir13 } from "node:os";
-import { extname as extname3, join as join96 } from "node:path";
+import { extname as extname3, join as join97 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -112349,8 +112516,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp8(join96(tmpdir13(), tempDirPrefix));
-          inputPath = join96(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp8(join97(tmpdir13(), tempDirPrefix));
+          inputPath = join97(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile6(inputPath, bytes);
         }
         const deadlineAt = transcriptionDeadlineFromLease(input.job.leaseExpiresAt);
@@ -115560,18 +115727,18 @@ var init_analyst_openai = __esm(() => {
 import {
   existsSync as existsSync60,
   mkdirSync as mkdirSync46,
-  readFileSync as readFileSync62,
+  readFileSync as readFileSync63,
   renameSync as renameSync18,
   rmSync as rmSync22,
   writeFileSync as writeFileSync22
 } from "node:fs";
 import { randomUUID as randomUUID25 } from "node:crypto";
 import { homedir as homedir55 } from "node:os";
-import { dirname as dirname68, isAbsolute as isAbsolute27, join as join97 } from "node:path";
+import { dirname as dirname68, isAbsolute as isAbsolute27, join as join98 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir55(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute27(configuredRoot) ? configuredRoot : join97(homeDir, ".cache");
-  return join97(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute27(configuredRoot) ? configuredRoot : join98(homeDir, ".cache");
+  return join98(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -115745,7 +115912,7 @@ function readCatalogCache(path, type) {
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync62(path, "utf8"));
+    payload2 = JSON.parse(readFileSync63(path, "utf8"));
   } catch {
     return;
   }
@@ -116597,7 +116764,7 @@ import {
   unlink as unlink2
 } from "node:fs/promises";
 import { homedir as homedir56 } from "node:os";
-import { dirname as dirname69, join as join98 } from "node:path";
+import { dirname as dirname69, join as join99 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
@@ -116764,8 +116931,8 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join98(homedir56(), ".local", "share");
-  return join98(standaloneLinuxDataDir(env) ?? join98(dataHome, "openclaw", "olympus"), "source-answer-latency.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join99(homedir56(), ".local", "share");
+  return join99(standaloneLinuxDataDir(env) ?? join99(dataHome, "openclaw", "olympus"), "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
   try {
@@ -116869,7 +117036,7 @@ var init_answer_latency_log = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash65 } from "node:crypto";
-import { readFileSync as readFileSync63 } from "node:fs";
+import { readFileSync as readFileSync64 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir57 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -117036,7 +117203,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync63(trustPath, "utf8");
+        this.caPem = readFileSync64(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -117139,7 +117306,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync63(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync64(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -124774,6 +124941,43 @@ function hostProgram(input, bridge) {
       }
     });
   }
+  if (input.updateSupported) {
+    const refreshUpdate = async () => {
+      try {
+        const response = await fetch("/v1/health", { cache: "no-store", credentials: "omit", signal: AbortSignal.timeout(5000) });
+        if (!response.ok)
+          return;
+        const health = await response.json();
+        const version2 = health?.update_available?.version;
+        const notice = document.querySelector("[data-update-notice]");
+        const sentence = document.querySelector("[data-update-text]");
+        if (!notice || !sentence)
+          return;
+        const valid = typeof version2 === "string" && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version2);
+        sentence.textContent = valid ? input.updateWords.notice.replace("{version}", version2) : "";
+        notice.hidden = !valid;
+      } catch {}
+    };
+    refreshUpdate();
+    window.setInterval(() => {
+      refreshUpdate();
+    }, 60000);
+  }
+  const updateCopy = document.querySelector("[data-update-copy]");
+  const updateCommand = document.getElementById("update-command");
+  const updateStatus = document.querySelector("[data-update-copy-status]");
+  if (updateCopy && updateCommand) {
+    updateCopy.addEventListener("click", () => {
+      const done = (words2) => {
+        if (updateStatus)
+          updateStatus.textContent = words2;
+      };
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        navigator.clipboard.writeText(updateCommand.textContent || "").then(() => done(input.updateWords.copied), () => done(input.updateWords.copyFailed));
+      } else
+        done(input.updateWords.copyFailed);
+    });
+  }
   const form = document.querySelector("[data-gate-unlock]");
   if (form) {
     form.addEventListener("submit", (event) => {
@@ -124812,6 +125016,8 @@ function hostProgram(input, bridge) {
   }
 }
 function renderComputerHostPage(input) {
+  const installer = installerForPlatform(input.platform ?? "darwin");
+  const update = installer ? input.updateAvailable : undefined;
   const token = input.readToken;
   const locked2 = input.csrfToken === undefined;
   const links = {};
@@ -124838,7 +125044,9 @@ function renderComputerHostPage(input) {
     landings: panelOpenTargetSources(),
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
-    words: DASHBOARD_HOST_GATE_COPY
+    words: DASHBOARD_HOST_GATE_COPY,
+    updateSupported: installer !== undefined,
+    updateWords: { notice: DASHBOARD_UPDATE_COPY.notice("{version}"), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed }
   })}, ${dashboardHostBridge.toString()});`.replaceAll("</script", "<\\/script");
   return [
     "<!doctype html>",
@@ -124850,6 +125058,9 @@ function renderComputerHostPage(input) {
     `<style>${HOST_CSS}</style>`,
     "</head>",
     `<body data-olympus-host="computer" data-locked="${locked2 ? "true" : "false"}">`,
+    ...installer ? [
+      `<section class="update" data-update-notice${update ? "" : " hidden"}><p data-update-text>${update ? text2(DASHBOARD_UPDATE_COPY.notice(update.version)) : ""}</p>` + `<p><code id="update-command">${text2(installer.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${text2(DASHBOARD_UPDATE_COPY.copy)}</button> ` + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`
+    ] : [],
     lockedGate(!locked2),
     ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text2(model.name)} — ${text2(model.state)}</strong>: ${text2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute2(input.panelHtml)}"></iframe>`,
@@ -124862,6 +125073,7 @@ function renderComputerHostPage(input) {
 }
 var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_LOCAL_PAGES, HOST_CSS, COMPUTER_HOST_PAGE_CSP;
 var init_host_page = __esm(() => {
+  init_update_check();
   init_dashboard_contract();
   init_page();
   init_vocabulary();
@@ -124878,6 +125090,9 @@ var init_host_page = __esm(() => {
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
+.update p{margin:0 0 0.5rem}
+.update code{overflow-wrap:anywhere;white-space:pre-wrap}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
@@ -127354,7 +127569,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync28, copyFileSync as copyFileSync2, existsSync as existsSync61, lstatSync as lstatSync34, mkdirSync as mkdirSync47, readFileSync as readFileSync64 } from "node:fs";
+import { chmodSync as chmodSync28, copyFileSync as copyFileSync2, existsSync as existsSync61, lstatSync as lstatSync34, mkdirSync as mkdirSync47, readFileSync as readFileSync65 } from "node:fs";
 import { dirname as dirname70 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
@@ -127368,7 +127583,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text3 = readFileSync64(path, "utf8");
+  const text3 = readFileSync65(path, "utf8");
   const raw = JSON.parse(text3);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -127691,9 +127906,9 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash69, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { readFileSync as readFileSync65, statSync as statSync29 } from "node:fs";
+import { readFileSync as readFileSync66, statSync as statSync29 } from "node:fs";
 import { homedir as homedir58 } from "node:os";
-import { join as join99, resolve as resolve13 } from "node:path";
+import { join as join100, resolve as resolve13 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -127831,7 +128046,8 @@ function createEmailSourceWorker(options = {}) {
           const degradedCredentials = credentialDegradations?.() ?? [];
           const health = isDeepHealthRequest(url) ? withCredentialDegradations(await connector.health(), degradedCredentials) : cheapWorkerHealth(connector, degradedCredentials);
           assertNoRawEmailFields(health);
-          return json(health);
+          const update = options.updateAvailable?.();
+          return json({ ...health, ...update ? { update_available: update } : {} });
         }
         if (request.method === "GET" && url.pathname === `${basePath}/health/dependencies`) {
           const health = withCredentialReadiness(withCredentialDegradations(await connector.health(), credentialDegradations?.() ?? []), credentialReadiness?.());
@@ -128080,6 +128296,8 @@ function createEmailSourceWorker(options = {}) {
           if (page2 === "host") {
             return new Response(renderComputerHostPage({
               panelHtml: dashboardResourceHtml(),
+              updateAvailable: options.updateAvailable?.(),
+              platform: options.platform ?? process.platform,
               ...options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {},
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {},
@@ -131083,7 +131301,7 @@ function dashboardSourceAccountBindings(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync65(join99(homedir58(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync66(join100(homedir58(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -134124,12 +134342,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname71, join as join100 } from "node:path";
+import { dirname as dirname71, join as join101 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join100(dirname71(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join101(dirname71(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -134828,7 +135046,7 @@ var init_answer_activity = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync48, readFileSync as readFileSync66 } from "node:fs";
+import { mkdirSync as mkdirSync48, readFileSync as readFileSync67 } from "node:fs";
 import { dirname as dirname72 } from "node:path";
 
 class SnifferCallBudget {
@@ -134843,7 +135061,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync66(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync67(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -155602,7 +155820,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync64 } from "node:fs";
-import { dirname as dirname75, isAbsolute as isAbsolute29, join as join101 } from "node:path";
+import { dirname as dirname75, isAbsolute as isAbsolute29, join as join102 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -158113,7 +158331,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let desktopPoll;
   let desktopPollingClosed = false;
   const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === "listening" });
+  const updateChecker = createUpdateChecker({
+    runningVersion: runningOlympusVersion(),
+    platform: process.platform,
+    env: process.env,
+    fileEnv: () => readWorkerSetupEnv()
+  });
   const worker = createEmailSourceWorker({
+    updateAvailable: () => updateChecker.available(),
     ...process.platform === "linux" ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {},
     agentConnectHost: agentApprovalHost,
     agentConnections: {
@@ -158851,6 +159076,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     return response;
   } }) : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  updateChecker.start();
   if (socketPath) {
     let ready = false;
     let probing = false;
@@ -158917,7 +159143,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join101(dirname75(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join102(dirname75(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -158944,6 +159170,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     if (shuttingDown)
       return;
     shuttingDown = true;
+    updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
     if (desktopPoll)
@@ -159506,6 +159733,7 @@ function googleFilePage(locator) {
 }
 var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
+  init_update_check();
   init_open_targets();
   init_linux_owner_bridge();
   init_linux_desktop_opener();
@@ -160056,7 +160284,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes29 } from "node:crypto";
-import { readFileSync as readFileSync67, openSync as openSync18, closeSync as closeSync19, writeSync as writeSync6 } from "node:fs";
+import { readFileSync as readFileSync68, openSync as openSync18, closeSync as closeSync19, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve14 } from "node:path";
@@ -163507,6 +163735,7 @@ async function engineStatusReport(deps = {}) {
       ..."error" in remoteMode ? { remote_error: remoteMode.error } : {}
     },
     worker: { base_url: baseUrl, ...worker },
+    ...worker.update_available ? { update_available: worker.update_available } : {},
     relay: relayStatus ? { mode: relayStatus.mode, running: relayRunning, state: relayStatus.relay?.state ?? null, reason: relayStatus.relay?.reason ?? null, public_base_url: relayStatus.public_base_url ?? null } : null,
     analyst: {
       public_personal: "answered in ChatGPT from evidence returned by the Olympus MCP tools",
@@ -163529,11 +163758,13 @@ async function probeWorker(fetchImpl, baseUrl, socket) {
   const timeout = setTimeout(() => controller.abort(), 1500);
   try {
     const response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}/health`, { method: "GET", signal: controller.signal, ...socket ? { unix: socket } : {} });
-    const health = socket && response.ok ? await response.json() : undefined;
+    const health = response.ok ? await response.json().catch(() => {
+      return;
+    }) : undefined;
     await response.body?.cancel().catch(() => {
       return;
     });
-    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...health?.built_in_models ? { built_in_models: health.built_in_models } : {}, ...health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {} };
+    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...health?.built_in_models ? { built_in_models: health.built_in_models } : {}, ...health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {}, ...typeof health?.update_available?.version === "string" ? { update_available: { version: health.update_available.version } } : {} };
   } catch {
     return { reachable: false, detail: "no answer" };
   } finally {
@@ -164234,7 +164465,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync67("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync68("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -164589,7 +164820,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync67(resolve14(input2), "utf8");
+    raw = readFileSync68(resolve14(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }

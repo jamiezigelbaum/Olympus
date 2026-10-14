@@ -24,6 +24,8 @@ for (const [name, body, expected] of [
   ['oversized', script('1.0.1') + 'x'.repeat(524288), undefined],
   ['prerelease', script('1.1.0-rc.1'), '1.1.0-rc.1'],
   ['leading zero', script('01.0.1'), undefined],
+  ['version length 64', script('1'.repeat(60) + '.0.1'), '1'.repeat(60) + '.0.1'],
+  ['version length 65', script('1'.repeat(61) + '.0.1'), undefined],
 ] as const) test(`installer parser: ${name}`, () => expect(parseInstallerVersion(body)).toBe(expected));
 
 test('parser follows the publisher version pattern without changing publishing', () => {
@@ -60,6 +62,28 @@ test('off in environment or worker.env makes zero requests, including after a pr
     await checker.check(); expect(calls).toBe(1); expect(checker.available()).toBeUndefined();
     checker.stop();
   }
+});
+
+for (const value of ['OFF', '0', 'false', 'FaLsE', 'NO']) test(`update off switch ${value} makes zero requests`, async () => {
+  for (const file of [false, true]) {
+    let calls = 0;
+    const setting = { OLYMPUS_UPDATE_CHECK: value };
+    const checker = createUpdateChecker({
+      ...options, env: file ? {} : setting, fileEnv: () => file ? setting : {},
+      fetchImpl: (async () => { calls++; return new Response(script('1.0.1')); }) as unknown as typeof fetch,
+    });
+    try {
+      checker.start(); await checker.check();
+      expect(calls).toBe(0); expect(checker.available()).toBeUndefined();
+    } finally { checker.stop(); }
+  }
+});
+
+test('an overlong installer version is ignored by the update checker', async () => {
+  const checker = createUpdateChecker({ ...options, fetchImpl: fetcher(script('1'.repeat(61) + '.0.1')) });
+  try {
+    await checker.check(); expect(checker.available()).toBeUndefined();
+  } finally { checker.stop(); }
 });
 
 test('fixed anonymous GET, bounded timeout and no redirects; result stays in memory', async () => {
