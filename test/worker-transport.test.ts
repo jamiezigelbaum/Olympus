@@ -98,8 +98,14 @@ test('Linux approval accepts socket provenance only; loopback peer and forged he
     expect((await handler(new Request(postUrl, { method: 'POST', headers, body }))).status).toBe(403);
     const client = createWorkerFetch(options);
     expect((await client(postUrl, { method: 'POST', headers, body, redirect: 'manual' })).status).toBe(303);
-    // A spent decision cannot be replayed, even by the socket owner.
-    expect((await client(postUrl, { method: 'POST', headers, body, redirect: 'manual' })).status).toBe(400);
+    // A spent decision cannot be replayed, even by the socket owner: the
+    // resubmission gets a status-only receipt, never another code or callback.
+    const replayed = await client(postUrl, { method: 'POST', headers, body, redirect: 'manual' });
+    expect(replayed.status).toBe(200);
+    expect(replayed.headers.get('location')).toBeNull();
+    const receipt = await replayed.text();
+    expect(receipt).toContain('<h1>Approved</h1>');
+    expect(receipt).not.toContain('code=');
     expect((await handler(new Request(postUrl, { method: 'POST', headers, body }))).status).toBe(403);
   } finally { store.close(); }
 });

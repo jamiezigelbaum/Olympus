@@ -332,3 +332,33 @@ export function renderConsentErrorPage(message: string): { body: string; headers
 </html>`;
   return { body, headers: consentSecurityHeaders(nonce) };
 }
+
+/**
+ * A stable receipt: no script, automatic close, or OAuth credentials. It says
+ * Connected only once the app finished connecting; before that, Approved.
+ */
+export function renderConsentSuccessPage(connected: boolean): { body: string; headers: Record<string, string> } {
+  const nonce = randomBytes(16).toString('base64');
+  const heading = connected ? 'Connected' : 'Approved';
+  const message = connected
+    ? 'You already approved this connection. You can close this page and return to the app.'
+    : 'You approved this connection. Return to the app to finish. If it doesn\'t show Olympus as connected, start connecting again from the app.';
+  return {
+    body: `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${heading} · Olympus</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>${heading}</h1>
+<div class="card"><p>${message}</p></div>
+</main>
+</body>
+</html>`,
+    headers: consentSecurityHeaders(nonce),
+  };
+}
