@@ -24,7 +24,7 @@ async function fixture() {
   const identity = { ...identityOf('mail'), provider: 'gmail', family: 'email' as const };
   const safe = { ...identityOf('safe'), provider: 'gmail', family: 'email' as const };
   closes.push(() => { f.close(); tmp.cleanup(); });
-  return { get f() { return f; }, identity, safe,
+  return { get f() { return f; }, identity, safe, connector,
     restart: () => { f.close(); f = openTierFixture(tmp.dir, { family: 'email' }); return f; } };
 }
 
@@ -173,4 +173,33 @@ test('a move between vector scan pages cannot crowd out a Personal match at rank
   const searching = lower.vectorSearchItems('garden', f.cloud, 1);
   await started; await moved;
   expect((await searching).map(row => row.sourceItem.localItemId)).toEqual([localId('safe')]);
+});
+
+test.each(['afterVerified', 'afterPurge'] as const)('a newer Secret/restored generation supersedes a %s receipt without blocking later moves', async hook => {
+  const x = await fixture(); const f = x.f;
+  await expect(moveTieredItem({ set: f.set, identity: x.identity, target, [hook]: () => { throw new Error('crash'); } })).rejects.toThrow('crash');
+  await moveTieredItem({ set: f.set, identity: x.identity, target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+  f.ledger.setOverride(x.identity, { kind: 'not_secret' });
+  await f.set.sync(x.connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  expect(f.ledger.getCurrent(x.identity)?.contentTier).toBe('private');
+  expect(f.stores.internal!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  expect(contentCounts(f.paths.internal)).toEqual(empty);
+  expect(f.stores.secure_local!.localContent(localId('mail'))?.chunks.join('')).toBe(body);
+});
+
+test('vector visibility uses full row identity when a hidden and a Personal item share a local id', async () => {
+  const x = await fixture(); const f = x.f; const lower = f.stores.internal!;
+  const retained = lower.exportItemCopy(x.identity)!;
+  await moveTieredItem({ set: f.set, identity: x.identity, target });
+  lower.importItemCopy(retained, { trustTier: 'S3', syncConnectorId: 'old-release', layers: 'both', vectorProvider: f.cloud });
+  const db = new Database(f.paths.internal);
+  db.query('UPDATE items SET local_item_id = ? WHERE provider_item_id = ?').run(localId('mail'), 'safe');
+  for (const [id, values] of [['mail', [1, 0, 0, 0]], ['safe', [0, 1, 0, 0]]] as const) {
+    db.query('UPDATE chunk_embeddings SET embedding = ? WHERE item_pk = (SELECT item_pk FROM items WHERE provider_item_id = ?)')
+      .run(new Uint8Array(new Float32Array(values).buffer), id);
+  }
+  db.close();
+  f.cloud.embed = async () => [[1, 0.8, 0, 0]];
+  expect((await lower.vectorSearchItems('garden', f.cloud, 1)).map(row => row.sourceItem.providerItemId)).toEqual(['safe']);
 });

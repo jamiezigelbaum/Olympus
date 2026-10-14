@@ -838,6 +838,10 @@ export class ConnectorStoreMetadataOnlyViolationError extends Error {
  * worker responsive and preserves the active item until the maintenance pass
  * can prove an unambiguous identity.
  */
+class ConnectorStoreTierWriteRefusedError extends Error {
+  constructor() { super('The current tier ledger does not authorize this store write.'); }
+}
+
 /**
  * A store a tiered store set routed copies into, read or written without that
  * set's ledger (missing, replaced, or unreadable). Visibility cannot be judged,
@@ -5274,6 +5278,9 @@ export class LocalConnectorStore {
       seenIdentities.add(key);
     }
 
+    // Opening a ledger can settle its schema/holds: do that before acquiring
+    // the source writer, then only read the captured ledger under the lock.
+    const tierLedgerForWrite = this.visibilityLedger();
     const summary = this.db.transaction((): ConnectorStoreRepresentationRestoreSummary => {
       const syncRunId = `connector-representation-restore-${randomUUID()}`;
       const startedAt = this.now().toISOString();
@@ -5306,6 +5313,11 @@ export class LocalConnectorStore {
 
       for (const record of options.items) {
         const item = record.item;
+        if (!this.tierWriteAllowed(item.identity, 'content', tierLedgerForWrite)) {
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
         // Restore re-admits an item's chunks after extraction, so it is a
         // second front door. It is closed the same way and before the identity
         // lookup: an excluded item is counted and skipped rather than raising
@@ -5472,7 +5484,7 @@ export class LocalConnectorStore {
         restoredProviderItemIds: restoredProviderItemIds.sort(),
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
-    })();
+    }).immediate();
     // References are taken once the content is committed: a rolled-back
     // restore leaves no marker behind. The extraction's own staging hold
     // keeps the file until then.
@@ -7240,18 +7252,26 @@ export class LocalConnectorStore {
           const sourceScopeObservation = options?.sourceScopeObservation
             ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage))
             : undefined;
-          const upsert = this.upsertItemWithOwner(
-            itemForStorage,
-            sensitivity,
-            connector.id,
-            ownershipKind,
-            syncRunId,
-            options?.ownerObservation ?? 'provider_listing',
-            deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
-            false,
-            deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
-            sourceScopeObservation,
-          );
+          let upsert: { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean };
+          try {
+            upsert = this.upsertItemWithOwner(
+              itemForStorage,
+              sensitivity,
+              connector.id,
+              ownershipKind,
+              syncRunId,
+              options?.ownerObservation ?? 'provider_listing',
+              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              false,
+              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              sourceScopeObservation,
+              routedLayer && routedLayer !== 'metadata' ? 'content' : undefined,
+            );
+          } catch (error) {
+            if (!(error instanceof ConnectorStoreTierWriteRefusedError)) throw error;
+            itemsRejected += 1;
+            continue;
+          }
           itemsIndexed += 1;
           let itemChanged = upsert.contentChanged;
 
@@ -7646,6 +7666,33 @@ export class LocalConnectorStore {
     };
   }
 
+  /** Read only under this store's writer lock: an earlier writer is purged,
+   * and a writer after a hide/purge cannot repopulate a lower copy. */
+  private tierWriteAllowed(identity: SourceItemIdentity, layer: TierSearchLayer, ledger: TierLedger | undefined): boolean {
+    try {
+      const binding = this.tierSetBinding();
+      if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId)) return false;
+      if (!ledger) return true;
+      const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
+      if (!state || !state.record.routed) return true;
+      const { record, copies } = state;
+      if (record.state === 'moving' || record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;
+      const here = copies.find((copy) => copy.corpusId === this.corpusId
+        && (copy.state === 'current' || (copy.state === 'staged' && !record.contentRead && copy.generation === record.generation)));
+      if (!here) return false;
+      // Content copies legitimately carry their names at the higher tier too.
+      if (layer === 'metadata') return true;
+      if (here.layers === 'content' || here.layers === 'both') return true;
+      // A first landing may widen an unread names copy at its already decided
+      // content tier. It may never widen a lower names-only copy after a raise.
+      const contentDomain = record.contentTier === 'public' ? 'public_safe'
+        : record.contentTier === 'private' ? 'internal' : 'secure_local';
+      return !record.contentRead && contentDomain === this.trustDomain;
+    } catch {
+      return false;
+    }
+  }
+
   private upsertItemWithOwner(
     item: RawItem,
     sensitivity: SourceSensitivity,
@@ -7657,8 +7704,11 @@ export class LocalConnectorStore {
     preserveStoredSearchTextOwnedFacets = false,
     preserveStoredContentHash = false,
     sourceScopeObservation?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] },
+    requiredLayer: TierSearchLayer = textFromRawItem(item) === undefined ? 'metadata' : 'content',
   ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
+    const tierLedgerForWrite = this.visibilityLedger();
     return this.db.transaction(() => {
+      if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite)) throw new ConnectorStoreTierWriteRefusedError();
       const upsert = this.upsertItem(
         item,
         sensitivity,
@@ -7693,7 +7743,7 @@ export class LocalConnectorStore {
         `).get(upsert.itemPk) as { present?: number } | null)?.present;
       if (upsert.ftsMetadataChanged || missingScopeMetadataRow) this.refreshFtsForItem(upsert.itemPk);
       return upsert;
-    })();
+    }).immediate();
   }
 
   private tombstoneWindowRemovedItems(
@@ -8126,6 +8176,20 @@ export class LocalConnectorStore {
   }
 
   private indexItemText(
+    item: RawItem,
+    itemPk: number,
+    maxChunkChars: number,
+    text: string | undefined,
+    media?: ConnectorStoreChunkMedia,
+  ): { chunksIndexed: number; ftsContentChanged: boolean } {
+    const tierLedgerForWrite = this.visibilityLedger();
+    return this.db.transaction(() => {
+      if (!this.tierWriteAllowed(item.identity, 'content', tierLedgerForWrite)) return { chunksIndexed: 0, ftsContentChanged: false };
+      return this.indexItemTextHeld(item, itemPk, maxChunkChars, text, media);
+    }).immediate();
+  }
+
+  private indexItemTextHeld(
     item: RawItem,
     itemPk: number,
     maxChunkChars: number,
@@ -9761,12 +9825,9 @@ export class LocalConnectorStore {
         // The winning CHUNK is kept, not just its score. A cosine is a
         // chunk-level measurement, so the chunk that produced the item's best
         // score is the only defensible semantic citation target.
-        const visible = new Set(this.tierVisibleRows(
-          this.searchRowsByItemPks([...new Set(page.map(row => row.itemPk))], selectedAccount, filters),
-          row => row.sourceItem, () => 'content',
-        ).map(row => row.sourceItem.localItemId));
+        const visible = this.visibleVectorItemPks([...new Set(page.map(row => row.itemPk))], selectedAccount, filters);
         for (const [index, row] of page.entries()) {
-          if (!visible.has(row.localItemId)) continue;
+          if (!visible.has(row.itemPk)) continue;
           if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
             return { rows: [], skippedReason: 'vector_scan_deadline_exceeded' };
           }
@@ -9810,12 +9871,9 @@ export class LocalConnectorStore {
     // importantly, makes it independent of whatever plan SQLite chooses.
     // A move can land while a paged scan yields. Recheck all winners before
     // applying the rank limit so a now-hidden score cannot crowd out a match.
-    const visibleAtRanking = new Set(this.tierVisibleRows(
-      this.searchRowsByItemPks([...bestByItem.keys()], selectedAccount, filters),
-      row => row.sourceItem, () => 'content',
-    ).map(row => row.sourceItem.localItemId));
+    const visibleAtRanking = this.visibleVectorItemPks([...bestByItem.keys()], selectedAccount, filters);
     const rankedItems = Array.from(bestByItem.entries())
-      .filter(([, candidate]) => visibleAtRanking.has(candidate.localItemId))
+      .filter(([itemPk]) => visibleAtRanking.has(itemPk))
       .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
       .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0])
       .slice(0, limit);
@@ -9968,6 +10026,27 @@ export class LocalConnectorStore {
   }
 
   // Hydrates membrane-safe search rows for ranked item pks, preserving order.
+  // Exact item PKs avoid local-id aliases across providers/accounts. Batches
+  // keep full-corpus winner validation below SQLite's bind-variable ceiling.
+  private visibleVectorItemPks(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Set<number> {
+    const visible = new Set<number>();
+    const selectedFilters = connectorStoreFilterSql(filters);
+    for (let offset = 0; offset < itemPks.length; offset += 200) {
+      const batch = itemPks.slice(offset, offset + 200);
+      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
+        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`)
+        .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params) as Array<{
+          item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+        }>;
+      for (const row of this.tierVisibleRows(rows, row => ({
+        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      }), () => 'content')) visible.add(row.item_pk);
+    }
+    return visible;
+  }
+
   private searchRowsByItemPks(
     itemPks: number[],
     accountScope?: string,

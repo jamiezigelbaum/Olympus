@@ -180,9 +180,9 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   // Once verified, a retry must never import again from a possibly emptied
   // source. The receipt lives in the existing ledger metadata table.
   const receiptKey = purgeReceiptKey(identity);
-  const pending = ledger.readMeta(receiptKey);
-  if (pending) {
-    const receipt = JSON.parse(pending) as VerifiedMove;
+  const receiptToResume = readVerifiedMove(ledger, identity);
+  if (receiptToResume) {
+    const receipt = receiptToResume;
     if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier
       || receipt.target.contentTier !== target.contentTier) throw new TierLedgerGenerationConflictError();
     return finishVerifiedMove(options, receipt);
@@ -382,9 +382,8 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
 
 /** Resume only a durably verified move, without exporting its lower source. */
 export function resumeVerifiedTierMove(set: TieredStoreSet, identity: TierLedgerIdentity): boolean {
-  const pending = set.ledger.readMeta(purgeReceiptKey(identity));
-  if (!pending) return false;
-  const receipt = JSON.parse(pending) as VerifiedMove;
+  const receipt = readVerifiedMove(set.ledger, identity);
+  if (!receipt) return false;
   const copy = receipt.placement.map(copy => set.store(copy.trustDomain)?.exportItemCopy(identity)).find(Boolean);
   if (!copy) throw new Error('Verified destination unavailable.');
   finishVerifiedMove({ set, identity: copy.identity }, receipt);
@@ -404,6 +403,33 @@ interface VerifiedMove {
 
 function purgeReceiptKey(identity: TierLedgerIdentity): string {
   return `tier-move-verified:${tierLedgerIdentityKey(identity)}`;
+}
+
+function readVerifiedMove(ledger: TierLedger, identity: TierLedgerIdentity): VerifiedMove | undefined {
+  const raw = ledger.readMeta(purgeReceiptKey(identity));
+  if (!raw) return undefined;
+  const receipt = JSON.parse(raw) as VerifiedMove;
+  const current = ledger.getCurrent(identity);
+  if (!current) throw new TierLedgerGenerationConflictError();
+  if (receipt.generation < current.generation
+    || (receipt.generation === current.generation && current.state !== 'moving')) {
+    // A new authoritative generation (e.g. Secret retirement/restoration),
+    // or an abandoned move, owns the copies now. Never replay its predecessor.
+    // An ordinary partial purge stays `moving` at the SAME generation, so its
+    // receipt is retained and prevents re-copying from an emptied source.
+    ledger.withGenerationFence(identity, current.generation, () => {
+      const now = ledger.getCurrent(identity)!;
+      // Do not erase a new receipt staged at the same generation while this
+      // reader was deciding whether the old abandoned receipt was obsolete.
+      if (ledger.readMeta(purgeReceiptKey(identity)) !== raw
+        || !(receipt.generation < now.generation || (receipt.generation === now.generation && now.state !== 'moving'))) {
+        throw new TierLedgerGenerationConflictError();
+      }
+      ledger.writeMeta(purgeReceiptKey(identity), '');
+    });
+    return undefined;
+  }
+  return receipt;
 }
 
 function copyFingerprint(copy: ConnectorStoreItemCopy, layers: TierCopyLayers): string {
