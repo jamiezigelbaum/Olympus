@@ -10287,7 +10287,7 @@ function zkapiProcessExitMessage(exit) {
   const who = exit.role === "tor" ? "The Tor client" : "The zkAPI daemon";
   const how = exit.signal ? ` (signal ${exit.signal})` : exit.code !== undefined ? ` (exit code ${exit.code})` : "";
   const when = exit.stage && EXIT_STAGE_NAMES[exit.stage] ? ` ${EXIT_STAGE_NAMES[exit.stage]}` : "";
-  if (exit.role === "daemon" && exit.reason === "wallet_companion_exited") {
+  if (exit.role === "daemon" && exit.reason === "wallet_companion_exited" && !exit.signal) {
     return `The zkAPI wallet companion stopped, causing this session's daemon to exit${how}${when}. Check the zkAPI installation and Tor connection before retrying.`;
   }
   const outside = exit.signal ? " Something else on this computer stopped it." : "";
