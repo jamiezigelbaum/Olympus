@@ -42,6 +42,7 @@ export {
   createGmailConnectorStoreSyncHandler,
   encodeGmailStoreCheckpoint,
   gmailReceiptDigest,
+  gmailCursorConnectorId,
   type GmailConnectorStoreReceipt,
   type GmailConnectorStoreSyncHandler,
   type GmailConnectorStoreSyncOptions,

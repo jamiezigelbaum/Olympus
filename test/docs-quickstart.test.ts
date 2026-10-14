@@ -135,7 +135,7 @@ describe('first-run docs', () => {
 
   test('Venice option distinguishes Private search from Public and Personal embeddings', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
-    const posture = install.slice(install.indexOf('> 3. **Venice**'), install.indexOf("> 4. **Private kept local, keyword search only**"))
+    const posture = install.slice(install.indexOf('> 3. **Venice**'), install.indexOf("> 4. **Private meaning search on this computer**"))
       .replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(posture).toContain('Private content goes only to Venice');
     expect(posture).toContain('Search indexing for every tier uses the model built into Olympus');

@@ -24429,6 +24429,8 @@ var init_venice_models = __esm(() => {
 import { chmodSync as chmodSync7, existsSync as existsSync22, mkdirSync as mkdirSync15, readFileSync as readFileSync26 } from "node:fs";
 import { dirname as dirname24, join as join31 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import { randomUUID as randomUUID5 } from "node:crypto";
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -24439,6 +24441,13 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync22(configPath)) {
+    if (options.migratePrivateMeaning) {
+      try {
+        migratePrivateMeaningSearch(configPath);
+      } catch {
+        console.warn("Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.");
+      }
+    }
     const parsed = JSON.parse(readFileSync26(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
@@ -24718,7 +24727,12 @@ function writeSovereigntyConfigFile(input) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
-  publishSovereigntyConfigFile(path, config);
+  withFileLeaseSync(path, (lease) => {
+    if (existsSync22(path) && input.force !== true) {
+      throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
+    }
+    lease.commit(() => publishSovereigntyConfigFile(path, config));
+  }, { acquireTimeoutMs: 5000 });
   return path;
 }
 function publishSovereigntyConfigFile(path, config, onPublished) {
@@ -24781,6 +24795,67 @@ function updateSovereigntyConfigFile(input) {
       return afterPublish();
     throw error;
   }
+}
+function migratePrivateMeaningSearch(path) {
+  const legacy = {
+    schemaVersion: 1,
+    modelProfiles: {
+      "built-in-embedding": { provider: "built-in", trust: "local", model: "embeddinggemma-2-litert-24d962e", purpose: "embedding" },
+      "cloud-openclaw-infer": { provider: "openclaw-infer", trust: "standard_cloud", purpose: "analyst" }
+    },
+    routes: {
+      secure_local: {
+        mode: "disabled",
+        pool: { members: [] },
+        disabledReason: "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
+      },
+      internal: { analyst: ["cloud-openclaw-infer"] }
+    },
+    retrieval: { trustDomains: {
+      secure_local: {
+        minimumExecutionTrust: "local",
+        allowedEmbeddingTrust: ["local"],
+        embeddingProfile: null,
+        allowCloudQuery: false,
+        activationMode: "metadata_only",
+        secureHandling: "metadata_only_gap"
+      },
+      internal: {
+        minimumExecutionTrust: "standard_cloud",
+        allowedEmbeddingTrust: ["local", "standard_cloud"],
+        embeddingProfile: "built-in-embedding",
+        allowCloudQuery: true,
+        activationMode: "hybrid_shadow"
+      }
+    } }
+  };
+  if (!existsSync22(path))
+    return;
+  const eligible = (current2) => isDeepStrictEqual(current2, legacy) || isDeepStrictEqual(current2, validateSovereigntyConfig(legacy));
+  if (!eligible(JSON.parse(readFileSync26(path, "utf8"))))
+    return;
+  return withFileLeaseSync(path, (lease) => {
+    const original = readFileSync26(path, "utf8");
+    const current2 = JSON.parse(original);
+    if (!eligible(current2))
+      return;
+    const nextPolicy = loadSovereigntyPreset("no-sensitive");
+    const next = {
+      ...current2,
+      retrieval: {
+        ...current2.retrieval,
+        trustDomains: { ...current2.retrieval.trustDomains, secure_local: nextPolicy.retrieval.trustDomains.secure_local }
+      }
+    };
+    validateSovereigntyConfig(next);
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID5()}`;
+    lease.commit(() => {
+      writePrivateFileAtomicSync(backup, original);
+      writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
+`);
+    });
+    return backup;
+  }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
   const sourceLayoutPath = join31(dirname24(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
@@ -26499,7 +26574,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash18, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash18, randomUUID as randomUUID6 } from "node:crypto";
 import {
   chmodSync as chmodSync8,
   existsSync as existsSync23,
@@ -26557,10 +26632,10 @@ function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash18("sha256").update(bytes).digest("hex");
   const path = join32(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
-  const stagingHolder = `staging:${randomUUID5()}`;
+  const stagingHolder = `staging:${randomUUID6()}`;
   addMarker(path, stagingHolder);
   if (!existsSync23(path)) {
-    const temporary = join32(dir, `.${sha256}.${randomUUID5()}.tmp`);
+    const temporary = join32(dir, `.${sha256}.${randomUUID6()}.tmp`);
     writeFileSync8(temporary, bytes, { mode: 384 });
     chmodSync8(temporary, 384);
     renameSync6(temporary, path);
@@ -28674,7 +28749,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash22, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash22, randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync18, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
 import { dirname as dirname28 } from "node:path";
 import { Database as Database7 } from "bun:sqlite";
@@ -28985,11 +29060,11 @@ async function embedPendingChunks(targets, options) {
       itemsOutOfScope: 0
     };
     runs.push(run);
-    const groups = store.queuedEmbeddingGroups(options.maxItems);
+    const groups = target.missingOnly ? [] : store.queuedEmbeddingGroups(options.maxItems);
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued).filter((localItemId) => !queuedIds.has(localItemId));
+      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued, target).filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0)
         groups.push({ provider: target.provider, localItemIds: missing });
     }
@@ -28997,12 +29072,13 @@ async function embedPendingChunks(targets, options) {
     for (const group of groups) {
       try {
         group.provider.assertBindingCurrent?.();
+        await target.assertAuthorized?.();
       } catch {
         store.completeQueuedEmbedding(group.localItemIds);
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds);
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, target);
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -29023,9 +29099,15 @@ async function embedPendingChunks(targets, options) {
   }
   return runs;
 }
-async function embedItemsIsolated(store, provider, localItemIds) {
+async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
   try {
-    const embed = await store.embedChunks({ provider, localItemIds: [...localItemIds] });
+    const embed = await store.embedChunks({
+      provider,
+      localItemIds: [...localItemIds],
+      ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+      ...scope.filters ? { filters: scope.filters } : {},
+      ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}
+    });
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
@@ -29042,7 +29124,7 @@ async function embedItemsIsolated(store, provider, localItemIds) {
     let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const localItemId of localItemIds) {
-      const single = await embedItemsIsolated(store, provider, [localItemId]);
+      const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
       if (single.busy || single.deferredReason)
@@ -30481,6 +30563,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...provider ? { provider } : {},
+    ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty2(value.observedConnectorId, "Observed connector id") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -30508,6 +30591,10 @@ function connectorStoreFilterSql(filters) {
   if (normalized.provider) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
+  }
+  if (normalized.observedConnectorId) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -31694,7 +31781,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty2(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID6()}` : this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID7()}` : this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -32023,6 +32110,16 @@ var init_local_index = __esm(() => {
       LIMIT 1
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
     }
+    observeStoredItemOwner(identity, connectorId) {
+      this.db.transaction(() => {
+        const row = this.db.query(`
+        SELECT item_pk, sync_run_id FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        if (row)
+          this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso2(), "provider_listing");
+      })();
+    }
     reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
       const row = this.db.query(`
       SELECT item_pk FROM items
@@ -32034,7 +32131,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso2(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID6()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID7()}`;
       const startedAt = nowIso2();
       try {
         return this.db.transaction(() => {
@@ -32093,7 +32190,7 @@ var init_local_index = __esm(() => {
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID7()}`;
           const startedAt = nowIso2();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -32196,7 +32293,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID6()}`;
+      const syncRunId = `connector-tier-move-${randomUUID7()}`;
       const now = nowIso2();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -32575,7 +32672,7 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID6()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID7()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -33492,7 +33589,7 @@ var init_local_index = __esm(() => {
         seenIdentities.add(key2);
       }
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID6()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID7()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -33829,7 +33926,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID6()}`;
+        const syncRunId = `connector-relinquish-${randomUUID7()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -33968,7 +34065,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID6()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID7()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -34587,7 +34684,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID6()}`;
+      const syncRunId = `connector-sync-${randomUUID7()}`;
       const startedAt = nowIso2();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -35373,15 +35470,17 @@ var init_local_index = __esm(() => {
     embeddingFailedItemCount() {
       return this.embeddingFailureState?.size ?? 0;
     }
-    missingEmbeddingItemIds(embedder, limit) {
+    missingEmbeddingItemIds(embedder, limit, scope = {}) {
       if (limit <= 0)
         return [];
       const modelId = embedder.modelId;
+      const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = this.privateTierEmbeddingFilter(embedder);
-      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
-      const params = [...tierExclusion.params, ...privateTier.params];
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+      const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
       const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -43367,11 +43466,11 @@ var init_analyst_openclaw_infer = __esm(() => {
 
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
   return {
-    correlationId: randomUUID7(),
+    correlationId: randomUUID8(),
     receivedAt: received.toISOString(),
     receivedAtMs: received.getTime(),
     sqliteRetryCount: 0,
@@ -46571,7 +46670,7 @@ function sourceInvocationProvenance(value) {
 }
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash27, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash27, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync31, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname32, join as join42 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -46657,7 +46756,7 @@ function approveFileSourceScope(input) {
     }
     const existing = readState3(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID8();
+    const revision = randomUUID9();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -46836,7 +46935,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash28, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash28, randomUUID as randomUUID10 } from "node:crypto";
 import { existsSync as existsSync32, readFileSync as readFileSync30 } from "node:fs";
 import { dirname as dirname33, join as join43 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -46897,7 +46996,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState4(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID9();
+    const revision = randomUUID10();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -47735,11 +47834,11 @@ class GoogleGmailSourceConnector {
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    const metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
+    const metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
-    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
@@ -47765,7 +47864,21 @@ class GoogleGmailSourceConnector {
           break;
         messagesExamined += 1;
         const stored = this.scope?.storedItem?.(message2.id);
+        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
+          continue;
         if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved) {
+            messagesFetched += 1;
+            this.providerRequests += 1;
+            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
+            const received = internalDateNumber({ internalDate: metadata.internalDate });
+            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const subject2 = metadataString2(item2.metadata, "subject");
+            const from2 = metadataString2(item2.metadata, "from");
+            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
+            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
+              this.scope.storedItemObserved(item2);
+          }
           this.itemsSkippedStored += 1;
           continue;
         }
@@ -48454,12 +48567,24 @@ function createGmailConnectorStoreSyncHandler(options) {
     const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)].filter((copy) => copy !== undefined);
     if (copies.length === 0)
       return;
-    return { hasContent: copies.some((copy) => copy.chunkCount > 0) };
+    return {
+      hasContent: copies.some((copy) => copy.chunkCount > 0),
+      ...options.confirmStoredPrivateScope && options.scopeApproval && options.secureStore.itemStoredContent(identity)?.chunkCount && !options.secureStore.itemOwnerPresent(identity, connectorId, "observed") ? { needsScopeObservation: true } : {}
+    };
   };
-  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
+  const scope = options.scope ? {
+    ...options.scope,
+    storedItem,
+    ...options.confirmStoredPrivateScope && options.scopeApproval ? {
+      storedItemObserved: (item) => {
+        options.assertScopeCurrent?.();
+        options.secureStore.observeStoredItemOwner(item.identity, connectorId);
+      }
+    } : {}
+  } : undefined;
   const buildConnector = (overrides = {}) => new GoogleGmailSourceConnector({
     ...options,
-    ...scope ? { scope } : {},
+    ...overrides.scope ? { scope: overrides.scope } : scope ? { scope } : {},
     ...overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {},
     ...overrides.query ? { query: overrides.query } : {},
     provenance: sourceInvocationProvenance(overrides.provenance)
@@ -48524,6 +48649,39 @@ function createGmailConnectorStoreSyncHandler(options) {
     };
   };
   return {
+    ...options.confirmStoredPrivateScope && options.scopeApproval && scope ? {
+      confirmPrivateScope: async (request = {}) => {
+        const confirmationScope = `private-confirmation-v1:${connectorId}`;
+        const complete = `${confirmationScope}:done`;
+        if (request.checkpoint === complete)
+          return { confirmed: 0, done: true, checkpoint: complete };
+        const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
+        options.assertScopeCurrent?.();
+        let confirmed = 0;
+        const connector = buildConnector({
+          maxMessages: request.max_items ?? config.storePullMaxItems,
+          scope: { ...scope, confirmationOnly: true, storedItemObserved: (item) => {
+            scope.storedItemObserved?.(item);
+            if (options.secureStore.itemOwnerPresent(item.identity, connectorId, "observed"))
+              confirmed++;
+          } }
+        });
+        let done = false;
+        let checkpoint = resume ? encodeCheckpoint({ head: resume, scope: confirmationScope }) : null;
+        try {
+          for await (const page2 of connector.listItems({ limit: request.max_items ?? config.storePullMaxItems, ...resume ? { cursor: resume } : {} })) {
+            done = page2.done;
+            checkpoint = done ? complete : page2.nextCursor ? encodeCheckpoint({ head: page2.nextCursor, scope: confirmationScope }) : checkpoint;
+          }
+        } catch (error) {
+          if (!resume || !isRejectedCursorError(error))
+            throw error;
+          checkpoint = null;
+        }
+        options.assertScopeCurrent?.();
+        return { confirmed, done, checkpoint };
+      }
+    } : {},
     async sync(request = {}) {
       const maxMessages = request.max_messages ?? options.maxMessages;
       const connector = buildConnector({
@@ -49773,7 +49931,7 @@ var init_privacy_language = __esm(() => {
     "local-first": "Local models with Venice fallback",
     "local-only": "Local models",
     "private-cloud-only": "Venice",
-    "no-sensitive": "Private kept local, keyword search only"
+    "no-sensitive": "Private meaning search on this computer"
   };
 });
 
@@ -52556,7 +52714,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash38, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash38, randomUUID as randomUUID11 } from "node:crypto";
 import { chmodSync as chmodSync12, lstatSync as lstatSync21, mkdirSync as mkdirSync22 } from "node:fs";
 import { homedir as homedir32 } from "node:os";
 import { dirname as dirname36, join as join52 } from "node:path";
@@ -52835,7 +52993,7 @@ class LocalXBookmarksApiUsageStore {
       }
       const maxResources = routine ? Math.min(requestedMaxResources, input.preserveHeadReserve ? backgroundRemainingReads : remainingReads, input.preserveHeadReserve ? backgroundRemainingCostUnits : remainingCostUnits) : requestedMaxResources;
       const reservation = {
-        reservationId: randomUUID10(),
+        reservationId: randomUUID11(),
         account,
         utcDay,
         maxResources,
@@ -53497,7 +53655,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash39, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash39, randomUUID as randomUUID12 } from "node:crypto";
 import { chmodSync as chmodSync13, mkdirSync as mkdirSync23 } from "node:fs";
 import { homedir as homedir33 } from "node:os";
 import { dirname as dirname37, join as join53 } from "node:path";
@@ -53567,7 +53725,7 @@ class LocalXBookmarksReconcileStateStore {
     const nowDate = validDate4(input.now ?? new Date);
     const now = nowDate.toISOString();
     const leaseExpiresAt = new Date(nowDate.getTime() + FOLDER_FACET_REFRESH_LEASE_MS).toISOString();
-    const runToken = randomUUID11();
+    const runToken = randomUUID12();
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT *
@@ -53792,7 +53950,7 @@ class LocalXBookmarksReconcileStateStore {
           membership_pages, coverage_scope, window_boundary_algorithm_version,
           started_at, updated_at
         ) VALUES (?, ?, ?, ?, 'global', 0, 0, 0, 0, 0, ?, ?, ?, ?)
-      `).run(account, randomUUID11(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
+      `).run(account, randomUUID12(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
     }
     return { progress: this.progress(account), warnings };
   }
@@ -56822,7 +56980,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash41, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash41, randomUUID as randomUUID13 } from "node:crypto";
 import {
   chmodSync as chmodSync14,
   existsSync as existsSync35,
@@ -57073,7 +57231,7 @@ function writePrivateReport(pathValue, contents) {
     throw new TypeError("X bookmark diagnostic report path is required.");
   const parent = dirname38(reportPath);
   mkdirSync24(parent, { recursive: true, mode: 448 });
-  const temporaryPath = `${reportPath}.tmp-${randomUUID12()}`;
+  const temporaryPath = `${reportPath}.tmp-${randomUUID13()}`;
   try {
     writeFileSync9(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync14(temporaryPath, 384);
@@ -57501,7 +57659,7 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash42, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash42, randomUUID as randomUUID14 } from "node:crypto";
 import {
   chmodSync as chmodSync15,
   renameSync as renameSync9,
@@ -57810,7 +57968,7 @@ function buildReceipt(status, counts, retryAt) {
 }
 function writeReceipt(pathValue, receipt) {
   const path = resolve8(pathValue);
-  const temporary = `${path}.tmp-${randomUUID13()}`;
+  const temporary = `${path}.tmp-${randomUUID14()}`;
   try {
     writeFileSync10(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
@@ -59523,7 +59681,7 @@ var init_email_policy = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash45, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash45, randomUUID as randomUUID16 } from "node:crypto";
 import {
   chmodSync as chmodSync16,
   existsSync as existsSync38,
@@ -59609,7 +59767,7 @@ class LocalSourceWatchStore {
     requireOwnerContext(ownerContext);
     assertOnlyFields(input, CREATE_WATCH_FIELDS, "create watch");
     const now = this.now();
-    const watchId = input.watchId === undefined ? randomUUID15() : requireId(input.watchId, "watchId");
+    const watchId = input.watchId === undefined ? randomUUID16() : requireId(input.watchId, "watchId");
     const corpusId = requireId(input.corpusId, "corpusId");
     const queryText = requireQuery(input.queryText);
     const mode = requireMode(input.mode);
@@ -59904,7 +60062,7 @@ class LocalSourceWatchStore {
       `).all(now, limit);
       const leases = [];
       for (const candidate of candidates) {
-        const leaseToken = randomUUID15();
+        const leaseToken = randomUUID16();
         const result = this.db.query(`
           UPDATE source_watch_outbox
           SET status = 'leased', lease_owner = ?, lease_token = ?,
@@ -62118,7 +62276,7 @@ __export(exports_managed_tools, {
   MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
 });
 import { execFile as execFile2 } from "node:child_process";
-import { createHash as createHash46, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash46, randomUUID as randomUUID17 } from "node:crypto";
 import {
   accessSync as accessSync7,
   constants as constants5,
@@ -62467,7 +62625,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
   const toolDir = join60(root, tool);
   const versionDir = join60(toolDir, pin.version);
-  const id = randomUUID16();
+  const id = randomUUID17();
   const download = join60(toolDir, `.download-${id}`);
   const staging = join60(toolDir, `.staging-${id}`);
   try {
@@ -64751,7 +64909,7 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash48, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash48, randomUUID as randomUUID18 } from "node:crypto";
 import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants6, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync41, readlinkSync as readlinkSync3, realpathSync as realpathSync10, rmSync as rmSync16, statSync as statSync21, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
 import { homedir as homedir39, tmpdir as tmpdir4 } from "node:os";
@@ -66101,7 +66259,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     return refuse2("tor_port_busy");
   if (sessionSignal.aborted)
     return refuse2(abortCause);
-  const sessionId = randomUUID17();
+  const sessionId = randomUUID18();
   const workDir = mkdtempSync2(join63(tmpdir4(), "olympus-zkapi-"));
   chmodSync19(workDir, 448);
   const watchdog = join63(workDir, "watchdog.cjs");
@@ -68136,7 +68294,7 @@ import { chmodSync as chmodSync20, closeSync as closeSync15, constants as consta
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve11, sep as sep9 } from "node:path";
 import { userInfo } from "node:os";
-import { randomBytes as randomBytes14, createHash as createHash50, randomUUID as randomUUID18 } from "node:crypto";
+import { randomBytes as randomBytes14, createHash as createHash50, randomUUID as randomUUID19 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync11(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -68637,7 +68795,7 @@ function writeSnapshot(backupDir, index, text2, mode = 384) {
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join65(input.layout.stateDir, `.install-backup-${randomUUID18()}`);
+  const backupDir = join65(input.layout.stateDir, `.install-backup-${randomUUID19()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync27(backupDir);
   const files = {};
@@ -68654,7 +68812,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join65(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID18()}`),
+    stagingPath: join65(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID19()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -86663,7 +86821,7 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID21 } from "node:crypto";
+import { randomUUID as randomUUID22 } from "node:crypto";
 import { readFileSync as readFileSync55, statSync as statSync26 } from "node:fs";
 import { delimiter as delimiter6, dirname as dirname61, isAbsolute as isAbsolute23, join as join82 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
@@ -86714,7 +86872,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join82(dirname61(reportPath), READINESS_FILE);
-  const instanceId = randomUUID21();
+  const instanceId = randomUUID22();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
@@ -86883,7 +87041,7 @@ var init_native_embedding_drain_service = __esm(() => {
 });
 
 // src/core/native-worker-service.ts
-import { randomUUID as randomUUID22 } from "node:crypto";
+import { randomUUID as randomUUID23 } from "node:crypto";
 import { statSync as statSync27 } from "node:fs";
 import { basename as basename11, delimiter as delimiter7, isAbsolute as isAbsolute24, join as join83 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
@@ -87024,7 +87182,7 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   if (!authToken) {
     throw new Error("Olympus worker service requires a configured worker auth token.");
   }
-  const instanceId = randomUUID22();
+  const instanceId = randomUUID23();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
     runtimePath: resolveBunRuntimePath2(service.runtimePath, env),
@@ -105870,7 +106028,7 @@ var init_manifest2 = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawnSync as spawnSync16 } from "node:child_process";
-import { createHash as createHash60, randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash60, randomUUID as randomUUID24 } from "node:crypto";
 import {
   closeSync as closeSync18,
   createReadStream as createReadStream3,
@@ -106139,7 +106297,7 @@ function runtimeInstalled2(runtimeDir, archive) {
   return marker !== undefined && marker.sha256 === archive.sha256 && existsSync58(join89(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID23()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID24()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join89(staging, archive.name);
@@ -106262,7 +106420,7 @@ async function sha256File3(path, timeoutMs, onProgress) {
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   const deadline = Date.now() + waitMs;
-  const token = randomUUID23();
+  const token = randomUUID24();
   for (;; ) {
     if (tryAcquireLock2(lockPath, token))
       break;
@@ -108120,7 +108278,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync27, mkdirSync as mkdirSync45 } from "node:fs";
-import { createHash as createHash61, randomUUID as randomUUID24 } from "node:crypto";
+import { createHash as createHash61, randomUUID as randomUUID25 } from "node:crypto";
 import { dirname as dirname65 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
@@ -108278,7 +108436,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID24();
+    const leaseToken = randomUUID25();
     const workerHash = hashString5(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -109217,7 +109375,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID24());
+      `).run(randomUUID25());
     }
   }, {
     version: 4,
@@ -109436,7 +109594,7 @@ function clampInteger(value2, min, max) {
   return Math.min(max, Math.max(min, value2));
 }
 function makeJobId() {
-  return `fx_${randomUUID24()}`;
+  return `fx_${randomUUID25()}`;
 }
 function hashString5(value2) {
   return createHash61("sha256").update(value2).digest("hex");
@@ -115739,7 +115897,7 @@ import {
   rmSync as rmSync22,
   writeFileSync as writeFileSync22
 } from "node:fs";
-import { randomUUID as randomUUID25 } from "node:crypto";
+import { randomUUID as randomUUID26 } from "node:crypto";
 import { homedir as homedir55 } from "node:os";
 import { dirname as dirname68, isAbsolute as isAbsolute27, join as join98 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir55(), type = "text") {
@@ -115949,7 +116107,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID25()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID26()}.tmp`;
   try {
     mkdirSync46(dirname68(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -133246,6 +133404,19 @@ function wholeStoreEmbeddingSweepAllowed(sourceId, corpusId) {
   const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
   return allowed === true || Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId);
 }
+function withLocalPrivateEmbeddingBackfill(sources, targetsFor) {
+  return sources.map((source) => {
+    const task = embeddingSweepTask(source, () => targetsFor(source).filter((target) => target.store.trustDomain === "secure_local" && target.provider.provider === "built-in" && target.provider.backend === "local").map((target) => ({ ...target, wholeStore: true, missingOnly: true })));
+    return { ...source, tasks: [...source.tasks, {
+      ...task,
+      id: `${source.sourceId}_private_meaning`,
+      run: async (context2) => {
+        const result = await task.run(context2);
+        return { ...result, ...!result.retryAt && (result.counts?.chunks_embedded ?? 0) >= EMBEDDING_SWEEP_MAX_ITEMS ? { continueSoon: true } : {} };
+      }
+    }] };
+  });
+}
 function withEmbeddingSweep(sources, targetsFor) {
   return sources.map((source) => {
     if (source.tasks.some((task) => task.kind === "embed"))
@@ -133520,7 +133691,27 @@ function createGmailConnectorStoreSchedulerSource(input) {
             throw gmailSchedulerFailure(error2);
           }
         }
-      }
+      },
+      ...input.sync.confirmPrivateScope ? [{
+        id: "gmail.email_private_scope_confirmation_v1",
+        kind: "sync",
+        writer: true,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context2) => {
+          try {
+            const result = await input.sync.confirmPrivateScope({ max_items: liveConfig.storePullMaxItems, ...context2?.checkpoint ? { checkpoint: context2.checkpoint } : {} });
+            return {
+              status: result.confirmed > 0 ? "progress" : "idle",
+              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              checkpoint: result.checkpoint,
+              ...!result.done ? { continueSoon: true } : {}
+            };
+          } catch (error2) {
+            throw gmailSchedulerFailure(error2);
+          }
+        }
+      }] : []
     ],
     lastSyncCompletedAt: lastCompletedAt
   };
@@ -156745,6 +156936,7 @@ async function main() {
   });
   const sovereigntyEngine = loadSovereigntyEngine({
     env: process.env,
+    migratePrivateMeaning: true,
     ...olympusConfig.sovereignty?.policy ? { inlineConfig: olympusConfig.sovereignty.policy } : {},
     ...olympusConfig.sovereignty?.configPath ? { configPath: olympusConfig.sovereignty.configPath } : {}
   });
@@ -157427,6 +157619,31 @@ async function main() {
     };
   };
   const connectorStoreStatusScope = (store) => {
+    if (store === gmailSecureConnectorStore) {
+      const ref = fileSourceScopeAuthority?.mailPolicyRef();
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
+        provider: "gmail",
+        capability: "gmail.email.sync",
+        handles: readActiveConnectedHandles(process.env)
+      });
+      if (!ref || !handle || !fileSourceScopeAuthority)
+        return { itemsAllowed: false, contentAllowed: false };
+      const approval = fileSourceScopeAuthority.assertCurrentMail(ref);
+      const accountScope = handle.accountRole?.trim() || "personal";
+      const itemFilters = {
+        provider: "gmail",
+        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+      };
+      return {
+        accountScope,
+        scopeRevision: ref.revision,
+        itemFilters,
+        contentAllowed: true,
+        contentFilters: itemFilters
+      };
+    }
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed)
       return { itemsAllowed: false, contentAllowed: false };
@@ -157533,12 +157750,14 @@ async function main() {
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+    const privateDefinition = gmailSecureConnectorStore && sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === gmailSecureConnectorStore.corpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget ? createGmailConnectorStoreSyncHandler({
       internalStore: gmailInternalConnectorStore,
       secureStore: gmailSecureConnectorStore,
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      confirmStoredPrivateScope: secureLocalPolicyEmbeddingProvider?.provider === "built-in" && privateDefinition?.activationMode !== "lexical_only" && privateDefinition?.embeddingPolicy !== "disabled" && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_shadow" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_primary"),
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -158050,7 +158269,48 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
       return targets().length > 0 ? targets : undefined;
     });
-    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
+    const scopeRefs = new Map;
+    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef]) {
+      if (ref)
+        scopeRefs.set(ref.sourceId, ref);
+    }
+    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, (source) => {
+      const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
+      if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
+        return [];
+      const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
+      corpusIds.add(source.corpusId);
+      const ref = scopeRefs.get(source.sourceId);
+      return connectorStores.flatMap((store) => {
+        if (store.trustDomain !== "secure_local" || !corpusIds.has(store.corpusId))
+          return [];
+        const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+        const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+        if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
+          return [];
+        if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
+          return [];
+        const scope = connectorStoreReadScope(store);
+        if (!scope.allowed || !scope.contentAllowed)
+          return [];
+        const mail = ref?.sourceId === "gmail.email" && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
+        const accountScope = mail ? currentGmailHandle?.accountRole?.trim() || "personal" : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
+        if (mail && !accountScope)
+          return [];
+        const filters = mail ? {
+          provider: "gmail",
+          observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+        } : scope.contentFilters;
+        const provider = ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref) : secureLocalPolicyEmbeddingProvider;
+        return [{
+          store,
+          provider,
+          ...accountScope ? { accountScope } : {},
+          ...filters ? { filters } : {}
+        }];
+      });
+    });
+    const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass ? attachSourceWatchSchedulerTask({
@@ -160626,7 +160886,7 @@ init_pairing_session_paths();
 init_public_source_capabilities();
 init_worker_service();
 init_media_cache();
-import { createHash as createHash44, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash44, randomUUID as randomUUID15 } from "node:crypto";
 import {
   closeSync as closeSync13,
   existsSync as existsSync37,
@@ -161196,7 +161456,7 @@ function exportSqliteStore(options) {
     return;
   }
   const destination = join57(destinationRoot, basename6(sqlitePath));
-  const staging = `${destination}.${randomUUID14()}.partial`;
+  const staging = `${destination}.${randomUUID15()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
@@ -161535,7 +161795,7 @@ import { dirname as dirname54, isAbsolute as isAbsolute22, join as join77 } from
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash53, randomUUID as randomUUID19 } from "node:crypto";
+import { createHash as createHash53, randomUUID as randomUUID20 } from "node:crypto";
 import { spawnSync as spawnSync13 } from "node:child_process";
 import {
   chmodSync as chmodSync21,
@@ -161840,7 +162100,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync50(workingDirectory)) {
-      replacedPath = join75(versionsDir, `.olympus-replaced-${basename10(workingDirectory)}-${randomUUID19()}`);
+      replacedPath = join75(versionsDir, `.olympus-replaced-${basename10(workingDirectory)}-${randomUUID20()}`);
       renameSync14(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
@@ -161882,7 +162142,7 @@ function removeStagingTree(root) {
 init_atomic_file();
 init_file_lease();
 init_operation_error();
-import { randomUUID as randomUUID20 } from "node:crypto";
+import { randomUUID as randomUUID21 } from "node:crypto";
 import { existsSync as existsSync51, linkSync as linkSync2, lstatSync as lstatSync29, readFileSync as readFileSync50 } from "node:fs";
 import { join as join76 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
@@ -161898,7 +162158,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
-      nonce: randomUUID20(),
+      nonce: randomUUID21(),
       action,
       started_at: now().toISOString()
     };

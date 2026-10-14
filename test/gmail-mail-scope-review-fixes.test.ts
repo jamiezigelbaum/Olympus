@@ -21,6 +21,7 @@ import {
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
   GoogleGmailSourceConnector,
   createGmailConnectorStoreSyncHandler,
+  gmailCursorConnectorId,
 } from '../src/workers/google-connectors/index.ts';
 import type {
   GmailApiClient,
@@ -42,6 +43,9 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { mailScopeOwnerTierRules } from '../src/core/mail-source-scope.ts';
 import { closeSqliteStore } from '../src/core/sqlite-store.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { withLocalPrivateEmbeddingBackfill } from '../src/workers/source-scheduler.ts';
+import { createGmailConnectorStoreSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { defaultConfig } from '../src/core/config.ts';
 
 const NOW = new Date('2026-09-23T12:00:00.000Z');
 const DAY = 86_400_000;
@@ -121,6 +125,118 @@ function laneFor(
 }
 
 describe('no existing embeddings are thrown away by a scope', () => {
+  test('a finished approval gets a separate resumable confirmation walk after upgrade, beyond the ordinary list-page cap', async () => {
+    const stores = fileStores(tempDir());
+    const mails = Array.from({ length: 80 }, (_, index) => {
+      const mail = message(`retained-${index}`, NOW.getTime() - 10 * DAY);
+      mail.payload!.headers = mail.payload!.headers!.map(header => header.name === 'From' ? { ...header, value: 'doctor@clinic.example' } : header);
+      return mail;
+    });
+    const client = fakeClient(mails);
+    // One item per provider page makes this exceed the 50-page per-run cap
+    // without an enormous fixture. A durable continuation must reach page 80.
+    client.listMessages = async request => {
+      client.queries.push(request.query);
+      const after = /after:(\d+)/.exec(request.query ?? '')?.[1];
+      const before = /before:(\d+)/.exec(request.query ?? '')?.[1];
+      const eligible = mails.filter(mail => (!after || Number(mail.internalDate) > Number(after) * 1_000) && (!before || Number(mail.internalDate) < Number(before) * 1_000));
+      const offset = Number(request.pageToken ?? 0);
+      return { messages: eligible.slice(offset, offset + 1).map(mail => ({ id: mail.id })), ...(offset + 1 < eligible.length ? { nextPageToken: String(offset + 1) } : {}) };
+    };
+    const scope = gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@clinic.example'] }) });
+    const common = { ...stores, account: 'personal', apiClient: client, env: {}, scope, now: () => NOW.getTime() };
+    const finish = async (lane: ReturnType<typeof createGmailConnectorStoreSyncHandler>) => {
+      let checkpoint: string | null = null;
+      for (let pass = 0; pass < 200; pass++) {
+        const result = await lane.pull({ max_items: 100, ...(checkpoint ? { checkpoint } : {}) });
+        checkpoint = result.checkpoint;
+        if (result.receipt.counts.traversal_complete === 1) return;
+      }
+      throw new Error('ordinary traversal did not finish');
+    };
+    await finish(createGmailConnectorStoreSyncHandler({ ...common, scopeApproval: { generation: 'account', revision: 'R1' } }));
+    const scopeApproval = { generation: 'account', revision: 'R2' };
+    await finish(createGmailConnectorStoreSyncHandler({ ...common, scopeApproval }));
+    const currentId = gmailCursorConnectorId('personal', scopeApproval);
+    expect(stores.secureStore.itemOwnerPresent(identity('retained-79'), currentId, 'observed')).toBe(false);
+    const formatsBefore = client.formats.length;
+    let checkpoint: string | undefined;
+    let confirmations = 0;
+    for (let pass = 0; pass < 100; pass++) {
+      // Re-create the handler/task on every pass: only stored ownership and
+      // the scheduler checkpoint survive a worker restart.
+      const lane = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval, confirmStoredPrivateScope: true });
+      const task = createGmailConnectorStoreSchedulerSource({ config: defaultConfig(), sync: lane })!.tasks.find(task => task.id === 'gmail.email_private_scope_confirmation_v1')!;
+      const result = await task.run({ sourceId: 'gmail.email', corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, taskId: task.id, attemptedAt: NOW.toISOString(), consecutiveFailures: 0, effectiveIntervalMs: 60_000, ...(checkpoint ? { checkpoint } : {}) });
+      confirmations += result.counts?.private_scope_confirmed ?? 0;
+      checkpoint = result.checkpoint ?? undefined;
+      if (!result.continueSoon) break;
+    }
+    expect(confirmations).toBe(80);
+    expect(stores.secureStore.itemOwnerPresent(identity('retained-79'), currentId, 'observed')).toBe(true);
+    expect(client.formats.slice(formatsBefore)).toHaveLength(80);
+    expect(client.formats.slice(formatsBefore).every(format => format === 'metadata')).toBe(true);
+    const lane = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval, confirmStoredPrivateScope: true });
+    expect(await lane.confirmPrivateScope!({ ...(checkpoint ? { checkpoint } : {}) })).toMatchObject({ confirmed: 0, done: true });
+    expect(client.formats.slice(formatsBefore)).toHaveLength(80);
+    const renewed = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval: { generation: 'reconnected-account', revision: 'R3' }, confirmStoredPrivateScope: true });
+    // Neither R2's completion marker nor its page cursor may skip R3's walk.
+    const restarted = await renewed.confirmPrivateScope!({ ...(checkpoint ? { checkpoint } : {}) });
+    expect(restarted).toMatchObject({ confirmed: 1, done: false });
+    const list = client.listMessages;
+    client.listMessages = async request => {
+      if (request.pageToken) throw new Error('Gmail API request failed (400): page token expired');
+      return list(request);
+    };
+    const rejected = await renewed.confirmPrivateScope!({ checkpoint: restarted.checkpoint! });
+    expect(rejected).toMatchObject({ confirmed: 0, done: false, checkpoint: null });
+    client.listMessages = list;
+    // Retry starts fresh, skips the durable already-confirmed first item,
+    // and continues to the next one instead of re-reading the first metadata.
+    expect(await renewed.confirmPrivateScope!()).toMatchObject({ confirmed: 1, done: false });
+    expect(client.formats.slice(formatsBefore)).toHaveLength(82);
+  }, 30_000);
+
+  test('current-scope confirmation makes retained Private mail eligible without rewriting bodies or vectors; fresh skip rules still win', async () => {
+    const stores = fileStores(tempDir());
+    const mails = ['allowed', 'skip-sender', 'skip-label', 'older'].map((id, index) => {
+      const mail = message(id, NOW.getTime() - (index === 3 ? 3 * 365 : 10) * DAY);
+      mail.payload!.headers = mail.payload!.headers!.map(header => header.name === 'From'
+        ? { ...header, value: `${id}@clinic.example` }
+        // Date headers do not decide the approved receipt-time window.
+        : id === 'allowed' && header.name === 'Date' ? { ...header, value: 'Sat, 01 Jan 2000 00:00:00 GMT' } : header);
+      return mail;
+    });
+    const client = fakeClient(mails);
+    const baseScope = gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@clinic.example'] }) });
+    const oldScope = { ...baseScope, contentAfterMs: NOW.getTime() - 5 * 365 * DAY };
+    const old = createGmailConnectorStoreSyncHandler({ ...stores, account: 'personal', apiClient: client, env: {}, scope: oldScope, scopeApproval: { generation: 'old-generation', revision: 'old-revision' } });
+    let pulled = await old.pull({ max_items: 50 });
+    if (pulled.checkpoint) await old.pull({ max_items: 50, checkpoint: pulled.checkpoint });
+    const before = stores.secureStore.exportItemCopy(identity('allowed'))!;
+    mails[2]!.labelIds = ['Label_renamed'];
+    const scopeApproval = { generation: 'new-generation', revision: 'new-revision' };
+    const current = createGmailConnectorStoreSyncHandler({ ...stores, account: 'personal', apiClient: client, env: {}, scope: { ...baseScope, skipSenders: ['skip-sender@clinic.example'], skippedLabelIds: ['Label_renamed'] }, scopeApproval, confirmStoredPrivateScope: true });
+    const getsBefore = client.formats.length;
+    pulled = await current.pull({ max_items: 50 });
+    if (pulled.checkpoint) await current.pull({ max_items: 50, checkpoint: pulled.checkpoint });
+    expect(client.formats.slice(getsBefore).every(format => format === 'metadata')).toBe(true);
+    const after = stores.secureStore.exportItemCopy(identity('allowed'))!;
+    expect(after.columns).toEqual(before.columns);
+    expect(after.chunks).toEqual(before.chunks);
+    expect(after.vectors).toEqual(before.vectors);
+    const currentId = gmailCursorConnectorId('personal', scopeApproval);
+    expect(stores.secureStore.itemOwnerPresent(identity('allowed'), currentId, 'observed')).toBe(true);
+    for (const id of ['skip-sender', 'skip-label', 'older']) expect(stores.secureStore.itemOwnerPresent(identity(id), currentId, 'observed')).toBe(false);
+    const inputs: string[] = [];
+    const provider = { ...recordingProvider('local', inputs), provider: 'built-in' };
+    const task = withLocalPrivateEmbeddingBackfill([{ sourceId: 'gmail.email', corpusId: stores.secureStore.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] }], () => [{ store: stores.secureStore, provider, accountScope: 'personal', filters: { provider: 'gmail', observedConnectorId: currentId } }])[0]!.tasks[0]!;
+    expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
+    expect(inputs.join('')).toContain('Body of allowed');
+    expect(inputs.join('')).not.toContain('Body of skip-');
+    expect(inputs.join('')).not.toContain('Body of older');
+  });
+
   test.each([
     ['the first approval of an already-ingested mailbox', undefined, 2],
     ['a 5-year to 2-year narrowing', 5, 2],

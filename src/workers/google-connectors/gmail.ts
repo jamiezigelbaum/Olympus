@@ -138,11 +138,16 @@ export interface GmailConnectorScope {
    * mail is never re-observed under a scope; see listItems.
    */
   storedItem?: (providerItemId: string) => GmailStoredItem | undefined;
+  /** A metadata-only scope confirmation for an already-stored Private body; never a body re-read. */
+  storedItemObserved?: (item: RawItem) => void;
+  /** One resumable scope-confirmation walk: no new items or bodies are fetched. */
+  confirmationOnly?: boolean;
 }
 
 export interface GmailStoredItem {
   /** True when a stored copy has chunks (a body), false for a metadata-only row. */
   hasContent: boolean;
+  needsScopeObservation?: boolean;
 }
 
 /**
@@ -333,13 +338,13 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     const cutoffMs = this.scope?.contentAfterMs;
     // The metadata leg exists only under a scope with a cutoff; a phase marker
     // arriving without one is a stale cursor and restarts the content leg.
-    const metadataLeg = resume.phase === 'metadata' && cutoffMs !== undefined;
+    const metadataLeg = !this.scope?.confirmationOnly && resume.phase === 'metadata' && cutoffMs !== undefined;
     const staleLeg = resume.phase === 'metadata' && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
     // A scoped first traversal is two legs: full content after the cutoff,
     // then metadata-only before it. Incremental passes read only new mail.
-    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     // Carried from the first page of a scoped traversal to its last; a fresh
@@ -373,7 +378,22 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         // away existing chunks and embeddings. The one exception is mail
         // stored metadata-only that the content leg may now store in full.
         const stored = this.scope?.storedItem?.(message.id);
+        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent)) continue;
         if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved) {
+            // Only unconfirmed Private copies need this request, once per
+            // approval. It consumes the same bounded message/request budget.
+            messagesFetched += 1;
+            this.providerRequests += 1;
+            const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS });
+            const received = internalDateNumber({ internalDate: metadata.internalDate });
+            const item = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const subject = metadataString(item.metadata, 'subject');
+            const from = metadataString(item.metadata, 'from');
+            const skipped = this.scope.skipSenders?.some(rule => senderMatchesRule(from, rule))
+              || classifyEmailIngestSkip({ ...(subject ? { subject } : {}), ...(from ? { from } : {}), labels: metadataStringArray(item.metadata, 'labels') }, this.ingestFilterOptions);
+            if (!skipped && (cutoffMs === undefined || (received !== undefined && received >= cutoffMs))) this.scope.storedItemObserved(item);
+          }
           // Held mail never moves the high-water mark: its stored date is the
           // sender's Date header, which can say anything (a spam dated 2036
           // would park every later query past all real mail). The traversal's

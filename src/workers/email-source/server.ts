@@ -145,6 +145,7 @@ import {
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   GoogleDailyRequestBudget,
   createGmailConnectorStoreSyncHandler,
+  gmailCursorConnectorId,
   createGmailDailyRequestBudget,
   createGoogleDriveConnectorStoreSyncHandler,
   createGoogleDriveDailyRequestBudget,
@@ -300,6 +301,7 @@ import {
   createXBookmarksSchedulerSource,
   attachSourceWatchSchedulerTask,
   withEmbeddingSweep,
+  withLocalPrivateEmbeddingBackfill,
   wholeStoreEmbeddingSweepAllowed,
   sourceSchedulerConstructionLogLines,
   sourceSchedulerEnabledLogLine,
@@ -351,6 +353,7 @@ import {
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
   type FileSourceScopePolicyRef,
+  type SourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import {
@@ -1851,6 +1854,7 @@ export async function main(): Promise<void> {
   });
   const sovereigntyEngine = loadSovereigntyEngine({
     env: process.env,
+    migratePrivateMeaning: true,
     ...(olympusConfig.sovereignty?.policy ? { inlineConfig: olympusConfig.sovereignty.policy } : {}),
     ...(olympusConfig.sovereignty?.configPath ? { configPath: olympusConfig.sovereignty.configPath } : {}),
   });
@@ -2928,6 +2932,26 @@ export async function main(): Promise<void> {
   };
   const connectorStoreStatusScope = (store: LocalConnectorStore):
     ConnectorStoreStatusScope | undefined => {
+    // Private mail indexing counts the same approved observations the
+    // backfill may embed; retained mail outside that scope is not owed work.
+    if (store === gmailSecureConnectorStore) {
+      const ref = fileSourceScopeAuthority?.mailPolicyRef();
+      const handle = selectedSourceCredentialHandle({
+        env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
+        provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
+      });
+      if (!ref || !handle || !fileSourceScopeAuthority) return { itemsAllowed: false, contentAllowed: false };
+      const approval = fileSourceScopeAuthority.assertCurrentMail(ref);
+      const accountScope = handle.accountRole?.trim() || 'personal';
+      const itemFilters = {
+        provider: 'gmail',
+        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
+      };
+      return {
+        accountScope, scopeRevision: ref.revision, itemFilters, contentAllowed: true,
+        contentFilters: itemFilters,
+      };
+    }
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed) return { itemsAllowed: false, contentAllowed: false };
     if (!readScope.filters && !readScope.contentFilters) return undefined;
@@ -3065,6 +3089,7 @@ export async function main(): Promise<void> {
   ) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+    const privateDefinition = gmailSecureConnectorStore && sourceCorpusRegistry.definitions().find(entry => entry.corpusId === gmailSecureConnectorStore.corpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority
       && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget
     ? createGmailConnectorStoreSyncHandler({
@@ -3073,6 +3098,10 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      confirmStoredPrivateScope: secureLocalPolicyEmbeddingProvider?.provider === 'built-in'
+        && privateDefinition?.activationMode !== 'lexical_only' && privateDefinition?.embeddingPolicy !== 'disabled'
+        && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === 'hybrid_shadow'
+          || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === 'hybrid_primary'),
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -3973,7 +4002,48 @@ export async function main(): Promise<void> {
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
-    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
+    const scopeRefs = new Map<string, SourceScopePolicyRef>();
+    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef]) {
+      if (ref) scopeRefs.set(ref.sourceId, ref);
+    }
+    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, source => {
+      const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
+      if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== 'built-in'
+        || (policy?.activationMode !== 'hybrid_shadow' && policy?.activationMode !== 'hybrid_primary')) return [];
+      const corpusIds = new Set(sourceCorpusRegistry.list().filter(corpus => corpus.sourceId === source.sourceId).map(corpus => corpus.corpusId));
+      corpusIds.add(source.corpusId);
+      const ref = scopeRefs.get(source.sourceId);
+      return connectorStores.flatMap(store => {
+        if (store.trustDomain !== 'secure_local' || !corpusIds.has(store.corpusId)) return [];
+        const definition = fullCorpusDefinitions.find(entry => entry.corpusId === store.corpusId)
+          ?? sourceCorpusRegistry.definitions().find(entry => entry.corpusId === store.corpusId);
+        const registered = sourceCorpusRegistry.definitions().find(entry => entry.corpusId === store.corpusId);
+        if (!definition || definition.activationMode === 'lexical_only' || definition.embeddingPolicy === 'disabled'
+          || registered?.activationMode === 'lexical_only' || registered?.embeddingPolicy === 'disabled') return [];
+        // Scope-gated source adapters must supply their current binding.
+        if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox].some(id => id === source.sourceId) && (!ref || !fileSourceScopeAuthority)) return [];
+        const scope = connectorStoreReadScope(store);
+        if (!scope.allowed || !scope.contentAllowed) return [];
+        const mail = ref?.sourceId === 'gmail.email' && fileSourceScopeAuthority
+          ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
+        const accountScope = mail ? currentGmailHandle?.accountRole?.trim() || 'personal'
+          : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
+        if (mail && !accountScope) return [];
+        const filters = mail ? {
+          provider: 'gmail',
+          observedConnectorId: gmailCursorConnectorId(accountScope!, { generation: ref!.accountGeneration, revision: ref!.revision }),
+        } : scope.contentFilters;
+        const provider = ref && fileSourceScopeAuthority
+          ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref)
+          : secureLocalPolicyEmbeddingProvider;
+        return [{
+          store, provider,
+          ...(accountScope ? { accountScope } : {}),
+          ...(filters ? { filters } : {}),
+        }];
+      });
+    });
+    const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass

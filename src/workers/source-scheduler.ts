@@ -1574,6 +1574,31 @@ export function wholeStoreEmbeddingSweepAllowed(sourceId: string, corpusId?: str
 }
 
 /**
+ * Local Private meaning search also indexes already-ingested items after an
+ * upgrade. Queue-only sync lanes can have no new provider pages to enqueue.
+ * Use their normal store embedder, bounded per pass, with current account and
+ * content scope supplied by the host. No connector traversal or cloud lane.
+ */
+export function withLocalPrivateEmbeddingBackfill(
+  sources: readonly SourceSchedulerSource[],
+  targetsFor: (source: SourceSchedulerSource) => readonly ConnectorStoreEmbeddingTarget[],
+): SourceSchedulerSource[] {
+  return sources.map(source => {
+    const task = embeddingSweepTask(source, () => targetsFor(source)
+      .filter(target => target.store.trustDomain === 'secure_local'
+        && target.provider.provider === 'built-in' && target.provider.backend === 'local')
+      .map(target => ({ ...target, wholeStore: true, missingOnly: true })));
+    return { ...source, tasks: [...source.tasks, {
+      ...task, id: `${source.sourceId}_private_meaning`,
+      run: async context => {
+        const result = await task.run(context);
+        return { ...result, ...(!result.retryAt && (result.counts?.chunks_embedded ?? 0) >= EMBEDDING_SWEEP_MAX_ITEMS ? { continueSoon: true } : {}) };
+      },
+    }] };
+  });
+}
+
+/**
  * Give every source that embeds one embedding sweep, built here once for all
  * of them rather than per source.
  *
@@ -1928,6 +1953,22 @@ export function createGmailConnectorStoreSchedulerSource(input: {
           }
         },
       },
+      ...(input.sync.confirmPrivateScope ? [{
+        id: 'gmail.email_private_scope_confirmation_v1', kind: 'sync' as const, writer: true as const,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
+          try {
+            const result = await input.sync!.confirmPrivateScope!({ max_items: liveConfig.storePullMaxItems, ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}) });
+            return {
+              status: result.confirmed > 0 ? 'progress' : 'idle',
+              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              checkpoint: result.checkpoint,
+              ...(!result.done ? { continueSoon: true } : {}),
+            };
+          } catch (error) { throw gmailSchedulerFailure(error); }
+        },
+      }] : []),
     ],
     lastSyncCompletedAt: lastCompletedAt,
   };

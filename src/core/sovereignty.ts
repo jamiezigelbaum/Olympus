@@ -5,6 +5,8 @@ import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import { OperationError } from './operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
 import { parseOptionalBooleanEnv } from './config.ts';
@@ -172,6 +174,8 @@ export interface LoadSovereigntyOptions {
   env?: Record<string, string | undefined>;
   inlineConfig?: unknown;
   configPath?: string;
+  /** Engine/drain startup only; ordinary policy inspection remains read-only. */
+  migratePrivateMeaning?: boolean;
 }
 
 const BUILTIN_DOMAINS = ['public_safe', 'internal', 'secure_local'] as const;
@@ -194,6 +198,12 @@ export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): Sov
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync(configPath)) {
+    if (options.migratePrivateMeaning) {
+      try { migratePrivateMeaningSearch(configPath); }
+      catch {
+        console.warn('Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.');
+      }
+    }
     const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: 'file',
@@ -618,7 +628,12 @@ export function writeSovereigntyConfigFile(input: {
   // privacy profile and the tier rules. It must exist after setup, and at
   // 0700 -- created with the process umask it was world-readable, which is
   // the wrong custody for the directory that holds the owner's privacy rules.
-  publishSovereigntyConfigFile(path, config);
+  withFileLeaseSync(path, lease => {
+    if (existsSync(path) && input.force !== true) {
+      throw new OperationError('invalid_params', `Sovereignty config already exists at ${path}.`, 'Pass --force to overwrite it.');
+    }
+    lease.commit(() => publishSovereigntyConfigFile(path, config));
+  }, { acquireTimeoutMs: 5_000 });
   return path;
 }
 
@@ -724,6 +739,70 @@ export function updateSovereigntyConfigFile(input: {
     if (published) return afterPublish();
     throw error;
   }
+}
+
+/**
+ * Owner-approved 1.0.1 upgrade. Match the raw shipped 1.0.0 policy, not its
+ * normalized form (normalization drops unknown owner fields). A customized
+ * policy, including a different built-in profile, is never rewritten. Only
+ * secure_local retrieval changes; the original bytes are backed up first.
+ */
+export function migratePrivateMeaningSearch(path: string): string | undefined {
+  // Frozen 1.0.0 shape: later preset edits must not broaden migration eligibility.
+  const legacy: SovereigntyConfig = {
+    schemaVersion: 1,
+    modelProfiles: {
+      'built-in-embedding': { provider: 'built-in', trust: 'local', model: 'embeddinggemma-2-litert-24d962e', purpose: 'embedding' },
+      'cloud-openclaw-infer': { provider: 'openclaw-infer', trust: 'standard_cloud', purpose: 'analyst' },
+    },
+    routes: {
+      secure_local: {
+        mode: 'disabled', pool: { members: [] },
+        disabledReason: 'no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured.',
+      },
+      internal: { analyst: ['cloud-openclaw-infer'] },
+    },
+    retrieval: { trustDomains: {
+      secure_local: {
+        minimumExecutionTrust: 'local', allowedEmbeddingTrust: ['local'],
+        embeddingProfile: null, allowCloudQuery: false,
+        activationMode: 'metadata_only', secureHandling: 'metadata_only_gap',
+      },
+      internal: {
+        minimumExecutionTrust: 'standard_cloud', allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding', allowCloudQuery: true, activationMode: 'hybrid_shadow',
+      },
+    } },
+  };
+  if (!existsSync(path)) return undefined;
+  const eligible = (current: unknown) => isDeepStrictEqual(current, legacy)
+    || isDeepStrictEqual(current, validateSovereigntyConfig(legacy));
+  // A customized/read-only policy needs no writer lease or bundled preset.
+  if (!eligible(JSON.parse(readFileSync(path, 'utf8')))) return undefined;
+  return withFileLeaseSync(path, (lease) => {
+    const original = readFileSync(path, 'utf8');
+    const current = JSON.parse(original) as SovereigntyConfig;
+    // The preset JSON and the engine/setup's normalized serialization are
+    // both shipped forms. Compare raw input to each trusted form so unknown
+    // owner fields cannot disappear during normalization and trigger a rewrite.
+    if (!eligible(current)) return undefined;
+    const nextPolicy = loadSovereigntyPreset('no-sensitive');
+    const next = {
+      ...current,
+      retrieval: {
+        ...current.retrieval,
+        trustDomains: { ...current.retrieval.trustDomains, secure_local: nextPolicy.retrieval.trustDomains.secure_local! },
+      },
+    };
+    validateSovereigntyConfig(next);
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;
+    lease.commit(() => {
+      // A failed backup must leave the original policy in place.
+      writePrivateFileAtomicSync(backup, original);
+      writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}\n`);
+    });
+    return backup;
+  }, { acquireTimeoutMs: 5_000 });
 }
 
 export function loadSovereigntyPreset(name: SovereigntyPresetName): SovereigntyConfig {

@@ -59,7 +59,7 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 | Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Built-in model | Built-in model | Approved Venice Private/TEE model | Venice account, usable API balance and key |
 | Local models (`local-only`) | Built-in model | Built-in model | Local answer model | Local answer server and its exact registered model ID |
 | Local models with Venice fallback (`local-first`) | Built-in model | Built-in model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
-| Don't ingest Private data (`no-sensitive`) | Built-in model | Private content is unavailable to answering | None | Nothing |
+| Private meaning search on this computer (`no-sensitive`) | Built-in model | Built-in model, on this computer | Built-in private model in Ask privately and the sealed panel; no agent answer lane | Nothing |
 
 ### Built-in embeddings
 
@@ -896,7 +896,7 @@ The bundled presets are:
 | Local models with Venice fallback (`local-first`) | Local models with Venice fallback | Private pool with explicit local → Venice Private order |
 | Local models (`local-only`) | Local models | Local source-answer only |
 | Venice (`private-cloud-only`) | Venice | Venice Private `kimi-k3` only |
-| Don't ingest Private data (`no-sensitive`) | Don't ingest Private data | Metadata-only gap; Private content is not added |
+| Private meaning search on this computer (`no-sensitive`) | Private meaning search on this computer | Local meaning search; no Private agent answer lane |
 
 ### Default posture for new users (owner decision, 2026-07-06)
 

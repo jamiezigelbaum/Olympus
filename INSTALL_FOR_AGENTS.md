@@ -687,16 +687,17 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    for Private answers and embeddings, on that provider's word rather than on
 >    encryption.
 >
-> 4. **Private kept local, keyword search only** (`no-sensitive`) — Olympus
->    stores Private items on this computer and finds them there by keyword,
->    but never embeds them, and no answer lane (local, private cloud or
->    ordinary cloud) is set up for them. When a question touches health,
+> 4. **Private meaning search on this computer** (`no-sensitive`) — Olympus
+>    stores Private items and finds them by meaning on this computer using
+>    the built-in embedding model. Private text and search vectors stay here.
+>    Ask privately and the sealed ChatGPT panel can use them; no Private
+>    agent answer lane is set up. When a question touches health,
 >    finances, or legal matters, the answer says Private sources were not
 >    searched instead of answering from them. Requires:
->    nothing; Personal content is indexed by the model built
->    into Olympus.
->    Trade-off: a real hole in what your assistant can do, in exchange for
->    maximum caution.
+>    nothing; Personal and Private content is indexed by the model built
+>    into Olympus. Existing unmodified 1.0.0 defaults switch automatically
+>    at engine start, with a dated backup; customized policies stay as they are.
+>    Trade-off: Private sources need the local panel until you add an agent answer lane.
 >
 > You can change this later — it's a config file, not a commitment
 > (`olympus sovereignty init --preset <name>`).

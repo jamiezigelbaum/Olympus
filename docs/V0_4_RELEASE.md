@@ -162,6 +162,18 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-14 — Private meaning search on the default install (1.0.1).**
+  Owner-approved decision A: keep `no-sensitive` as the standalone seed and
+  enable `secure_local` retrieval with `built-in-embedding`, local trust only,
+  `hybrid_shadow` and `allowCloudQuery: false`. This adds no Delphi or Venice
+  lane. Ask privately, the sealed ChatGPT panel and the private-match probe
+  gain local meaning search; the Private agent answer route stays disabled.
+  Engine/drain startup atomically replaces only the secure retrieval block
+  of an unmodified shipped 1.0.0 policy, keeping a dated owner-only backup.
+  Customized files (even edits elsewhere in the policy) stay untouched.
+  Existing Private items enter the normal bounded embedding sweep under
+  current account and content-scope observations and count as indexing work. No Private text or search vectors leave the computer.
+
 - **2026-10-14 — Omarchy qualified for 1.0.0; Linux publication unblocked.**
   Owner decision. The owner's Omarchy x64 laptop (glibc 2.44, SSE4.2) ran the
   full 1.0.0 release test on the pinned Bun 1.3.14 executable, under the real
