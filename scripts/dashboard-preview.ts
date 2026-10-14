@@ -747,7 +747,7 @@ function previewPrivateAnswersAction(body: Record<string, unknown>): Response {
   const answered = {
     ok: true,
     status: 'answered',
-    answer: 'Preview only: this is where the answer appears, written on this computer from your private things.\n\nNothing was searched: there is no worker behind this page.',
+    answer: '**Preview only.** This answer would be written on this computer from your private things.\n\n- The answer stays here.\n- Sources appear beneath it.\n\nNothing was searched: there is no worker behind this page.',
     citations: [{ title: 'Lease renewal.pdf', source: 'Dropbox', date: '2026-06-30' }],
     unanswered: [],
     left_out: ['Gmail'],

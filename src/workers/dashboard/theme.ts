@@ -211,6 +211,15 @@ export const DASHBOARD_THEME_CSS: string = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
+/* Text can wrap inside the window; intrinsic grid/flex minima must not
+   widen a page for a filename, URL, or diagnostic. */
+body { overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+input, select, textarea { max-width: 100%; min-width: 0; }
+.top { flex-wrap: wrap; }
+.attncard .grow, .card, .kpi, .setrow > *, .rowform { min-width: 0; }
+.btn { max-width: 100%; white-space: normal; }
+
 /* No card around the page: the page is the surface, as wide as a reading
    layout allows, and every row below shares its left and right edges. */
 .frame { max-width: 1120px; margin: 0 auto; }
@@ -271,7 +280,7 @@ a.attncard.rowzone .go { color: var(--t3); font-size: var(--fs-body); }
 .hint { color: var(--t3); font-size: var(--fs-caption); }
 /* Two button styles and no third: filled for the row's one main action,
    outlined for everything else. Links are for navigation only. */
-.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: nowrap; }
+.btn { border: 1px solid var(--link-line); color: var(--link); border-radius: 7px; padding: 6px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; line-height: 1.3; background: none; cursor: pointer; white-space: normal; }
 .btn:hover { background: var(--panel2); }
 .btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
@@ -301,8 +310,8 @@ details.howto > summary { color: var(--link); font-size: var(--fs-caption); curs
 details.howto > summary:hover { text-decoration: underline; }
 details.howto[open] > summary { margin-bottom: 6px; }
 details.howto p { margin: 0 0 6px; }
-.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
-.cards.four { grid-template-columns: repeat(4, 1fr); }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 22px; }
+.cards.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .card .hd { display: flex; gap: 9px; align-items: center; font-weight: 600; font-size: var(--fs-row); }
 .card .ln { color: var(--t3); font-size: var(--fs-caption); margin-top: 6px; }
@@ -317,7 +326,7 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
 .bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
-.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .kpi .u { font-size: var(--fs-caption); color: var(--t3); }
 .kpi .n { font-size: var(--fs-section); font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
@@ -351,13 +360,13 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .evidence[open] > summary { margin-bottom: 4px; }
 .ok { color: var(--good); }
 .no { color: var(--bad); }
-table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
+table { table-layout: fixed; border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
 /* A not-connected source: one flat list row, like the source rows above it. */
-.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
+.setrow { display: grid; grid-template-columns: 20px minmax(0, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
-.setrow.noblurb { grid-template-columns: 20px 1fr auto; }
+.setrow.noblurb { grid-template-columns: 20px minmax(0, 1fr) auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
 .setrow a.name { text-decoration: none; }
 .setrow a.name:hover { color: var(--link); text-decoration: underline; }
@@ -408,9 +417,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 @media (max-width: 700px) {
   body { padding: 0 16px 60px; }
   .page { padding: 20px 0 28px; }
-  .cards, .cards.four { grid-template-columns: 1fr 1fr; }
-  .kpis { grid-template-columns: 1fr 1fr; }
-  .setrow { grid-template-columns: 20px 1fr auto; }
+  .cards, .cards.four { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .kpis { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .setrow { grid-template-columns: 20px minmax(0, 1fr) auto; }
   .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
   .setrow .btn { justify-self: end; width: max-content; }
   /* A row's control and its hint wrap under the reason rather than squeezing
