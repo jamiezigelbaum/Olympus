@@ -140,6 +140,8 @@ test('a metadata-only raise removes zero-chunk version remnants', async () => {
   closes.push(() => { f.close(); tmp.cleanup(); });
   await f.set.sync(fixtureConnector(() => [{ id: 'mail', name: 'Garden' }]), { placement: FIXTURE_PLACEMENT });
   const identity = identityOf('mail');
+  f.ledger.adoptLegacyPlacement(identity, [{ corpusId: f.stores.internal!.corpusId, trustDomain: 'internal', layers: 'metadata' }]);
+  f.stores.internal!.bindTierSet(f.ledger);
   const db = new Database(f.paths.internal);
   const pk = (db.query('SELECT item_pk FROM items WHERE local_item_id = ?').get(localId('mail')) as { item_pk: number }).item_pk;
   db.query('INSERT INTO item_text_versions (item_pk, source_version, recorded_at) VALUES (?, ?, ?)').run(pk, 'old', '2026-10-14');
