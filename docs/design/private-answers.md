@@ -421,38 +421,41 @@ install in the worker and returns at once. The card re-reads its page every
 
 ### Pins (verified 2026-10-07)
 
-**zkapi-clientd 0.1.6-olympus2** — release `clientd-v0.1.6-olympus2` of the
-Olympus fork `jamiezigelbaum/zkapi` (published 2026-10-11 by its
-`olympus-release` workflow from commit `14fcba96`). The managed route needs
-the fork's supervisor flags and companion custody; an upstream daemon is
-refused with `daemon_supervisor_unsupported`. Base URL
-`https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/`.
+**zkapi-clientd 0.1.6-olympus4** — prepared release `clientd-v0.1.6-olympus4` of
+`jamiezigelbaum/zkapi`, built from fork commit
+`22fffc86ea0b09166530512dba7757bd84388dbc`. The managed route requires the
+fork's supervisor flags and companion custody. Linux x64 additionally
+requires the bundled confinement launcher and passing host and per-session
+checks. Linux x64 is qualified on Omarchy; unsupported hosts refuse.
+Base URL: `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/`.
 
 | Platform | Asset | Bytes | SHA-256 |
 |---|---|---|---|
-| macOS arm64 | `zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz` | 23,233,212 | `93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c` |
-| macOS x86_64 | `zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz` | 23,924,127 | `eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9` |
-| Linux x86_64 | `zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz` | 24,179,427 | `33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1` |
-| Linux arm64 | `zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz` | 23,914,142 | `ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0` |
+| macOS arm64 | `zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz` | 23,233,898 | `c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87` |
+| macOS x86_64 | `zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz` | 23,924,531 | `afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9` |
+| Linux x86_64 | `zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz` | 25,885,185 | `069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a` |
+| Linux arm64 | `zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz` | 23,923,385 | `cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489` |
 
-How made: each bundle is upstream's `clientd-v0.1.6` archive (its hash
-checked against the fork's `packaging/releases/clientd-0.1.6.json`; the
-upstream hashes are the ones Olympus pinned on 2026-10-07) with
-`zkapi-clientd` rebuilt from the fork with go1.27.1 (built twice, refused if
-the two differ), `VERSION` set to `0.1.6-olympus2`, `NOTICE-modified.md`, and
-`share/zkapi-clientd/olympus-build.json` recording both hashes. The wallet
-companion `zkapi-walletd` and `share/zkapi-clientd/` (proof-setup keys and
-manifest, build info, third-party licences) are upstream's bytes. Each
-platform's bundle is run on its own runner before publishing (`--version`,
-the five supervisor flags in `serve --help`, `zkapi-walletd --help`).
+Verification, 2026-10-13: all four archives were built from the committed fork
+on Sparta with the official Go 1.27.1 Linux amd64 toolchain; each daemon and
+the Linux launcher matched a clean HEAD rebuild. Owner publication is still
+required before these URLs are usable. Mac moves from main's olympus2 pin to
+olympus4 for the shared version contract; its custody and transport code paths
+are unchanged. The required Mac transport regression ran on the Linux build
+host; the two native Seatbelt cases remain unrun under the remote-only rule. Linux x64 `bin/zkapi-confine` hashes to
+`bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3`, matching
+`share/zkapi-clientd/olympus-build.json`'s `zkapi_confine_sha256` and both
+recorded reproducibility builds. Install verifies this exact named field and
+binary digest before committing the install. At each session the supervisor
+checks the launcher's hash and version again.
 
-How verified (2026-10-11): each archive downloaded and hashed locally,
-matched to the release's `SHA256SUMS` and GitHub's per-asset digest; every
-file's build-provenance attestation verified with `gh attestation verify -R
-jamiezigelbaum/zkapi` (Sigstore-signed, tied to the workflow run); the macOS
-arm64 bundle diffed against upstream's (only the four files above differ)
-and run on an Apple silicon Mac. The macOS daemon is ad-hoc, linker-signed
-(no Developer ID, not notarized).
+Comparing each Mac archive to olympus2: only `zkapi-clientd`, `VERSION`,
+`NOTICE-modified.md`, and `share/zkapi-clientd/olympus-build.json` changed.
+No files were added or removed; the wallet companion, proof files and other
+assets are byte-identical. The fork diff changes no daemon source outside the
+new Linux-only launcher; the Mac daemon is rebuilt with the new version.
+This verification did not run Mac binaries or repeat release attestations.
+
 
 **Updating.** The manifest names the version, so an install of an earlier pin
 (upstream 0.1.6) is not found by discovery and is reported as outdated. The

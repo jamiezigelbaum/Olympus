@@ -10,7 +10,9 @@
  *     BEFORE a single entry is extracted;
  *   - checks the whole archive before writing anything: no absolute paths, no
  *     `..`, no hard links, no device or FIFO entries, and no symlink that
- *     resolves outside the install;
+ *     resolves outside the install; a file the bundle pins by its own SHA-256
+ *     (the Linux x64 `bin/zkapi-confine` launcher) must match that hash and be
+ *     named by the bundle's own build record, or the install is refused;
  *   - extracts into a private staging folder, clears macOS quarantine on those
  *     verified files only, on Apple silicon ad-hoc signs the Tor files that
  *     `/usr/bin/codesign -dv` reports unsigned (never anything already
@@ -57,6 +59,22 @@ import { FileLeaseBusyError, FileLeaseLostError, withFileLease, type FileLease }
 export type ManagedToolName = 'tor' | 'zkapi-clientd';
 export type ManagedToolPlatform = 'darwin-arm64' | 'darwin-x64' | 'linux-x64' | 'linux-arm64' | 'linux-ia32';
 
+/**
+ * A file the bundle must carry with these exact bytes, beyond the archive's
+ * own pinned SHA-256, and the JSON file inside the bundle that must record the
+ * same hash. The Linux zkAPI launcher is one: the daemon's bundle carries
+ * `bin/zkapi-confine`, and the bundle's own `olympus-build.json` names the hash
+ * it was built as, so the install can refuse a bundle whose launcher and build
+ * record disagree.
+ */
+export interface ManagedToolPinnedFile {
+  /** Path inside the version folder. */
+  readonly path: string;
+  readonly sha256: string;
+  /** A bundle file (JSON) that must name that SHA-256. */
+  readonly record: string;
+}
+
 export interface ManagedToolAsset {
   readonly url: string;
   readonly sha256: string;
@@ -65,6 +83,12 @@ export interface ManagedToolAsset {
   readonly executable: string;
   /** Files that must exist after extraction (beside the executable). */
   readonly required: readonly string[];
+  /**
+   * Files pinned by their own SHA-256, each with the bundle file that must
+   * record the same hash (the Linux x64 `bin/zkapi-confine` launcher). Checked
+   * after extraction; a bundle that disagrees is refused whole.
+   */
+  readonly pinnedFiles?: readonly ManagedToolPinnedFile[];
   /** Archive path prefixes left out (debug symbols). */
   readonly skip?: readonly string[];
   /** Archive path → install path, for files the bundle keeps at its root. */
@@ -98,9 +122,19 @@ export interface ManagedToolPin {
 // The Olympus fork's release (docs/design/private-answers.md): upstream's
 // clientd-v0.1.6 bundle with zkapi-clientd rebuilt from the fork, which adds
 // the supervisor flags and companion custody the managed route requires
-// (an upstream daemon is refused with daemon_supervisor_unsupported).
+// (an upstream daemon is refused with daemon_supervisor_unsupported). From
+// clientd-v0.1.6-olympus3 the Linux x64 bundle also carries the `zkapi-confine`
+// launcher (docs/design/linux-zkapi-confinement.md, step 3).
 // zkapi-walletd and share/zkapi-clientd/ are upstream's bytes.
-const ZKAPI_VERSION = '0.1.6-olympus2';
+const ZKAPI_VERSION = '0.1.6-olympus4';
+// The launcher in the clientd-v0.1.6-olympus4 Linux x64 bundle. Pinned here
+// and cross-checked against the bundle's own build record at install; exported
+// so the Linux supervisor can pin the same bytes it runs.
+export const ZKAPI_CONFINE_SHA256 = 'bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3';
+/** The launcher's path inside the bundle. Linux x64 requires it. */
+const ZKAPI_CONFINE_PATH = 'bin/zkapi-confine';
+/** The bundle's own build record, which must name the launcher's pinned hash. */
+const ZKAPI_BUILD_RECORD = 'share/zkapi-clientd/olympus-build.json';
 // Each asset's full URL is written out as one literal: the packaged-bundle
 // scan exempts exactly these four public download addresses
 // (scripts/owner-identifier-patterns.ts), and a composed URL would not match.
@@ -118,8 +152,19 @@ const ZKAPI_REQUIRED = [
 // to bin/ beside share/, which is where the daemon looks for its proof files.
 const ZKAPI_RENAME = { 'zkapi-clientd': 'bin/zkapi-clientd', 'zkapi-walletd': 'bin/zkapi-walletd' } as const;
 
-function zkapiAsset(url: string, sha256: string, bytes: number): ManagedToolAsset {
-  return { url, sha256, bytes, executable: 'bin/zkapi-clientd', required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
+/** The Linux launcher a bundle must carry, and the record that must name it. */
+const ZKAPI_CONFINE_PIN: ManagedToolPinnedFile = { path: ZKAPI_CONFINE_PATH, sha256: ZKAPI_CONFINE_SHA256, record: ZKAPI_BUILD_RECORD };
+
+function zkapiAsset(url: string, sha256: string, bytes: number, extra: { required?: readonly string[]; pinnedFiles?: readonly ManagedToolPinnedFile[] } = {}): ManagedToolAsset {
+  return {
+    url,
+    sha256,
+    bytes,
+    executable: 'bin/zkapi-clientd',
+    required: [...ZKAPI_REQUIRED, ...(extra.required ?? [])],
+    ...(extra.pinnedFiles ? { pinnedFiles: extra.pinnedFiles } : {}),
+    rename: ZKAPI_RENAME,
+  };
 }
 
 // Tor's permanent archive: dist.torproject.org drops a release once a newer one ships.
@@ -142,14 +187,14 @@ function torLinuxAsset(name: string, sha256: string, bytes: number): ManagedTool
 }
 
 /**
- * The pinned builds (docs/design/private-answers.md). zkapi-clientd, verified
- * 2026-10-11: release clientd-v0.1.6-olympus2 of the Olympus fork (the asset URLs), built
- * by its olympus-release workflow from fork commit 14fcba96; hashes computed
- * from the downloaded archives and matched to the release's SHA256SUMS and
- * GitHub's asset digests, each file's build-provenance attestation verified
- * (`gh attestation verify`), and each bundle differs from upstream's
- * clientd-v0.1.6 archive only in zkapi-clientd, VERSION, NOTICE-modified.md
- * and share/zkapi-clientd/olympus-build.json. Tor, verified 2026-10-07: hashes computed and
+ * The pinned builds (docs/design/private-answers.md, docs/design/linux-zkapi-confinement.md).
+ * zkapi-clientd, pinned 2026-10-13: release clientd-v0.1.6-olympus4 of the
+ * Olympus fork (the asset URLs), Linux custody and the `bin/zkapi-confine`
+ * launcher in its Linux x64 bundle with the hash in
+ * share/zkapi-clientd/olympus-build.json; this pin carries the locally reproduced bytes prepared for
+ * owner publication, and an install verifies the Linux x64 launcher against
+ * both this pin and the bundle's own record. Tor,
+ * verified 2026-10-07: hashes computed and
  * matched to sha256sums-signed-build.txt, whose signature and each archive's
  * own .asc verified as good signatures by the Tor Browser Developers signing
  * key EF6E 286D DA85 EA2A 4BA7 DE68 4E2C 6E87 9329 8290 (subkey 022D A248 432D
@@ -172,20 +217,43 @@ export const MANAGED_TOOL_PINS: Readonly<Record<ManagedToolName, ManagedToolPin>
     tool: 'zkapi-clientd',
     label: 'zkAPI',
     version: ZKAPI_VERSION,
-    versionLine: /^zkapi-clientd 0\.1\.6-olympus2(\s|$)/,
+    versionLine: /^zkapi-clientd 0\.1\.6-olympus4(\s|$)/,
     assets: {
-      'darwin-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz', '93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c', 23_233_212),
-      'darwin-x64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz', 'eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9', 23_924_127),
-      'linux-x64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz', '33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1', 24_179_427),
-      'linux-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz', 'ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0', 23_914_142),
+      // No launcher on the Macs: it is Linux-only.
+      'darwin-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz', 'c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87', 23_233_898),
+      'darwin-x64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz', 'afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9', 23_924_531),
+      // Linux x64 requires the confinement launcher, verified byte for byte
+      // against the pin and against the bundle's own build record.
+      'linux-x64': zkapiAsset(
+        'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz',
+        '069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a',
+        25_885_185,
+        { required: [ZKAPI_CONFINE_PATH], pinnedFiles: [ZKAPI_CONFINE_PIN] },
+      ),
+      // Linux arm64 is deferred (the launcher refuses on arm64 until it is
+      // qualified), so its bundle is carried without the launcher requirement.
+      'linux-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz', 'cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489', 23_923_385),
     },
-    // Upstream clientd-v0.1.6, pinned 2026-10-07 until this release.
+    // Upstream clientd-v0.1.6 (pinned 2026-10-07) and the previous Olympus
+    // fork release, each with the hashes Olympus pinned when it installed them.
     replaces: {
       '0.1.6': {
         'darwin-arm64': '0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4',
         'darwin-x64': 'ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12',
         'linux-x64': '41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95',
         'linux-arm64': '41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf',
+      },
+      '0.1.6-olympus3': {
+        'darwin-arm64': 'e4d911dd43839fd25b23a96781fcf2628538c0f0f0ed7e791161843583284b14',
+        'darwin-x64': '2cfecfba8176141eaf8106f23f15d251e9f677287a5401412156bb288bba1851',
+        'linux-x64': 'c306cfc86b3d4eee8e407b81cb48fbe148f7b771b77059cf16d5ca35504b152b',
+        'linux-arm64': 'bde3b8851a0acd190e28906828afc3b508c985ee848dd997b3ee5b10f4212da4',
+      },
+      '0.1.6-olympus2': {
+        'darwin-arm64': '93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c',
+        'darwin-x64': 'eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9',
+        'linux-x64': '33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1',
+        'linux-arm64': 'ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0',
       },
     },
   },
@@ -324,6 +392,7 @@ export function managedToolExecutable(tool: ManagedToolName, host: ManagedToolsH
     for (const required of new Set([...asset.required, asset.executable])) {
       if (!trustedInside(realDir, join(versionDir, required), uid, versionDir)) return undefined;
     }
+    verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
     const real = realpathSync(join(versionDir, asset.executable));
     accessSync(real, constants.X_OK);
     return real;
@@ -451,6 +520,7 @@ export type ManagedToolsErrorCode =
   | 'download_failed'
   | 'size_mismatch'
   | 'hash_mismatch'
+  | 'launcher_mismatch'
   | 'unsafe_archive'
   | 'archive_incomplete'
   | 'will_not_run'
@@ -715,6 +785,7 @@ async function installOne(
         throw new ManagedToolsError('archive_incomplete', `The ${pin.label} download is missing ${required}, so nothing was installed.`, tool);
       }
     }
+    verifyPinnedFiles(staging, asset, uid, pin.label, tool);
     if ((options.platform ?? process.platform) === 'darwin') await (options.clearQuarantine ?? defaultClearQuarantine)(staging);
     const adhocSigned = await adhocSignUnsigned(staging, asset, platformKey, options.runCommand ?? defaultCommandRunner, pin.label, tool);
     const check = await (options.versionCheck ?? defaultVersionCheck)(join(staging, asset.executable), {
@@ -786,6 +857,50 @@ async function installOne(
       ? error
       : new ManagedToolsError('install_failed', `${pin.label} could not be installed: ${(error as Error).message}`, tool);
     return { tool, version: pin.version, outcome: 'failed', code: failure.code, message: failure.message };
+  }
+}
+
+/** SHA-256 of a file's bytes, as the manifest and the pins use it. */
+function fileSha256(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+/**
+ * The asset's pinned files (the Linux x64 `bin/zkapi-confine` launcher): each
+ * must be present, privately owned inside the staging folder, hash to its
+ * pinned SHA-256, and be named by the bundle's own build record. A bundle
+ * whose launcher or record disagrees is refused whole, so a tampered launcher
+ * is never installed. The launcher is not run here: the Linux supervisor
+ * resolves it through `managedToolExecutable` and runs it at each session.
+ */
+function verifyPinnedFiles(staging: string, asset: ManagedToolAsset, uid: number | undefined, label: string, tool: ManagedToolName): void {
+  for (const pinned of asset.pinnedFiles ?? []) {
+    const file = join(staging, pinned.path);
+    if (!privatelyOwned(file, uid, 'file')) {
+      throw new ManagedToolsError('archive_incomplete', `The ${label} download is missing ${pinned.path}, so nothing was installed.`, tool);
+    }
+    let actual: string;
+    try {
+      actual = fileSha256(file);
+    } catch {
+      throw new ManagedToolsError('launcher_mismatch', `The ${label} download's launcher (${pinned.path}) could not be read, so nothing was installed.`, tool);
+    }
+    if (actual !== pinned.sha256) {
+      throw new ManagedToolsError('launcher_mismatch', `The ${label} download carries a launcher (${pinned.path}) that does not match its pinned fingerprint, so nothing was installed.`, tool);
+    }
+    const record = join(staging, pinned.record);
+    if (!privatelyOwned(record, uid, 'file')) {
+      throw new ManagedToolsError('launcher_mismatch', `The ${label} download does not carry its build record (${pinned.record}), so nothing was installed.`, tool);
+    }
+    let recorded: unknown;
+    try {
+      recorded = (JSON.parse(readFileSync(record, 'utf8')) as { zkapi_confine_sha256?: unknown }).zkapi_confine_sha256;
+    } catch {
+      throw new ManagedToolsError('launcher_mismatch', `The ${label} download's build record (${pinned.record}) cannot be read, so nothing was installed.`, tool);
+    }
+    if (recorded !== pinned.sha256) {
+      throw new ManagedToolsError('launcher_mismatch', `The ${label} download's build record does not name its pinned launcher, so nothing was installed.`, tool);
+    }
   }
 }
 

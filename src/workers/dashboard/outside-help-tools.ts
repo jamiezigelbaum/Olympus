@@ -168,12 +168,13 @@ function sourceWords(entry: DashboardOutsideHelpTool): string {
  * render nothing. The script is rendered once per page
  * (renderOutsideHelpToolsScript).
  */
-export function renderOutsideHelpTools(tools: DashboardOutsideHelpTools | undefined, input: { canEdit: boolean }): string {
+export function renderOutsideHelpTools(tools: DashboardOutsideHelpTools | undefined, input: { canEdit: boolean; requireLauncher?: boolean }): string {
   if (!tools) return '';
   const install = tools.install;
   const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml(entry.tool)}" data-outside-tool-source="${escapeHtml(entry.source)}">`
     + `${escapeHtml(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join('');
-  const missing = tools.tools.some(installable);
+  const launcher = input.requireLauncher ? tools.tools.find((entry) => entry.tool === 'zkapi-clientd' && entry.offered === true) : undefined;
+  const missing = Boolean(launcher) || tools.tools.some(installable);
   const parts: string[] = [
     `<p class="pnote"><strong>${escapeHtml(C.title)}</strong></p>`,
     `<p class="pnote">${escapeHtml(C.intro)}</p>`,
@@ -182,7 +183,7 @@ export function renderOutsideHelpTools(tools: DashboardOutsideHelpTools | undefi
   ];
   if (install.state === 'done' && !missing) parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml(C.done)}</p>`);
   if (!missing && install.state !== 'running') parts.push(`<p class="pnote ohsmall">${escapeHtml(C.allInstalled)}</p>`);
-  parts.push(installButton(tools, input.canEdit));
+  parts.push(installButton(tools, input.canEdit, launcher));
   return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml(install.state)}">${parts.join('')}</div>`;
 }
 

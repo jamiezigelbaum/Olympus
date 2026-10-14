@@ -65,7 +65,7 @@ const dgram = require('node:dgram');
 const { spawn } = require('node:child_process');
 const dir = process.env.ZKAPI_CLIENTD_CONFIG_DIR;
 const planPath = dir + '/plan.json';
-const plan = fs.existsSync(planPath) ? JSON.parse(fs.readFileSync(planPath, 'utf8')) : { version: '0.1.6' };
+const plan = fs.existsSync(planPath) ? JSON.parse(fs.readFileSync(planPath, 'utf8')) : { version: '0.1.6-olympus4' };
 if (process.argv[2] === '--version') { console.log('zkapi-clientd ' + plan.version); process.exit(0); }
 if (process.argv[2] === 'serve' && process.argv[3] === '--help') { console.log(plan.noSupervisor ? 'Usage: serve' : '--relay-url --companion-proxy-listen --wallet-api-listen --require-managed-companion --require-companion-custody'); process.exit(0); }
 if (process.argv[2] !== 'serve') process.exit(2);
@@ -606,7 +606,7 @@ export function useZkapiHarness(): void {
     mkdirSync(configDir);
     statePath = join(root, 'zkapi-consult-state.json');
     [daemonPort, torPort] = freePorts(2) as [number, number];
-    plan = { port: daemonPort, relayPort: torPort, apiKey: API_KEY, version: '0.1.6', requireKey: true, reuse: 0, statePath };
+    plan = { port: daemonPort, relayPort: torPort, apiKey: API_KEY, version: '0.1.6-olympus4', requireKey: true, reuse: 0, statePath };
     writePlan();
   });
   afterEach(() => {

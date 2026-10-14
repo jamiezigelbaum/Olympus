@@ -1,3 +1,6 @@
+import { linuxZkapiConfinement, type LinuxConfinementDependencies, parseLinuxStatus, type LinuxEvent, type LinuxBackend, type ZkapiPreparedConfinement } from './zkapi-confinement-linux.ts';
+export { linuxZkapiConfinement } from './zkapi-confinement-linux.ts';
+import type { Readable } from 'node:stream';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 // Experimental zkAPI consult transport (design: docs/design/frontier-consult-lane.md,
 // track Z, tranche Z1).
@@ -52,8 +55,8 @@ import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createConnection, createServer, type Server } from 'node:net';
+import { accessSync, chmodSync, closeSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createConnection, createServer, type Socket, type Server, type NetConnectOpts } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
@@ -105,7 +108,7 @@ const KILL_GRACE_MS = 3_000;
  * change between the listing and the send can move the actual hold, bounded
  * by $6. A newer version is refused until its allowance table is reviewed.
  */
-export const ZKAPI_SUPPORTED_DAEMON_VERSIONS = ['0.1.5', '0.1.6', '0.1.6-olympus2'] as const;
+export const ZKAPI_SUPPORTED_DAEMON_VERSIONS = ['0.1.5', '0.1.6', '0.1.6-olympus2', '0.1.6-olympus3', '0.1.6-olympus4'] as const;
 export const ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6_000_000;
 /** The fixed, content-free question a recovery-only session sends. */
 const RECOVERY_QUESTION = 'Reply with the single word OK.';
@@ -215,6 +218,9 @@ export interface ZkapiConfinementPorts {
 
 export interface ZkapiConfinement {
   readonly level: ZkapiConfinementLevel;
+  /** Optional per-session preparation; Linux requires the private status channel. */
+  prepare?(workDir: string, ports: ZkapiConfinementPorts): Promise<ZkapiPreparedConfinement>;
+  check?(): Promise<{ ok: boolean; line: string; installRequired?: boolean }>;
   /** A fixed sentence naming what this confinement does not cover. */
   readonly limit: string;
   /** The argv that runs `argv` under the confinement. */
@@ -232,6 +238,9 @@ export interface ZkapiSessionReceipt {
   freshTorClient: boolean;
   confinement: ZkapiConfinementLevel;
   confinementSelfTest: 'passed' | 'failed' | 'not_run';
+  confinementBackend?: LinuxBackend;
+  /** Fixed launcher refusal code only; never raw stderr or status detail. */
+  confinementFailure?: string;
   /** Secondary signal only: what the daemon's model list did once Tor stopped. */
   postStopProbe: 'route_lost' | 'still_reachable' | 'inconclusive' | 'not_run';
   /** `pending`: only on the receipt a session hands over with its reply, before settlement is known. */
@@ -387,6 +396,8 @@ export interface ZkapiConsultTransportOptions {
   statePath?: string;
   /** PATH and the daemon's config location are taken from here. */
   env?: Record<string, string | undefined>;
+  /** Host platform; defaults to the current process. */
+  platform?: NodeJS.Platform;
   fetchImpl?: typeof fetch;
   inspectListener?: ZkapiListenerInspector;
   /** Defaults to this platform's implementation (`defaultZkapiConfinement`). */
@@ -456,7 +467,7 @@ export interface ZkapiConsultReadiness {
   daemonVersion?: string;
   torExecutable?: string;
   tor: ZkapiConsultSettings['tor'];
-  confinement: { level: ZkapiConfinementLevel; limit: string };
+  confinement: { level: ZkapiConfinementLevel; limit: string; checkLine?: string };
   daemonPort: 'free' | 'in_use';
   torPort: 'free' | 'in_use' | 'not_used';
   apiKeyConfigured: boolean;
@@ -500,8 +511,8 @@ export const ZKAPI_CONSULT_ERROR_MESSAGES: Readonly<Record<ZkapiConsultErrorCode
   tor_port_busy: 'Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.',
   tor_bootstrap_failed: 'The per-consult Tor client did not finish bootstrapping.',
   daemon_start_failed: 'zkapi-clientd serve did not become ready.',
-  daemon_version_unsupported: 'This zkapi-clientd version is not a reviewed version (0.1.5, 0.1.6 or 0.1.6-olympus2).',
-  daemon_supervisor_unsupported: 'This zkAPI app cannot enforce the managed anonymous route. Use the Olympus zkapi-clientd fork with companion custody support (0.1.6-olympus2); nothing was sent.',
+  daemon_version_unsupported: 'This zkapi-clientd version is not a reviewed version (0.1.5, 0.1.6, 0.1.6-olympus2, 0.1.6-olympus3 or 0.1.6-olympus4).',
+  daemon_supervisor_unsupported: 'This zkAPI app cannot enforce the managed anonymous route. Use the Olympus zkapi-clientd fork with companion custody support (0.1.6-olympus4); nothing was sent.',
   relay_mismatch: 'The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).',
   key_reuse_on: 'The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.',
   key_reuse_unverified: 'The daemon did not confirm a fresh key for every request.',
@@ -618,9 +629,12 @@ function settingsBlockers(money: ZkapiMoneyStatus): ZkapiConsultErrorCode[] {
   return blockers;
 }
 
-function versionSupported(version: string | undefined): boolean {
+function versionSupported(version: string | undefined, platform: NodeJS.Platform = process.platform): boolean {
   const normalized = version?.replace(/^v/, '');
-  return (ZKAPI_SUPPORTED_DAEMON_VERSIONS as readonly string[]).includes(normalized ?? '');
+  if (!(ZKAPI_SUPPORTED_DAEMON_VERSIONS as readonly string[]).includes(normalized ?? '')) return false;
+  // Linux companion custody first shipped in olympus4. Keep the reviewed
+  // version ceiling as well: newer allowance tables still need review.
+  return platform !== 'linux' || Number(/^0\.1\.6-olympus(\d+)$/.exec(normalized ?? '')?.[1] ?? 0) >= 4;
 }
 
 /** Help reads no wallet state; an old binary must refuse before Tor starts. */
@@ -788,14 +802,15 @@ export function zkapiConfinementAvailable(confinement: Pick<ZkapiConfinement, 'l
 }
 
 /**
- * This platform's confinement: the macOS sandbox, else none (Linux until its
- * launcher lands, docs/design/linux-zkapi-confinement.md), which refuses.
+ * This platform's confinement: the macOS sandbox or the checked Linux launcher.
+ * Unsupported hosts refuse; every session still runs its confinement self-test.
  * `host` is a seam for tests; it defaults to this process's platform.
  */
 export function defaultZkapiConfinement(
-  host: { platform?: NodeJS.Platform; sandboxAvailable?: boolean } = {},
+  host: LinuxConfinementDependencies & { sandboxAvailable?: boolean } = {},
 ): ZkapiConfinement {
   const platform = host.platform ?? process.platform;
+  if (platform === 'linux') return linuxZkapiConfinement(host);
   if (platform === 'darwin' && (host.sandboxAvailable ?? existsSync('/usr/bin/sandbox-exec'))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
@@ -1085,10 +1100,15 @@ export function reserveZkapiRequest(
  */
 /** The line the watchdog prints the moment its child exits, before group cleanup. */
 const WATCHDOG_CHILD_EXITED = 'OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED';
-const WATCHDOG_SCRIPT = `
+export const WATCHDOG_SCRIPT = `
 const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const [, , expectedParentText, ...argv] = process.argv;
+const privateStatus = argv[0] === '--private-status';
+if (privateStatus) argv.shift();
+const inheritedCount = privateStatus ? Number(argv.shift()) : 0;
+if (!Number.isInteger(inheritedCount) || inheritedCount < 0 || inheritedCount > 8) process.exit(70);
+const inheritedFds = Array.from({ length: inheritedCount }, (_, i) => 4 + i);
 const expectedParent = Number(expectedParentText);
 const self = process.pid;
 if (process.ppid !== expectedParent) process.exit(70);
@@ -1136,7 +1156,8 @@ process.stdout.on('error', () => {});
 process.stderr.on('error', () => {});
 process.on('uncaughtException', () => cleanup());
 const start = () => {
-  child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
+  child = spawn(argv[0], argv.slice(1), { stdio: privateStatus ? ['ignore', 'inherit', 'inherit', 3, ...inheritedFds] : ['ignore', 'inherit', 'inherit'] });
+  if (privateStatus) { fs.closeSync(3); for (const fd of inheritedFds) fs.closeSync(fd); }
   // The child's exit code or signal rides on the marker line: the only facts
   // kept about how it ended.
   const report = (code, signal) => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED} ' + (typeof code === 'number' ? code : '-') + ' ' + (signal || '-') + '\\n'); } catch {} };
@@ -1169,17 +1190,56 @@ interface Supervised {
   go(): void;
 }
 
-function supervise(
+/** Bun 1.3.14 gives extra `pipe` stdio two owners: node:net closes it on EOF,
+ * then Subprocess.finalizeStreams closes the reused fd during GC. Supply an
+ * unowned numeric child fd instead; our Socket alone owns the receiving end.
+ * CLOEXEC keeps both ends out of unrelated children. Node uses its native pipe.
+ */
+function linuxBunStatusChannel(): { reader: Socket; writer: number } | undefined {
+  if (process.platform !== 'linux' || !process.versions.bun) return undefined;
+  const { dlopen, FFIType, ptr } = require('bun:ffi') as typeof import('bun:ffi');
+  const libc = dlopen('libc.so.6', {
+    socketpair: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
+  });
+  const fds = new Int32Array(2);
+  try {
+    // AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC; the child receives a dup at fd 3.
+    if (libc.symbols.socketpair(1, 1 | 0x80000, 0, ptr(fds)) !== 0) throw new Error('private status socketpair unavailable');
+  } finally { libc.close(); }
+  try {
+    // Bun's fd adoption is a connect overload (also used by its child_process
+    // adapter), rather than Node's Socket constructor option.
+    const reader = createConnection({ fd: fds[0]! } as unknown as NetConnectOpts);
+    return { reader, writer: fds[1]! };
+  } catch (error) {
+    closeSync(fds[0]!); closeSync(fds[1]!);
+    throw error;
+  }
+}
+
+export function supervise(
   role: 'tor' | 'daemon',
   watchdog: string,
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
   onLine: (line: string) => void,
   onExit: (handle: Supervised) => void,
+  onStatus?: (event: LinuxEvent) => void,
+  onStatusClosed?: () => void,
+  inheritedFds: readonly number[] = [],
 ): Supervised {
   // detached: the watchdog leads a new group with no controlling terminal, so
   // the daemon's prompts can never land on the owner's terminal.
-  const child = spawn(process.execPath, [watchdog, String(process.pid), ...argv], { env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const statusChannel = onStatus ? linuxBunStatusChannel() : undefined;
+  let child: ChildProcess;
+  try {
+    child = spawn(process.execPath, [watchdog, String(process.pid), ...(onStatus ? ['--private-status', String(inheritedFds.length)] : []), ...argv], { env, detached: true, stdio: onStatus ? ['pipe', 'pipe', 'pipe', statusChannel?.writer ?? 'pipe', ...inheritedFds] : ['pipe', 'pipe', 'pipe'] });
+  } catch (error) {
+    statusChannel?.reader.destroy();
+    throw error;
+  } finally {
+    if (statusChannel) closeSync(statusChannel.writer);
+  }
   const handle: Supervised = {
     role,
     child,
@@ -1232,6 +1292,27 @@ function supervise(
       }
       if (pending.length > 64 * 1024) pending = '';
     });
+  }
+  if (onStatus) {
+    const stream = statusChannel?.reader ?? child.stdio[3] as Readable | null;
+    let pending = ''; let invalid = false;
+    const reject = (): void => { if (!invalid) { invalid = true; onStatus({ event: 'refused', code: 'no_status_event' }); } };
+    if (!stream) reject();
+    stream?.setEncoding('utf8');
+    stream?.on('data', (chunk: string) => {
+      if (invalid) return;
+      pending += chunk;
+      if (pending.length > 65536) { reject(); return; }
+      let index: number;
+      while ((index = pending.indexOf('\n')) >= 0) {
+        const event = parseLinuxStatus(pending.slice(0, index));
+        pending = pending.slice(index + 1);
+        if (!event) { reject(); return; }
+        onStatus(event);
+      }
+    });
+    stream?.on('error', reject);
+    stream?.on('end', () => { if (pending) reject(); onStatusClosed?.(); });
   }
   return handle;
 }
@@ -1865,9 +1946,11 @@ export async function zkapiConsultReadiness(
   const now = (options.now ?? (() => new Date()))();
   const env = options.env ?? process.env;
   const settings = options.settings;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env, platform: options.platform ?? process.platform });
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
+  const confinementCheck = await confinement.check?.();
+  if (confinementCheck && !confinementCheck.ok) blockers.unshift('confinement_unavailable');
   // No confinement here: nothing else could make a session run.
   if (!zkapiConfinementAvailable(confinement)) blockers.unshift('confinement_unavailable');
   const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
@@ -1888,7 +1971,7 @@ export async function zkapiConsultReadiness(
     } catch {
       daemonVersion = undefined;
     }
-    if (!versionSupported(daemonVersion)) blockers.push('daemon_version_unsupported');
+    if (!versionSupported(daemonVersion, options.platform)) blockers.push('daemon_version_unsupported');
     if (settings.tor === 'per_consult' && confinement.level === 'loopback_filtered'
       && !supportsManagedConfinement(daemonExecutable, childEnvironment(env))) blockers.push('daemon_supervisor_unsupported');
   }
@@ -1948,7 +2031,7 @@ export async function zkapiConsultReadiness(
     ...(daemonVersion ? { daemonVersion } : {}),
     ...(torExecutable ? { torExecutable } : {}),
     tor: settings.tor,
-    confinement: { level: confinement.level, limit: confinement.limit },
+    confinement: { level: confinement.level, limit: confinement.limit, ...(confinementCheck ? { checkLine: confinementCheck.line } : {}) },
     daemonPort,
     torPort,
     apiKeyConfigured,
@@ -2314,13 +2397,14 @@ async function runSession(
   const now = options.now ?? (() => new Date());
   const settings = options.settings;
   const env = options.env ?? process.env;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  let fetchImpl = options.fetchImpl ?? fetch;
+  let confinementSession: ZkapiPreparedConfinement | undefined;
   const inspect = options.inspectListener ?? inspectLoopbackListener;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confinement = options.confinement ?? defaultZkapiConfinement({ env, platform: options.platform ?? process.platform });
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === 'per_consult';
-  const filtered = perConsultTor && confinement.level === 'loopback_filtered';
+  let filtered = perConsultTor && confinement.level === 'loopback_filtered';
   const ports: ZkapiConfinementPorts = { tor: settings.torSocksPort, daemon: daemonPort };
   const receipt: ZkapiSessionReceipt = {
     recovery,
@@ -2392,7 +2476,12 @@ async function runSession(
   // No network confinement on this platform: refused first, with or without
   // Tor and for a recovery too, so neither Tor nor the daemon ever starts
   // unconfined (owner ruling 2026-10-12: no weaker mode).
+  try { if (confinement.check && !(await confinement.check()).ok) return refuse('confinement_unavailable'); } catch { return refuse('confinement_unavailable'); }
   if (!zkapiConfinementAvailable(confinement)) return refuse('confinement_unavailable');
+  filtered = perConsultTor && confinement.level === 'loopback_filtered';
+  receipt.confinement = perConsultTor ? confinement.level : 'none';
+  // A Linux confinementSession backend has no direct/unwrapped mode. Mac behaviour is unchanged.
+  if (confinement.prepare && !perConsultTor) return refuse('confinement_unavailable');
   // The cost-and-risk statements govern questions: what the owner's model
   // sends and what each one costs. A recovery session sends the fixed empty
   // request, nothing of the owner's, to settle money already held, so the
@@ -2496,6 +2585,10 @@ async function runSession(
         return (result = fail('confinement_self_test_failed'));
       }
       if (sessionSignal.aborted) return (result = fail(interrupted()));
+      if (confinement.prepare) {
+        try { confinementSession = await confinement.prepare(workDir, ports); fetchImpl = confinementSession.fetch; }
+        catch { return (result = fail('confinement_unavailable')); }
+      }
       // zkapi-serve-tor.sh: a throwaway client with a fresh data directory, so
       // fresh guards and circuits; bound to Olympus's lifetime.
       const torDataDir = join(workDir, 'tor');
@@ -2532,21 +2625,32 @@ async function runSession(
     daemon = supervise(
       'daemon',
       watchdog,
-      perConsultTor ? confinement.wrap(daemonArgv, ports) : daemonArgv,
+      confinementSession ? confinementSession.wrap(daemonArgv) : perConsultTor ? confinement.wrap(daemonArgv, ports) : daemonArgv,
       daemonEnvironment(childEnv, daemonExecutable),
       (line) => parseDaemonLine(facts, line),
       onChildExit,
+      confinementSession ? (event) => confinementSession!.status(event, daemon?.leader ? { pid: daemon.pgid, startTime: daemon.leader.startTime } : undefined) : undefined,
+      confinementSession ? () => confinementSession!.statusClosed() : undefined,
     );
     recordAndStart(daemon);
+    if (confinementSession) {
+      const statusReady = await waitFor(() => confinementSession!.ready, settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: () => Boolean(confinementSession!.refusal) || anyExited() });
+      if (!statusReady) {
+        receipt.confinementFailure = confinementSession.refusal ?? 'no_status_event';
+        return (result = fail('confinement_unavailable'));
+      }
+      receipt.confinementBackend = confinementSession.backend!;
+    }
 
     // Every port of this session must be held by the process group Olympus
     // started; checked again immediately before anything carries the key.
     const daemonGone = (): boolean => daemon!.leaderExited || daemon!.childExited;
     const owned = async (includeTor = true): Promise<boolean> => {
       if (includeTor ? anyExited() : daemonGone()) return false;
-      const listener = await inspect(daemonPort);
+      if (confinementSession && (!confinementSession.verifyInstance() || !confinementSession.inspect())) return false;
+      const listener = confinementSession ? { kind: 'found' as const, pgid: daemon!.pgid } : await inspect(daemonPort);
       if (listener.kind !== 'found' || listener.pgid !== daemon!.pgid) return false;
-      if (filtered) {
+      if (filtered && !confinementSession) {
         for (const port of [ports.companionProxy!, ports.walletApi!]) {
           const companion = await inspect(port);
           if (companion.kind !== 'found' || companion.pgid !== daemon!.pgid) return false;
@@ -2569,6 +2673,7 @@ async function runSession(
 
     const ready = await waitFor(
       async (remainingMs) => Boolean(facts.listen)
+        && (!confinementSession || await owned())
         && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: 'GET' }, sessionSignal, Math.min(2_000, remainingMs)))
         // The API can bind before the Rust companion finishes starting. Do
         // not send a key until every required listener has proven ownership.
@@ -2580,7 +2685,7 @@ async function runSession(
       : filtered && facts.listen ? 'daemon_identity_failed' : 'daemon_start_failed'));
     stage('daemonVerifyMs');
     receipt.daemonVersion = facts.version!;
-    if (!versionSupported(facts.version)) return (result = fail('daemon_version_unsupported'));
+    if (!versionSupported(facts.version, options.platform)) return (result = fail('daemon_version_unsupported'));
     if (facts.listen !== new URL(options.baseUrl).host) return (result = fail('daemon_identity_failed'));
     const expectedTransport = perConsultTor ? 'SOCKS5 proxy required' : 'direct HTTPS (network proxy off)';
     if (facts.transport !== expectedTransport) return (result = fail('relay_mismatch'));
@@ -2720,7 +2825,7 @@ async function runSession(
     // the fence clears only on settlement evidence. The one exception is the
     // deadline check sendCompletion makes immediately before invoking fetch.
     detachCaller = () => bridge.reply.resolve({ kind: 'failed', error: failure('aborted', 'unknown', identity(), { receipt: pendingSnapshot() }).error });
-    const completion = await sendCompletion(prepared, options, sessionSignal, stage, pastDeadline);
+    const completion = await sendCompletion(prepared, confinementSession ? { ...options, fetchImpl } : options, sessionSignal, stage, pastDeadline);
 
     if (!completion.ok && completion.error.outcome === 'not_sent') {
       // The deadline passed between the reservation and the fetch (the
@@ -2866,6 +2971,7 @@ async function runSession(
       allStopped = false;
     }
   }
+  confinementSession?.close();
   if (allStopped) {
     try {
       rmSync(workDir, { recursive: true, force: true });

@@ -1,3 +1,4 @@
+import { linuxZkapiConfinement } from '../src/core/zkapi-confinement-linux.ts';
 /**
  * The Outside help card (src/workers/dashboard/outside-help.ts,
  * pages/private-answers.ts) and its worker side (email-source/dashboard-consult.ts,
@@ -210,6 +211,8 @@ describe('Set up zkAPI names the program Olympus installed', () => {
     expect(steps[6]).toBe(`Run: '${MANAGED}' config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.`);
     // The key reference still fills.
     expect(steps[5]).toContain('(env:OLYMPUS_ZKAPI_API_KEY)');
+    expect(steps[5]).not.toContain('config --api-key <key>');
+    expect(steps[5]).toContain('Pipe');
     expect(steps[5]).not.toContain('{');
   });
 
@@ -268,7 +271,7 @@ describe('the Outside help page: states and copy', () => {
     for (const step of W.steps) expect(visibleText(html)).toContain(step.replace('{secretRef}', 'env:OLYMPUS_ZKAPI_API_KEY').replaceAll('{daemon}', 'zkapi-clientd').slice(0, 40));
     // The seven setup steps, in the order that worked live (§A.14): one send, activation, relay, require key, api key, key reuse 0.
     const text = visibleText(html);
-    const order = ['--usd N', 'Private inference balance activated', '--relay-url socks5://127.0.0.1:19050', '--require-api-key', '--api-key <key>', '--key-reuse-window-seconds 0'];
+    const order = ['--usd N', 'Private inference balance activated', '--relay-url socks5://127.0.0.1:19050', '--require-api-key', '--api-key', '--key-reuse-window-seconds 0'];
     const positions = order.map((needle) => text.indexOf(needle));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
@@ -833,6 +836,7 @@ function adapter(input: {
   profileOverrides?: Record<string, unknown>;
   secret?: string;
   readiness?: Partial<ZkapiConsultReadiness>;
+  probeConfinement?: boolean;
   recover?: ZkapiConsultResult;
   reload?: boolean;
   source?: string;
@@ -857,7 +861,7 @@ function adapter(input: {
     env,
     statePath: join(input.home, '.olympus', 'zkapi-consult-state.json'),
     now: () => new Date('2026-10-07T12:00:00.000Z'),
-    readiness: async (options) => { probes.push(options); return readiness(input.readiness); },
+    readiness: async (options) => { probes.push(options); if (input.probeConfinement) await options.confinement?.check?.(); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
     ...(input.writerCheck ? { writerCheck: input.writerCheck } : {}),
     ...(input.chatgptModelProblem ? { chatgptModelProblem: input.chatgptModelProblem } : {}),
@@ -874,6 +878,75 @@ const UNCONFINED: ZkapiConfinement = { level: 'none', limit: 'no network confine
 // card says so in one line and offers nothing to set up; the worker refuses
 // the same actions itself.
 describe('the adapter: a computer without network confinement', () => {
+  test('one status render shares its confinement check with readiness', async () => {
+    let calls = 0;
+    const confinement = { ...CONFINED, check: async () => { calls++; return { ok: true, line: 'ready' }; } };
+    const { backend } = adapter({ home: tempHome(), confinement, probeConfinement: true });
+    await backend.status();
+    expect(calls).toBe(1);
+  });
+  test('two Linux status renders within the TTL run the launcher once', async () => {
+    const home = tempHome();
+    const path = join(home, 'launcher');
+    writeFileSync(path, 'synthetic launcher', { mode: 0o700 });
+    let calls = 0;
+    const confinement = linuxZkapiConfinement({ platform: 'linux', arch: 'x64', resolveLauncher: () => path, check: async () => {
+      calls++;
+      return { ok: true, landlockAbi: 4, layers: ['netns','pidns','ipv6-off','caps','nnp','launcher-undumpable','launcher-seccomp','landlock-net','seccomp'], stage0Layers: ['nnp','launcher-undumpable','launcher-seccomp'] };
+    } });
+    const { backend } = adapter({ home, confinement, probeConfinement: true });
+    expect((await backend.status()).unavailable).toBeUndefined();
+    expect((await backend.status()).unavailable).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
+  test('configured executables keep the real adapter launcher-download offer', async () => {
+    const home = tempHome();
+    const executable = join(home, 'configured-tool');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    const confinement: ZkapiConfinement = { ...UNCONFINED, check: async () => ({ ok: false, line: 'unavailable', installRequired: true }) };
+    const { backend } = adapter({ home, profileOverrides: { daemonExecutable: executable, torExecutable: executable }, confinement });
+    const value = await backend.status();
+    const daemon = value.tools!.tools.find(entry => entry.tool === 'zkapi-clientd');
+    expect(daemon?.source).toBe('configured');
+    expect(daemon?.offered).toBe(true);
+    const document = new Window().document;
+    document.body.innerHTML = renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true });
+    expect(document.querySelector('form[data-outside-tools-form] button')).not.toBeNull();
+  });
+
+  for (const source of ['missing', 'outdated', 'system', 'configured'] as const) test(`${source} Linux launcher retains installation controls but refuses enabling`, async () => {
+    const confinement: ZkapiConfinement = { ...UNCONFINED, check: async () => ({ ok: false, line: 'network confinement: unavailable', installRequired: true }) };
+    const { backend } = adapter({ home: tempHome(), zkapi: false, confinement });
+    const value = await backend.status();
+    expect(value.confinementInstallRequired).toBe(true);
+    const render = { ...value, tools: { tools: [{ tool: 'zkapi-clientd' as const, label: 'zkAPI', source, offered: true, installedVersion: '0.1.6-olympus3', version: '0.1.6-olympus4' }], install: { state: 'idle' as const } } };
+    const html = renderOutsideHelpCard(render, { csrfToken: 'csrf', localSession: true });
+    const document = new Window().document;
+    document.body.innerHTML = html;
+    expect(document.querySelector('form[data-outside-tools-form] button')).not.toBeNull();
+    expect(html).toContain('/dashboard/consult/tools/install');
+    expect(html).not.toContain('data-outside-form="add-route"');
+    expect(await backend.addRoute({ confirm: true })).toMatchObject({ ok: false, code: 'confinement_unavailable' });
+    const locked = renderOutsideHelpCard(render, { csrfToken: 'csrf', localSession: false });
+    expect(locked).toContain('data-outside-unlock');
+  });
+
+  test('the same dashboard reflects a newly available or refused Linux launcher', async () => {
+    let available = false;
+    const confinement: ZkapiConfinement = { ...CONFINED, get level() { return available ? 'loopback_filtered' : 'none'; }, check: async () => ({ ok: available, line: available ? 'network confinement: ready' : 'network confinement: unavailable' }) };
+    const { backend } = adapter({ home: tempHome(), zkapi: false, confinement });
+    expect((await backend.status()).unavailable).toBe('confinement_unavailable');
+    available = true;
+    const ready = await backend.status();
+    expect(ready.unavailable).toBeUndefined();
+    expect(visibleText(renderOutsideHelpCard(ready, { csrfToken: 'csrf', localSession: true }))).not.toContain('not available on Linux yet');
+    available = false;
+    expect((await backend.status()).unavailable).toBe('confinement_unavailable');
+    expect(W.confinementUnavailable).not.toContain('Linux yet');
+    expect(W.row.unavailable).toBe('Anonymous answers: not available on this computer');
+  });
+
   const offered = (html: string): void => {
     expect(visibleText(html)).toContain(W.confinementUnavailable);
     expect(html).not.toContain(W.addRoute);

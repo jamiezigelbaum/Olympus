@@ -168,6 +168,19 @@ testers have exercised the normal product journey without custom engineering.
   uses that connection, with the same xAI account. Grok Bot's own sign-in (as
   Cursor's pinned client), Muse and the Grok API key path stay after 1.0.
 
+- **2026-10-13 — Linux anonymous answers qualified and activated on the task branch.**
+  Published olympus4 downloads match all four pins. The owner's existing funded
+  wallet reached `ready` on Omarchy x64 with verified companion custody; the
+  synthetic paid answer returned 4 and settled, with a clear fence and a lost
+  route after Tor stopped. The full production-launcher matrix passed with zero
+  failures and no leaked launchers. Independent integrated review found no
+  P1/P2 issues. Linux selection now requires a passing launcher check; every
+  session retains its self-test and custody checks. Missing tools can be installed
+  without enabling the route; unsupported hosts stay unavailable. The changed
+  dashboard wording awaits owner acceptance. Mac behavior is unchanged; its pin
+  remains olympus4. This is branch work, not a deployment or merged release.
+  Evidence: `design/linux-zkapi-confinement.md`, “Funded qualification”.
+
 - **2026-10-13 — Linux W5 PR preparation (local only).** Merge current main,
   retain existing standalone data in place, and use XDG for fresh installs.
   Program generations and personal data have separate removal roots on new
