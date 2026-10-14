@@ -320,6 +320,7 @@ function outsideHelpScriptConfig(csrfToken: string | undefined) {
       unreachable: W.saveUnreachable,
       restarting: W.restarting,
       restartRecovery: W.restartRecovery,
+      staleWindow: W.staleWindow,
       on: W.state.on,
       off: W.state.off,
     },
@@ -827,6 +828,7 @@ export interface OutsideHelpClientCopy {
   unreachable: string;
   restarting: string;
   restartRecovery: string;
+  staleWindow: string;
   on: string;
   off: string;
 }
@@ -864,7 +866,7 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     return response && (response.status === 421 || ((response.status === 403 || response.status === 503) && response.headers && response.headers.get('X-Olympus-Owner-Refused') === '1'));
   }
   function failure(response, result) {
-    if (bridgeRestart(response)) return config.copy.restartRecovery;
+    if (bridgeRestart(response)) return config.copy.staleWindow;
     if (result && result.error && typeof result.error.message === 'string' && result.error.message) return result.error.message;
     if (result && typeof result.message === 'string' && result.message) return result.message;
     if (result && typeof result.error === 'string' && result.error) return result.error;

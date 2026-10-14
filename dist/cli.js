@@ -71602,6 +71602,7 @@ var init_vocabulary = __esm(() => {
     saveUnreachable: "Olympus did not answer. If it is restarting, wait a moment and try again.",
     restarting: "Restarting Olympus to apply it…",
     restartRecovery: "Olympus restarted to apply your change. Close this window and open Olympus again.",
+    staleWindow: "This Olympus window is out of date, so your change was not saved. Close this window, open Olympus again, and make the change again.",
     locked: "Open dashboard controls to see and change anonymous answers.",
     unlockIntro: "Changes need a session opened here, not by an agent or the launch link.",
     unlock: "Unlock on this computer",
@@ -119387,6 +119388,7 @@ function outsideHelpScriptConfig(csrfToken) {
       unreachable: DASHBOARD_OUTSIDE_HELP_COPY.saveUnreachable,
       restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting,
       restartRecovery: DASHBOARD_OUTSIDE_HELP_COPY.restartRecovery,
+      staleWindow: DASHBOARD_OUTSIDE_HELP_COPY.staleWindow,
       on: DASHBOARD_OUTSIDE_HELP_COPY.state.on,
       off: DASHBOARD_OUTSIDE_HELP_COPY.state.off
     },
@@ -119704,7 +119706,7 @@ function outsideHelpClientScript(config2) {
     return response && (response.status === 421 || ((response.status === 403 || response.status === 503) && response.headers && response.headers.get('X-Olympus-Owner-Refused') === '1'));
   }
   function failure(response, result) {
-    if (bridgeRestart(response)) return config.copy.restartRecovery;
+    if (bridgeRestart(response)) return config.copy.staleWindow;
     if (result && result.error && typeof result.error.message === 'string' && result.error.message) return result.error.message;
     if (result && typeof result.message === 'string' && result.message) return result.message;
     if (result && typeof result.error === 'string' && result.error) return result.error;

@@ -2622,6 +2622,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   saveUnreachable: 'Olympus did not answer. If it is restarting, wait a moment and try again.',
   restarting: 'Restarting Olympus to apply it…',
   restartRecovery: 'Olympus restarted to apply your change. Close this window and open Olympus again.',
+  staleWindow: 'This Olympus window is out of date, so your change was not saved. Close this window, open Olympus again, and make the change again.',
   locked: 'Open dashboard controls to see and change anonymous answers.',
   unlockIntro: 'Changes need a session opened here, not by an agent or the launch link.',
   unlock: 'Unlock on this computer',

@@ -604,20 +604,20 @@ describe('the Outside help page: states and copy', () => {
     expect(out.textContent).toBe(W.saveUnreachable);
   });
 
-  test('the card names restart recovery on a bridge 421', async () => {
+  test('the card says a direct bridge 421 did not save the change', async () => {
     const { document, window, settle } = runCardScript(page(status({ settings: { level: 'general' } })), () => ({ status: 421, body: {} }));
     const form = document.querySelector('form[data-outside-form="level"]')!;
     form.dispatchEvent(new window.Event('submit', { cancelable: true })); await settle();
-    expect(form.querySelector('[data-action-message]')!.textContent).toBe('Olympus restarted to apply your change. Close this window and open Olympus again.');
+    expect(form.querySelector('[data-action-message]')!.textContent).toBe('This Olympus window is out of date, so your change was not saved. Close this window, open Olympus again, and make the change again.');
   });
 
   for (const code of [403, 503]) {
-    test(`bridge ${code} names restart recovery; backend refusal words are preserved`, async () => {
+    test(`direct bridge ${code} says the change was not saved; backend refusal words are preserved`, async () => {
       const answers = [{ status: code, body: {}, bridgeRefusal: true }, { status: code, body: { error: 'Backend refusal' } }];
       const { document, window, settle } = runCardScript(page(status({ settings: { level: 'general' } })), () => answers.shift()!);
       const form = document.querySelector('form[data-outside-form="level"]')!;
       form.dispatchEvent(new window.Event('submit', { cancelable: true })); await settle();
-      expect(form.querySelector('[data-action-message]')!.textContent).toBe('Olympus restarted to apply your change. Close this window and open Olympus again.');
+      expect(form.querySelector('[data-action-message]')!.textContent).toBe('This Olympus window is out of date, so your change was not saved. Close this window, open Olympus again, and make the change again.');
       form.dispatchEvent(new window.Event('submit', { cancelable: true })); await settle();
       expect(form.querySelector('[data-action-message]')!.textContent).toBe('Backend refusal');
     });
