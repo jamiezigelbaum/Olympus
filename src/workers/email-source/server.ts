@@ -1,6 +1,6 @@
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
-import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
+import { manageLinuxOwnerBridge, revokeLinuxOwnerBridgeSessions, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
 import { linuxGraphicalSessionReadinessAsync } from '../../core/linux-desktop-opener.ts';
 import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
 import { workerFetch } from '../../core/worker-transport.ts';
@@ -1895,6 +1895,12 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
+  // Startup awaits desktop readiness before installing the full shutdown
+  // handler. A stop during that interval must revoke the previous epoch too.
+  const startupInt = () => { revokeLinuxOwnerBridgeSessions(); process.exit(130); };
+  const startupTerm = () => { revokeLinuxOwnerBridgeSessions(); process.exit(143); };
+  process.once('SIGINT', startupInt);
+  process.once('SIGTERM', startupTerm);
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -5522,14 +5528,15 @@ export async function main(): Promise<void> {
   // needs a way to put it down. Without this the only shutdown was the process
   // dying, which is not a shutdown so much as an interruption.
   let shuttingDown = false;
-  const shutdown = (signal: NodeJS.Signals): void => {
+  const shutdown = (signal: NodeJS.Signals, kind: 'shutdown' | 'reload' = 'shutdown'): void => {
+    // A real stop arriving during a reload must still revoke the owner epoch.
+    desktopBridge?.close(kind);
     if (shuttingDown) return;
     shuttingDown = true;
     updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
     if (desktopPoll) clearInterval(desktopPoll);
-    desktopBridge?.close();
     clearInterval(captureTick);
     tierSniffer?.stop();
     installedTierClassification.close();
@@ -5550,11 +5557,13 @@ export async function main(): Promise<void> {
   };
   requestModelReload = createModelKeyReload({
     managed: workerRestartsItself(workerLaunch, process.env),
-    shutdown: async () => { shutdown('SIGTERM'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
+    shutdown: async () => { shutdown('SIGTERM', 'reload'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.removeListener('SIGINT', startupInt);
+  process.removeListener('SIGTERM', startupTerm);
 
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));

@@ -18882,12 +18882,18 @@ function workerSocketPath(options = {}) {
     throw new Error("Worker Unix socket path exceeds the Linux limit.");
   return path;
 }
-function validateWorkerSocket(options = {}) {
+function validateWorkerSocketDirectory(options = {}) {
   const path = workerSocketPath(options);
   if (!path)
     return;
+  validateDirectory(dirname8(path), ownerId(options), true);
+  return path;
+}
+function validateWorkerSocket(options = {}) {
+  const path = validateWorkerSocketDirectory(options);
+  if (!path)
+    return;
   const uid = ownerId(options);
-  validateDirectory(dirname8(path), uid, true);
   const stat3 = lstatSync5(path);
   if (!stat3.isSocket() || stat3.uid !== uid || (stat3.mode & 511) !== 384)
     throw new Error("Worker socket must be owner-owned and 0600.");

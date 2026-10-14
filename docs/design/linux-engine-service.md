@@ -623,6 +623,16 @@ listener and reports `desktop_bridge.state=port_in_use` plus its remedy through
 socket health, engine status and doctor. Headless hosts open no TCP listener.
 Mac browser, socket-free transport, and page output are unchanged.
 
+Non-reload worker shutdown revokes the saved desktop epoch immediately,
+including SIGINT/SIGTERM during startup or before the readiness observer sees
+logout. Only a deliberate settings reload keeps the fixed-expiry hashed
+sessions and their existing configured port and random origin. Revocation
+validates the private runtime directory even when the socket is not bound.
+The private ticket file is the opening view of the same Olympus window; after
+single-use redemption the bridge renders the requested document there. No
+disposable owner-check window is opened or closed, and no proof is sent with
+a redirect or exposed in opener arguments.
+
 Rejected alternative (kept for the record): retain loopback but require a short-lived, single-use code
 issued only by the owner's CLI, bound to the pending install/client/redirect/
 state/PKCE approval transaction. Never expose it through an unauthenticated

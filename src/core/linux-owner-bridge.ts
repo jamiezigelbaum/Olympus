@@ -5,7 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, openSync, writeFileSync, unlinkSync, constants, fstatSync, lstatSync, readFileSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { dirname, join } from 'node:path';
-import { validateWorkerSocket, type WorkerTransportOptions } from './worker-transport.ts';
+import { validateWorkerSocket, validateWorkerSocketDirectory, type WorkerTransportOptions } from './worker-transport.ts';
 import { openLinuxOwnerTicketFile } from './linux-desktop-opener.ts';
 import { readBoundedRequestText } from '../workers/remote-request-body.ts';
 
@@ -119,13 +119,27 @@ function confirmation(): Response {
  const html=await r.text();document.open();document.write(html);document.close();}catch{}
 })();</script>`);
 }
+// The private file is the first view of the SAME Olympus window, not a
+// disposable owner-check popup. Keep its opening state across the origin hop.
+function openingView(): string {
+  return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
+html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px system-ui,sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
+</style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
+}
 function proofPage(): Response {
-  const response = page(`<p id="message">Confirming the private owner ticket…</p><script>
+  const response = page(`${openingView()}<script>
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{const r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);location.replace(result.target);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ // Render the requested document in this window. The proof stays at this
+ // origin, and the fetched document carries the worker's own CSP and bootstrap.
+ const documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});
+ const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
+ if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
+ if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();
+ const html=await documentResponse.text();history.replaceState(null,'',result.target);document.open();document.write(html);document.close();
  }catch{document.getElementById('message').textContent='This private ticket expired or was refused. Run olympus dashboard again. Use the owner SSH socket forward if this browser cannot resolve the session origin.';}
 })();</script>`);
   // The private file probes browser resolution before navigating. No owner
@@ -148,6 +162,13 @@ export interface LinuxOwnerBridgeOptions {
 interface Ticket { value: string; target: string; path: string; expires: number }
 interface Session { cookieHash: string; proofHash: string; expires: number }
 const SESSION_FILE = 'owner-bridge-sessions.json';
+/** Revoke even before readiness/bind or after the worker socket is gone. */
+export function revokeLinuxOwnerBridgeSessions(transport?: WorkerTransportOptions, expectedSocketPath?: string): void {
+  try {
+    const path = validateWorkerSocketDirectory(transport);
+    if (path && (!expectedSocketPath || path === expectedSocketPath)) unlinkSync(join(dirname(path), SESSION_FILE));
+  } catch {} // No state, or unsafe custody: never traverse an untrusted directory.
+}
 const hashSecret = (value: string) => createHash('sha256').update(value).digest('hex');
 function equalHash(value: string | null | undefined, hash: string): boolean {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value)
@@ -220,11 +241,11 @@ export class LinuxOwnerBridge {
     }
   }
   private live(): boolean { return !this.closed && this.options.ready(); }
-  close(revoke = false): void {
+  close(revoke = true): void {
     this.closed = true; this.sessions = []; this.clearTicket();
-    // A worker shutdown preserves fixed-expiry sessions. Desktop logout must
-    // revoke them, including the origin, before a later login can restore.
-    if (revoke) { try { unlinkSync(this.sessionPath()); } catch {} }
+    // Only an explicit reload preserves fixed-expiry sessions. Every other
+    // shutdown revokes even when the desktop observer has not seen logout yet.
+    if (revoke) revokeLinuxOwnerBridgeSessions(this.options.transport, this.options.socketPath);
   }
   private clearTicket(): void {
     if (this.ticketTimer) clearTimeout(this.ticketTimer);
@@ -241,7 +262,7 @@ export class LinuxOwnerBridge {
     // The filename is independent of the proof. It is the ONLY opener argument.
     const path = join(dirname(this.options.socketPath), `owner-ticket-${randomBytes(16).toString('hex')}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
-    const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus owner confirmation</title><p id="message">Checking the private session origin…</p><script>
+    const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'}).then(r=>{if(!r.ok)throw new Error();location.replace(${JSON.stringify(url)});}).catch(()=>{document.getElementById('message').textContent=${JSON.stringify('This browser cannot reach the private *.localhost session origin. ' + DESKTOP_BRIDGE_REMEDY)};});</script>`;
     const fd = openSync(path, 'wx', 0o600);
     try { writeFileSync(fd, html); } finally { closeSync(fd); }
@@ -376,9 +397,7 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
     if (revoke && !bridge) {
       // A worker can start after logout: no live instance exists to revoke
       // the previous worker's saved desktop epoch.
-      try {
-        if (validateWorkerSocket(options.transport) === options.socketPath) unlinkSync(join(dirname(options.socketPath), SESSION_FILE));
-      } catch {}
+      revokeLinuxOwnerBridgeSessions(options.transport, options.socketPath);
     }
     bridge = undefined; listener?.stop(true); listener = undefined;
   };
@@ -391,7 +410,7 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
       listener = options.listen ? options.listen(candidate) : Bun.serve({ hostname: '127.0.0.1', port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) });
       bridge = candidate; status = { state: 'listening', origin: bridge.origin };
     } catch (error) {
-      candidate.close();
+      candidate.close(false);
       status = { state: (error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? 'port_in_use' : 'unavailable',
         remedy: 'Close the process occupying the configured loopback port, then retry. ' + DESKTOP_BRIDGE_REMEDY };
     }
@@ -407,6 +426,9 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
       if (bridge !== current) throw new Error('Desktop session changed.');
       return current.origin;
     },
-    close() { closed = true; clearInterval(timer); stop(); status = { state: 'headless' }; },
+    close(kind: 'shutdown' | 'reload' = 'shutdown') {
+      closed = true; clearInterval(timer);
+      stop(kind !== 'reload' || !options.ready()); status = { state: 'headless' };
+    },
   };
 }

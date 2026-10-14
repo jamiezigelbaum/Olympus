@@ -6966,12 +6966,18 @@ function workerSocketPath(options = {}) {
     throw new Error("Worker Unix socket path exceeds the Linux limit.");
   return path;
 }
-function validateWorkerSocket(options = {}) {
+function validateWorkerSocketDirectory(options = {}) {
   const path = workerSocketPath(options);
   if (!path)
     return;
+  validateDirectory(dirname8(path), ownerId(options), true);
+  return path;
+}
+function validateWorkerSocket(options = {}) {
+  const path = validateWorkerSocketDirectory(options);
+  if (!path)
+    return;
   const uid = ownerId(options);
-  validateDirectory(dirname8(path), uid, true);
   const stat3 = lstatSync6(path);
   if (!stat3.isSocket() || stat3.uid !== uid || (stat3.mode & 511) !== 384)
     throw new Error("Worker socket must be owner-owned and 0600.");
@@ -7762,17 +7768,36 @@ function confirmation() {
  const html=await r.text();document.open();document.write(html);document.close();}catch{}
 })();</script>`);
 }
+function openingView() {
+  return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
+html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px system-ui,sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
+</style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
+}
 function proofPage() {
-  const response = page(`<p id="message">Confirming the private owner ticket…</p><script>
+  const response = page(`${openingView()}<script>
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{const r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);location.replace(result.target);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ // Render the requested document in this window. The proof stays at this
+ // origin, and the fetched document carries the worker's own CSP and bootstrap.
+ const documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});
+ const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
+ if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
+ if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();
+ const html=await documentResponse.text();history.replaceState(null,'',result.target);document.open();document.write(html);document.close();
  }catch{document.getElementById('message').textContent='This private ticket expired or was refused. Run olympus dashboard again. Use the owner SSH socket forward if this browser cannot resolve the session origin.';}
 })();</script>`);
   response.headers.set("Access-Control-Allow-Origin", "*");
   return response;
+}
+function revokeLinuxOwnerBridgeSessions(transport, expectedSocketPath) {
+  try {
+    const path = validateWorkerSocketDirectory(transport);
+    if (path && (!expectedSocketPath || path === expectedSocketPath))
+      unlinkSync2(join15(dirname10(path), SESSION_FILE));
+  } catch {}
 }
 function equalHash(value, hash) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
@@ -7860,15 +7885,12 @@ class LinuxOwnerBridge {
   live() {
     return !this.closed && this.options.ready();
   }
-  close(revoke = false) {
+  close(revoke = true) {
     this.closed = true;
     this.sessions = [];
     this.clearTicket();
-    if (revoke) {
-      try {
-        unlinkSync2(this.sessionPath());
-      } catch {}
-    }
+    if (revoke)
+      revokeLinuxOwnerBridgeSessions(this.options.transport, this.options.socketPath);
   }
   clearTicket() {
     if (this.ticketTimer)
@@ -7892,7 +7914,7 @@ class LinuxOwnerBridge {
     const value = secret();
     const path = join15(dirname10(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
-    const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus owner confirmation</title><p id="message">Checking the private session origin…</p><script>
+    const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'}).then(r=>{if(!r.ok)throw new Error();location.replace(${JSON.stringify(url)});}).catch(()=>{document.getElementById('message').textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. " + DESKTOP_BRIDGE_REMEDY)};});</script>`;
     const fd = openSync5(path, "wx", 384);
     try {
@@ -8069,10 +8091,7 @@ function manageLinuxOwnerBridge(options) {
   const stop = (revoke = false) => {
     bridge?.close(revoke);
     if (revoke && !bridge) {
-      try {
-        if (validateWorkerSocket(options.transport) === options.socketPath)
-          unlinkSync2(join15(dirname10(options.socketPath), SESSION_FILE));
-      } catch {}
+      revokeLinuxOwnerBridgeSessions(options.transport, options.socketPath);
     }
     bridge = undefined;
     listener?.stop(true);
@@ -8094,7 +8113,7 @@ function manageLinuxOwnerBridge(options) {
       bridge = candidate;
       status = { state: "listening", origin: bridge.origin };
     } catch (error) {
-      candidate.close();
+      candidate.close(false);
       status = {
         state: error.code === "EADDRINUSE" ? "port_in_use" : "unavailable",
         remedy: "Close the process occupying the configured loopback port, then retry. " + DESKTOP_BRIDGE_REMEDY
@@ -8120,10 +8139,10 @@ function manageLinuxOwnerBridge(options) {
         throw new Error("Desktop session changed.");
       return current2.origin;
     },
-    close() {
+    close(kind = "shutdown") {
       closed = true;
       clearInterval(timer);
-      stop();
+      stop(kind !== "reload" || !options.ready());
       status = { state: "headless" };
     }
   };
@@ -157858,6 +157877,16 @@ async function startWorkerWithLaunch(launch) {
   await main();
 }
 async function main() {
+  const startupInt = () => {
+    revokeLinuxOwnerBridgeSessions();
+    process.exit(130);
+  };
+  const startupTerm = () => {
+    revokeLinuxOwnerBridgeSessions();
+    process.exit(143);
+  };
+  process.once("SIGINT", startupInt);
+  process.once("SIGTERM", startupTerm);
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? "8010");
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -160353,7 +160382,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
   let shuttingDown = false;
-  const shutdown = (signal) => {
+  const shutdown = (signal, kind = "shutdown") => {
+    desktopBridge?.close(kind);
     if (shuttingDown)
       return;
     shuttingDown = true;
@@ -160362,7 +160392,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     desktopPollingClosed = true;
     if (desktopPoll)
       clearInterval(desktopPoll);
-    desktopBridge?.close();
     clearInterval(captureTick);
     tierSniffer?.stop();
     installedTierClassification.close();
@@ -160384,7 +160413,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   requestModelReload = createModelKeyReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     shutdown: async () => {
-      shutdown("SIGTERM");
+      shutdown("SIGTERM", "reload");
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
       await server.stop(true);
     },
@@ -160392,6 +160421,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.removeListener("SIGINT", startupInt);
+  process.removeListener("SIGTERM", startupTerm);
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog("Dropbox connector-store storage", dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog("WhatsApp connector-store storage", whatsappConnectorStoreLane));

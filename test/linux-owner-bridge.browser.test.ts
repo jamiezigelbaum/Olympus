@@ -38,11 +38,12 @@ for (const kind of ['chromium', 'firefox']) {
     let auth = makeAuth();
     const socket = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch: (r, server) => new URL(r.url).pathname.startsWith('/connect/') ? oauth(r, server) : auth(r, server) }));
     let bridge: LinuxOwnerBridge | undefined;
-    const listener = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(r) {
+    const listenerOptions = { hostname: '127.0.0.1', async fetch(r: Request) {
       if (bridge) return bridge.handle(r);
       if (new URL(r.url).pathname === '/sw.js') return new Response("self.addEventListener('fetch',e=>e.respondWith(fetch(e.request)));self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));", { headers: { 'Content-Type': 'application/javascript', 'Service-Worker-Allowed': '/' } });
       return new Response('<!doctype html><title>Squatter</title><script>localStorage.setItem("olympus-desktop-owner-v1","planted");navigator.serviceWorker.register("/sw.js");</script>', { headers: { 'Content-Type': 'text/html' } });
-    } });
+    } };
+    let listener = Bun.serve({ ...listenerOptions, port: 0 });
     const callback = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('OAUTH CALLBACK COMPLETE') });
     try {
       const entry = `http://127.0.0.1:${listener.port}`;
@@ -62,11 +63,20 @@ for (const kind of ['chromium', 'firefox']) {
       // localhost handling must reach the real loopback listener.
       const owner = await context.newPage();
       const browserErrors: string[] = []; owner.on('pageerror', (e: Error) => browserErrors.push(e.message));
+      const windowEvents: string[] = [];
+      owner.on('popup', () => windowEvents.push('popup'));
+      owner.on('close', () => windowEvents.push('close'));
+      const pagesBeforeOpen = context.pages().length;
+      const ticket = readFileSync(ticketPath, 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
       await owner.goto(pathToFileURL(ticketPath).href);
       await owner.waitForURL(bridge.origin + '/dashboard', { timeout: 15_000 });
       await owner.waitForFunction(() => document.body.dataset.loaded === 'yes', undefined, { timeout: 15_000 });
       expect(await owner.locator('h1').textContent()).toBe('PRIVATE OWNER DASHBOARD');
       expect(browserErrors).toEqual([]);
+      expect(windowEvents).toEqual([]); expect(context.pages()).toHaveLength(pagesBeforeOpen);
+      expect(await owner.evaluate(async (ticket: string) => (await fetch('/owner-proof', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }),
+      })).status, ticket)).toBe(403);
       const ownerCookies = await context.cookies(bridge.origin);
       const cookie = ownerCookies.find((c: { name: string }) => c.name === 'olympus_desktop_owner');
       expect(cookie.httpOnly).toBe(true); expect(cookie.sameSite).toBe('Lax'); expect(cookie.domain).toBe(bridge.hostname);
@@ -94,7 +104,10 @@ for (const kind of ['chromium', 'firefox']) {
       const returned = new URL(next.url()); expect(returned.searchParams.get('state')).toBe('original+state');
       const exchanged = await fetch(entry + '/connect/token', { unix: socketPath, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: client.clientId, redirect_uri: redirect, code: returned.searchParams.get('code')!, code_verifier: verifier }) } as RequestInit);
       expect(exchanged.status).toBe(200);
-      const oldOrigin = bridge.origin; bridge.close();
+      const oldOrigin = bridge.origin; bridge.close(false);
+      const stablePort = listener.port!;
+      await listener.stop(true);
+      listener = Bun.serve({ ...listenerOptions, port: stablePort });
       bridge = new LinuxOwnerBridge({ port: listener.port!, socketPath, transport, ready: () => true, fetchSocket: r => fetch(r, { unix: socketPath, redirect: 'manual' } as RequestInit), establishDashboard, openFile: async p => { ticketPath = p; } });
       auth = makeAuth(); // Simulate the worker's auth wrapper restarting too.
       expect(bridge.origin).toBe(oldOrigin);
