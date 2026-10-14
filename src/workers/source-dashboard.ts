@@ -790,6 +790,12 @@ export interface DashboardSourceCard {
      * per-item parity count; the bar then says the share is not measured.
      */
     embedded_files?: number;
+    /** Policy-eligible embedding population, excluding corpora with no embedding stage. */
+    embedding_eligible_items?: number;
+    /** Read items in policy-exempt corpora: searchable without an embedding stage. */
+    embedding_not_required_read_items?: number;
+    /** Unreadable items in the embedding-eligible population only. */
+    embedding_unreadable_items?: number;
     needs_review_items: number;
     /**
      * Indexed items the system is never asked to read — media, books and shelf
@@ -3113,11 +3119,19 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
   // corpus holding items measures it. A partial sum over the card's whole
   // in-scope population would print an exact percentage the unmeasured
   // corpus was never counted toward.
-  const measuring = cards.filter((card) => card.coverage.embedded_files !== undefined);
-  const dataBearing = cards.filter((card) => card.coverage.indexed_items > 0);
+  const required = cards.filter((card) => card.embedding_required !== false);
+  const exempt = cards.filter((card) => card.embedding_required === false);
+  const measuring = required.filter((card) => card.coverage.embedded_files !== undefined);
+  const dataBearing = required.filter((card) => card.coverage.indexed_items > 0);
   const embeddedFiles = measuring.length > 0 && dataBearing.every((card) => card.coverage.embedded_files !== undefined)
     ? measuring.reduce((sum, card) => sum + (card.coverage.embedded_files ?? 0), 0)
     : undefined;
+  const population = (card: DashboardSourceCard) => answerReadyEligibleItems(card.coverage.indexed_items, card.coverage.not_read_by_policy_items, card.coverage.answer_ready_eligible_items);
+  const policyCounts = exempt.length > 0 ? {
+    embedding_unreadable_items: required.reduce((sum, card) => sum + (card.coverage.unreadable_items ?? 0), 0),
+    embedding_eligible_items: required.reduce((sum, card) => sum + population(card), 0),
+    embedding_not_required_read_items: exempt.reduce((sum, card) => sum + Math.min(card.coverage.content_ready_items, population(card)), 0),
+  } : {};
   return cards.reduce((sum, card) => ({
     ...sum,
     indexed_items: sum.indexed_items + card.coverage.indexed_items,
@@ -3129,6 +3143,7 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     content_ready_items: 0,
     embedded_items: 0,
     ...(embeddedFiles !== undefined ? { embedded_files: embeddedFiles } : {}),
+    ...policyCounts,
     needs_review_items: 0,
     ...(notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {}),
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
@@ -4302,6 +4317,7 @@ function sourceCardFromCorpus(
     family: corpus.family,
     trust_domain: corpus.trust_domain,
     configured: corpus.configured,
+    ...(corpus.embedding_parity ? { embedding_required: corpus.embedding_parity.required } : {}),
     freshness,
     coverage,
     needs_review: needsReviewFromCounts(coverage.needs_review_items, counts),
@@ -4564,8 +4580,9 @@ function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined)
  * A task speaks through `traversal_complete`, or, for X bookmarks, whose
  * reconcile walks the provider's whole list and reports no such counter,
  * through its own `global_traversal_exhausted`. 1 means that walk finished and
- * 0 means it did not. A task that has not reported at all has not finished a
- * pass, so the answer is no. A task that reported but carries neither counter
+ * 0 means it did not. An unreported sibling is unknown, and cannot undo a
+ * completed walk. With no reported walk, an unreported task keeps listing open.
+ * A task that reported but carries neither counter
  * (Telegram's spool pull has no provider walk; X's head sync is not the walk)
  * takes no part: a missing counter is "unknown", never "not finished", or the
  * source would read as still listing for as long as it runs. The answer is
@@ -4578,13 +4595,17 @@ function metadataTraversalCompleteFromSchedulers(
   const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'sync'));
   if (tasks.length === 0) return undefined;
   const walks: boolean[] = [];
+  let unreported = false;
   for (const task of tasks) {
-    if (!task.last_result) return false;
+    if (!task.last_result) {
+      unreported = true;
+      continue;
+    }
     const signal = [task.last_result.counts?.traversal_complete, task.last_result.counts?.global_traversal_exhausted]
       .find((value): value is number => typeof value === 'number' && Number.isFinite(value));
     if (signal !== undefined) walks.push(signal === 1);
   }
-  return walks.length === 0 ? undefined : walks.every(Boolean);
+  return walks.length === 0 ? (unreported ? false : undefined) : walks.every(Boolean);
 }
 
 function freshnessFrom(

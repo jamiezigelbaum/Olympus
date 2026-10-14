@@ -20152,6 +20152,18 @@ function foldLocator(locator) {
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
+function toRelaxedLocalFtsQuery(query) {
+  const terms = new Set;
+  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
+    const term = match[0];
+    if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term))
+      continue;
+    terms.add(term);
+    if (terms.size === 8)
+      break;
+  }
+  return [...terms].map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
+}
 function connectorStoreTitleFtsQuery(terms) {
   const normalizedTerms = [
     ...new Set(terms.map((term) => term.trim().toLowerCase()).filter(Boolean))
@@ -20353,7 +20365,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -25043,11 +25055,11 @@ var init_local_index = __esm(() => {
     searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-      const terms = toFtsQuery(query, ftsOptions);
+      const terms = ftsOptions.relaxed ? toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
-      const groups = sourceIndexFtsTermGroups(query);
+      const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
       const exact = queryInitialisms(query);
       const minimumSignal = groups.length >= 2;
       const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
@@ -25708,6 +25720,49 @@ var init_local_index = __esm(() => {
     "attempts",
     "tier_checked_at"
   ];
+  LOCAL_RELAXED_STOPWORDS = new Set([
+    "do",
+    "i",
+    "me",
+    "my",
+    "any",
+    "anyone",
+    "anything",
+    "what",
+    "who",
+    "is",
+    "are",
+    "the",
+    "a",
+    "an",
+    "to",
+    "of",
+    "in",
+    "on",
+    "for",
+    "about",
+    "does",
+    "did",
+    "and",
+    "or",
+    "not",
+    "have",
+    "has",
+    "was",
+    "were",
+    "with",
+    "this",
+    "that",
+    "can",
+    "could",
+    "would",
+    "should",
+    "please",
+    "how",
+    "when",
+    "where",
+    "why"
+  ]);
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
@@ -29010,6 +29065,9 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/core/package-root.ts
+var init_package_root = () => {};
+
 // src/core/open-targets.ts
 function allOpenTargets() {
   return [
@@ -29069,58 +29127,6 @@ var init_open_targets = __esm(() => {
 });
 
 // src/core/worker-transport.ts
-import { lstatSync as lstatSync7, mkdirSync as mkdirSync13, realpathSync as realpathSync3, chmodSync as chmodSync6 } from "node:fs";
-import { dirname as dirname18, isAbsolute as isAbsolute8, join as join20, normalize as normalize4, parse } from "node:path";
-function ownerId(options) {
-  const uid = options.uid ?? process.getuid?.();
-  if (uid === undefined)
-    throw new Error("Worker socket requires a Unix owner.");
-  return uid;
-}
-function validateDirectory(path, uid, privateMode) {
-  if (!isAbsolute8(path) || normalize4(path) !== path || /[\x00-\x1f\x7f]/.test(path))
-    throw new Error("Unsafe worker socket directory.");
-  let current2 = parse(path).root;
-  for (const part of path.slice(current2.length).split("/").filter(Boolean)) {
-    current2 = join20(current2, part);
-    const stat4 = lstatSync7(current2);
-    if (!stat4.isDirectory() || stat4.isSymbolicLink() || stat4.uid !== uid && stat4.uid !== 0)
-      throw new Error("Unsafe worker socket ancestor.");
-    if (stat4.mode & 18 && !(stat4.uid === 0 && stat4.mode & 512))
-      throw new Error("Writable worker socket ancestor.");
-  }
-  const stat3 = lstatSync7(path);
-  if (privateMode && (stat3.uid !== uid || (stat3.mode & 511) !== 448))
-    throw new Error("Worker runtime directory must be owner-owned and 0700.");
-  if (realpathSync3(path) !== path)
-    throw new Error("Worker socket directory must not contain symlinks.");
-}
-function workerSocketPath(options = {}) {
-  if ((options.platform ?? process.platform) !== "linux")
-    return;
-  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
-  const runtime = layout.runtimeHome;
-  if (!runtime)
-    throw new Error("Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.");
-  validateDirectory(runtime, ownerId(options), true);
-  if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime))
-    throw new Error("XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.");
-  const path = layout.workerSocketPath;
-  if (Buffer.byteLength(path) > 107)
-    throw new Error("Worker Unix socket path exceeds the Linux limit.");
-  return path;
-}
-function validateWorkerSocket(options = {}) {
-  const path = workerSocketPath(options);
-  if (!path)
-    return;
-  const uid = ownerId(options);
-  validateDirectory(dirname18(path), uid, true);
-  const stat3 = lstatSync7(path);
-  if (!stat3.isSocket() || stat3.uid !== uid || (stat3.mode & 511) !== 384)
-    throw new Error("Worker socket must be owner-owned and 0600.");
-  return path;
-}
 var init_worker_transport = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
@@ -29174,289 +29180,12 @@ var init_open_target = __esm(() => {
 });
 
 // src/core/linux-desktop-opener.ts
-import { accessSync as accessSync2, constants as fsConstants2, lstatSync as lstatSync8, realpathSync as realpathSync4 } from "node:fs";
-import { execFile, spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
-import { randomBytes as randomBytes2 } from "node:crypto";
-import { dirname as dirname19, extname, isAbsolute as isAbsolute9, join as join21 } from "node:path";
-import { pathToFileURL as pathToFileURL2 } from "node:url";
-function linuxGraphicalSessionReadiness(dependencies = {}) {
-  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
-  const trustExecutable = dependencies.trustExecutable ?? isTrustedExecutable;
-  if (!absoluteExecutables(executables) || !trustExecutable(executables.systemctl)) {
-    return { ready: false, reason: "untrusted_systemctl" };
-  }
-  const runSync = dependencies.runSync ?? runCommandSync;
-  const active = runSync([executables.systemctl, "--user", "is-active", "graphical-session.target"], COMMAND_TIMEOUT_MS);
-  if (active.status !== 0 || active.timedOut === true || active.stdout.trim() !== "active") {
-    return { ready: false, reason: "inactive_graphical_session" };
-  }
-  const shown = runSync([executables.systemctl, "--user", "show-environment"], COMMAND_TIMEOUT_MS);
-  if (shown.status !== 0 || shown.timedOut === true) {
-    return { ready: false, reason: "manager_environment_unavailable" };
-  }
-  const manager = parseManagerEnvironment(shown.stdout);
-  const uid = dependencies.uid ?? (typeof process.getuid === "function" ? process.getuid() : -1);
-  const inspectPath = dependencies.inspectPath ?? inspectLinuxPath;
-  const runtime = manager.XDG_RUNTIME_DIR;
-  if (!runtime || !isAbsolute9(runtime) || runtime.includes("\x00") || runtime.includes(`
-`) || runtime.includes("\r")) {
-    return { ready: false, reason: "unsafe_runtime_directory" };
-  }
-  const runtimeInfo = inspectPath(runtime);
-  const resolveRealpath = dependencies.realpath ?? resolvedRealpath;
-  if (resolveRealpath(runtime) !== runtime || !runtimeInfo || runtimeInfo.symbolicLink || runtimeInfo.kind !== "directory" || runtimeInfo.uid !== uid || (runtimeInfo.mode & 63) !== 0) {
-    return { ready: false, reason: "unsafe_runtime_directory" };
-  }
-  const baseEnvironment = sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath);
-  const wayland = manager.WAYLAND_DISPLAY;
-  if (wayland && /^[A-Za-z0-9_.-]{1,128}$/.test(wayland)) {
-    const socket = join21(runtime, wayland);
-    const socketInfo = inspectPath(socket);
-    if (resolveRealpath(socket) === socket && socketInfo && !socketInfo.symbolicLink && socketInfo.kind === "socket" && socketInfo.uid === uid) {
-      return {
-        ready: true,
-        kind: "wayland",
-        environment: { ...baseEnvironment, XDG_RUNTIME_DIR: runtime, WAYLAND_DISPLAY: wayland },
-        displaySocket: socket
-      };
-    }
-  }
-  const display = manager.DISPLAY;
-  const displayMatch = display?.match(/^(?:(?:unix)?)(?::)(\d{1,4})(?:\.\d+)?$/);
-  if (display && displayMatch) {
-    const socket = `/tmp/.X11-unix/X${Number(displayMatch[1])}`;
-    const socketInfo = inspectPath(socket);
-    if (resolveRealpath(socket) === socket && socketInfo && !socketInfo.symbolicLink && socketInfo.kind === "socket" && (socketInfo.uid === uid || socketInfo.uid === 0)) {
-      return {
-        ready: true,
-        kind: "x11",
-        environment: { ...baseEnvironment, XDG_RUNTIME_DIR: runtime, DISPLAY: display },
-        displaySocket: socket
-      };
-    }
-  }
-  return { ready: false, reason: "stale_display" };
-}
-function isActiveLinuxScope(output, scopeUnit) {
-  if (!/^olympus-open-[a-z0-9-]{1,80}$/.test(scopeUnit))
-    return false;
-  const fields = new Map;
-  for (const line of output.trim().split(/\r?\n/)) {
-    const separator = line.indexOf("=");
-    if (separator <= 0)
-      continue;
-    fields.set(line.slice(0, separator), line.slice(separator + 1));
-  }
-  const controlGroup = fields.get("ControlGroup");
-  return fields.get("ActiveState") === "active" && typeof controlGroup === "string" && controlGroup.startsWith("/") && controlGroup.endsWith(`/${scopeUnit}.scope`) && !/[\0\r\n]/.test(controlGroup);
-}
-function parseManagerEnvironment(output) {
-  const allowed = new Set([
-    "XDG_RUNTIME_DIR",
-    "WAYLAND_DISPLAY",
-    "DISPLAY",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "XAUTHORITY",
-    "XDG_CURRENT_DESKTOP",
-    "XDG_SESSION_DESKTOP",
-    "XDG_SESSION_TYPE",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE"
-  ]);
-  const parsed = {};
-  for (const line of output.split(`
-`)) {
-    const separator = line.indexOf("=");
-    if (separator <= 0)
-      continue;
-    const key2 = line.slice(0, separator);
-    const value = line.slice(separator + 1);
-    if (allowed.has(key2) && value.length <= 4096 && !/[\0\r\n]/.test(value))
-      parsed[key2] = value;
-  }
-  return parsed;
-}
-function sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath) {
-  const environment = { PATH: "/usr/bin:/bin" };
-  const safeText = /^(?:[A-Za-z0-9_.@+,:/ -]){1,512}$/;
-  for (const key2 of ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "XDG_SESSION_TYPE", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE"]) {
-    const value = manager[key2];
-    if (value && safeText.test(value))
-      environment[key2] = value;
-  }
-  const home = manager.HOME;
-  if (home && isAbsolute9(home) && !/[\0\r\n]/.test(home))
-    environment.HOME = home;
-  const bus = manager.DBUS_SESSION_BUS_ADDRESS;
-  if (bus === `unix:path=${join21(runtime, "bus")}`)
-    environment.DBUS_SESSION_BUS_ADDRESS = bus;
-  const authority = manager.XAUTHORITY;
-  if (authority && isAbsolute9(authority)) {
-    const info = inspectPath(authority);
-    if (info && !info.symbolicLink && info.kind === "file" && info.uid === uid)
-      environment.XAUTHORITY = authority;
-  }
-  return environment;
-}
-function inspectLinuxPath(path) {
-  try {
-    const stat3 = lstatSync8(path);
-    return {
-      kind: stat3.isDirectory() ? "directory" : stat3.isFile() ? "file" : stat3.isSocket() ? "socket" : "other",
-      uid: stat3.uid,
-      mode: stat3.mode,
-      symbolicLink: stat3.isSymbolicLink()
-    };
-  } catch {
-    return;
-  }
-}
-function resolvedRealpath(path) {
-  try {
-    return realpathSync4.native(path);
-  } catch {
-    return;
-  }
-}
-function isTrustedExecutable(path) {
-  if (!isAbsolute9(path))
-    return false;
-  try {
-    accessSync2(path, fsConstants2.X_OK);
-    const stat3 = lstatSync8(path);
-    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
-    return stat3.isFile() && !stat3.isSymbolicLink() && (stat3.uid === 0 || stat3.uid === uid) && (stat3.mode & 18) === 0;
-  } catch {
-    return false;
-  }
-}
-function absoluteExecutables(executables) {
-  return Object.values(executables).every((path) => isAbsolute9(path) && !/[\0\r\n]/.test(path));
-}
-function runCommandSync(argv, timeoutMs) {
-  const result = spawnSync3(argv[0], argv.slice(1), { encoding: "utf8", timeout: timeoutMs, maxBuffer: MAX_COMMAND_OUTPUT });
-  return {
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    ...result.error && result.error.code === "ETIMEDOUT" ? { timedOut: true } : {}
-  };
-}
-function runCommand2(argv, options) {
-  return new Promise((resolve6) => {
-    execFile(argv[0], argv.slice(1), {
-      encoding: "utf8",
-      timeout: options.timeoutMs,
-      maxBuffer: MAX_COMMAND_OUTPUT,
-      env: { ...options.env },
-      windowsHide: true
-    }, (error, stdout, stderr) => {
-      const failure = error;
-      const status = typeof failure?.code === "number" ? failure.code : failure ? null : 0;
-      resolve6({ status, stdout, stderr, ...failure?.killed === true ? { timedOut: true } : {} });
-    });
-  });
-}
-function launchInUserScope(argv, options) {
-  return new Promise((resolve6) => {
-    let settled = false;
-    let exited = false;
-    let overallTimer;
-    const child = spawn2(argv[0], argv.slice(1), {
-      detached: true,
-      stdio: "ignore",
-      env: { ...options.env },
-      windowsHide: true
-    });
-    const finish = (result) => {
-      if (settled)
-        return;
-      settled = true;
-      if (overallTimer)
-        clearTimeout(overallTimer);
-      child.unref();
-      resolve6(result);
-    };
-    child.once("error", (error) => finish({ established: false, stderr: error.message }));
-    child.once("exit", (code) => {
-      exited = true;
-      finish({ established: code === 0, stderr: "" });
-    });
-    const verifyScope = async () => {
-      if (settled || exited)
-        return;
-      const shown = await runCommand2([
-        options.systemctl,
-        "--user",
-        "show",
-        `${options.scopeUnit}.scope`,
-        "--property=ActiveState",
-        "--property=ControlGroup"
-      ], { timeoutMs: COMMAND_TIMEOUT_MS, env: options.env });
-      if (settled || exited)
-        return;
-      if (shown.status === 0 && shown.timedOut !== true && isActiveLinuxScope(shown.stdout, options.scopeUnit)) {
-        finish({ established: true, stderr: "" });
-        return;
-      }
-      const retry = setTimeout(() => {
-        verifyScope();
-      }, 50);
-      retry.unref();
-    };
-    child.once("spawn", () => {
-      verifyScope();
-    });
-    overallTimer = setTimeout(() => {
-      finish({ established: false, stderr: "systemd scope was not confirmed before the launch deadline" });
-    }, options.observeMs);
-    overallTimer.unref();
-  });
-}
 function mime(...values) {
   return new Set(values);
 }
-async function openLinuxOwnerTicketFile(path, dependencies = {}) {
-  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
-  const trusted = dependencies.trustExecutable ?? isTrustedExecutable;
-  if (![executables.systemctl, executables.systemdRun, executables.xdgOpen].every(trusted))
-    throw new Error("Trusted desktop opener unavailable.");
-  const readiness = dependencies.readiness?.() ?? linuxGraphicalSessionReadiness(dependencies);
-  if (!readiness.ready)
-    throw new Error("No live graphical session.");
-  const runtime = readiness.environment.XDG_RUNTIME_DIR;
-  if (!runtime || dirname19(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname19(path).length + 1)))
-    throw new Error("Invalid owner ticket path.");
-  const stat3 = lstatSync8(path);
-  const parent = lstatSync8(dirname19(path));
-  const uid = dependencies.uid ?? process.getuid?.();
-  if (realpathSync4(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
-    throw new Error("Unsafe owner ticket file.");
-  const dispatch = async (opener) => {
-    const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
-    const result = await (dependencies.launch ?? launchInUserScope)([executables.systemdRun, "--user", "--scope", `--unit=${scopeUnit}`, "--", ...opener], { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl });
-    return result.established;
-  };
-  if (trusted(executables.omarchyWebApp) && await dispatch([executables.omarchyWebApp, pathToFileURL2(path).href]))
-    return;
-  if (!await dispatch([executables.xdgOpen, path]))
-    throw new Error("Desktop browser did not open the owner ticket.");
-}
-var SYSTEMCTL = "/usr/bin/systemctl", SYSTEMD_RUN = "/usr/bin/systemd-run", XDG_OPEN = "/usr/bin/xdg-open", XDG_MIME = "/usr/bin/xdg-mime", FILE = "/usr/bin/file", OMARCHY_WEB_APP = "/usr/bin/omarchy-launch-webapp", COMMAND_TIMEOUT_MS = 3000, LAUNCH_OBSERVATION_MS = 3000, MAX_COMMAND_OUTPUT = 65536, DEFAULT_EXECUTABLES, EXPECTED_MIME_TYPES;
+var EXPECTED_MIME_TYPES;
 var init_linux_desktop_opener = __esm(() => {
   init_open_target();
-  DEFAULT_EXECUTABLES = {
-    systemctl: SYSTEMCTL,
-    systemdRun: SYSTEMD_RUN,
-    xdgOpen: XDG_OPEN,
-    xdgMime: XDG_MIME,
-    file: FILE,
-    omarchyWebApp: OMARCHY_WEB_APP
-  };
   EXPECTED_MIME_TYPES = Object.freeze({
     pdf: mime("application/pdf"),
     txt: mime("text/plain"),
@@ -29506,57 +29235,6 @@ var init_linux_desktop_opener = __esm(() => {
 });
 
 // src/workers/remote-request-body.ts
-async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES, options = {}) {
-  const declared = request.headers.get("Content-Length");
-  if (declared !== null) {
-    const length = Number(declared);
-    if (Number.isFinite(length) && length > maxBytes)
-      return { ok: false, reason: "too_large" };
-  }
-  if (!request.body)
-    return { ok: true, text: "" };
-  const reader = request.body.getReader();
-  const chunks = [];
-  let total = 0;
-  let timer;
-  const deadline = new AbortController;
-  const timeout = new Error("request body timeout");
-  if (options.deadlineMs !== undefined)
-    timer = setTimeout(() => deadline.abort(timeout), options.deadlineMs);
-  try {
-    for (;; ) {
-      const { done, value } = options.deadlineMs === undefined ? await reader.read() : await untilAborted(reader.read(), deadline.signal);
-      if (done)
-        break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => {
-          return;
-        });
-        return { ok: false, reason: "too_large" };
-      }
-      chunks.push(value);
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => {
-      return;
-    });
-    return { ok: false, reason: error === timeout ? "timeout" : "unreadable" };
-  } finally {
-    clearTimeout(timer);
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return { ok: true, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
-  } catch {
-    return { ok: false, reason: "unreadable" };
-  }
-}
 var REMOTE_REQUEST_MAX_BODY_BYTES;
 var init_remote_request_body = __esm(() => {
   init_http_timeout();
@@ -29564,7 +29242,7 @@ var init_remote_request_body = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash16, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash15, randomBytes as randomBytes2 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -29588,7 +29266,7 @@ class DashboardLaunchTickets {
     }
     const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
     const expiresAtMs = nowMs + ttlSeconds * 1000;
-    const ticket = randomBytes4(32).toString("base64url");
+    const ticket = randomBytes2(32).toString("base64url");
     this.tickets.set(ticket, {
       expiresAtMs,
       originTag: dashboardLaunchOriginTag(origin),
@@ -29627,7 +29305,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash16("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash15("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -30042,9 +29720,6 @@ function metadataStringArray2(metadata, key2) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
-// src/core/package-root.ts
-var init_package_root = () => {};
-
 // src/workers/credential-broker/unpaired-sources.ts
 var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
 var init_unpaired_sources = __esm(() => {
@@ -30157,9 +29832,9 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 import { homedir as homedir12 } from "node:os";
-import { join as join23 } from "node:path";
+import { join as join20 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -30226,12 +29901,12 @@ class GoogleDriveSourceConnector {
         break;
       if (pageToken)
         assertNewProviderPage(requestedPageTokens, pageToken);
-      const page2 = await client.listFiles({
+      const page = await client.listFiles({
         pageSize: Math.min(DEFAULT_GOOGLE_DRIVE_PAGE_SIZE, remaining, contentBudget),
         ...pageToken ? { pageToken } : {},
         query
       });
-      const files = page2.files.filter((file) => file.id);
+      const files = page.files.filter((file) => file.id);
       const items = [];
       let processedFiles = 0;
       for (const file of files) {
@@ -30253,7 +29928,7 @@ class GoogleDriveSourceConnector {
         }
       }
       remaining -= items.length;
-      pageToken = page2.nextPageToken;
+      pageToken = page.nextPageToken;
       const pageTruncated = processedFiles < files.length;
       const done = !pageToken && !pageTruncated;
       const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
@@ -30551,8 +30226,8 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir12(), ".local", "share");
-  return join23(standaloneLinuxDataDir(env) ?? join23(dataHome, "openclaw", "olympus"), "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join20(homedir12(), ".local", "share");
+  return join20(standaloneLinuxDataDir(env) ?? join20(dataHome, "openclaw", "olympus"), "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -30732,7 +30407,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash18("sha256").update(value).digest("hex");
+  return createHash17("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -30776,13 +30451,13 @@ var init_live_connector = __esm(() => {
 
 // src/workers/whatsapp/store-sync.ts
 import { homedir as homedir13 } from "node:os";
-import { join as join24 } from "node:path";
+import { join as join21 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join24(env.HOME?.trim() || homedir13(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join24(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join21(env.HOME?.trim() || homedir13(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join21(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join24(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join21(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync = __esm(() => {
@@ -31106,9 +30781,9 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 import { homedir as homedir15 } from "node:os";
-import { join as join26 } from "node:path";
+import { join as join23 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -31193,12 +30868,12 @@ class GoogleGmailSourceConnector {
         assertNewProviderPage2(requestedPageTokens, pageToken);
       this.providerRequests += 1;
       listPages += 1;
-      const page2 = await client.listMessages({
+      const page = await client.listMessages({
         maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
         ...pageToken ? { pageToken } : {},
         ...query ? { query } : {}
       });
-      const listed = page2.messages.filter((message2) => message2.id);
+      const listed = page.messages.filter((message2) => message2.id);
       const items = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
@@ -31254,7 +30929,7 @@ class GoogleGmailSourceConnector {
         items.push(item);
       }
       remaining -= messagesFetched;
-      pageToken = page2.nextPageToken;
+      pageToken = page.nextPageToken;
       const pageTruncated = messagesExamined < listed.length;
       const legDone = !pageToken && !pageTruncated;
       const enterMetadataLeg = legDone && splitsAtCutoff;
@@ -31458,8 +31133,8 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join26(homedir15(), ".local", "share");
-  return join26(standaloneLinuxDataDir(env) ?? join26(dataHome, "openclaw", "olympus"), "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir15(), ".local", "share");
+  return join23(standaloneLinuxDataDir(env) ?? join23(dataHome, "openclaw", "olympus"), "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -31722,7 +31397,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash19("sha256").update(value).digest("hex");
+  return createHash18("sha256").update(value).digest("hex");
 }
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
@@ -31754,13 +31429,13 @@ var init_corpus_adapter2 = __esm(() => {
 
 // src/workers/readwise/connector.ts
 import { homedir as homedir16 } from "node:os";
-import { dirname as dirname22, join as join27 } from "node:path";
+import { dirname as dirname19, join as join24 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join27(homedir16(), ".local", "share");
-  return join27(standaloneLinuxDataDir(env) ?? join27(dataHome, "openclaw", "olympus"), "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join24(homedir16(), ".local", "share");
+  return join24(standaloneLinuxDataDir(env) ?? join24(dataHome, "openclaw", "olympus"), "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
@@ -31865,13 +31540,13 @@ var init_folder_facets = __esm(() => {
 
 // src/workers/x-bookmarks/connector.ts
 import { homedir as homedir17 } from "node:os";
-import { join as join28 } from "node:path";
+import { join as join25 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join28(homedir17(), ".local", "share");
-  return join28(standaloneLinuxDataDir(env) ?? join28(dataHome, "openclaw", "olympus"), "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join25(homedir17(), ".local", "share");
+  return join25(standaloneLinuxDataDir(env) ?? join25(dataHome, "openclaw", "olympus"), "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
@@ -31980,12 +31655,12 @@ var init_x_bookmarks = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 import { homedir as homedir18 } from "node:os";
-import { join as join29 } from "node:path";
+import { join as join26 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join29(standaloneLinuxDataDir(env) ?? join29(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
+  return join26(standaloneLinuxDataDir(env) ?? join26(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join29(standaloneLinuxDataDir(env) ?? join29(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
+  return join26(standaloneLinuxDataDir(env) ?? join26(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_linux_engine_layout();
@@ -33229,13 +32904,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         return;
       }
       if (name === H.unreadablePageTool) {
-        const page2 = result && result.structuredContent;
-        if (page2 && page2.status === "listed" && typeof page2.source_id === "string" && Array.isArray(page2.files)) {
-          const prior = state.unreadablePages[page2.source_id];
-          state.unreadablePages[page2.source_id] = {
-            files: (prior ? prior.files : []).concat(unreadableEntries(page2.files)),
-            more: moreCount(page2.more),
-            after: cursorOf(page2.after)
+        const page = result && result.structuredContent;
+        if (page && page.status === "listed" && typeof page.source_id === "string" && Array.isArray(page.files)) {
+          const prior = state.unreadablePages[page.source_id];
+          state.unreadablePages[page.source_id] = {
+            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
+            more: moreCount(page.more),
+            after: cursorOf(page.after)
           };
         }
         redraw();
@@ -34015,6 +33690,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function sourceProgressLabel(progress) {
     const total = Number(progress.total) || 0;
+    if (progress.percent === undefined && progress.stage !== "listing")
+      return P.sourceStages[progress.stage] || P.findingItems;
     if (total <= 0)
       return P.findingItems;
     const stage = P.sourceStages[progress.stage] || P.findingItems;
@@ -34038,7 +33715,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return box;
     }
     const label = sourceProgressLabel(progress);
-    add(box, el("p", "muted", label), progressBar(progress.percent, name + ": " + label));
+    add(box, el("p", "muted", label));
+    if (progress.percent !== undefined)
+      add(box, progressBar(progress.percent, name + ": " + label));
     return box;
   }
   function progressRepeatsOneRow(sources) {
@@ -34126,7 +33805,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
   }
   function progressFinished(progress) {
-    return !!progress && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
+    return !!progress && progress.itemsLeft !== undefined && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
   }
   function progressText(progress) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
@@ -34134,13 +33813,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
       return phase + ": " + P.findingItems + paused;
     }
-    const parts = [fill2(P.percentDone, { percent: percent(progress.percent) })];
+    const parts = progress.percent === undefined ? [P.sourceStages.indexing] : [fill2(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
       parts.push(P.progressPaused);
       return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
     }
     const left = Number(progress.itemsLeft) || 0;
-    parts.push(fill2(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
+    if (progress.itemsLeft !== undefined)
+      parts.push(fill2(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
     if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
       parts.push(fill2(P.eta, { duration: duration(progress.etaSeconds) }));
     }
@@ -34168,7 +33848,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const section = add(el("section", "section"), el("h2", "", P.progress));
     const stalled = progress.stalled && !progressPaused();
     const line = el("p", stalled ? "progress-line stalled" : progressPaused() ? "progress-line paused" : "progress-line", progressText(progress));
-    add(section, line, progressBar(progress.percent, P.progress));
+    add(section, line);
+    if (progress.percent !== undefined)
+      add(section, progressBar(progress.percent, P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
     const faster = indexFasterControl();
     if (withDetails && (stages.length || faster)) {
@@ -34377,32 +34059,32 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return card;
   }
   function renderFull() {
-    const page2 = el("main", "page");
-    add(page2, el("h1", "", P.title));
+    const page = el("main", "page");
+    add(page, el("h1", "", P.title));
     const data2 = state.data;
-    add(page2, connectionBanner());
+    add(page, connectionBanner());
     if (state.notice) {
       const notice = el("p", "notice", state.notice);
       notice.setAttribute("role", "status");
-      add(page2, notice);
+      add(page, notice);
     }
     if (!data2) {
       if (!state.relayDown)
-        add(page2, el("p", "muted", P.loading));
-      return page2;
+        add(page, el("p", "muted", P.loading));
+      return page;
     }
-    add(page2, data2.blocker ? itemBanner(data2.blocker, "blocker", true) : null);
-    add(page2, staleLine());
+    add(page, data2.blocker ? itemBanner(data2.blocker, "blocker", true) : null);
+    add(page, staleLine());
     const listed = Array.isArray(data2.sources) ? data2.sources : [];
-    add(page2, needsYouSection((Array.isArray(data2.needsYou) ? data2.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
-    add(page2, sourcesSection(Array.isArray(data2.sources) ? data2.sources : []));
-    add(page2, privacySection(data2));
+    add(page, needsYouSection((Array.isArray(data2.needsYou) ? data2.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
+    add(page, sourcesSection(Array.isArray(data2.sources) ? data2.sources : []));
+    add(page, privacySection(data2));
     const sourceList = Array.isArray(data2.sources) ? data2.sources : [];
-    add(page2, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data2.progress, true));
-    add(page2, modelsSection(data2.models));
-    add(page2, computerSection());
-    add(page2, moreOnComputer());
-    return page2;
+    add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data2.progress, true));
+    add(page, modelsSection(data2.models));
+    add(page, computerSection());
+    add(page, moreOnComputer());
+    return page;
   }
   function moreOnComputer() {
     if (onComputer() || GLOBAL_STATES.indexOf(connectionState()) >= 0)
@@ -35176,8 +34858,8 @@ function chatgptPickerProgram(kit) {
     session++;
     startConnect(p.connectArgs, p.id, p.label, p.returnKey);
   }
-  function connectView(page2) {
-    add(page2, el("h1", "", fill2(Q.connectTitle, { source: p.label })));
+  function connectView(page) {
+    add(page, el("h1", "", fill2(Q.connectTitle, { source: p.label })));
     const box = el("div", "picker-status");
     if (p.phase === "starting") {
       const line = el("p", "", Q.connectStarting);
@@ -35203,7 +34885,7 @@ function chatgptPickerProgram(kit) {
       const models = p.errorCode === "models_not_ready";
       add(box, line, add(el("div", "actions"), models ? kit.button(Q.goToModels, "picker:connect:models", goToModels, "main") : null, kit.button(Q.tryAgain, "picker:connect:retry", reopen, models ? "plain" : "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     }
-    add(page2, box);
+    add(page, box);
   }
   function pickFolder(sourceId, sourceLabel, words2, taken, done) {
     stopTimer();
@@ -35279,8 +34961,8 @@ function chatgptPickerProgram(kit) {
   function validNode(node) {
     return !!node && typeof node.key === "string" && !!node.key && typeof node.name === "string";
   }
-  function validBrowse(page2) {
-    return !!page2 && typeof page2 === "object" && typeof page2.account_generation === "string" && !!page2.account_generation && typeof page2.scope_revision === "string" && !!page2.scope_revision && Array.isArray(page2.nodes) && page2.nodes.every(validNode);
+  function validBrowse(page) {
+    return !!page && typeof page === "object" && typeof page.account_generation === "string" && !!page.account_generation && typeof page.scope_revision === "string" && !!page.scope_revision && Array.isArray(page.nodes) && page.nodes.every(validNode);
   }
   function failLoad(retry, focus) {
     p.loading = "";
@@ -35305,29 +34987,29 @@ function chatgptPickerProgram(kit) {
     kit.call(T.scopeList, args).then((result) => {
       if (mine !== session || !p)
         return;
-      const page2 = scopeData(result);
-      if (!validBrowse(page2)) {
+      const page = scopeData(result);
+      if (!validBrowse(page)) {
         failLoad(() => list(parentKey, append, after), "picker:retry");
         return;
       }
-      if (p.loaded && !p.pick && (page2.account_generation !== p.generation || page2.scope_revision !== p.revision)) {
-        reload(Q.conflict, parentKey || append ? null : page2);
+      if (p.loaded && !p.pick && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
+        reload(Q.conflict, parentKey || append ? null : page);
         return;
       }
-      takeFolders(page2, parentKey, append, focus, after);
+      takeFolders(page, parentKey, append, focus, after);
     }, () => {
       if (mine !== session || !p)
         return;
       failLoad(() => list(parentKey, append, after), "picker:retry");
     });
   }
-  function takeFolders(page2, parentKey, append, focus, after) {
+  function takeFolders(page, parentKey, append, focus, after) {
     if (!p.loaded) {
-      p.generation = page2.account_generation;
-      p.revision = page2.scope_revision;
-      p.whole = page2.whole_account_selected === true;
+      p.generation = page.account_generation;
+      p.revision = page.scope_revision;
+      p.whole = page.whole_account_selected === true;
       p.wholeConfirmed = p.whole;
-      const saved = Array.isArray(page2.selections) ? page2.selections : [];
+      const saved = Array.isArray(page.selections) ? page.selections : [];
       for (const selection of saved) {
         if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
           continue;
@@ -35341,19 +35023,19 @@ function chatgptPickerProgram(kit) {
     const seen = {};
     for (const node of previous)
       seen[node.key] = true;
-    const fresh = page2.nodes.filter((node) => !seen[node.key] && trail.indexOf(node.key) < 0);
+    const fresh = page.nodes.filter((node) => !seen[node.key] && trail.indexOf(node.key) < 0);
     for (const node of fresh) {
       p.catalog.set(node.key, node);
       p.ancestors.set(node.key, trail);
     }
     const nodes = previous.concat(fresh).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
-    const next = typeof page2.next_cursor === "string" && page2.next_cursor ? page2.next_cursor : "";
-    const more = typeof page2.remaining === "number" && isFinite(page2.remaining) && page2.remaining > 0 ? Math.round(page2.remaining) : 0;
+    const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
+    const more = typeof page.remaining === "number" && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
     if (next && more)
       p.remaining.set(parentKey, more);
     else
       p.remaining.delete(parentKey);
-    if (page2.truncated === true)
+    if (page.truncated === true)
       p.truncated.add(parentKey);
     if (parentKey) {
       p.branches.set(parentKey, nodes);
@@ -35993,7 +35675,7 @@ function chatgptPickerProgram(kit) {
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ""));
     return footer;
   }
-  function foldersView(page2) {
+  function foldersView(page) {
     const body = el("div", "picker-body");
     if (p.path.length)
       folderScreen(body);
@@ -36001,7 +35683,7 @@ function chatgptPickerProgram(kit) {
       rootScreen(body);
     if (p.loaded && !p.pick)
       add(body, folderFooter());
-    add(page2, body);
+    add(page, body);
   }
   function saveRow(enabled, label, onSave, reason) {
     const row = el("div", "actions");
@@ -36172,25 +35854,25 @@ function chatgptPickerProgram(kit) {
     p.draft[which] = listNow;
     mailEdited(focus);
   }
-  function mailView(page2) {
-    add(page2, el("h1", "", p.title));
-    add(page2, el("p", "muted", fill2(Q.mailIntro, { source: p.label })));
+  function mailView(page) {
+    add(page, el("h1", "", p.title));
+    add(page, el("p", "muted", fill2(Q.mailIntro, { source: p.label })));
     if (p.notice) {
       const notice = el("p", p.notice === Q.conflict ? "fnote strong" : "fnote muted", p.notice);
       notice.setAttribute("role", "status");
-      add(page2, notice);
+      add(page, notice);
     }
     if (p.error) {
       const error = el("div", "banner");
       error.setAttribute("role", "alert");
       add(error, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
-      add(page2, error);
+      add(page, error);
     }
     if (!p.loaded) {
       if (p.loading) {
         const line = el("p", "muted", Q.loadingMail);
         line.setAttribute("role", "status");
-        add(page2, line);
+        add(page, line);
       }
       return;
     }
@@ -36202,7 +35884,7 @@ function chatgptPickerProgram(kit) {
         mailEdited("picker:window:" + value);
       }));
     }
-    add(page2, windows);
+    add(page, windows);
     const categories = group(Q.mailCategories, Q.mailCategoriesHelp);
     for (const category of CATEGORIES) {
       const words2 = Q.mailCategoryNames[category];
@@ -36214,7 +35896,7 @@ function chatgptPickerProgram(kit) {
         mailEdited("picker:category:" + category);
       }));
     }
-    add(page2, categories);
+    add(page, categories);
     const labels = group(Q.mailLabels, Q.mailLabelsHelp);
     if (!p.labels.length)
       add(labels, el("p", "muted", Q.mailLabelsEmpty));
@@ -36226,7 +35908,7 @@ function chatgptPickerProgram(kit) {
         mailEdited("picker:label:" + index);
       }));
     });
-    add(page2, labels);
+    add(page, labels);
     const senders = group(Q.mailSenders, "");
     add(senders, senderField("always_private_senders", Q.mailPrivate, Q.mailPrivateHelp));
     add(senders, senderField("skip_senders", Q.mailSkip, Q.mailSkipHelp));
@@ -36244,7 +35926,7 @@ function chatgptPickerProgram(kit) {
       });
       add(senders, listNode);
     }
-    add(page2, senders);
+    add(page, senders);
     const footer = el("section", "picker-footer");
     footer.setAttribute("aria-label", Q.summaryTitle);
     const summary = el("div", "summary");
@@ -36269,7 +35951,7 @@ function chatgptPickerProgram(kit) {
       args[kit.config.mailArgs.set] = draftOut();
       save(args, "picker:save");
     }, ""));
-    add(page2, footer);
+    add(page, footer);
   }
   function back() {
     if (!p)
@@ -36282,9 +35964,9 @@ function chatgptPickerProgram(kit) {
     leave("", true);
   }
   function view() {
-    const page2 = el("main", "page picker");
+    const page = el("main", "page picker");
     if (!p)
-      return page2;
+      return page;
     const top = el("div", "picker-top");
     const deep = p.mode === "folders" && p.path.length > 0;
     const backButton = deep ? kit.button(Q.up, "picker:up", escape, "plain") : kit.button(p.pick ? p.pick.words.back : Q.back, "picker:back", escape, "plain");
@@ -36294,7 +35976,7 @@ function chatgptPickerProgram(kit) {
     }
     backButton.className = "btn back";
     add(top, backButton);
-    add(page2, top);
+    add(page, top);
     if (p.discarding) {
       const confirm = el("div", "confirm-box");
       confirm.setAttribute("role", "alert");
@@ -36302,15 +35984,15 @@ function chatgptPickerProgram(kit) {
         p.discarding = false;
         kit.render("picker:back");
       }, "plain")));
-      add(page2, confirm);
+      add(page, confirm);
     }
     if (p.mode === "connect")
-      connectView(page2);
+      connectView(page);
     else if (p.mode === "mail")
-      mailView(page2);
+      mailView(page);
     else
-      foldersView(page2);
-    return page2;
+      foldersView(page);
+    return page;
   }
   function escape() {
     if (!p)
@@ -36832,22 +36514,22 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     }
     return section;
   }
-  function mainView(page2) {
-    add(page2, el("h1", "", W.title));
-    add(page2, el("p", "muted intro", W.intro));
+  function mainView(page) {
+    add(page, el("h1", "", W.title));
+    add(page, el("p", "muted intro", W.intro));
     if (s.server)
-      add(page2, conflictBox());
+      add(page, conflictBox());
     if (s.error) {
       const error = el("div", "banner");
       error.setAttribute("role", "alert");
       add(error, add(el("div", "banner-body"), el("p", "", s.error), add(el("div", "actions"), kit.button(W.tryAgain, "privacy:retry", load, "plain"))));
-      add(page2, error);
+      add(page, error);
     }
     if (!s.loaded) {
       if (s.loading) {
         const line = el("p", "muted fstate", W.loading);
         line.setAttribute("role", "status");
-        add(page2, line);
+        add(page, line);
       }
       return;
     }
@@ -36871,13 +36553,13 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       if (open4 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
         kit.render("privacy:description");
     });
-    add(page2, add(field, area));
+    add(page, add(field, area));
     const shared = el("p", "reason field-note", W.descriptionShared);
     shared.id = "privacy-description-shared";
-    add(page2, shared);
+    add(page, shared);
     const questions = questionsSection();
     if (questions)
-      add(page2, questions);
+      add(page, questions);
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
       const listNode = el("ul", "flist");
@@ -36893,13 +36575,13 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     if (!gmail)
       add(rules, el("p", "reason", W.needGmail));
     add(rules, el("p", "reason", W.namesShared));
-    add(page2, rules);
+    add(page, rules);
     const footer = el("section", "picker-footer");
     if (s.pendingCount > 0) {
       add(footer, el("p", "", fill2(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
     }
     if (s.confirmStep && !s.saving && lowers()) {
-      add(page2, add(footer, confirmBox()));
+      add(page, add(footer, confirmBox()));
       return;
     }
     const row = el("div", "actions");
@@ -36916,11 +36598,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       error.setAttribute("role", "alert");
       add(wrap, error);
     }
-    add(page2, add(footer, wrap));
+    add(page, add(footer, wrap));
   }
-  function sourcesView(page2) {
-    add(page2, el("h1", "", W.folderSourceTitle));
-    add(page2, el("p", "muted intro", W.folderSourceIntro));
+  function sourcesView(page) {
+    add(page, el("h1", "", W.folderSourceTitle));
+    add(page, el("p", "muted intro", W.folderSourceIntro));
     for (const source of folderSources()) {
       const control = el("button", "account");
       control.type = "button";
@@ -36930,23 +36612,23 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       chevron.setAttribute("aria-hidden", "true");
       add(control, chevron);
       control.addEventListener("click", () => pickIn(source.id, source.label));
-      add(page2, control);
+      add(page, control);
     }
   }
-  function labelsView(page2) {
-    add(page2, el("h1", "", W.labelTitle));
-    add(page2, el("p", "muted intro", W.labelIntro));
+  function labelsView(page) {
+    add(page, el("h1", "", W.labelTitle));
+    add(page, el("p", "muted intro", W.labelIntro));
     if (s.labelsError) {
       const error = el("div", "banner");
       error.setAttribute("role", "alert");
       add(error, add(el("div", "banner-body"), el("p", "", s.labelsError), add(el("div", "actions"), kit.button(W.tryAgain, "privacy:labels:retry", addLabel, "plain"))));
-      add(page2, error);
+      add(page, error);
       return;
     }
     if (s.labelsLoading) {
       const line = el("p", "muted fstate", W.loadingLabels);
       line.setAttribute("role", "status");
-      add(page2, line);
+      add(page, line);
       return;
     }
     const listNode = el("ul", "flist");
@@ -36970,11 +36652,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       add(listNode, li);
     });
-    add(page2, listNode);
+    add(page, listNode);
   }
-  function senderView(page2) {
-    add(page2, el("h1", "", W.senderTitle));
-    add(page2, el("p", "muted intro", W.senderIntro));
+  function senderView(page) {
+    add(page, el("h1", "", W.senderTitle));
+    add(page, el("p", "muted intro", W.senderIntro));
     const field = el("label", "field");
     add(field, el("span", "field-label", W.senderLabel));
     const input = el("input", "text");
@@ -37003,17 +36685,17 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       input.setAttribute("aria-describedby", "privacy-sender-error");
       add(field, error);
     }
-    add(page2, field);
-    add(page2, add(el("div", "actions"), kit.button(W.senderAdd, "privacy:sender:add", submitSender, "main")));
+    add(page, field);
+    add(page, add(el("div", "actions"), kit.button(W.senderAdd, "privacy:sender:add", submitSender, "main")));
   }
   function view() {
-    const page2 = el("main", "page picker privacy");
+    const page = el("main", "page picker privacy");
     if (!s)
-      return page2;
+      return page;
     const top = el("div", "picker-top");
     const backButton = kit.button(s.screen === "main" ? W.back : W.backToPrivacy, "privacy:back", escape, "plain");
     backButton.className = "btn back";
-    add(page2, add(top, backButton));
+    add(page, add(top, backButton));
     if (s.discarding) {
       const confirm = el("div", "confirm-box");
       confirm.setAttribute("role", "alert");
@@ -37021,17 +36703,17 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         s.discarding = false;
         kit.render("privacy:back");
       }, "plain")));
-      add(page2, confirm);
+      add(page, confirm);
     }
     if (s.screen === "sources")
-      sourcesView(page2);
+      sourcesView(page);
     else if (s.screen === "labels")
-      labelsView(page2);
+      labelsView(page);
     else if (s.screen === "sender")
-      senderView(page2);
+      senderView(page);
     else
-      mainView(page2);
-    return page2;
+      mainView(page);
+    return page;
   }
   function backOut() {
     if (!s)
@@ -37443,9 +37125,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 });
 
 // src/workers/chatgpt/dashboard-resource.ts
-import { createHash as createHash20 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash20("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash19("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
 var init_dashboard_resource = __esm(() => {
@@ -37571,7 +37253,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash22 } from "node:crypto";
+import { createHash as createHash21 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -37583,7 +37265,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash22("sha256").update(material, "utf8").digest("hex");
+  return createHash21("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -37918,72 +37600,26 @@ init_sovereignty();
 init_secret_store();
 init_worker_auth();
 init_dropbox_files();
-import { createHash as createHash24 } from "node:crypto";
-import { existsSync as existsSync19, lstatSync as lstatSync9, mkdirSync as mkdirSync16, writeFileSync as writeFileSync8 } from "node:fs";
-import { dirname as dirname25, isAbsolute as isAbsolute11 } from "node:path";
+import { createHash as createHash23 } from "node:crypto";
+import { existsSync as existsSync19, lstatSync as lstatSync7, mkdirSync as mkdirSync15, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname22, isAbsolute as isAbsolute9 } from "node:path";
+
+// src/core/update-check.ts
+init_package_root();
+var UPDATE_MAX_BYTES = 512 * 1024;
 
 // src/workers/email-source/server.ts
 init_open_targets();
 
 // src/core/linux-owner-bridge.ts
+init_atomic_file();
 init_worker_transport();
 init_linux_desktop_opener();
 init_remote_request_body();
-import { createHash as createHash15, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
-import { closeSync as closeSync7, openSync as openSync7, writeFileSync as writeFileSync6, unlinkSync as unlinkSync2 } from "node:fs";
-import { dirname as dirname20, join as join22 } from "node:path";
-var COOKIE = "olympus_desktop_owner";
 var PROOF_HEADER = "X-Olympus-Owner-Proof";
 var FORM_PROOF = "_olympus_owner_proof";
 var STORAGE = "olympus-desktop-owner-v1";
-var TICKET_MS = 60000;
 var SESSION_MS = 12 * 60 * 60 * 1000;
-var DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open";
-var DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.";
-var CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'";
-function randomOwnerHostname() {
-  const bytes = randomBytes3(16);
-  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
-  let bits = 0, value = 0, text2 = "";
-  for (const byte of bytes) {
-    value = value << 8 | byte;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      text2 += alphabet[value >>> bits & 31];
-    }
-  }
-  if (bits)
-    text2 += alphabet[value << 5 - bits & 31];
-  return `${text2}.localhost`;
-}
-var secret = () => randomBytes3(32).toString("base64url");
-function equal(a, b) {
-  return typeof a === "string" && /^[A-Za-z0-9_-]+$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-async function boundedBody(request, limit) {
-  const result = await readBoundedRequestText(request, limit, { deadlineMs: 5000 });
-  if (!result.ok)
-    throw new Error("Body refused.");
-  return result.text;
-}
-function page(body, status = 200) {
-  return new Response(`<!doctype html><html><head><meta charset="utf-8"><title>Olympus owner confirmation</title></head><body>${body}</body></html>`, { status, headers: {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": CSP,
-    "Cross-Origin-Opener-Policy": "same-origin",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY"
-  } });
-}
-function refusal(status = 403) {
-  return page(`<p>Owner confirmation refused. ${DESKTOP_BRIDGE_REMEDY}</p>`, status);
-}
-function safeTarget(value) {
-  return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
-}
 var BOOTSTRAP = `<script>(function(){
 const key=${JSON.stringify(STORAGE)}, header=${JSON.stringify(PROOF_HEADER)}, field=${JSON.stringify(FORM_PROOF)};
 const nativeFetch=window.fetch.bind(window);
@@ -38006,266 +37642,6 @@ document.addEventListener('submit',function(event){
  input.value=localStorage.getItem(key)||'';
 },true);
 })();</script>`;
-function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash15("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
-  const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
-  const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
-  const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
-  const index = directives.findIndex((s) => /^script-src(\s|$)/.test(s));
-  if (index >= 0) {
-    if (needsHash(directives[index]))
-      directives[index] = withHash(directives[index].slice("script-src".length));
-  } else {
-    const fallback = directives.find((s) => /^default-src(\s|$)/.test(s));
-    if (fallback && needsHash(fallback))
-      directives.push(withHash(fallback.slice("default-src".length)));
-  }
-  return directives.filter((s) => !/^worker-src(\s|$)/.test(s)).join("; ") + "; worker-src 'none'";
-}
-function metaPolicy(policy) {
-  return policy.split("; ").filter((s) => !/^(frame-ancestors|report-uri|report-to|sandbox)(\s|$)/.test(s)).join("; ");
-}
-function attribute(value) {
-  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
-}
-function confirmation() {
-  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
-(async function(){
- const message=document.getElementById('message');
- document.getElementById('confirm').onclick=async function(){
-  try{const r=await fetch('/owner-open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:location.pathname+location.search+location.hash})});
-  message.textContent=r.ok?'A private ticket was opened in your desktop browser. Return to it to continue.':'Unable to open the private ticket. Wait a moment and retry, or use the owner SSH socket forward.';}catch{message.textContent='Owner confirmation unavailable. Use the owner SSH socket forward.';}
- };
- if(!localStorage.getItem(${JSON.stringify(STORAGE)}))return;
- try{const r=await fetch(location.pathname+location.search);if(!r.ok)return;
- const html=await r.text();document.open();document.write(html);document.close();}catch{}
-})();</script>`);
-}
-function proofPage() {
-  const response = page(`<p id="message">Confirming the private owner ticket…</p><script>
-(async function(){
- const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
- if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
- try{const r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);location.replace(result.target);
- }catch{document.getElementById('message').textContent='This private ticket expired or was refused. Run olympus dashboard again. Use the owner SSH socket forward if this browser cannot resolve the session origin.';}
-})();</script>`);
-  response.headers.set("Access-Control-Allow-Origin", "*");
-  return response;
-}
-
-class LinuxOwnerBridge {
-  options;
-  hostname = randomOwnerHostname();
-  origin;
-  entryOrigin;
-  ticket;
-  sessions = [];
-  lastOpen = -Infinity;
-  closed = false;
-  now;
-  ticketTimer;
-  constructor(options) {
-    this.options = options;
-    this.origin = `http://${this.hostname}:${options.port}`;
-    this.entryOrigin = `http://127.0.0.1:${options.port}`;
-    this.now = options.now ?? Date.now;
-  }
-  live() {
-    return !this.closed && this.options.ready();
-  }
-  close() {
-    this.closed = true;
-    this.sessions = [];
-    this.clearTicket();
-  }
-  clearTicket() {
-    if (this.ticketTimer)
-      clearTimeout(this.ticketTimer);
-    if (this.ticket) {
-      try {
-        unlinkSync2(this.ticket.path);
-      } catch {}
-    }
-    this.ticket = undefined;
-  }
-  async openTicket(target) {
-    if (!safeTarget(target) || !this.live())
-      throw new Error("Desktop owner confirmation is unavailable.");
-    if (this.now() - this.lastOpen < 1e4)
-      throw new Error("Wait ten seconds before opening another owner ticket.");
-    this.lastOpen = this.now();
-    if (validateWorkerSocket(this.options.transport) !== this.options.socketPath)
-      throw new Error("Owner socket changed.");
-    this.clearTicket();
-    const value = secret();
-    const path = join22(dirname20(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
-    const url = `${this.origin}/owner-proof#${value}`;
-    const html2 = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus owner confirmation</title><p id="message">Checking the private session origin…</p><script>
-fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'}).then(r=>{if(!r.ok)throw new Error();location.replace(${JSON.stringify(url)});}).catch(()=>{document.getElementById('message').textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. " + DESKTOP_BRIDGE_REMEDY)};});</script>`;
-    const fd = openSync7(path, "wx", 384);
-    try {
-      writeFileSync6(fd, html2);
-    } finally {
-      closeSync7(fd);
-    }
-    this.ticket = { value, target, path, expires: this.now() + TICKET_MS };
-    this.ticketTimer = setTimeout(() => this.clearTicket(), TICKET_MS);
-    this.ticketTimer.unref();
-    try {
-      await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
-      if (!this.live())
-        throw new Error("Graphical session ended.");
-    } catch (error) {
-      this.clearTicket();
-      throw error;
-    }
-  }
-  async handle(request, ownerRequestAdmitted) {
-    if (!this.live())
-      return refusal(503);
-    const url = new URL(request.url);
-    const host = request.headers.get("host");
-    if (request.headers.has("Service-Worker"))
-      return refusal();
-    if (host === new URL(this.entryOrigin).host && url.host === host) {
-      if (request.method !== "GET" && request.method !== "HEAD")
-        return refusal();
-      return new Response(null, { status: 303, headers: {
-        Location: this.origin + url.pathname + url.search,
-        "Cache-Control": "no-store",
-        "Clear-Site-Data": '"cache", "storage"',
-        "Content-Security-Policy": "default-src 'none'; worker-src 'none'",
-        "Referrer-Policy": "no-referrer"
-      } });
-    }
-    if (host !== new URL(this.origin).host || url.origin !== this.origin)
-      return refusal(421);
-    if (request.headers.has("x-olympus-relay") || ["x-forwarded-host", "x-forwarded-for", "x-forwarded-proto", "forwarded"].some((h) => request.headers.has(h)))
-      return refusal();
-    const origin = request.headers.get("origin");
-    const site = request.headers.get("sec-fetch-site");
-    if (request.method !== "GET" && request.method !== "HEAD" && (origin !== this.origin || site !== null && site !== "same-origin"))
-      return refusal();
-    if (url.pathname === "/owner-proof" && request.method === "GET")
-      return proofPage();
-    if (url.pathname === "/owner-proof" && request.method === "POST") {
-      let body2;
-      try {
-        body2 = JSON.parse(await boundedBody(request, 1024));
-      } catch {
-        return refusal();
-      }
-      const ticket = this.ticket;
-      if (!this.live() || !ticket || ticket.expires <= this.now() || !equal(body2.ticket, ticket.value))
-        return refusal();
-      this.clearTicket();
-      let dashboardCookies;
-      try {
-        dashboardCookies = await this.options.establishDashboard?.() ?? [];
-      } catch {
-        return refusal(503);
-      }
-      if (!this.live())
-        return refusal(503);
-      const session2 = { cookie: secret(), proof: secret(), expires: this.now() + SESSION_MS };
-      this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-15), session2];
-      const response2 = Response.json({ proof: session2.proof, target: ticket.target }, { headers: {
-        "Set-Cookie": `${COOKIE}=${session2.cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
-        "Cache-Control": "no-store",
-        "Clear-Site-Data": '"cache"',
-        "Content-Security-Policy": CSP
-      } });
-      for (const cookie2 of dashboardCookies)
-        response2.headers.append("Set-Cookie", cookie2);
-      return response2;
-    }
-    if (url.pathname === "/owner-open" && request.method === "POST") {
-      try {
-        const body2 = JSON.parse(await boundedBody(request, 20000));
-        await this.openTicket(body2.target);
-        return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
-      } catch {
-        return refusal(429);
-      }
-    }
-    if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith("/owner-"))
-      return refusal();
-    const cookie = request.headers.get("cookie")?.split(";").map((v) => v.trim()).find((v) => v.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
-    const session = this.sessions.find((s) => s.expires > this.now() && equal(cookie, s.cookie));
-    let proof = request.headers.get(PROOF_HEADER);
-    let body;
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      try {
-        body = await boundedBody(request, 1048576);
-      } catch {
-        return refusal(413);
-      }
-      if (request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")) {
-        const form = new URLSearchParams(body);
-        proof ??= form.get(FORM_PROOF);
-        form.delete(FORM_PROOF);
-        body = form.toString();
-      }
-    }
-    if (!session || !equal(proof, session.proof)) {
-      if (request.method === "GET" && !proof && (request.headers.get("accept") ?? "").includes("text/html"))
-        return confirmation();
-      return refusal();
-    }
-    if (!this.live())
-      return refusal(503);
-    ownerRequestAdmitted?.();
-    const headers = new Headers(request.headers);
-    headers.delete(PROOF_HEADER);
-    headers.delete("content-length");
-    headers.set("Host", new URL(this.entryOrigin).host);
-    if (origin === this.origin)
-      headers.set("Origin", this.entryOrigin);
-    const referer = headers.get("referer");
-    if (referer?.startsWith(this.origin + "/"))
-      headers.set("Referer", this.entryOrigin + referer.slice(this.origin.length));
-    headers.set("Cookie", (headers.get("cookie") ?? "").split(";").filter((v) => !v.trim().startsWith(COOKIE + "=")).join(";"));
-    const response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
-      method: request.method,
-      headers,
-      ...body !== undefined ? { body } : {},
-      redirect: "manual"
-    }));
-    if (!this.live())
-      return refusal(503);
-    const outgoing = new Headers(response.headers);
-    outgoing.delete("access-control-allow-origin");
-    outgoing.delete("access-control-allow-credentials");
-    outgoing.set("Cache-Control", "no-store");
-    outgoing.set("Cross-Origin-Opener-Policy", "same-origin");
-    const policy = documentPolicy(response.headers.get("content-security-policy"));
-    outgoing.set("Content-Security-Policy", policy);
-    outgoing.set("Referrer-Policy", "same-origin");
-    outgoing.set("X-Content-Type-Options", "nosniff");
-    const location = outgoing.get("location");
-    if (location) {
-      const target = location.startsWith(this.entryOrigin + "/") ? this.origin + location.slice(this.entryOrigin.length) : location;
-      if (request.headers.has(PROOF_HEADER)) {
-        outgoing.delete("location");
-        outgoing.set("X-Olympus-Owner-Location", target);
-        return new Response(null, { status: 200, headers: outgoing });
-      }
-      outgoing.set("Location", target);
-    }
-    if (outgoing.get("content-type")?.includes("text/html")) {
-      outgoing.delete("content-length");
-      outgoing.delete("content-encoding");
-      const html2 = (await response.text()).replace(/<meta name="referrer" content="no-referrer">/g, '<meta name="referrer" content="same-origin">');
-      if (!this.live())
-        return refusal(503);
-      const htmlPolicy = documentPolicy(response.headers.get("content-security-policy"));
-      outgoing.set("Content-Security-Policy", htmlPolicy);
-      return new Response(html2.replace(/<head([^>]*)>/i, `<head$1><meta name="referrer" content="same-origin"><meta http-equiv="Content-Security-Policy" content="${attribute(metaPolicy(htmlPolicy))}">${BOOTSTRAP}`), { status: response.status, headers: outgoing });
-    }
-    return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
-  }
-}
 
 // src/workers/email-source/server.ts
 init_linux_desktop_opener();
@@ -38326,7 +37702,7 @@ init_credential_broker();
 init_types();
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
   source_item_not_found: "failed_terminal",
   source_permission_denied: "failed_terminal",
@@ -38354,7 +37730,7 @@ class FileExtractionSourceError extends Error {
     this.errorKind = errorKind;
     this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
     this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash17("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+    const errorHash = options.detailForHash === undefined ? undefined : createHash16("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
   }
@@ -38427,17 +37803,17 @@ class DropboxExtractionSource {
     const sharedAccount = singleAccount(scopes);
     if (sharedAccount)
       readerOptions.accountScope = sharedAccount;
-    const page2 = await this.candidates.extractionCandidates(readerOptions);
+    const page = await this.candidates.extractionCandidates(readerOptions);
     const candidates = [];
-    for (const row of page2.candidates) {
+    for (const row of page.candidates) {
       const ref = this.refFromRow(row, scopes);
       if (ref)
         candidates.push(ref);
     }
     return {
       candidates,
-      ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
-      done: page2.done
+      ...page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {},
+      done: page.done
     };
   }
   async fetch(ref, options) {
@@ -38955,15 +38331,15 @@ init_model_transport();
 init_venice_models();
 import {
   existsSync as existsSync17,
-  mkdirSync as mkdirSync14,
+  mkdirSync as mkdirSync13,
   readFileSync as readFileSync16,
   renameSync as renameSync5,
   rmSync as rmSync6,
-  writeFileSync as writeFileSync7
+  writeFileSync as writeFileSync6
 } from "node:fs";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
-import { dirname as dirname21, isAbsolute as isAbsolute10, join as join25 } from "node:path";
+import { dirname as dirname18, isAbsolute as isAbsolute8, join as join22 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -38973,8 +38349,8 @@ var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir14(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute10(configuredRoot) ? configuredRoot : join25(homeDir, ".cache");
-  return join25(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute8(configuredRoot) ? configuredRoot : join22(homeDir, ".cache");
+  return join22(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -39180,9 +38556,9 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID7()}.tmp`;
   try {
-    mkdirSync14(dirname21(path), { recursive: true, mode: 448 });
+    mkdirSync13(dirname18(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync7(tempPath, `${JSON.stringify({
+    writeFileSync6(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -39737,6 +39113,9 @@ var HOST_CSS = `
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
+.update p{margin:0 0 0.5rem}
+.update code{overflow-wrap:anywhere;white-space:pre-wrap}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
@@ -39880,7 +39259,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -39964,7 +39343,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash21("sha256").update(value).digest("hex");
+  return createHash20("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -40115,7 +39494,7 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
-import { createHash as createHash23 } from "node:crypto";
+import { createHash as createHash22 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
@@ -40923,7 +40302,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash23("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash22("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -41200,13 +40579,13 @@ import { Database as Database6 } from "bun:sqlite";
 // src/workers/classification-ledger.ts
 init_linux_engine_layout();
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname23, join as join30 } from "node:path";
+import { dirname as dirname20, join as join27 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname23(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname20(path), { recursive: true, mode: 448 });
   const handle = await open4(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -41328,8 +40707,8 @@ init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
-import { mkdirSync as mkdirSync15, readFileSync as readFileSync17 } from "node:fs";
-import { dirname as dirname24 } from "node:path";
+import { mkdirSync as mkdirSync14, readFileSync as readFileSync17 } from "node:fs";
+import { dirname as dirname21 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -41367,7 +40746,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync15(dirname24(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync14(dirname21(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -43266,7 +42645,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash24("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash23("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -43720,7 +43099,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash24("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash23("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
@@ -43826,12 +43205,12 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!instanceId || !CANONICAL_UUID.test(instanceId)) {
     throw new Error(`${NATIVE_SERVICE_INSTANCE_ID_ENV} must be a canonical UUID for native startup.`);
   }
-  if (!readinessPath || !isAbsolute11(readinessPath)) {
+  if (!readinessPath || !isAbsolute9(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname25(readinessPath);
-  mkdirSync16(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync9(directory);
+  const directory = dirname22(readinessPath);
+  mkdirSync15(directory, { recursive: true, mode: 448 });
+  const parent = lstatSync7(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -43852,8 +43231,8 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync16(dirname25(args.reportPath), { recursive: true });
-      writeFileSync8(args.reportPath, `${json}
+      mkdirSync15(dirname22(args.reportPath), { recursive: true });
+      writeFileSync7(args.reportPath, `${json}
 `);
     }
     console.log(json);
@@ -43862,9 +43241,9 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync16(dirname25(args.reportPath), { recursive: true });
+      mkdirSync15(dirname22(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
-        writeFileSync8(args.reportPath, `${JSON.stringify(report2, null, 2)}
+        writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);
       };
     }
@@ -43872,7 +43251,7 @@ if (__require.main == __require.module) {
     const report = await runSourceEmbeddingDrain(options);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync8(args.reportPath, `${json}
+      writeFileSync7(args.reportPath, `${json}
 `);
     console.log(json);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {

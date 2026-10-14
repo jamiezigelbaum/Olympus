@@ -295,6 +295,7 @@ function dropboxStatus(): SourceIndexStatusResult {
         files: 254,
         folders: 0,
         items_with_text: 254,
+        items_embedded: 254,
         qa_eligible_items: 254,
         extraction_jobs_queued: 0,
         extraction_jobs_queued_actionable: 0,

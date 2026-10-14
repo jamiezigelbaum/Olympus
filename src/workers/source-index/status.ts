@@ -1,3 +1,4 @@
+import type { SovereigntyTrustDomainPolicy } from '../../core/sovereignty.ts';
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/embedding-cost-estimates.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
@@ -144,7 +145,7 @@ export interface SourceIndexCorpusStatusBase {
   last_refresh?: SourceIndexLastRefresh;
   retrieval?: {
     declared_mode: string;
-    servable_mode: 'keyword' | 'hybrid';
+    servable_mode: 'keyword' | 'hybrid' | 'metadata_only';
     state: 'ready' | 'degraded';
     reason?: string;
     model_id?: string;
@@ -252,6 +253,8 @@ export interface SourceIndexStatusHandlerOptions {
    */
   connectorStores?: LocalConnectorStore[];
   retrievalAvailability?: Readonly<Record<string, SourceIndexStatusRetrievalAvailability | undefined>>;
+  /** Live policy intent, independent of provider availability; read before cache lookup. */
+  retrievalPolicy?: (domain: SourceIndexCorpusDefinition['trustDomain']) => Pick<SovereigntyTrustDomainPolicy, 'embeddingProfile' | 'activationMode'> | undefined;
   readinessLedger?: SourceIndexReadinessLedger;
   /** Dynamic trusted scope for store counts; absent preserves whole-store status. */
   connectorStoreStatusScope?: (store: LocalConnectorStore) => ConnectorStoreStatusScope | undefined;
@@ -307,6 +310,11 @@ export type SourceIndexStatusRetrievalAvailability =
  */
 export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
 
+/** A live names-only policy is a status fact, not a content retrieval mode. */
+type StatusCorpusDefinition = Omit<SourceIndexCorpusDefinition, 'activationMode'> & {
+  activationMode: SourceIndexCorpusDefinition['activationMode'] | 'metadata_only';
+};
+
 export function createSourceIndexStatusHandler(
   options: SourceIndexStatusHandlerOptions = {},
 ): SourceIndexStatusHandler {
@@ -328,7 +336,13 @@ export function createSourceIndexStatusHandler(
       const corpora = currentRegistry()
         .list()
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
-      const statuses = corpora.map((corpus) => {
+      const statuses = corpora.map((declaredCorpus) => {
+        const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
+        const embeddingDisabled = policy !== undefined
+          && (!policy.embeddingProfile || policy.activationMode === 'metadata_only' || policy.activationMode === 'lexical_only');
+        const corpus: StatusCorpusDefinition = embeddingDisabled
+          ? { ...declaredCorpus, embeddingPolicy: 'disabled', activationMode: policy?.activationMode === 'metadata_only' ? 'metadata_only' : 'lexical_only' }
+          : declaredCorpus;
         const store = storesByCorpusId.get(corpus.corpusId);
         const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
         const maxAgeMs = normalizedStatusCacheMaxAge(request.readiness_ledger_max_age_ms);
@@ -344,6 +358,7 @@ export function createSourceIndexStatusHandler(
         // a delimiter-joined key could collide ("m:a"+"b" vs "m"+"a:b").
         const cacheKey = JSON.stringify([
           corpus.corpusId,
+          corpus.embeddingPolicy, corpus.activationMode,
           request.include_readiness_ledger === true ? 'full' : 'cheap',
           availability === undefined ? null : [
             availability.servable,
@@ -505,7 +520,7 @@ function secretLocationCount(store: LocalConnectorStore): number | undefined {
 }
 
 function connectorStoreStatus(
-  corpus: SourceIndexCorpusDefinition,
+  corpus: StatusCorpusDefinition,
   status: ConnectorStoreStatus,
   readinessCounts?: Record<string, number>,
   extractionThroughput?: ContentExtractionThroughputSignal,
@@ -587,7 +602,7 @@ function connectorStoreStatus(
 }
 
 function configuredCorpusStatus(
-  corpus: SourceIndexCorpusDefinition,
+  corpus: StatusCorpusDefinition,
 ): SourceIndexConfiguredCorpusStatus {
   return {
     ...baseStatus(corpus),
@@ -596,7 +611,7 @@ function configuredCorpusStatus(
   };
 }
 
-function baseStatus(corpus: SourceIndexCorpusDefinition): SourceIndexCorpusStatusBase {
+function baseStatus(corpus: StatusCorpusDefinition): SourceIndexCorpusStatusBase {
   return {
     corpus_id: corpus.corpusId,
     family: corpus.family,
@@ -611,14 +626,23 @@ function baseStatus(corpus: SourceIndexCorpusDefinition): SourceIndexCorpusStatu
 }
 
 function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
-  corpus: SourceIndexCorpusDefinition,
+  corpus: StatusCorpusDefinition,
   status: T,
   hybridAvailability: SourceIndexHybridAvailability | undefined,
 ): T {
-  const retrieval = assessSourceIndexRetrievalState({
-    declaredMode: corpus.activationMode,
-    ...(hybridAvailability ? { hybridAvailability } : {}),
-  });
+  // Names-only policy has no content retrieval, even when old vectors remain
+  // or a local embedding provider is available. Exemption is not keyword readiness.
+  const retrieval = corpus.activationMode === 'metadata_only'
+    ? {
+      declaredMode: 'metadata_only' as const,
+      servableMode: 'metadata_only' as const,
+      health: 'ready' as const,
+      reason: undefined, modelId: undefined, embeddingEpoch: undefined, backend: undefined,
+    }
+    : assessSourceIndexRetrievalState({
+      declaredMode: corpus.activationMode,
+      ...(hybridAvailability ? { hybridAvailability } : {}),
+    });
   const counts = status.configured ? status.counts : undefined;
   const chunks = counts?.chunks ?? 0;
   const noCurrentArtifacts = retrieval.reason === 'no_current_embedding_artifacts';
@@ -649,7 +673,7 @@ function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
       required: embeddingRequired,
       chunks,
       embedded_chunks: embeddedChunks,
-      missing_chunks: Math.max(0, chunks - embeddedChunks),
+      missing_chunks: embeddingRequired ? Math.max(0, chunks - embeddedChunks) : 0,
       refresh_needed: embeddingRequired && embeddedChunks < chunks,
     },
   };

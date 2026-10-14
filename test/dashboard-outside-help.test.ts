@@ -157,7 +157,7 @@ const LEGACY = /\b(Full ingestion|Metadata only|metadata only|invisible|Public)\
 
 // ---------------------------------------------------------------------------
 
-type CardAnswer = { status: number; body: unknown } | 'network';
+type CardAnswer = { status: number; body: unknown; bridgeRefusal?: boolean } | 'network';
 
 /** Runs the card's own controller against the parsed card; reloads are recorded, never run. */
 function runCardScript(html: string, answer: (url: string, body: unknown) => CardAnswer | Promise<CardAnswer>) {
@@ -166,21 +166,22 @@ function runCardScript(html: string, answer: (url: string, body: unknown) => Car
   const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
   document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script>[\s\S]*?<\/script>/g, '');
   const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
-  const posts: Array<{ url: string; init: { headers: Record<string, string>; body: string } }> = [];
-  const fetchStub = async (url: string, init: { headers: Record<string, string>; body: string }) => {
+  const posts: Array<{ url: string; init: { headers: Record<string, string>; body?: string } }> = [];
+  const timers: Array<() => void> = [];
+  const fetchStub = async (url: string, init: { headers: Record<string, string>; body?: string }) => {
     posts.push({ url, init });
     const reply = await answer(url, init.body === undefined ? undefined : JSON.parse(init.body));
     if (reply === 'network') throw new TypeError('Failed to fetch');
-    return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, json: async () => reply.body };
+    return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, headers: new Headers(reply.bridgeRefusal ? { 'X-Olympus-Owner-Refused': '1' } : {}), json: async () => reply.body };
   };
   new Function('window', 'document', 'fetch', 'setTimeout', script)(
     { confirm: () => true, location: { href: 'http://127.0.0.1:8010/dashboard?outside-help', reload: () => undefined } },
     document,
     fetchStub,
-    () => undefined,
+    (fn: () => void) => { timers.push(fn); },
   );
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
-  return { window, document, posts, settle };
+  return { window, document, posts, settle, timers };
 }
 
 describe('Set up zkAPI names the program Olympus installed', () => {
@@ -361,12 +362,16 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain(`data-outside-state="route_not_configured">${W.state.route_not_configured}<`);
     expect(html).toContain(`data-outside-form="add-route"`);
     expect(html).toContain(W.addRoute);
+    // The prerequisite comes before the disabled switch, with no duplicate box.
+    expect(html.indexOf('data-outside-form="add-route"')).toBeLessThan(html.indexOf('data-outside-form="enable"'));
+    expect(html.match(/data-outside-form="add-route"/g)?.length).toBe(1);
     expect(html).toContain(W.enableBlockedRoute);
     expect(html).toContain(`<button type="button" class="btn primary" disabled aria-disabled="true">${W.turnOn}</button>`);
     // The policy-not-a-file case cannot add it here: it says why, with the steps as its one button.
     const inline = page(status({ route: { state: 'not_configured', policyWritable: false } }));
     expect(inline).not.toContain('data-outside-form="add-route"');
     expect(inline).toContain(W.policyNotFile);
+    expect(inline.indexOf(W.policyNotFile)).toBeLessThan(inline.indexOf('data-outside-form="enable"'));
     expect(inline).toContain(`data-outside-open="steps">${W.showSteps}</button>`);
   });
 
@@ -494,7 +499,7 @@ describe('the Outside help page: states and copy', () => {
     await settle();
     expect(posts[0]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.route);
     expect(posts[0]!.init.headers['X-Olympus-CSRF']).toBe('csrf');
-    expect(JSON.parse(posts[0]!.init.body)).toEqual({ daily_request_cap: null, daily_spend_cap_usd: null });
+    expect(JSON.parse(posts[0]!.init.body!)).toEqual({ daily_request_cap: null, daily_spend_cap_usd: null });
     // Turn on: the switch sits in the status block; the language boxes sit in their section.
     const enable = document.querySelector('form[data-outside-form="enable"]')!;
     const event = new window.Event('submit', { cancelable: true }) as unknown as { submitter?: unknown };
@@ -502,7 +507,7 @@ describe('the Outside help page: states and copy', () => {
     enable.dispatchEvent(event as never);
     await settle();
     expect(posts[1]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.enable);
-    expect(JSON.parse(posts[1]!.init.body)).toEqual({ enabled: true, revision: 4, languages: ['en', 'fr'] });
+    expect(JSON.parse(posts[1]!.init.body!)).toEqual({ enabled: true, revision: 4, languages: ['en', 'fr'] });
     // The state line says on before the reload redraws the card.
     expect(document.querySelector('[data-outside-state-text]')!.textContent).toBe(W.state.on);
     expect(document.querySelector('[data-outside-state-text]')!.getAttribute('data-outside-state')).toBe('on');
@@ -564,12 +569,12 @@ describe('the Outside help page: states and copy', () => {
     await settle();
     // Paused by a held payment is still on: saving a level never turns it off.
     expect(posts.map((post) => post.url)).toEqual([DASHBOARD_OUTSIDE_HELP_PATHS.enable]);
-    expect(JSON.parse(posts[0]!.init.body)).toEqual({ enabled: true, revision: 7, level: 'unnamed' });
+    expect(JSON.parse(posts[0]!.init.body!)).toEqual({ enabled: true, revision: 7, level: 'unnamed' });
     const accept = document.querySelector('form[data-outside-accept]')!;
     accept.dispatchEvent(new window.Event('submit', { cancelable: true }));
     await settle();
     expect(posts[1]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.route);
-    expect(JSON.parse(posts[1]!.init.body)).toEqual({ acknowledged: ALL_IDS });
+    expect(JSON.parse(posts[1]!.init.body!)).toEqual({ acknowledged: ALL_IDS });
     expect(accept.querySelector('[data-action-message]')!.textContent).toContain('Saved. Olympus is restarting.');
     // Enter the date: opens Balance and limits.
     const limits = document.querySelector('details[data-outside-section="limits"]') as unknown as { open: boolean };
@@ -598,6 +603,35 @@ describe('the Outside help page: states and copy', () => {
     await settle();
     expect(out.textContent).toBe(W.saveUnreachable);
   });
+
+  test('the card says a direct bridge 421 did not save the change', async () => {
+    const { document, window, settle } = runCardScript(page(status({ settings: { level: 'general' } })), () => ({ status: 421, body: {} }));
+    const form = document.querySelector('form[data-outside-form="level"]')!;
+    form.dispatchEvent(new window.Event('submit', { cancelable: true })); await settle();
+    expect(form.querySelector('[data-action-message]')!.textContent).toBe('This Olympus window is out of date, so your change was not saved. Close this window, open Olympus again, and make the change again.');
+  });
+
+  for (const code of [403, 503]) {
+    test(`direct bridge ${code} says the change was not saved; backend refusal words are preserved`, async () => {
+      const answers = [{ status: code, body: {}, bridgeRefusal: true }, { status: code, body: { error: 'Backend refusal' } }];
+      const { document, window, settle } = runCardScript(page(status({ settings: { level: 'general' } })), () => answers.shift()!);
+      const form = document.querySelector('form[data-outside-form="level"]')!;
+      form.dispatchEvent(new window.Event('submit', { cancelable: true })); await settle();
+      expect(form.querySelector('[data-action-message]')!.textContent).toBe('This Olympus window is out of date, so your change was not saved. Close this window, open Olympus again, and make the change again.');
+      form.dispatchEvent(new window.Event('submit', { cancelable: true })); await settle();
+      expect(form.querySelector('[data-action-message]')!.textContent).toBe('Backend refusal');
+    });
+  }
+  for (const restarting of [true, false]) {
+    test(`post-save re-fetch names bridge restart recovery (restarting=${restarting})`, async () => {
+      const answers = [{ status: 200, body: { ok: true, restarting } }, { status: 421, body: {} }];
+      const { document, window, settle, timers } = runCardScript(page(status({ settings: { level: 'general' } })), () => answers.shift()!);
+      const form = document.querySelector('form[data-outside-form="level"]')!;
+      form.dispatchEvent(new window.Event('submit', { cancelable: true })); await settle();
+      timers.shift()!(); await settle();
+      expect(form.querySelector('[data-action-message]')!.textContent).toBe('Olympus restarted to apply your change. Close this window and open Olympus again.');
+    });
+  }
 
   test('Tor off: the route is said to be direct with the network address visible, whether or not a tor binary exists', () => {
     const off = readiness({ tor: 'off', torPort: 'not_used' });
@@ -1273,7 +1307,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     const { backend, reloads, path } = adapter({ home, zkapi: false });
     expect(await backend.addRoute({})).toMatchObject({ ok: false, code: 'confirmation_required' });
     const added = await backend.addRoute({ confirm: true });
-    expect(added).toMatchObject({ ok: true, restarting: true });
+    expect(added).toMatchObject({ ok: true, restarting: true, status_message: 'The zkAPI route is added. Finish the steps below.' });
     expect(reloads).toEqual([1]);
     const written = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
     expect(written.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID]).toMatchObject({ provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult', baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', secretRef: 'env:OLYMPUS_ZKAPI_API_KEY' });
@@ -1530,14 +1564,14 @@ describe('who writes the question (owner decision 2026-10-10)', () => {
     form.dispatchEvent(new window.Event('submit', { cancelable: true }));
     await settle();
     expect(posts[0]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.writer);
-    expect(JSON.parse(posts[0]!.init.body)).toEqual({ revision: 0, chatgpt_frontier_model: 'google/gemini-3-pro', claude_frontier_model: 'x-ai/grok-5' });
+    expect(JSON.parse(posts[0]!.init.body!)).toEqual({ revision: 0, chatgpt_frontier_model: 'google/gemini-3-pro', claude_frontier_model: 'x-ai/grok-5' });
     set('writer_base_url', 'http://127.0.0.1:11434/v1');
     set('writer_model', 'llama3.3:70b');
     set('claude_frontier_model', '');
     form.dispatchEvent(new window.Event('submit', { cancelable: true }));
     await settle();
     // The card took the saved revision from the first answer.
-    expect(JSON.parse(posts[1]!.init.body)).toEqual({
+    expect(JSON.parse(posts[1]!.init.body!)).toEqual({
       revision: 1,
       chatgpt_frontier_model: 'google/gemini-3-pro',
       claude_frontier_model: null,

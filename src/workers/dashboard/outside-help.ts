@@ -269,6 +269,9 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
 
   // 1. One status line: the switch, and today's count.
   const access: Access = canEdit ? 'edit' : canUnlock ? 'unlock' : 'read';
+  // Adding the missing route is the prerequisite for turning answers on.
+  const missingRoute = !unavailable && route.state === 'not_configured';
+  if (missingRoute) parts.push(renderProblems(status, access));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
   if (unavailable) {
@@ -279,7 +282,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   }
 
   // 2. Problems: one line each, one button each.
-  parts.push(renderProblems(status, access));
+  if (!missingRoute) parts.push(renderProblems(status, access));
 
   // 3. The statements, in full only until accepted.
   if (route.state === 'configured' && !route.acknowledgements.complete) parts.push(renderStatementsToAccept(access));
@@ -316,6 +319,8 @@ function outsideHelpScriptConfig(csrfToken: string | undefined) {
       failedStatus: W.saveFailedStatus,
       unreachable: W.saveUnreachable,
       restarting: W.restarting,
+      restartRecovery: W.restartRecovery,
+      staleWindow: W.staleWindow,
       on: W.state.on,
       off: W.state.off,
     },
@@ -822,6 +827,8 @@ export interface OutsideHelpClientCopy {
   failedStatus: string;
   unreachable: string;
   restarting: string;
+  restartRecovery: string;
+  staleWindow: string;
   on: string;
   off: string;
 }
@@ -855,7 +862,11 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     return Array.prototype.map.call(container.querySelectorAll('input[name="acknowledged"]'), function (input) { return input.value; });
   }
   // The server's own words for a refusal; the generic line only when there are none.
+  function bridgeRestart(response) {
+    return response && (response.status === 421 || ((response.status === 403 || response.status === 503) && response.headers && response.headers.get('X-Olympus-Owner-Refused') === '1'));
+  }
   function failure(response, result) {
+    if (bridgeRestart(response)) return config.copy.staleWindow;
     if (result && result.error && typeof result.error.message === 'string' && result.error.message) return result.error.message;
     if (result && typeof result.message === 'string' && result.message) return result.message;
     if (result && typeof result.error === 'string' && result.error) return result.error;
@@ -949,11 +960,12 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     return { confirm: true };
   }
   // After a restart the worker is briefly away: wait for it to answer, then reload.
-  function reloadWhenBack(delay) {
+  function reloadWhenBack(delay, form) {
     var tries = 0;
     function poll() {
       tries += 1;
       fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+        if (bridgeRestart(response)) { message(form, config.copy.restartRecovery, true); return; }
         if (response.ok || tries > 40) window.location.reload(); else setTimeout(poll, 1500);
       }, function () { if (tries > 40) window.location.reload(); else setTimeout(poll, 1500); });
     }
@@ -1014,9 +1026,9 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
-          reloadWhenBack(4000);
+          reloadWhenBack(4000, form);
         } else {
-          setTimeout(function () { window.location.reload(); }, 900);
+          reloadWhenBack(900, form);
         }
       } catch (error) {
         fail(config.copy.failed);

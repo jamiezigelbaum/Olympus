@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { loadOrCreateDashboardSessionSecret } from '../src/core/dashboard-session-secret.ts';
 import { LinuxOwnerBridge } from '../src/core/linux-owner-bridge.ts';
 import { prepareWorkerSocket, bindWorkerSocket } from '../src/core/worker-transport.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
@@ -30,10 +31,11 @@ for (const kind of ['chromium', 'firefox']) {
     const urls = parseRemotePublicBaseUrl('https://relay.example', 'a'.repeat(32));
     if (!urls.enabled) throw new Error('fixture');
     const oauth = withRequestPeer(createRemoteOAuthHandler({ platform: 'linux', publicUrls: urls.urls, connections: () => connections, requireOwnerSocket: true }), true);
-    const auth = withRequestPeer(withWorkerBearerAuth(async r => {
-      if (new URL(r.url).pathname === '/dashboard') return new Response(`<!doctype html><html><head><title>Owner dashboard</title></head><body><h1>PRIVATE OWNER DASHBOARD</h1><script>fetch("/dashboard.json?token=${dashboardQueryTokenFromWorkerAuthToken(token)}").then(r=>r.json()).then(v=>document.body.dataset.loaded=v.private)</script></body></html>`, { headers: { 'Content-Type': 'text/html' } });
-      return Response.json({ private: 'yes' });
-    }, { authToken: token, requireOwnerSocket: true }), true);
+    const makeAuth = () => withRequestPeer(withWorkerBearerAuth(async r => {
+      if (new URL(r.url).pathname === '/dashboard') return new Response(`<!doctype html><html><head><title>Owner dashboard</title></head><body data-csrf="${r.headers.get('X-Olympus-Control-Session-CSRF') ?? ''}"><h1>PRIVATE OWNER DASHBOARD</h1><script>fetch("/dashboard.json?token=${dashboardQueryTokenFromWorkerAuthToken(token)}").then(r=>r.json()).then(v=>document.body.dataset.loaded=v.private)</script></body></html>`, { headers: { 'Content-Type': 'text/html' } });
+      return Response.json({ private: 'yes', csrf: r.headers.get('X-Olympus-Control-Session-CSRF') });
+    }, { authToken: token, requireOwnerSocket: true, sessionSecret: loadOrCreateDashboardSessionSecret({ path: join(root, 'dashboard-session.secret') }).secret }), true);
+    let auth = makeAuth();
     const socket = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch: (r, server) => new URL(r.url).pathname.startsWith('/connect/') ? oauth(r, server) : auth(r, server) }));
     let bridge: LinuxOwnerBridge | undefined;
     const listener = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(r) {
@@ -94,10 +96,24 @@ for (const kind of ['chromium', 'firefox']) {
       expect(exchanged.status).toBe(200);
       const oldOrigin = bridge.origin; bridge.close();
       bridge = new LinuxOwnerBridge({ port: listener.port!, socketPath, transport, ready: () => true, fetchSocket: r => fetch(r, { unix: socketPath, redirect: 'manual' } as RequestInit), establishDashboard, openFile: async p => { ticketPath = p; } });
-      const stale = await fetch(entry + '/dashboard', { headers: { Host: new URL(oldOrigin).host } }); expect(stale.status).toBe(421);
+      auth = makeAuth(); // Simulate the worker's auth wrapper restarting too.
+      expect(bridge.origin).toBe(oldOrigin);
+      await owner.reload();
+      await owner.waitForFunction(() => document.body.dataset.loaded === 'yes');
+      expect(await owner.locator('h1').textContent()).toBe('PRIVATE OWNER DASHBOARD');
       const fresh = await context.newPage(); await fresh.goto(bridge.origin + '/dashboard');
-      expect(await fresh.locator('h1').textContent()).toBe("Confirm it's you on this computer");
-      expect(await fresh.evaluate(() => localStorage.getItem('olympus-desktop-owner-v1'))).toBeNull();
+      await fresh.waitForFunction(() => document.body.dataset.loaded === 'yes');
+      // The old dashboard cookie is still accepted for a CSRF-authenticated save.
+      const saved = await owner.evaluate(async () => {
+        const csrf = document.body.dataset.csrf!;
+        const statuses = [];
+        for (let i = 0; i < 2; i++) {
+          const response = await fetch('/dashboard/models/check', { method: 'POST', headers: { 'X-Olympus-CSRF': csrf } });
+          statuses.push(response.status);
+        }
+        return { hasCsrf: !!csrf, statuses };
+      });
+      expect(saved).toEqual({ hasCsrf: true, statuses: [200, 200] });
       // Owner proof alone also establishes the existing dashboard cookie;
       // OAuth-first/bookmarked entries do not require a CLI launch fragment.
       await bridge.openTicket('/dashboard');

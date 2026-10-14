@@ -49,7 +49,7 @@ The preset prerequisites are:
 | `local-first` — Local models with Venice fallback | A funded Venice API key; a local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. |
 | `local-only` — Local models | A local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. No Venice account is needed. |
 | `private-cloud-only` — Venice | A funded Venice API key for Private answers; no local server required. |
-| `no-sensitive` — Don't ingest Private data | Nothing. Private content is unavailable to answering. |
+| `no-sensitive` — Private kept local, keyword search only | Nothing. Private items are stored on this computer and found there by keyword only; they are never embedded or sent to a cloud model, and agent answers say Private sources were not searched. |
 
 Every preset makes content searchable with the built-in embedding model: a
 small model (Google's EmbeddingGemma 2) that runs on this computer, downloads
@@ -250,7 +250,7 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   | `local-first` | frontier cloud | Private pool explicitly ordered local → Venice Private |
   | `local-only` | frontier cloud | your own local models only |
   | `private-cloud-only` | frontier cloud | Venice Private `kimi-k3` only |
-  | `no-sensitive` | frontier cloud | **not ingested** (honest gap until you add a Private lane) |
+  | `no-sensitive` | frontier cloud | **kept local, keyword search only** (no Private answer lane until you add one) |
 
   In `private-cloud-only`, Private answers are served by the approved Venice
   Private model, with no local-model prerequisite or fallback. The Venice

@@ -1,6 +1,17 @@
 # Changelog
 
-## 1.0.0 - 2026-10-13
+## 1.0.0 - 2026-10-14
+
+- ChatGPT connection steps now start in Plugins and explain when to turn on Developer mode.
+- Anonymous answers show Add zkAPI before the turn-on switch when zkAPI is not set up; adding it asks you to finish setup without repeating the key step.
+
+- An out-of-date Linux dashboard window asks you to close it and open Olympus again.
+
+- Progress finishes when everything allowed by your privacy settings is ready. Private items kept out of search indexing no longer leave it stuck at 0%; unmeasured progress stays unmeasured.
+
+- On Linux, the Olympus window keeps working after you change a setting.
+
+- Olympus tells you when a new version is available, with the command to update.
 
 - **Stuck privacy checks recover automatically.** Missing questions are restored from stored text when possible; otherwise items settle as Private. Deleted items stop waiting. While privacy checks hold search indexing, the dashboard says Waiting to be checked.
 
@@ -47,6 +58,8 @@
   their Public tier unchanged; Olympus does not rewrite an existing privacy
   policy, and the operator drift check no longer counts that kept tier as
   drift.
+
+- Known issue, fixed in 1.0.1: if an AI app read an item while it was Personal and the check then moves it to Private, an answer already being prepared can still be delivered, and a copy made on your computer stays there (it is never sent anywhere).
 
 ## 1.0.0-rc.6 - 2026-10-12
 

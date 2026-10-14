@@ -193,7 +193,7 @@ describe('sources that do report the walk keep their verdict', () => {
     expect(build({ corpus: xCorpus(), sourceId: 'x.bookmarks', tasks: [task], handles: X_HANDLES }).card.last_run?.traversal_complete).toBe(false);
   });
 
-  test('a task that has not run its walk yet keeps the source listing', () => {
-    expect(build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [counted('gmail.pull', 1), { id: 'gmail.reconcile' }] }).card.last_run?.traversal_complete).toBe(false);
+  test('a completed provider walk is not undone by a sibling task that has never reported', () => {
+    expect(build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [counted('gmail.pull', 1), { id: 'gmail.reconcile' }] }).card.last_run?.traversal_complete).toBe(true);
   });
 });

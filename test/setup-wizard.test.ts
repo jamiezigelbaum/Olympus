@@ -49,8 +49,8 @@ describe('olympus setup wizard', () => {
       expect(pitch).toContain('Semantic search uses a small model built into Olympus');
       expect(pitch).toContain('needs no account or key');
       expect(pitch).toContain('Private content never goes to ordinary cloud embedding providers');
-      expect(pitch).toContain("Choosing Don't ingest Private data is a deliberate choice");
-      expect(result.presetLabel).toBe("Don't ingest Private data");
+      expect(pitch).toContain("Choosing Private kept local, keyword search only is a deliberate choice");
+      expect(result.presetLabel).toBe("Private kept local, keyword search only");
       expect(pitch).not.toContain('Venice E2EE can be connected');
       expect(pitch).not.toContain('E2EE and Anonymized models are refused');
       expect(result.secureTierDecision).toBe('secure_off_user_choice');

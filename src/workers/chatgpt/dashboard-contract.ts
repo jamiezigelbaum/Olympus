@@ -115,9 +115,10 @@ export interface SourceStallDetail {
 export interface SourceProgress {
   stage: 'listing' | 'reading' | 'indexing' | 'done';
   unit: 'files' | 'messages' | 'items';
-  done: number;
+  /** Absent when the store cannot measure the numerator. */
+  done?: number;
   total: number;
-  percent: number;
+  percent?: number;
   stalled: boolean;
   /** Only when `stalled`, and only when the reason is known. */
   stalledReason?: SourceStalledReason;
@@ -260,8 +261,9 @@ export interface DashboardViewModelV1 {
     unit: 'files' | 'messages' | 'items';
     phase: 'initial' | 'refresh';
     /** Searchable (indexed) items over the in-scope total: read but unindexed is not done. */
-    percent: number;
-    itemsLeft: number;
+    /** Both omitted when the numerator is unknown. */
+    percent?: number;
+    itemsLeft?: number;
     /** Only once a rate has been measured. */
     etaSeconds?: number;
     stalled: boolean;

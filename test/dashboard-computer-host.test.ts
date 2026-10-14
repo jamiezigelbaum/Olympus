@@ -892,10 +892,12 @@ describe('the host page when its session expires', () => {
     const fetched: string[] = [];
     let status = 200;
     const fakeFetch = async (url: string) => {
+      if (url === '/v1/health') return Response.json({});
       fetched.push(url);
       return new Response(JSON.stringify({ structuredContent: { ok: true } }), { status });
     };
     const fakeWindow = {
+      setInterval: win.setInterval.bind(win),
       location: { hash: '', pathname: '/dashboard', search: '', href: `${pageOrigin}/dashboard`, origin: pageOrigin, assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') },
       history: { replaceState: () => undefined },
       open: (url: string) => { opened.push(url); return null; },

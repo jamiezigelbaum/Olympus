@@ -376,6 +376,14 @@ function render(access: DashboardRemoteAccess, store?: RemoteConnectionStore): s
 }
 
 describe('the panel', () => {
+  test('ChatGPT setup starts in Plugins and explains when Developer mode is needed', () => {
+    const doc = new Window().document;
+    doc.body.innerHTML = render(REMOTE_ON);
+    const text = doc.querySelector('[data-agent="chatgpt"]')!.textContent;
+    expect(text).toContain("In ChatGPT, open Plugins, choose +, then Add custom MCP server. Name it Olympus, choose OAuth, and paste this address as the URL (if you don't see Add custom MCP server, turn on Developer mode in Settings first):");
+    expect(text).not.toContain('Developer mode under Advanced settings');
+  });
+
   test('through your own tunnel, offers every agent with its own method', () => {
     const html = render(REMOTE_TUNNEL);
     for (const label of ['Claude', 'ChatGPT', 'Grok', 'Grok API', 'Claude Code or Codex', 'Other']) {
