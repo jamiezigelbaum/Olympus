@@ -36,8 +36,8 @@ export const ENGINE_BRIEF_MAX_SENTENCES = 5;
 export interface EngineBriefProgress {
   unit: 'files' | 'messages' | 'items';
   phase: 'initial' | 'refresh';
-  percent: number;
-  itemsLeft: number;
+  percent?: number;
+  itemsLeft?: number;
   /** Only once a rate has been measured. */
   etaSeconds?: number;
   stalled: boolean;
@@ -70,8 +70,8 @@ export function engineBriefFromViewModel(view: EngineBriefViewModel): EngineBrie
       ? {
           unit: progress.unit,
           phase: progress.phase,
-          percent: progress.percent,
-          itemsLeft: progress.itemsLeft,
+          ...(finiteNumber(progress.percent) ? { percent: progress.percent } : {}),
+          ...(finiteNumber(progress.itemsLeft) ? { itemsLeft: progress.itemsLeft } : {}),
           ...(typeof progress.etaSeconds === 'number' ? { etaSeconds: progress.etaSeconds } : {}),
           stalled: progress.stalled === true,
         }
@@ -99,12 +99,12 @@ export function parseEngineBrief(value: unknown): EngineBrief | undefined {
   if (value.progress !== null && value.progress !== undefined) {
     const raw = value.progress;
     if (!isRecord(raw) || !UNITS.has(raw.unit) || !PHASES.has(raw.phase)
-      || !finiteNumber(raw.percent) || !finiteNumber(raw.itemsLeft) || typeof raw.stalled !== 'boolean') return undefined;
+      || (raw.percent !== undefined && !finiteNumber(raw.percent)) || (raw.itemsLeft !== undefined && !finiteNumber(raw.itemsLeft)) || typeof raw.stalled !== 'boolean') return undefined;
     progress = {
       unit: raw.unit as EngineBriefProgress['unit'],
       phase: raw.phase as EngineBriefProgress['phase'],
-      percent: raw.percent,
-      itemsLeft: raw.itemsLeft,
+      ...(finiteNumber(raw.percent) ? { percent: raw.percent } : {}),
+      ...(finiteNumber(raw.itemsLeft) ? { itemsLeft: raw.itemsLeft } : {}),
       ...(finiteNumber(raw.etaSeconds) ? { etaSeconds: raw.etaSeconds } : {}),
       stalled: raw.stalled,
     };

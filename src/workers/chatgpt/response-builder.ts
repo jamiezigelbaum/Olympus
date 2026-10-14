@@ -241,8 +241,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     out.progress = {
       unit: UNITS.has(progress.unit) ? progress.unit : 'items',
       phase: progress.phase === 'initial' ? 'initial' : 'refresh',
-      percent: percent(progress.percent),
-      itemsLeft: whole(progress.itemsLeft),
+      ...(finite(progress.percent) ? { percent: percent(progress.percent) } : {}),
+      ...(finite(progress.itemsLeft) ? { itemsLeft: whole(progress.itemsLeft) } : {}),
       ...(finite(progress.etaSeconds) ? { etaSeconds: whole(progress.etaSeconds) } : {}),
       stalled: progress.stalled === true,
       details: (progress.details ?? []).map((detail) => ({
@@ -359,9 +359,9 @@ function copySourceProgress(progress: SourceProgress): SourceProgress {
   return {
     stage: SOURCE_STAGES.has(progress.stage) ? progress.stage : 'listing',
     unit: UNITS.has(progress.unit) ? progress.unit : 'items',
-    done: whole(progress.done),
+    ...(finite(progress.done) ? { done: whole(progress.done) } : {}),
     total: whole(progress.total),
-    percent: percent(progress.percent),
+    ...(finite(progress.percent) ? { percent: percent(progress.percent) } : {}),
     stalled,
     ...(reason ? { stalledReason: reason } : {}),
     ...(stall ? { stall } : {}),
@@ -402,7 +402,7 @@ function dashboardSummary(view: DashboardViewModelV1): string {
   if (connected.length > 0) {
     parts.push(`Sources: ${connected.map((source) => `${source.label} (${source.status})`).join(', ')}.`);
   }
-  if (view.progress) parts.push(`Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
+  if (view.progress) parts.push(view.progress.percent === undefined ? 'Indexing progress is not measured.' : `Indexing ${view.progress.percent}% done, ${view.progress.itemsLeft} ${view.progress.unit} left.`);
   if (view.needsYou.length > 0) parts.push(`Needs you: ${view.needsYou.map((item) => item.sentence.replace(/\.$/, '')).join('; ')}.`);
   return parts.join(' ');
 }

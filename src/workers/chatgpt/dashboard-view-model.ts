@@ -623,10 +623,11 @@ interface StageCounts {
   /**
    * Items a question can find now, over the in-scope population: indexed
    * (embedded) items, or read items for a keyword-only source whose
-   * embedding stage does not apply. Zero when the store publishes no
-   * per-item embedding count: unknown is never claimed as searchable.
+   * embedding stage does not apply. Absent when per-item embedding progress
+   * is unknown: an unknown numerator must never become zero.
    */
   searchable?: { done: number; total: number };
+  searchableUnknown?: boolean;
 }
 
 interface MeasuredSourceProgress {
@@ -679,13 +680,25 @@ function measuredSourceProgress(
     if (phase.id === 'embedding') counts.indexing = entry;
   }
   const embeddingApplies = !phases.some((phase) => phase.id === 'embedding' && phase.not_applicable === true);
-  if (counts.indexing) counts.searchable = counts.indexing;
-  else if (counts.reading) counts.searchable = embeddingApplies ? { done: 0, total: counts.reading.total } : counts.reading;
-  // An embedding row whose store publishes no per-item count is finished when
-  // the chunk backlog says nothing is missing; otherwise it is still indexing.
-  const embeddingBehind = (scrubbed.embedding_backlog?.missing_chunks ?? 0) > 0
-    || scrubbed.embedding_backlog?.refresh_needed === true;
-  const open = phases.find((phase) => phase.state !== 'done' && !(phase.unmeasured === true && !embeddingBehind));
+  if (counts.indexing) {
+    const summary = dashboardWorkingSummary(scrubbed);
+    const exemptTotal = scrubbed.coverage.embedding_eligible_items === undefined
+      ? 0 : Math.max(0, (summary?.in_scope_items ?? 0) - scrubbed.coverage.embedding_eligible_items);
+    const exemptRead = Math.min(exemptTotal, scrubbed.coverage.embedding_not_required_read_items ?? 0);
+    const delta = phases.find((phase) => phase.id === 'embedding')?.scope === 'delta';
+    // A phase's delta and another phase's corpus total are different
+    // populations. Only unfinished exempt reading belongs in an embedding
+    // delta; completed exempt items must never inflate its numerator.
+    counts.searchable = {
+      done: counts.indexing.done + (delta ? 0 : exemptRead),
+      total: counts.indexing.total + (delta ? exemptTotal - exemptRead : exemptTotal),
+    };
+  }
+  else if (counts.reading && !embeddingApplies) counts.searchable = counts.reading;
+  else if (embeddingApplies) counts.searchableUnknown = true;
+  // A chunk count cannot supply an unknown item numerator, even at chunk
+  // parity. Policy-exempt stages are already done; unmeasured stages stay open.
+  const open = phases.find((phase) => phase.state !== 'done');
   if (!open) {
     const summary = dashboardWorkingSummary(scrubbed);
     const total = summary?.in_scope_items ?? 0;
@@ -696,9 +709,9 @@ function measuredSourceProgress(
   }
   const stage = STAGE_FOR_PHASE[open.id];
   const measure = open.measure;
-  let done = 0;
+  let done: number | undefined = 0;
   let total = 0;
-  let percent = 0;
+  let percent: number | undefined = 0;
   if (open.id === 'metadata_sync') {
     // Listing counts the source's own items found so far; a folder walk's
     // share, when the walk is sized, is the only percentage it has.
@@ -710,7 +723,8 @@ function measuredSourceProgress(
     total = count(measure.total);
     percent = total > 0 ? clampPercent((done / total) * 100) : 0;
   } else if (measure.kind === 'indeterminate') {
-    done = count(measure.done);
+    done = open.unmeasured ? undefined : count(measure.done);
+    percent = undefined;
   } else {
     total = count(measure.remaining);
   }
@@ -718,7 +732,7 @@ function measuredSourceProgress(
   const stalled = reason !== undefined || open.state === 'stalled';
   const stall = stalled ? stallDetail(card, open, stage, reason, now) : undefined;
   return {
-    progress: { stage, unit, done, total, percent, stalled, ...(reason ? { stalledReason: reason } : {}), ...(stall ? { stall } : {}) },
+    progress: { stage, unit, ...(done === undefined ? {} : { done }), total, ...(percent === undefined ? {} : { percent }), stalled, ...(reason ? { stalledReason: reason } : {}), ...(stall ? { stall } : {}) },
     counts,
   };
 }
@@ -1024,7 +1038,7 @@ function overallProgress(
       searchable.total += counts.searchable.total;
     }
     ownTotal += progress.total;
-    ownDone += progress.total > 0 ? Math.min(progress.done, progress.total) : 0;
+    ownDone += progress.total > 0 ? Math.min(progress.done ?? 0, progress.total) : 0;
     if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || progress.stage === 'listing') initial = true;
     const minutes = card.progress?.eta_minutes;
     if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) {
@@ -1039,8 +1053,10 @@ function overallProgress(
   return {
     unit,
     phase: initial ? 'initial' : 'refresh',
-    percent: total > 0 ? clampPercent((Math.min(done, total) / total) * 100) : 0,
-    itemsLeft: Math.max(0, total - done),
+    ...(open.some((row) => row.counts.searchableUnknown) ? {} : {
+      percent: total > 0 ? clampPercent((Math.min(done, total) / total) * 100) : 0,
+      itemsLeft: Math.max(0, total - done),
+    }),
     ...(eta !== undefined ? { etaSeconds: eta } : {}),
     stalled: open.some((row) => row.progress.stalled),
     details,
@@ -1092,6 +1108,9 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       indexed_items: count(card.coverage.indexed_items),
       content_ready_items: count(card.coverage.content_ready_items),
       embedded_items: count(card.coverage.embedded_items),
+      ...(finite(card.coverage.embedding_unreadable_items) ? { embedding_unreadable_items: count(card.coverage.embedding_unreadable_items) } : {}),
+      ...(finite(card.coverage.embedding_eligible_items) ? { embedding_eligible_items: count(card.coverage.embedding_eligible_items) } : {}),
+      ...(finite(card.coverage.embedding_not_required_read_items) ? { embedding_not_required_read_items: count(card.coverage.embedding_not_required_read_items) } : {}),
       ...(finite(card.coverage.embedded_files) ? { embedded_files: count(card.coverage.embedded_files) } : {}),
       needs_review_items: count(card.coverage.needs_review_items),
       ...(finite(card.coverage.not_read_by_policy_items)

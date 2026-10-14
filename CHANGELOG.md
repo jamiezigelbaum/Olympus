@@ -2,6 +2,8 @@
 
 ## 1.0.0 - 2026-10-13
 
+- Progress finishes when everything allowed by your privacy settings is ready. Private items kept out of search indexing no longer leave it stuck at 0%; unmeasured progress stays unmeasured.
+
 - **Stuck privacy checks recover automatically.** Missing questions are restored from stored text when possible; otherwise items settle as Private. Deleted items stop waiting. While privacy checks hold search indexing, the dashboard says Waiting to be checked.
 
 - Linux upgrades preserve privacy preferences and keep settings inside the installation so purge removes them.

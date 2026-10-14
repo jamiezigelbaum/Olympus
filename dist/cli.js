@@ -71638,14 +71638,15 @@ function embeddingPhase(source, settledPass, extraction, summary) {
   if (source.embedding_required === false) {
     return { ...ratioPhase("embedding", noun, 0, 0, false), not_applicable: true };
   }
-  const read = summary !== undefined ? Math.min(summary.read_items, summary.in_scope_items) : extraction.measure.kind === "ratio" ? extraction.measure.done : undefined;
-  const total = summary !== undefined ? summary.in_scope_items : extraction.measure.kind === "ratio" ? extraction.measure.total : undefined;
+  const exemptRead = source.coverage.embedding_not_required_read_items ?? 0;
+  const read = summary !== undefined ? Math.max(0, Math.min(summary.read_items, summary.in_scope_items) - exemptRead) : extraction.measure.kind === "ratio" ? extraction.measure.done : undefined;
+  const total = source.coverage.embedding_eligible_items ?? (summary !== undefined ? summary.in_scope_items : extraction.measure.kind === "ratio" ? extraction.measure.total : undefined);
   if (read === undefined || total === undefined) {
     return indeterminatePhase("embedding", noun, source.coverage.embedded_files ?? 0);
   }
   const measured = source.coverage.embedded_files;
   if (measured !== undefined) {
-    return ratioPhase("embedding", noun, Math.min(measured, read), total, settledPass, source.movement?.embedding_settled_value, summary?.unreadable_items);
+    return ratioPhase("embedding", noun, Math.min(measured, read), total, settledPass, source.movement?.embedding_settled_value, source.coverage.embedding_unreadable_items ?? summary?.unreadable_items);
   }
   if (total === 0)
     return ratioPhase("embedding", noun, 0, 0, false);
@@ -71656,7 +71657,12 @@ function withState(phase, index, phases, source, now, embeddingRuntime) {
     return { ...phase, state: "done", state_words: "Not needed · keyword search only" };
   }
   if (phase.unmeasured === true) {
-    return { ...phase, state: "waiting", state_words: "Not measured by this store" };
+    const extraction = phases.find((candidate) => candidate.id === "extraction");
+    const backlog = source.embedding_backlog;
+    const knownWork = backlog !== undefined && (backlog.missing_chunks > 0 || backlog.refresh_needed);
+    if (!knownWork || !extraction || !dashboardPhaseComplete(extraction)) {
+      return { ...phase, state: "waiting", state_words: "Not measured by this store" };
+    }
   }
   if (dashboardPhaseComplete(phase)) {
     const due2 = nextSyncDue(source, phase.id, now);
@@ -72007,13 +72013,18 @@ function createSourceIndexStatusHandler(options = {}) {
       const requestedCorpusId = request.corpus_id ? canonicalSourceCorpusId(request.corpus_id) : undefined;
       const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
       const corpora = currentRegistry().list().filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
-      const statuses = corpora.map((corpus) => {
+      const statuses = corpora.map((declaredCorpus) => {
+        const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
+        const embeddingDisabled = policy !== undefined && (!policy.embeddingProfile || policy.activationMode === "metadata_only" || policy.activationMode === "lexical_only");
+        const corpus = embeddingDisabled ? { ...declaredCorpus, embeddingPolicy: "disabled", activationMode: "lexical_only" } : declaredCorpus;
         const store = storesByCorpusId.get(corpus.corpusId);
         const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
         const maxAgeMs = normalizedStatusCacheMaxAge(request.readiness_ledger_max_age_ms);
         const availability = resolveStatusRetrievalAvailability(options.retrievalAvailability?.[corpus.corpusId], request);
         const cacheKey = JSON.stringify([
           corpus.corpusId,
+          corpus.embeddingPolicy,
+          corpus.activationMode,
           request.include_readiness_ledger === true ? "full" : "cheap",
           availability === undefined ? null : [
             availability.servable,
@@ -72237,7 +72248,7 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
       required: embeddingRequired,
       chunks,
       embedded_chunks: embeddedChunks,
-      missing_chunks: Math.max(0, chunks - embeddedChunks),
+      missing_chunks: embeddingRequired ? Math.max(0, chunks - embeddedChunks) : 0,
       refresh_needed: embeddingRequired && embeddedChunks < chunks
     }
   };
@@ -73270,9 +73281,17 @@ function aggregateCoverage(cards) {
     const value2 = card.coverage.unreadable_items;
     return value2 === undefined ? sum2 : (sum2 ?? 0) + value2;
   }, undefined);
-  const measuring = cards.filter((card) => card.coverage.embedded_files !== undefined);
-  const dataBearing = cards.filter((card) => card.coverage.indexed_items > 0);
+  const required3 = cards.filter((card) => card.embedding_required !== false);
+  const exempt = cards.filter((card) => card.embedding_required === false);
+  const measuring = required3.filter((card) => card.coverage.embedded_files !== undefined);
+  const dataBearing = required3.filter((card) => card.coverage.indexed_items > 0);
   const embeddedFiles = measuring.length > 0 && dataBearing.every((card) => card.coverage.embedded_files !== undefined) ? measuring.reduce((sum2, card) => sum2 + (card.coverage.embedded_files ?? 0), 0) : undefined;
+  const population = (card) => answerReadyEligibleItems(card.coverage.indexed_items, card.coverage.not_read_by_policy_items, card.coverage.answer_ready_eligible_items);
+  const policyCounts = exempt.length > 0 ? {
+    embedding_unreadable_items: required3.reduce((sum2, card) => sum2 + (card.coverage.unreadable_items ?? 0), 0),
+    embedding_eligible_items: required3.reduce((sum2, card) => sum2 + population(card), 0),
+    embedding_not_required_read_items: exempt.reduce((sum2, card) => sum2 + Math.min(card.coverage.content_ready_items, population(card)), 0)
+  } : {};
   return cards.reduce((sum2, card) => ({
     ...sum2,
     indexed_items: sum2.indexed_items + card.coverage.indexed_items,
@@ -73284,6 +73303,7 @@ function aggregateCoverage(cards) {
     content_ready_items: 0,
     embedded_items: 0,
     ...embeddedFiles !== undefined ? { embedded_files: embeddedFiles } : {},
+    ...policyCounts,
     needs_review_items: 0,
     ...notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {},
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
@@ -73899,6 +73919,7 @@ function sourceCardFromCorpus(corpus, scheduler, _history, _now) {
     family: corpus.family,
     trust_domain: corpus.trust_domain,
     configured: corpus.configured,
+    ...corpus.embedding_parity ? { embedding_required: corpus.embedding_parity.required } : {},
     freshness,
     coverage,
     needs_review: needsReviewFromCounts(coverage.needs_review_items, counts),
@@ -74057,14 +74078,17 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   if (tasks.length === 0)
     return;
   const walks = [];
+  let unreported = false;
   for (const task of tasks) {
-    if (!task.last_result)
-      return false;
+    if (!task.last_result) {
+      unreported = true;
+      continue;
+    }
     const signal = [task.last_result.counts?.traversal_complete, task.last_result.counts?.global_traversal_exhausted].find((value2) => typeof value2 === "number" && Number.isFinite(value2));
     if (signal !== undefined)
       walks.push(signal === 1);
   }
-  return walks.length === 0 ? undefined : walks.every(Boolean);
+  return walks.length === 0 ? unreported ? false : undefined : walks.every(Boolean);
 }
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
@@ -85579,8 +85603,8 @@ function engineBriefFromViewModel(view2) {
     progress: progress ? {
       unit: progress.unit,
       phase: progress.phase,
-      percent: progress.percent,
-      itemsLeft: progress.itemsLeft,
+      ...finiteNumber(progress.percent) ? { percent: progress.percent } : {},
+      ...finiteNumber(progress.itemsLeft) ? { itemsLeft: progress.itemsLeft } : {},
       ...typeof progress.etaSeconds === "number" ? { etaSeconds: progress.etaSeconds } : {},
       stalled: progress.stalled === true
     } : null,
@@ -85600,13 +85624,13 @@ function parseEngineBrief(value2) {
   let progress = null;
   if (value2.progress !== null && value2.progress !== undefined) {
     const raw = value2.progress;
-    if (!isRecord3(raw) || !UNITS.has(raw.unit) || !PHASES.has(raw.phase) || !finiteNumber(raw.percent) || !finiteNumber(raw.itemsLeft) || typeof raw.stalled !== "boolean")
+    if (!isRecord3(raw) || !UNITS.has(raw.unit) || !PHASES.has(raw.phase) || raw.percent !== undefined && !finiteNumber(raw.percent) || raw.itemsLeft !== undefined && !finiteNumber(raw.itemsLeft) || typeof raw.stalled !== "boolean")
       return;
     progress = {
       unit: raw.unit,
       phase: raw.phase,
-      percent: raw.percent,
-      itemsLeft: raw.itemsLeft,
+      ...finiteNumber(raw.percent) ? { percent: raw.percent } : {},
+      ...finiteNumber(raw.itemsLeft) ? { itemsLeft: raw.itemsLeft } : {},
       ...finiteNumber(raw.etaSeconds) ? { etaSeconds: raw.etaSeconds } : {},
       stalled: raw.stalled
     };
@@ -120862,6 +120886,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function sourceProgressLabel(progress) {
     const total = Number(progress.total) || 0;
+    if (progress.percent === undefined && progress.stage !== "listing")
+      return P.sourceStages[progress.stage] || P.findingItems;
     if (total <= 0)
       return P.findingItems;
     const stage = P.sourceStages[progress.stage] || P.findingItems;
@@ -120885,7 +120911,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return box;
     }
     const label = sourceProgressLabel(progress);
-    add(box, el("p", "muted", label), progressBar(progress.percent, name + ": " + label));
+    add(box, el("p", "muted", label));
+    if (progress.percent !== undefined)
+      add(box, progressBar(progress.percent, name + ": " + label));
     return box;
   }
   function progressRepeatsOneRow(sources) {
@@ -120973,7 +121001,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
   }
   function progressFinished(progress) {
-    return !!progress && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
+    return !!progress && progress.itemsLeft !== undefined && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
   }
   function progressText(progress) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
@@ -120981,13 +121009,14 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
       return phase + ": " + P.findingItems + paused;
     }
-    const parts = [fill2(P.percentDone, { percent: percent(progress.percent) })];
+    const parts = progress.percent === undefined ? [P.sourceStages.indexing] : [fill2(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
       parts.push(P.progressPaused);
       return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
     }
     const left = Number(progress.itemsLeft) || 0;
-    parts.push(fill2(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
+    if (progress.itemsLeft !== undefined)
+      parts.push(fill2(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
     if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
       parts.push(fill2(P.eta, { duration: duration3(progress.etaSeconds) }));
     }
@@ -121015,7 +121044,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const section = add(el("section", "section"), el("h2", "", P.progress));
     const stalled = progress.stalled && !progressPaused();
     const line = el("p", stalled ? "progress-line stalled" : progressPaused() ? "progress-line paused" : "progress-line", progressText(progress));
-    add(section, line, progressBar(progress.percent, P.progress));
+    add(section, line);
+    if (progress.percent !== undefined)
+      add(section, progressBar(progress.percent, P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
     const faster = indexFasterControl();
     if (withDetails && (stages.length || faster)) {
@@ -136675,12 +136706,20 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
       counts.indexing = entry;
   }
   const embeddingApplies = !phases.some((phase) => phase.id === "embedding" && phase.not_applicable === true);
-  if (counts.indexing)
-    counts.searchable = counts.indexing;
-  else if (counts.reading)
-    counts.searchable = embeddingApplies ? { done: 0, total: counts.reading.total } : counts.reading;
-  const embeddingBehind = (scrubbed.embedding_backlog?.missing_chunks ?? 0) > 0 || scrubbed.embedding_backlog?.refresh_needed === true;
-  const open7 = phases.find((phase) => phase.state !== "done" && !(phase.unmeasured === true && !embeddingBehind));
+  if (counts.indexing) {
+    const summary = dashboardWorkingSummary(scrubbed);
+    const exemptTotal = scrubbed.coverage.embedding_eligible_items === undefined ? 0 : Math.max(0, (summary?.in_scope_items ?? 0) - scrubbed.coverage.embedding_eligible_items);
+    const exemptRead = Math.min(exemptTotal, scrubbed.coverage.embedding_not_required_read_items ?? 0);
+    const delta = phases.find((phase) => phase.id === "embedding")?.scope === "delta";
+    counts.searchable = {
+      done: counts.indexing.done + (delta ? 0 : exemptRead),
+      total: counts.indexing.total + (delta ? exemptTotal - exemptRead : exemptTotal)
+    };
+  } else if (counts.reading && !embeddingApplies)
+    counts.searchable = counts.reading;
+  else if (embeddingApplies)
+    counts.searchableUnknown = true;
+  const open7 = phases.find((phase) => phase.state !== "done");
   if (!open7) {
     const summary = dashboardWorkingSummary(scrubbed);
     const total2 = summary?.in_scope_items ?? 0;
@@ -136703,7 +136742,8 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
     total = count(measure.total);
     percent = total > 0 ? clampPercent2(done / total * 100) : 0;
   } else if (measure.kind === "indeterminate") {
-    done = count(measure.done);
+    done = open7.unmeasured ? undefined : count(measure.done);
+    percent = undefined;
   } else {
     total = count(measure.remaining);
   }
@@ -136711,7 +136751,7 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
   const stalled = reason !== undefined || open7.state === "stalled";
   const stall = stalled ? stallDetail(card, open7, stage, reason, now) : undefined;
   return {
-    progress: { stage, unit, done, total, percent, stalled, ...reason ? { stalledReason: reason } : {}, ...stall ? { stall } : {} },
+    progress: { stage, unit, ...done === undefined ? {} : { done }, total, ...percent === undefined ? {} : { percent }, stalled, ...reason ? { stalledReason: reason } : {}, ...stall ? { stall } : {} },
     counts
   };
 }
@@ -136912,7 +136952,7 @@ function overallProgress(rows) {
       searchable.total += counts.searchable.total;
     }
     ownTotal += progress.total;
-    ownDone += progress.total > 0 ? Math.min(progress.done, progress.total) : 0;
+    ownDone += progress.total > 0 ? Math.min(progress.done ?? 0, progress.total) : 0;
     if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || progress.stage === "listing")
       initial = true;
     const minutes = card.progress?.eta_minutes;
@@ -136931,8 +136971,10 @@ function overallProgress(rows) {
   return {
     unit,
     phase: initial ? "initial" : "refresh",
-    percent: total > 0 ? clampPercent2(Math.min(done, total) / total * 100) : 0,
-    itemsLeft: Math.max(0, total - done),
+    ...open7.some((row) => row.counts.searchableUnknown) ? {} : {
+      percent: total > 0 ? clampPercent2(Math.min(done, total) / total * 100) : 0,
+      itemsLeft: Math.max(0, total - done)
+    },
     ...eta !== undefined ? { etaSeconds: eta } : {},
     stalled: open7.some((row) => row.progress.stalled),
     details
@@ -136969,6 +137011,9 @@ function scrubCard(definition, card) {
       indexed_items: count(card.coverage.indexed_items),
       content_ready_items: count(card.coverage.content_ready_items),
       embedded_items: count(card.coverage.embedded_items),
+      ...finite(card.coverage.embedding_unreadable_items) ? { embedding_unreadable_items: count(card.coverage.embedding_unreadable_items) } : {},
+      ...finite(card.coverage.embedding_eligible_items) ? { embedding_eligible_items: count(card.coverage.embedding_eligible_items) } : {},
+      ...finite(card.coverage.embedding_not_required_read_items) ? { embedding_not_required_read_items: count(card.coverage.embedding_not_required_read_items) } : {},
       ...finite(card.coverage.embedded_files) ? { embedded_files: count(card.coverage.embedded_files) } : {},
       needs_review_items: count(card.coverage.needs_review_items),
       ...finite(card.coverage.not_read_by_policy_items) ? { not_read_by_policy_items: count(card.coverage.not_read_by_policy_items) } : {},
@@ -139949,8 +139994,8 @@ function copyDashboardViewModel(view2) {
     out.progress = {
       unit: UNITS2.has(progress.unit) ? progress.unit : "items",
       phase: progress.phase === "initial" ? "initial" : "refresh",
-      percent: percent(progress.percent),
-      itemsLeft: whole(progress.itemsLeft),
+      ...finite2(progress.percent) ? { percent: percent(progress.percent) } : {},
+      ...finite2(progress.itemsLeft) ? { itemsLeft: whole(progress.itemsLeft) } : {},
       ...finite2(progress.etaSeconds) ? { etaSeconds: whole(progress.etaSeconds) } : {},
       stalled: progress.stalled === true,
       details: (progress.details ?? []).map((detail) => ({
@@ -140045,9 +140090,9 @@ function copySourceProgress(progress) {
   return {
     stage: SOURCE_STAGES.has(progress.stage) ? progress.stage : "listing",
     unit: UNITS2.has(progress.unit) ? progress.unit : "items",
-    done: whole(progress.done),
+    ...finite2(progress.done) ? { done: whole(progress.done) } : {},
     total: whole(progress.total),
-    percent: percent(progress.percent),
+    ...finite2(progress.percent) ? { percent: percent(progress.percent) } : {},
     stalled,
     ...reason ? { stalledReason: reason } : {},
     ...stall ? { stall } : {}
@@ -140085,7 +140130,7 @@ function dashboardSummary(view2) {
     parts.push(`Sources: ${connected2.map((source) => `${source.label} (${source.status})`).join(", ")}.`);
   }
   if (view2.progress)
-    parts.push(`Indexing ${view2.progress.percent}% done, ${view2.progress.itemsLeft} ${view2.progress.unit} left.`);
+    parts.push(view2.progress.percent === undefined ? "Indexing progress is not measured." : `Indexing ${view2.progress.percent}% done, ${view2.progress.itemsLeft} ${view2.progress.unit} left.`);
   if (view2.needsYou.length > 0)
     parts.push(`Needs you: ${view2.needsYou.map((item) => item.sentence.replace(/\.$/, "")).join("; ")}.`);
   return parts.join(" ");
@@ -157296,6 +157341,7 @@ async function main() {
     corpusDefinitions: () => sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
     connectorStores,
     connectorStoreStatusScope,
+    retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain],
     retrievalAvailability,
     tierClassification: () => {
       const backlog = tierSnifferBacklog?.();

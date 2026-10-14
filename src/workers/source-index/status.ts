@@ -1,3 +1,4 @@
+import type { SovereigntyTrustDomainPolicy } from '../../core/sovereignty.ts';
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/embedding-cost-estimates.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
@@ -252,6 +253,8 @@ export interface SourceIndexStatusHandlerOptions {
    */
   connectorStores?: LocalConnectorStore[];
   retrievalAvailability?: Readonly<Record<string, SourceIndexStatusRetrievalAvailability | undefined>>;
+  /** Live policy intent, independent of provider availability; read before cache lookup. */
+  retrievalPolicy?: (domain: SourceIndexCorpusDefinition['trustDomain']) => Pick<SovereigntyTrustDomainPolicy, 'embeddingProfile' | 'activationMode'> | undefined;
   readinessLedger?: SourceIndexReadinessLedger;
   /** Dynamic trusted scope for store counts; absent preserves whole-store status. */
   connectorStoreStatusScope?: (store: LocalConnectorStore) => ConnectorStoreStatusScope | undefined;
@@ -328,7 +331,13 @@ export function createSourceIndexStatusHandler(
       const corpora = currentRegistry()
         .list()
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
-      const statuses = corpora.map((corpus) => {
+      const statuses = corpora.map((declaredCorpus) => {
+        const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
+        const embeddingDisabled = policy !== undefined
+          && (!policy.embeddingProfile || policy.activationMode === 'metadata_only' || policy.activationMode === 'lexical_only');
+        const corpus = embeddingDisabled
+          ? { ...declaredCorpus, embeddingPolicy: 'disabled' as const, activationMode: 'lexical_only' as const }
+          : declaredCorpus;
         const store = storesByCorpusId.get(corpus.corpusId);
         const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
         const maxAgeMs = normalizedStatusCacheMaxAge(request.readiness_ledger_max_age_ms);
@@ -344,6 +353,7 @@ export function createSourceIndexStatusHandler(
         // a delimiter-joined key could collide ("m:a"+"b" vs "m"+"a:b").
         const cacheKey = JSON.stringify([
           corpus.corpusId,
+          corpus.embeddingPolicy, corpus.activationMode,
           request.include_readiness_ledger === true ? 'full' : 'cheap',
           availability === undefined ? null : [
             availability.servable,
@@ -649,7 +659,7 @@ function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
       required: embeddingRequired,
       chunks,
       embedded_chunks: embeddedChunks,
-      missing_chunks: Math.max(0, chunks - embeddedChunks),
+      missing_chunks: embeddingRequired ? Math.max(0, chunks - embeddedChunks) : 0,
       refresh_needed: embeddingRequired && embeddedChunks < chunks,
     },
   };

@@ -1,3 +1,4 @@
+import { engineBriefFromViewModel, parseEngineBrief } from '../src/core/engine-brief.ts';
 // ChatGPT MCP surface: the dashboard view-model producer, the MCP Apps
 // dashboard tool and resource, and the privacy boundary.
 //
@@ -111,7 +112,7 @@ describe('dashboard view-model producer', () => {
   test('a connected, answer-ready engine is ready; sources keep roster order with their status words', () => {
     const vm = buildChatGptDashboardViewModel(view([
       offCard('dropbox.files'),
-      card('gmail.email'),
+      card('gmail.email', { coverage: { embedded_files: 100 } }),
     ]), { now: NOW });
     expect(vm.v).toBe(1);
     expect(vm.connection).toEqual({ state: 'ready' });
@@ -200,6 +201,38 @@ describe('dashboard view-model producer', () => {
       { stage: 'Indexing', unit: 'files', done: 120, total: 200 },
     ]);
     expect(copyDashboardViewModel(vm)).toEqual(vm);
+  });
+
+  test.each([2, 0, undefined])('an unknown embedding numerator stays unknown in the panel and transport (missing chunks: %s)', (missingChunks) => {
+    const vm = buildChatGptDashboardViewModel(view([card('gmail.email', {
+      coverage: { indexed_items: 11, content_ready_items: 11, embedded_items: 5 },
+      embedding_required: true,
+      ...(missingChunks === undefined ? {} : { embedding_backlog: { chunks: 7, embedded_chunks: 7 - missingChunks, missing_chunks: missingChunks, refresh_needed: missingChunks > 0 } }),
+    })]), { now: NOW });
+    expect(vm.sources[0]!.progress?.stage).toBe('indexing');
+    expect(vm.sources[0]!.progress?.stalled).toBe(missingChunks === 2);
+    expect(vm.sources[0]!.progress?.percent).toBeUndefined();
+    expect(vm.sources[0]!.progress?.done).toBeUndefined();
+    expect(vm.progress?.percent).toBeUndefined();
+    expect(vm.progress?.itemsLeft).toBeUndefined();
+    expect(copyDashboardViewModel(vm)).toEqual(vm);
+    const brief = engineBriefFromViewModel(vm);
+    expect(brief.progress?.percent).toBeUndefined();
+    expect(brief.progress?.itemsLeft).toBeUndefined();
+    expect(parseEngineBrief(JSON.parse(JSON.stringify(brief)))).toEqual(brief);
+  });
+
+  test.each([
+    { read: 1009, embedded: 5, embeddingBaseline: undefined, percent: 99.5, left: 5 },
+    { read: 1010, embedded: 9, embeddingBaseline: 9, percent: 0, left: 1 },
+  ])('policy-exempt completed items do not inflate a delta numerator ($read, $embedded)', ({ read, embedded, embeddingBaseline, percent, left }) => {
+    const vm = buildChatGptDashboardViewModel(view([card('gmail.email', {
+      coverage: { indexed_items: 1010, content_ready_items: read, embedded_items: embedded, embedded_files: embedded,
+        embedding_eligible_items: 10, embedding_not_required_read_items: 1000 },
+      embedding_required: true,
+      movement: { extraction_settled_value: 1000, ...(embeddingBaseline === undefined ? {} : { embedding_settled_value: embeddingBaseline }) },
+    })]), { now: NOW });
+    expect(vm.progress).toMatchObject({ percent, itemsLeft: left });
   });
 
   test('everything read but nothing indexed is not complete: completion counts searchable items', () => {

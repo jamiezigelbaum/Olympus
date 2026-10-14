@@ -34015,6 +34015,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function sourceProgressLabel(progress) {
     const total = Number(progress.total) || 0;
+    if (progress.percent === undefined && progress.stage !== "listing")
+      return P.sourceStages[progress.stage] || P.findingItems;
     if (total <= 0)
       return P.findingItems;
     const stage = P.sourceStages[progress.stage] || P.findingItems;
@@ -34038,7 +34040,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return box;
     }
     const label = sourceProgressLabel(progress);
-    add(box, el("p", "muted", label), progressBar(progress.percent, name + ": " + label));
+    add(box, el("p", "muted", label));
+    if (progress.percent !== undefined)
+      add(box, progressBar(progress.percent, name + ": " + label));
     return box;
   }
   function progressRepeatsOneRow(sources) {
@@ -34126,7 +34130,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
   }
   function progressFinished(progress) {
-    return !!progress && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
+    return !!progress && progress.itemsLeft !== undefined && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
   }
   function progressText(progress) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
@@ -34134,13 +34138,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
       return phase + ": " + P.findingItems + paused;
     }
-    const parts = [fill2(P.percentDone, { percent: percent(progress.percent) })];
+    const parts = progress.percent === undefined ? [P.sourceStages.indexing] : [fill2(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
       parts.push(P.progressPaused);
       return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
     }
     const left = Number(progress.itemsLeft) || 0;
-    parts.push(fill2(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
+    if (progress.itemsLeft !== undefined)
+      parts.push(fill2(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
     if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
       parts.push(fill2(P.eta, { duration: duration(progress.etaSeconds) }));
     }
@@ -34168,7 +34173,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const section = add(el("section", "section"), el("h2", "", P.progress));
     const stalled = progress.stalled && !progressPaused();
     const line = el("p", stalled ? "progress-line stalled" : progressPaused() ? "progress-line paused" : "progress-line", progressText(progress));
-    add(section, line, progressBar(progress.percent, P.progress));
+    add(section, line);
+    if (progress.percent !== undefined)
+      add(section, progressBar(progress.percent, P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
     const faster = indexFasterControl();
     if (withDetails && (stages.length || faster)) {

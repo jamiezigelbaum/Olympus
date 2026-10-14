@@ -3480,6 +3480,7 @@ export async function main(): Promise<void> {
         .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
       connectorStores,
       connectorStoreStatusScope,
+      retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain as keyof typeof sovereigntyEngine.config.retrieval.trustDomains],
       retrievalAvailability,
       tierClassification: () => {
         const backlog = tierSnifferBacklog?.();

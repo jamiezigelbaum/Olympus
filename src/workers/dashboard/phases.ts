@@ -449,12 +449,13 @@ function embeddingPhase(
   // The population comes from the working summary directly, not from the
   // extraction phase's measure: that measure may have been delta-converted to
   // a bare remainder, and the denominator it dropped is still known here.
+  const exemptRead = source.coverage.embedding_not_required_read_items ?? 0;
   const read = summary !== undefined
-    ? Math.min(summary.read_items, summary.in_scope_items)
+    ? Math.max(0, Math.min(summary.read_items, summary.in_scope_items) - exemptRead)
     : extraction.measure.kind === 'ratio' ? extraction.measure.done : undefined;
-  const total = summary !== undefined
+  const total = source.coverage.embedding_eligible_items ?? (summary !== undefined
     ? summary.in_scope_items
-    : extraction.measure.kind === 'ratio' ? extraction.measure.total : undefined;
+    : extraction.measure.kind === 'ratio' ? extraction.measure.total : undefined);
   if (read === undefined || total === undefined) {
     // Extraction has no denominator yet, so embedding has none either. It
     // counts what it can: measured files, or nothing.
@@ -471,7 +472,7 @@ function embeddingPhase(
       total,
       settledPass,
       source.movement?.embedding_settled_value,
-      summary?.unreadable_items,
+      source.coverage.embedding_unreadable_items ?? summary?.unreadable_items,
     );
   }
   if (total === 0) return ratioPhase('embedding', noun, 0, 0, false);
@@ -505,7 +506,14 @@ function withState(
     return { ...phase, state: 'done', state_words: 'Not needed · keyword search only' };
   }
   if (phase.unmeasured === true) {
-    return { ...phase, state: 'waiting', state_words: 'Not measured by this store' };
+    const extraction = phases.find((candidate) => candidate.id === 'extraction');
+    const backlog = source.embedding_backlog;
+    const knownWork = backlog !== undefined && (backlog.missing_chunks > 0 || backlog.refresh_needed);
+    if (!knownWork || !extraction || !dashboardPhaseComplete(extraction)) {
+      return { ...phase, state: 'waiting', state_words: 'Not measured by this store' };
+    }
+    // Item parity is unknown, but missing vectors after extraction are real
+    // work; its movement clock still decides working versus stalled.
   }
   if (dashboardPhaseComplete(phase)) {
     const due = nextSyncDue(source, phase.id, now);

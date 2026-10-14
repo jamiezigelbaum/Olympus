@@ -20,6 +20,28 @@ const CORPUS_ID = 'secure_local.dropbox.files';
 const ACCOUNT = 'dropbox.personal';
 
 describe('connector-store status readiness', () => {
+  test.each(['internal', 'secure_local'] as const)('live %s embedding policy exits are not refresh debt, and policy changes bypass cached status', async (trustDomain) => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain });
+    let profile: string | null = null;
+    let activationMode: 'hybrid_shadow' | 'metadata_only' = 'hybrid_shadow';
+    try {
+      await store.syncFromConnector(connector([file('policy.txt', 'synthetic text')]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: [{ ...defineDropboxFilesCorpus(), trustDomain }], connectorStores: [store],
+        retrievalPolicy: () => ({ embeddingProfile: profile, activationMode }),
+        retrievalAvailability: { [CORPUS_ID]: { servable: false, modelId: 'fake-embed-v1', reason: 'no_current_embedding_artifacts' } },
+      });
+      const held = (await handler.status({ readiness_ledger_max_age_ms: 120_000 })).corpora[0]!;
+      expect(held.embedding_parity).toMatchObject({ required: false, missing_chunks: 0, refresh_needed: false });
+      profile = 'approved-local';
+      activationMode = 'metadata_only';
+      expect((await handler.status({ readiness_ledger_max_age_ms: 120_000 })).corpora[0]?.embedding_parity?.required).toBe(false);
+      activationMode = 'hybrid_shadow';
+      const owed = (await handler.status({ readiness_ledger_max_age_ms: 120_000 })).corpora[0]!;
+      expect(owed.embedding_parity).toMatchObject({ required: true, missing_chunks: 1, refresh_needed: true });
+    } finally { store.close(); }
+  });
+
   test('reports a mounted empty store through the one canonical shape', async () => {
     const store = new LocalConnectorStore({
       dbPath: ':memory:',

@@ -480,7 +480,7 @@ describe('Reconnect Google, once, for a legacy connection', () => {
           ...card,
           connection: { ...card.connection, state: 'synced' as const, label: 'synced 41 minutes ago' },
           freshness: { label: 'Last checked 41 minutes ago', hours: 0.68, threshold_hours: 26, stale: false },
-          coverage: { indexed_items: 120, content_ready_items: 120, embedded_items: 0, needs_review_items: 0, answer_ready_eligible_items: 120 },
+          coverage: { indexed_items: 120, content_ready_items: 120, embedded_items: 120, embedded_files: 120, needs_review_items: 0, answer_ready_eligible_items: 120 },
           ingestion_health: { coverage_percent: 100, stuck_count: 0, drain_state: 'enabled' as const, label: '100% covered; nothing stuck' },
           queue_health: { label: 'Caught up', waiting: 0, active: 0, needs_attention: 0 },
           answer_readiness: { state: 'ready' as const, label: 'Ready for questions' },
