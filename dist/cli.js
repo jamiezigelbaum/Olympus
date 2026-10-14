@@ -24516,8 +24516,10 @@ var init_venice_models = __esm(() => {
 
 // src/core/sovereignty.ts
 import { chmodSync as chmodSync7, existsSync as existsSync22, mkdirSync as mkdirSync15, readFileSync as readFileSync26 } from "node:fs";
-import { dirname as dirname24, join as join31 } from "node:path";
+import { dirname as dirname24, join as join31, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import { randomUUID as randomUUID5 } from "node:crypto";
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -24528,7 +24530,27 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync22(configPath)) {
+    const isDefaultPath = (path) => {
+      try {
+        return resolve7(path) === resolve7(defaultSovereigntyConfigPath(env));
+      } catch {
+        return false;
+      }
+    };
+    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    if (options.migratePrivateMeaning && standaloneDefault) {
+      try {
+        const backup = migratePrivateMeaningSearch(configPath);
+        if (backup)
+          console.info(`Private meaning search enabled locally; policy backup: ${backup}`);
+      } catch {
+        console.warn("Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.");
+      }
+    }
     const parsed = JSON.parse(readFileSync26(configPath, "utf8"));
+    if (options.migratePrivateMeaning && !standaloneDefault && parsed?.retrieval?.trustDomains?.secure_local?.activationMode === "metadata_only") {
+      console.info("Pinned or hosted privacy policy still uses the 1.0.0 keyword-only Private setting; no migration was performed.");
+    }
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -24807,7 +24829,12 @@ function writeSovereigntyConfigFile(input) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
-  publishSovereigntyConfigFile(path, config);
+  withFileLeaseSync(path, (lease) => {
+    if (existsSync22(path) && input.force !== true) {
+      throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
+    }
+    lease.commit(() => publishSovereigntyConfigFile(path, config));
+  }, { acquireTimeoutMs: 5000 });
   return path;
 }
 function publishSovereigntyConfigFile(path, config, onPublished) {
@@ -24870,6 +24897,74 @@ function updateSovereigntyConfigFile(input) {
       return afterPublish();
     throw error;
   }
+}
+function migratePrivateMeaningSearch(path) {
+  const legacy = {
+    schemaVersion: 1,
+    modelProfiles: {
+      "built-in-embedding": { provider: "built-in", trust: "local", model: "embeddinggemma-2-litert-24d962e", purpose: "embedding" },
+      "cloud-openclaw-infer": { provider: "openclaw-infer", trust: "standard_cloud", purpose: "analyst" }
+    },
+    routes: {
+      secure_local: {
+        mode: "disabled",
+        pool: { members: [] },
+        disabledReason: "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
+      },
+      internal: { analyst: ["cloud-openclaw-infer"] }
+    },
+    retrieval: { trustDomains: {
+      secure_local: {
+        minimumExecutionTrust: "local",
+        allowedEmbeddingTrust: ["local"],
+        embeddingProfile: null,
+        allowCloudQuery: false,
+        activationMode: "metadata_only",
+        secureHandling: "metadata_only_gap"
+      },
+      internal: {
+        minimumExecutionTrust: "standard_cloud",
+        allowedEmbeddingTrust: ["local", "standard_cloud"],
+        embeddingProfile: "built-in-embedding",
+        allowCloudQuery: true,
+        activationMode: "hybrid_shadow"
+      }
+    } }
+  };
+  if (!existsSync22(path))
+    return;
+  const eligible = (current2) => {
+    const config = current2;
+    return config?.schemaVersion === 1 && isDeepStrictEqual(config.retrieval?.trustDomains?.secure_local, legacy.retrieval.trustDomains.secure_local) && isDeepStrictEqual(config.modelProfiles?.["built-in-embedding"], legacy.modelProfiles["built-in-embedding"]);
+  };
+  if (!eligible(JSON.parse(readFileSync26(path, "utf8"))))
+    return;
+  return withFileLeaseSync(path, (lease) => {
+    const original = readFileSync26(path, "utf8");
+    const current2 = JSON.parse(original);
+    if (!eligible(current2))
+      return;
+    const nextPolicy = loadSovereigntyPreset("no-sensitive");
+    const nextDisabledReason = nextPolicy.routes.secure_local?.disabledReason;
+    const next = {
+      ...current2,
+      ...nextDisabledReason && current2.routes?.secure_local?.disabledReason === legacy.routes.secure_local?.disabledReason ? {
+        routes: { ...current2.routes, secure_local: { ...current2.routes.secure_local, disabledReason: nextDisabledReason } }
+      } : {},
+      retrieval: {
+        ...current2.retrieval,
+        trustDomains: { ...current2.retrieval.trustDomains, secure_local: nextPolicy.retrieval.trustDomains.secure_local }
+      }
+    };
+    validateSovereigntyConfig(next);
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID5()}`;
+    lease.commit(() => {
+      writePrivateFileAtomicSync(backup, original);
+      writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
+`);
+    });
+    return backup;
+  }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
   const sourceLayoutPath = join31(dirname24(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
@@ -26588,7 +26683,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash18, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash18, randomUUID as randomUUID6 } from "node:crypto";
 import {
   chmodSync as chmodSync8,
   existsSync as existsSync23,
@@ -26603,7 +26698,7 @@ import {
   statSync as statSync13,
   writeFileSync as writeFileSync8
 } from "node:fs";
-import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute13, join as join32, resolve as resolve7 } from "node:path";
+import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute13, join as join32, resolve as resolve8 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute13(configured))
@@ -26620,11 +26715,11 @@ function isSha256(value) {
   return true;
 }
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute13(path) || !isSha256(sha256) || resolve7(path) !== path)
+  if (!isAbsolute13(path) || !isSha256(sha256) || resolve8(path) !== path)
     return false;
   if (basename4(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename4(dirname25(path))))
     return false;
-  if (dir !== undefined && dirname25(path) !== resolve7(dir))
+  if (dir !== undefined && dirname25(path) !== resolve8(dir))
     return false;
   try {
     const stat3 = lstatSync17(path);
@@ -26639,17 +26734,17 @@ function mediaHolderName(holder) {
   try {
     return realpathSync6(holder);
   } catch {
-    return resolve7(holder);
+    return resolve8(holder);
   }
 }
 function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash18("sha256").update(bytes).digest("hex");
   const path = join32(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
-  const stagingHolder = `staging:${randomUUID5()}`;
+  const stagingHolder = `staging:${randomUUID6()}`;
   addMarker(path, stagingHolder);
   if (!existsSync23(path)) {
-    const temporary = join32(dir, `.${sha256}.${randomUUID5()}.tmp`);
+    const temporary = join32(dir, `.${sha256}.${randomUUID6()}.tmp`);
     writeFileSync8(temporary, bytes, { mode: 384 });
     chmodSync8(temporary, 384);
     renameSync6(temporary, path);
@@ -28763,7 +28858,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash22, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash22, randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync18, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
 import { dirname as dirname28 } from "node:path";
 import { Database as Database7 } from "bun:sqlite";
@@ -29074,11 +29169,11 @@ async function embedPendingChunks(targets, options) {
       itemsOutOfScope: 0
     };
     runs.push(run);
-    const groups = store.queuedEmbeddingGroups(options.maxItems);
+    const groups = target.missingOnly ? [] : store.queuedEmbeddingGroups(options.maxItems);
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued).filter((localItemId) => !queuedIds.has(localItemId));
+      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued, target).filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0)
         groups.push({ provider: target.provider, localItemIds: missing });
     }
@@ -29086,12 +29181,13 @@ async function embedPendingChunks(targets, options) {
     for (const group of groups) {
       try {
         group.provider.assertBindingCurrent?.();
+        await target.assertAuthorized?.();
       } catch {
         store.completeQueuedEmbedding(group.localItemIds);
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds);
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, target);
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -29112,9 +29208,15 @@ async function embedPendingChunks(targets, options) {
   }
   return runs;
 }
-async function embedItemsIsolated(store, provider, localItemIds) {
+async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
   try {
-    const embed = await store.embedChunks({ provider, localItemIds: [...localItemIds] });
+    const embed = await store.embedChunks({
+      provider,
+      localItemIds: [...localItemIds],
+      ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+      ...scope.filters ? { filters: scope.filters } : {},
+      ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}
+    });
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
@@ -29131,7 +29233,7 @@ async function embedItemsIsolated(store, provider, localItemIds) {
     let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const localItemId of localItemIds) {
-      const single = await embedItemsIsolated(store, provider, [localItemId]);
+      const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
       if (single.busy || single.deferredReason)
@@ -29569,7 +29671,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function normalizeSemanticRelevanceBar(value) {
   if (value === undefined)
@@ -30570,6 +30672,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...provider ? { provider } : {},
+    ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty2(value.observedConnectorId, "Observed connector id") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -30597,6 +30700,10 @@ function connectorStoreFilterSql(filters) {
   if (normalized.provider) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
+  }
+  if (normalized.observedConnectorId) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -31498,7 +31605,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -31788,7 +31895,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty2(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID6()}` : this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID7()}` : this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -32117,6 +32224,16 @@ var init_local_index = __esm(() => {
       LIMIT 1
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
     }
+    observeStoredItemOwner(identity, connectorId) {
+      this.db.transaction(() => {
+        const row = this.db.query(`
+        SELECT item_pk, sync_run_id FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        if (row)
+          this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso2(), "provider_listing");
+      })();
+    }
     reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
       const row = this.db.query(`
       SELECT item_pk FROM items
@@ -32128,7 +32245,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso2(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID6()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID7()}`;
       const startedAt = nowIso2();
       try {
         return this.db.transaction(() => {
@@ -32187,7 +32304,7 @@ var init_local_index = __esm(() => {
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID7()}`;
           const startedAt = nowIso2();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -32290,7 +32407,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID6()}`;
+      const syncRunId = `connector-tier-move-${randomUUID7()}`;
       const now = nowIso2();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -32669,7 +32786,7 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID6()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID7()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -33613,7 +33730,7 @@ var init_local_index = __esm(() => {
       }
       const tierLedgerForWrite = this.visibilityLedger();
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID6()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID7()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -33955,7 +34072,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID6()}`;
+        const syncRunId = `connector-relinquish-${randomUUID7()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -34094,7 +34211,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID6()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID7()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -34713,7 +34830,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID6()}`;
+      const syncRunId = `connector-sync-${randomUUID7()}`;
       const startedAt = nowIso2();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -35544,15 +35661,17 @@ var init_local_index = __esm(() => {
     embeddingFailedItemCount() {
       return this.embeddingFailureState?.size ?? 0;
     }
-    missingEmbeddingItemIds(embedder, limit) {
+    missingEmbeddingItemIds(embedder, limit, scope = {}) {
       if (limit <= 0)
         return [];
       const modelId = embedder.modelId;
+      const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = this.privateTierEmbeddingFilter(embedder);
-      const filter = `${tierExclusion.filter} ${privateTier.filter}`;
-      const params = [...tierExclusion.params, ...privateTier.params];
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+      const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
       const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -38218,7 +38337,7 @@ class HelperProcess {
       helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
       child.kill("SIGKILL");
     });
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       let started = false;
       const timer = setTimeout(() => {
         if (started)
@@ -38242,7 +38361,7 @@ class HelperProcess {
             clearTimeout(timer);
             helper.device = message2.device === "gpu" ? "gpu" : "cpu";
             helper.vision = message2.vision === true;
-            resolve8(helper);
+            resolve9(helper);
           } else if (message2.fatal) {
             started = true;
             clearTimeout(timer);
@@ -38279,13 +38398,13 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       const timer = setTimeout(() => {
         this.child.kill("SIGKILL");
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve8, reject, count: items.length, timer });
+      this.pending.set(id, { resolve: resolve9, reject, count: items.length, timer });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
       this.child.stdin.write(`${JSON.stringify(request)}
 `);
@@ -38326,7 +38445,7 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve8) => this.child.once("close", () => resolve8()));
+    const exited = new Promise((resolve9) => this.child.once("close", () => resolve9()));
     this.child.stdin.end();
     const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
@@ -38812,7 +38931,7 @@ class BuiltInSourceEmbeddingProvider {
   }
   async withSlot(taskType, run) {
     if (this.slotBusy) {
-      await new Promise((resolve8) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve8));
+      await new Promise((resolve9) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve9));
     } else {
       this.slotBusy = true;
     }
@@ -42174,7 +42293,7 @@ function executableFile(path) {
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     const child = spawn4(command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -42217,7 +42336,7 @@ async function runExtractionCommand(request, internals = {}) {
         stderr: Buffer4.concat(stderr).toString("utf8")
       };
       if (code === 0) {
-        resolve8(result);
+        resolve9(result);
         return;
       }
       reject(new ExtractionCommandError({
@@ -43927,11 +44046,11 @@ var init_analyst_openclaw_infer = __esm(() => {
 
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
   return {
-    correlationId: randomUUID7(),
+    correlationId: randomUUID8(),
     receivedAt: received.toISOString(),
     receivedAtMs: received.getTime(),
     sqliteRetryCount: 0,
@@ -44487,8 +44606,8 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId) {
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve8) => {
-    timer = setTimeout(() => resolve8({ kind: "timeout" }), timeoutMs);
+  const deadline = new Promise((resolve9) => {
+    timer = setTimeout(() => resolve9({ kind: "timeout" }), timeoutMs);
   });
   try {
     const settled = await Promise.race([laneSettled, deadline]);
@@ -46301,7 +46420,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
           }, () => {
             return;
           }),
-          new Promise((resolve8) => setTimeout(resolve8, cancellationSettleMs))
+          new Promise((resolve9) => setTimeout(resolve9, cancellationSettleMs))
         ]);
       } else {
         await Promise.resolve();
@@ -47018,8 +47137,8 @@ async function probePrivateMatch(input) {
   try {
     return await Promise.race([
       run(),
-      new Promise((resolve8) => {
-        timer = setTimeout(() => resolve8("unknown"), input.timeoutMs);
+      new Promise((resolve9) => {
+        timer = setTimeout(() => resolve9("unknown"), input.timeoutMs);
         timer.unref?.();
       })
     ]);
@@ -47201,7 +47320,7 @@ function sourceInvocationProvenance(value) {
 }
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash28, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash28, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync31, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname32, join as join42 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -47287,7 +47406,7 @@ function approveFileSourceScope(input) {
     }
     const existing = readState3(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID8();
+    const revision = randomUUID9();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -47466,7 +47585,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash29, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash29, randomUUID as randomUUID10 } from "node:crypto";
 import { existsSync as existsSync32, readFileSync as readFileSync30 } from "node:fs";
 import { dirname as dirname33, join as join43 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -47527,7 +47646,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState4(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID9();
+    const revision = randomUUID10();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -48362,14 +48481,15 @@ class GoogleGmailSourceConnector {
   }
   async* listItems(options = {}) {
     const client = await this.clientForRequest();
+    let scopeConfirmationsFetched = 0;
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    let metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
+    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
-    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
@@ -48395,7 +48515,22 @@ class GoogleGmailSourceConnector {
           break;
         messagesExamined += 1;
         const stored = this.scope?.storedItem?.(message2.id);
+        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
+          continue;
         if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
+            scopeConfirmationsFetched += 1;
+            messagesFetched += 1;
+            this.providerRequests += 1;
+            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
+            const received = internalDateNumber({ internalDate: metadata.internalDate });
+            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const subject2 = metadataString2(item2.metadata, "subject");
+            const from2 = metadataString2(item2.metadata, "from");
+            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
+            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
+              this.scope.storedItemObserved(item2);
+          }
           this.itemsSkippedStored += 1;
           continue;
         }
@@ -48771,7 +48906,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -49018,7 +49153,7 @@ function safeProviderDetail(value) {
 function hashString3(value) {
   return createHash30("sha256").update(value).digest("hex");
 }
-var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_linux_engine_layout();
   init_mail_source_scope();
@@ -49090,12 +49225,24 @@ function createGmailConnectorStoreSyncHandler(options) {
     const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)].filter((copy) => copy !== undefined);
     if (copies.length === 0)
       return;
-    return { hasContent: copies.some((copy) => copy.chunkCount > 0) };
+    return {
+      hasContent: copies.some((copy) => copy.chunkCount > 0),
+      ...options.confirmStoredPrivateScope && options.scopeApproval && options.secureStore.itemStoredContent(identity)?.chunkCount && !options.secureStore.itemOwnerPresent(identity, connectorId, "observed") ? { needsScopeObservation: true } : {}
+    };
   };
-  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
+  const scope = options.scope ? {
+    ...options.scope,
+    storedItem,
+    ...options.confirmStoredPrivateScope && options.scopeApproval ? {
+      storedItemObserved: (item) => {
+        options.assertScopeCurrent?.();
+        options.secureStore.observeStoredItemOwner(item.identity, connectorId);
+      }
+    } : {}
+  } : undefined;
   const buildConnector = (overrides = {}) => new GoogleGmailSourceConnector({
     ...options,
-    ...scope ? { scope } : {},
+    ...overrides.scope ? { scope: overrides.scope } : scope ? { scope } : {},
     ...overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {},
     ...overrides.query ? { query: overrides.query } : {},
     provenance: sourceInvocationProvenance(overrides.provenance)
@@ -49160,6 +49307,40 @@ function createGmailConnectorStoreSyncHandler(options) {
     };
   };
   return {
+    ...options.confirmStoredPrivateScope && options.scopeApproval && scope ? {
+      confirmPrivateScope: async (request = {}) => {
+        const confirmationScope = `private-confirmation-v1:${connectorId}`;
+        const complete = `${confirmationScope}:done`;
+        if (request.checkpoint === complete)
+          return { confirmed: 0, done: true, checkpoint: complete };
+        const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
+        options.assertScopeCurrent?.();
+        let confirmed = 0;
+        const maxItems = Math.min(request.max_items ?? config.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS);
+        const connector = buildConnector({
+          maxMessages: maxItems,
+          scope: { ...scope, confirmationOnly: true, storedItemObserved: (item) => {
+            scope.storedItemObserved?.(item);
+            if (options.secureStore.itemOwnerPresent(item.identity, connectorId, "observed"))
+              confirmed++;
+          } }
+        });
+        let done = false;
+        let checkpoint = resume ? encodeCheckpoint({ head: resume, scope: confirmationScope }) : null;
+        try {
+          for await (const page2 of connector.listItems({ limit: maxItems, ...resume ? { cursor: resume } : {} })) {
+            done = page2.done;
+            checkpoint = done ? complete : page2.nextCursor ? encodeCheckpoint({ head: page2.nextCursor, scope: confirmationScope }) : checkpoint;
+          }
+        } catch (error) {
+          if (!resume || !isRejectedCursorError(error))
+            throw error;
+          checkpoint = null;
+        }
+        options.assertScopeCurrent?.();
+        return { confirmed, done, checkpoint };
+      }
+    } : {},
     async sync(request = {}) {
       const maxMessages = request.max_messages ?? options.maxMessages;
       const connector = buildConnector({
@@ -49895,7 +50076,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -50409,7 +50590,7 @@ var init_privacy_language = __esm(() => {
     "local-first": "Local models with Venice fallback",
     "local-only": "Local models",
     "private-cloud-only": "Venice",
-    "no-sensitive": "Private kept local, keyword search only"
+    "no-sensitive": "Private meaning search on this computer"
   };
 });
 
@@ -53192,7 +53373,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash39, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash39, randomUUID as randomUUID11 } from "node:crypto";
 import { chmodSync as chmodSync12, lstatSync as lstatSync21, mkdirSync as mkdirSync22 } from "node:fs";
 import { homedir as homedir32 } from "node:os";
 import { dirname as dirname36, join as join52 } from "node:path";
@@ -53471,7 +53652,7 @@ class LocalXBookmarksApiUsageStore {
       }
       const maxResources = routine ? Math.min(requestedMaxResources, input.preserveHeadReserve ? backgroundRemainingReads : remainingReads, input.preserveHeadReserve ? backgroundRemainingCostUnits : remainingCostUnits) : requestedMaxResources;
       const reservation = {
-        reservationId: randomUUID10(),
+        reservationId: randomUUID11(),
         account,
         utcDay,
         maxResources,
@@ -54133,7 +54314,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash40, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash40, randomUUID as randomUUID12 } from "node:crypto";
 import { chmodSync as chmodSync13, mkdirSync as mkdirSync23 } from "node:fs";
 import { homedir as homedir33 } from "node:os";
 import { dirname as dirname37, join as join53 } from "node:path";
@@ -54203,7 +54384,7 @@ class LocalXBookmarksReconcileStateStore {
     const nowDate = validDate4(input.now ?? new Date);
     const now = nowDate.toISOString();
     const leaseExpiresAt = new Date(nowDate.getTime() + FOLDER_FACET_REFRESH_LEASE_MS).toISOString();
-    const runToken = randomUUID11();
+    const runToken = randomUUID12();
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT *
@@ -54428,7 +54609,7 @@ class LocalXBookmarksReconcileStateStore {
           membership_pages, coverage_scope, window_boundary_algorithm_version,
           started_at, updated_at
         ) VALUES (?, ?, ?, ?, 'global', 0, 0, 0, 0, 0, ?, ?, ?, ?)
-      `).run(account, randomUUID11(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
+      `).run(account, randomUUID12(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
     }
     return { progress: this.progress(account), warnings };
   }
@@ -57458,7 +57639,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash42, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash42, randomUUID as randomUUID13 } from "node:crypto";
 import {
   chmodSync as chmodSync14,
   existsSync as existsSync35,
@@ -57709,7 +57890,7 @@ function writePrivateReport(pathValue, contents) {
     throw new TypeError("X bookmark diagnostic report path is required.");
   const parent = dirname38(reportPath);
   mkdirSync24(parent, { recursive: true, mode: 448 });
-  const temporaryPath = `${reportPath}.tmp-${randomUUID12()}`;
+  const temporaryPath = `${reportPath}.tmp-${randomUUID13()}`;
   try {
     writeFileSync9(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync14(temporaryPath, 384);
@@ -58137,14 +58318,14 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash43, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID14 } from "node:crypto";
 import {
   chmodSync as chmodSync15,
   renameSync as renameSync9,
   rmSync as rmSync11,
   writeFileSync as writeFileSync10
 } from "node:fs";
-import { resolve as resolve8 } from "node:path";
+import { resolve as resolve9 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
   const account = requireNonEmpty3(options.account, "X bookmark content-recovery account");
   const userId = requireNonEmpty3(options.userId, "X bookmark content-recovery provider user id");
@@ -58355,7 +58536,7 @@ function contentRecoveryEmbeddingJournalId(restoreItems) {
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
-  return resolve8(`${storePath}.content-recovery-receipt.json`);
+  return resolve9(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
   const session = await issueGrantFencedXSession({
@@ -58445,8 +58626,8 @@ function buildReceipt(status, counts, retryAt) {
   return { ...unsigned, receipt_sha256: sha256Json2(unsigned) };
 }
 function writeReceipt(pathValue, receipt) {
-  const path = resolve8(pathValue);
-  const temporary = `${path}.tmp-${randomUUID13()}`;
+  const path = resolve9(pathValue);
+  const temporary = `${path}.tmp-${randomUUID14()}`;
   try {
     writeFileSync10(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
@@ -59615,7 +59796,7 @@ var init_file_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile5, realpath, stat as stat3 } from "node:fs/promises";
-import { basename as basename5, relative as relative6, resolve as resolve9, sep as sep6 } from "node:path";
+import { basename as basename5, relative as relative6, resolve as resolve10, sep as sep6 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -59634,7 +59815,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty5(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve9(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve10(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -60159,7 +60340,7 @@ var init_email_policy = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash46, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash46, randomUUID as randomUUID16 } from "node:crypto";
 import {
   chmodSync as chmodSync16,
   existsSync as existsSync38,
@@ -60245,7 +60426,7 @@ class LocalSourceWatchStore {
     requireOwnerContext(ownerContext);
     assertOnlyFields(input, CREATE_WATCH_FIELDS, "create watch");
     const now = this.now();
-    const watchId = input.watchId === undefined ? randomUUID15() : requireId(input.watchId, "watchId");
+    const watchId = input.watchId === undefined ? randomUUID16() : requireId(input.watchId, "watchId");
     const corpusId = requireId(input.corpusId, "corpusId");
     const queryText = requireQuery(input.queryText);
     const mode = requireMode(input.mode);
@@ -60540,7 +60721,7 @@ class LocalSourceWatchStore {
       `).all(now, limit);
       const leases = [];
       for (const candidate of candidates) {
-        const leaseToken = randomUUID15();
+        const leaseToken = randomUUID16();
         const result = this.db.query(`
           UPDATE source_watch_outbox
           SET status = 'leased', lease_owner = ?, lease_token = ?,
@@ -62785,7 +62966,7 @@ __export(exports_managed_tools, {
   MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
 });
 import { execFile as execFile2 } from "node:child_process";
-import { createHash as createHash47, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash47, randomUUID as randomUUID17 } from "node:crypto";
 import {
   accessSync as accessSync7,
   constants as constants5,
@@ -63042,8 +63223,8 @@ ${inspect.stdout}`)) {
   return signed;
 }
 async function defaultClearQuarantine(dir) {
-  await new Promise((resolve11) => {
-    execFile2("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve11());
+  await new Promise((resolve12) => {
+    execFile2("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve12());
   });
 }
 function ensureOwnedDirectory(path, uid, label, options = {}) {
@@ -63134,7 +63315,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
   const toolDir = join60(root, tool);
   const versionDir = join60(toolDir, pin.version);
-  const id = randomUUID16();
+  const id = randomUUID17();
   const download = join60(toolDir, `.download-${id}`);
   const staging = join60(toolDir, `.staging-${id}`);
   try {
@@ -63428,7 +63609,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
   const compressed = readFileSync38(archivePath);
   let tar;
   try {
-    tar = await new Promise((resolve11, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve11(out)));
+    tar = await new Promise((resolve12, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve12(out)));
   } catch {
     throw new ManagedToolsError("unsafe_archive", "The archive could not be unpacked.", tool);
   }
@@ -63555,27 +63736,27 @@ function createManagedToolsJob(options = {}) {
     settled: () => current2
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve11) => {
+var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve12) => {
   execFile2(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (!error) {
-      resolve11({ code: 0, stdout, stderr });
+      resolve12({ code: 0, stdout, stderr });
       return;
     }
     const failure = error;
     if (typeof failure.code === "string")
-      resolve11({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
+      resolve12({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
     else
-      resolve11({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
+      resolve12({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
   });
-}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve11) => {
+}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve12) => {
   execFile2(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
     if (error) {
       const failure = error;
       const detail = failure.signal ? `stopped by ${failure.signal}` : failure.code !== undefined ? `exit ${String(failure.code)}` : failure.message;
-      resolve11({ ok: false, detail });
+      resolve12({ ok: false, detail });
       return;
     }
-    resolve11({ ok: true, stdout });
+    resolve12({ ok: true, stdout });
   });
 });
 var init_managed_tools = __esm(() => {
@@ -63673,7 +63854,7 @@ function bridgeMac(token, role, name, ...parts) {
   return hmac.digest();
 }
 function authenticate(socketPath, token, name, signal) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     const socket = createConnection({ path: socketPath });
     const clientNonce = randomBytes11(16);
     let buffered = Buffer.alloc(0);
@@ -63724,7 +63905,7 @@ function authenticate(socketPath, token, name, signal) {
         }
         settled = true;
         cleanup();
-        resolve11(socket);
+        resolve12(socket);
       });
     };
     const timer = setTimeout(() => fail(authError("timeout")), HANDSHAKE_TIMEOUT_MS);
@@ -63795,8 +63976,8 @@ Connection: close\r
 function writeSocket(socket, bytes) {
   if (bytes.byteLength === 0)
     return Promise.resolve();
-  return new Promise((resolve11, reject) => {
-    socket.write(bytes, (error) => error ? reject(error) : resolve11());
+  return new Promise((resolve12, reject) => {
+    socket.write(bytes, (error) => error ? reject(error) : resolve12());
   });
 }
 async function writeRequestBody(socket, request, contentLength, signal) {
@@ -63840,7 +64021,7 @@ function validHeaderValue(value) {
   return true;
 }
 function exchange(socket, request, head, contentLength, signal) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     let state = "head";
     let buffered = Buffer.alloc(0);
     let remaining = 0;
@@ -63997,7 +64178,7 @@ function exchange(socket, request, head, contentLength, signal) {
               headers.append(name, value);
             const response = new Response(responseStream ?? null, { status, statusText: statusMatch[2] ?? "", headers });
             settled = true;
-            resolve11(response);
+            resolve12(response);
             if (bodyless) {
               finish();
               break;
@@ -64274,33 +64455,33 @@ async function runLinuxConfinementSelfTestWithRunner(launcher, workDir, env, por
   }
 }
 function listen(server, port, host, ipv6Only = false) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ port, host, exclusive: true, ipv6Only }, () => {
       server.removeListener("error", reject);
-      resolve11(server.address().port);
+      resolve12(server.address().port);
     });
   });
 }
 function listenPath(server, path) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ path }, () => {
       server.removeListener("error", reject);
-      resolve11();
+      resolve12();
     });
   });
 }
 function closeServer(server) {
-  return new Promise((resolve11) => server.close(() => resolve11()));
+  return new Promise((resolve12) => server.close(() => resolve12()));
 }
 function socketFd(socket) {
   return socket._handle?.fd ?? -1;
 }
 function connected(options) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     const socket = createConnection2(options);
-    socket.once("connect", () => resolve11(socket));
+    socket.once("connect", () => resolve12(socket));
     socket.once("error", reject);
   });
 }
@@ -64335,14 +64516,14 @@ async function stopGroup(pgid) {
   } catch {}
   const deadline = Date.now() + 2500;
   while (!processGone(pgid) && Date.now() < deadline)
-    await new Promise((resolve11) => setTimeout(resolve11, 50));
+    await new Promise((resolve12) => setTimeout(resolve12, 50));
   if (!processGone(pgid)) {
     try {
       process.kill(-pgid, "SIGKILL");
     } catch {}
     const killDeadline = Date.now() + 1500;
     while (!processGone(pgid) && Date.now() < killDeadline)
-      await new Promise((resolve11) => setTimeout(resolve11, 50));
+      await new Promise((resolve12) => setTimeout(resolve12, 50));
   }
   if (!processGone(pgid))
     throw new Error(`self-test process group ${pgid} survived cleanup`);
@@ -64352,8 +64533,8 @@ function startDgramDecoy(script2, pathname, env, watchdogPath, supervise) {
   let started = false;
   let resolveReady;
   let rejectReady;
-  const ready = new Promise((resolve11, reject) => {
-    resolveReady = resolve11;
+  const ready = new Promise((resolve12, reject) => {
+    resolveReady = resolve12;
     rejectReady = reject;
   });
   const timer = setTimeout(() => rejectReady(new Error("Unix datagram decoy did not start")), 3000);
@@ -64386,8 +64567,8 @@ async function releaseFixtureResources(servers, datagrams, sockets, acceptedSock
     try {
       await Promise.race([
         closeServer(server),
-        new Promise((resolve11) => {
-          timer = setTimeout(resolve11, 1000);
+        new Promise((resolve12) => {
+          timer = setTimeout(resolve12, 1000);
         })
       ]);
     } catch {} finally {
@@ -64485,9 +64666,9 @@ async function createFixture(script2, workDir, launcher, ports, env, watchdogPat
       const answer = Buffer.from([192, 12, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 127, 0, 0, 1]);
       dnsUdp.send(Buffer.concat([response, answer]), info.port, info.address);
     });
-    await new Promise((resolve11, reject) => {
+    await new Promise((resolve12, reject) => {
       dnsUdp.once("error", reject);
-      dnsUdp.bind(dnsPort, "127.0.0.53", resolve11);
+      dnsUdp.bind(dnsPort, "127.0.0.53", resolve12);
     });
     let controlStreams = 0;
     let confinedStreams = 0;
@@ -64899,11 +65080,11 @@ main().catch(() => process.exit(1));
           let status;
           let instanceBound = false;
           let listenerSetBound = false;
-          const controlDone = new Promise((resolve11, reject) => {
+          const controlDone = new Promise((resolve12, reject) => {
             control = transport.supervise("daemon", watchdogPath, [process.execPath, probePath, JSON.stringify(fixture.controlTarget)], env, (line) => {
               controlResult ??= parseProbeLine(line);
               if (controlResult)
-                resolve11();
+                resolve12();
             }, () => {
               if (!controlResult)
                 reject(new Error("control exited"));
@@ -64916,8 +65097,8 @@ main().catch(() => process.exit(1));
           });
           let resolveConfined;
           let rejectConfined;
-          const confinedDone = new Promise((resolve11, reject) => {
-            resolveConfined = resolve11;
+          const confinedDone = new Promise((resolve12, reject) => {
+            resolveConfined = resolve12;
             rejectConfined = reject;
           });
           const args = [
@@ -64978,7 +65159,7 @@ main().catch(() => process.exit(1));
             if (timeoutId)
               clearTimeout(timeoutId);
           }
-          await new Promise((resolve11) => setTimeout(resolve11, 50));
+          await new Promise((resolve12) => setTimeout(resolve12, 50));
           if (!controlResult || !confinedResult)
             throw new Error("probe missing");
           return {
@@ -65220,7 +65401,7 @@ function linuxZkapiConfinement(deps = {}) {
   const proc = deps.proc ?? realProc;
   const now = deps.now ?? Date.now;
   const identity = deps.launcherIdentity ?? launcherIdentity;
-  const resolve11 = deps.resolveLauncher ?? (() => launcherPath(env));
+  const resolve12 = deps.resolveLauncher ?? (() => launcherPath(env));
   let cache = hostChecks;
   if (deps.check) {
     cache = injectedChecks.get(deps.check) ?? new Map;
@@ -65232,7 +65413,7 @@ function linuxZkapiConfinement(deps = {}) {
     if ((deps.platform ?? process.platform) !== "linux" || (deps.arch ?? process.arch) !== "x64")
       return check = { ok: false, code: "unsupported_platform" };
     try {
-      const selected = await resolve11();
+      const selected = await resolve12();
       if (!selected)
         return check = { ok: false, code: "launcher_missing_or_untrusted" };
       const before = await identity(selected);
@@ -65269,7 +65450,7 @@ function linuxZkapiConfinement(deps = {}) {
           cache.delete(cache.keys().next().value);
       }
       const result = await entry.result;
-      if (await resolve11() !== selected || await identity(selected) !== before) {
+      if (await resolve12() !== selected || await identity(selected) !== before) {
         cache.delete(key2);
         return check = { ok: false, code: "launcher_missing_or_untrusted" };
       }
@@ -65418,7 +65599,7 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash49, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash49, randomUUID as randomUUID18 } from "node:crypto";
 import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants6, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync41, readlinkSync as readlinkSync3, realpathSync as realpathSync10, rmSync as rmSync16, statSync as statSync21, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
 import { homedir as homedir39, tmpdir as tmpdir4 } from "node:os";
@@ -65594,11 +65775,11 @@ function runSelfTestProbe(argv, env) {
 }
 async function listenProbe(port = 0, host = "127.0.0.1") {
   const server = createServer3((socket) => socket.end());
-  await new Promise((resolve11, reject) => {
+  await new Promise((resolve12, reject) => {
     server.once("error", reject);
     server.listen({ port, host, exclusive: true }, () => {
       server.removeListener("error", reject);
-      resolve11();
+      resolve12();
     });
   });
   return server;
@@ -66180,7 +66361,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   return;
 }
 function sleep2(ms) {
-  return new Promise((resolve11) => setTimeout(resolve11, ms));
+  return new Promise((resolve12) => setTimeout(resolve12, ms));
 }
 async function waitFor(condition, timeoutMs, options = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -66195,11 +66376,11 @@ async function waitFor(condition, timeoutMs, options = {}) {
   }
 }
 function portAnswers(port) {
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     const socket = createConnection3({ host: "127.0.0.1", port });
     const done = (value) => {
       socket.destroy();
-      resolve11(value);
+      resolve12(value);
     };
     socket.setTimeout(1000, () => done(false));
     socket.once("connect", () => done(true));
@@ -66489,16 +66670,16 @@ async function zkapiConsultReadiness(options) {
 }
 function deferred() {
   let settled = false;
-  let resolve11;
+  let resolve12;
   const promise = new Promise((done) => {
-    resolve11 = (value) => {
+    resolve12 = (value) => {
       if (settled)
         return;
       settled = true;
       done(value);
     };
   });
-  return { promise, resolve: resolve11, settled: () => settled };
+  return { promise, resolve: resolve12, settled: () => settled };
 }
 async function openZkapiConsultSession(options, control = {}) {
   return openSession(options, control, false);
@@ -66768,7 +66949,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     return refuse2("tor_port_busy");
   if (sessionSignal.aborted)
     return refuse2(abortCause);
-  const sessionId = randomUUID17();
+  const sessionId = randomUUID18();
   const workDir = mkdtempSync2(join63(tmpdir4(), "olympus-zkapi-"));
   chmodSync19(workDir, 448);
   const watchdog = join63(workDir, "watchdog.cjs");
@@ -66980,11 +67161,11 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
       timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
       bridge.state = "ready";
       bridge.ready.resolve();
-      const aborted = new Promise((resolve11) => {
+      const aborted = new Promise((resolve12) => {
         if (sessionSignal.aborted)
-          resolve11(undefined);
+          resolve12(undefined);
         else
-          sessionSignal.addEventListener("abort", () => resolve11(undefined), { once: true });
+          sessionSignal.addEventListener("abort", () => resolve12(undefined), { once: true });
       });
       const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
       const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
@@ -68017,7 +68198,7 @@ function installEngineUnderFence(options = {}) {
 }
 async function waitForEngineHealthy(input, deps = {}) {
   const now = deps.now ?? Date.now;
-  const sleep3 = deps.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
+  const sleep3 = deps.sleep ?? ((ms) => new Promise((resolve12) => setTimeout(resolve12, ms)));
   const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? workerFetch;
@@ -68801,9 +68982,9 @@ var init_engine_service = __esm(() => {
 import { spawnSync as spawnSync11 } from "node:child_process";
 import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants7, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync4, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync27, linkSync, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync43, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync11, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve11, sep as sep9 } from "node:path";
+import { basename as basename8, dirname as dirname46, join as join65, relative as relative8, resolve as resolve12, sep as sep9 } from "node:path";
 import { userInfo } from "node:os";
-import { randomBytes as randomBytes14, createHash as createHash51, randomUUID as randomUUID18 } from "node:crypto";
+import { randomBytes as randomBytes14, createHash as createHash51, randomUUID as randomUUID19 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync11(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -69012,7 +69193,7 @@ function inheritedUtilLinuxFlock(lockPath) {
       const executable = realpathSync11(`/proc/${pid}/exe`);
       const executableStat = statSync23(executable);
       const args = readFileSync43(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
-      if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve11(arg) === lockPath))
+      if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve12(arg) === lockPath))
         return true;
     } catch {}
     const parent = processParent(pid);
@@ -69126,7 +69307,7 @@ function linuxMachineArtifactDigest(path, kind) {
       throw new Error(`${path} is not a symbolic link.`);
     return createHash51("sha256").update(readlinkSync4(path)).digest("hex");
   }
-  const root = resolve11(path);
+  const root = resolve12(path);
   const rootInfo = lstatSync27(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
@@ -69255,7 +69436,7 @@ function ownedUnitLink(layout, path) {
   if (!info)
     return false;
   assertLinuxManagedPath(dirname46(path), process.getuid(), "directory");
-  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve11(dirname46(path), readlinkSync4(path)) !== layout.unitPath) {
+  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve12(dirname46(path), readlinkSync4(path)) !== layout.unitPath) {
     throw new Error(`The systemd unit link changed at ${path}; it was retained.`);
   }
   return true;
@@ -69304,7 +69485,7 @@ function writeSnapshot(backupDir, index, text2, mode = 384) {
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join65(input.layout.stateDir, `.install-backup-${randomUUID18()}`);
+  const backupDir = join65(input.layout.stateDir, `.install-backup-${randomUUID19()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync27(backupDir);
   const files = {};
@@ -69321,7 +69502,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join65(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID18()}`),
+    stagingPath: join65(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID19()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -69349,8 +69530,8 @@ function readInstallTransaction(layout) {
   const value2 = JSON.parse(readFileSync43(path, "utf8"));
   const hasDesktop = Object.hasOwn(value2?.before?.files ?? {}, linuxDesktopEntryPaths(layout).desktop);
   const allowedFiles = transactionManagedFiles(layout, hasDesktop), actualFiles = value2?.before?.files && typeof value2.before.files === "object" ? Object.keys(value2.before.files) : [];
-  const backupDir = typeof value2?.backupDir === "string" ? resolve11(value2.backupDir) : "";
-  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname46(resolve11(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
+  const backupDir = typeof value2?.backupDir === "string" ? resolve12(value2.backupDir) : "";
+  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname46(resolve12(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const legacy = value2.legacySettings;
   if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join65(backupDir, `file-${1e4 + index}.backup`))))
     throw new Error("Invalid legacy settings recovery journal.");
@@ -69359,7 +69540,7 @@ function readInstallTransaction(layout) {
     throw new Error("Invalid legacy settings restore journal.");
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve11(dirname46(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve11(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve12(dirname46(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname46(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join65(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join65(backupDir, `file-${allowedFiles.length}.backup`) || dirname46(resolve12(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname46(resolve12(value2.generationPath)) !== join65(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join65(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
@@ -69512,7 +69693,7 @@ function assertLegacySettingOverrides(layout, env) {
   for (const [key2, value2] of Object.entries(effective)) {
     if (!/^OLYMPUS_.*(?:_PATH|_DIR|_CONFIG)$/.test(key2) || !value2?.trim())
       continue;
-    const selected = resolve11(value2.trim());
+    const selected = resolve12(value2.trim());
     const moved = files.find((name) => {
       const source = join65(layout.home, ".olympus", name);
       return selected === source || source.startsWith(selected + sep9);
@@ -84884,7 +85065,7 @@ async function yieldToAnswers(options) {
   }
 }
 function sleep3(ms) {
-  return new Promise((resolve12) => setTimeout(resolve12, ms));
+  return new Promise((resolve13) => setTimeout(resolve13, ms));
 }
 function adoptedByThisPlan(record2, proposal) {
   const expected = proposal.expectedGeneration ?? 0;
@@ -87060,20 +87241,20 @@ function isCleanExit(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve12) => {
+  await new Promise((resolve13) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve12();
+      resolve13();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve12) => {
-    const timeout = setTimeout(resolve12, ms);
+  return new Promise((resolve13) => {
+    const timeout = setTimeout(resolve13, ms);
     timeout.unref?.();
   });
 }
@@ -87350,7 +87531,7 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID21 } from "node:crypto";
+import { randomUUID as randomUUID22 } from "node:crypto";
 import { readFileSync as readFileSync55, statSync as statSync26 } from "node:fs";
 import { delimiter as delimiter6, dirname as dirname61, isAbsolute as isAbsolute23, join as join82 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
@@ -87401,7 +87582,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join82(dirname61(reportPath), READINESS_FILE);
-  const instanceId = randomUUID21();
+  const instanceId = randomUUID22();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
@@ -87570,7 +87751,7 @@ var init_native_embedding_drain_service = __esm(() => {
 });
 
 // src/core/native-worker-service.ts
-import { randomUUID as randomUUID22 } from "node:crypto";
+import { randomUUID as randomUUID23 } from "node:crypto";
 import { statSync as statSync27 } from "node:fs";
 import { basename as basename11, delimiter as delimiter7, isAbsolute as isAbsolute24, join as join83 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
@@ -87711,7 +87892,7 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   if (!authToken) {
     throw new Error("Olympus worker service requires a configured worker auth token.");
   }
-  const instanceId = randomUUID22();
+  const instanceId = randomUUID23();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
     runtimePath: resolveBunRuntimePath2(service.runtimePath, env),
@@ -88214,7 +88395,7 @@ async function startEngineHost(options) {
       status.state = "stopping";
       writeStatus();
       log("engine: stopping.");
-      const deadline = new Promise((resolve12) => setTimeout(resolve12, STOP_DEADLINE_MS).unref?.());
+      const deadline = new Promise((resolve13) => setTimeout(resolve13, STOP_DEADLINE_MS).unref?.());
       await Promise.race([
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline
@@ -88497,7 +88678,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve12) => setTimeout(resolve12, HEALTH_POLL_MS));
+      await new Promise((resolve13) => setTimeout(resolve13, HEALTH_POLL_MS));
     }
     if (current2 !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -88608,11 +88789,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve12) => {
+      return new Promise((resolve13) => {
         const settle = (value2) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve12(value2);
+          resolve13(value2);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -88655,12 +88836,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value2) => {
       signal.removeEventListener("abort", onAbort);
-      resolve12(value2);
+      resolve13(value2);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -88697,14 +88878,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const server = createServer4();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve12(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve13(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -96390,7 +96571,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve12) => setTimeout(resolve12, pollInterval));
+        await new Promise((resolve13) => setTimeout(resolve13, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -96402,7 +96583,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve12, reject) => {
+    return new Promise((resolve13, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -96480,7 +96661,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve12(parseResult.data);
+            resolve13(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -96671,12 +96852,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve12, reject) => {
+    return new Promise((resolve13, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve12, interval);
+      const timeoutId = setTimeout(resolve13, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -99661,7 +99842,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve12.call(this, root, ref);
+    let _sch = resolve13.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a4 = root.localRefs) === null || _a4 === undefined ? undefined : _a4[ref];
       const { schemaId } = this.opts;
@@ -99688,7 +99869,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve12(root, ref) {
+  function resolve13(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -100218,7 +100399,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve12(baseURI, relativeURI, options) {
+  function resolve13(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse7(baseURI, schemelessOptions), parse7(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -100446,7 +100627,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize5,
-    resolve: resolve12,
+    resolve: resolve13,
     resolveComponent,
     equal: equal2,
     serialize,
@@ -103829,12 +104010,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message2) {
-    return new Promise((resolve12) => {
+    return new Promise((resolve13) => {
       const json = serializeMessage(message2);
       if (this._stdout.write(json)) {
-        resolve12();
+        resolve13();
       } else {
-        this._stdout.once("drain", resolve12);
+        this._stdout.once("drain", resolve13);
       }
     });
   }
@@ -104649,8 +104830,8 @@ class SourceAnswerJobRegistry {
     }
     const outcome = pending.then((value2) => ({ ok: true, value: value2 }), (error2) => ({ ok: false, error: error2 }));
     let timer;
-    const handoff = new Promise((resolve12) => {
-      timer = setTimeout(() => resolve12("handoff"), this.limits.handoffMs);
+    const handoff = new Promise((resolve13) => {
+      timer = setTimeout(() => resolve13("handoff"), this.limits.handoffMs);
     });
     const first = await Promise.race([outcome, handoff]);
     clearTimeout(timer);
@@ -104669,8 +104850,8 @@ class SourceAnswerJobRegistry {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      done: new Promise((resolve12) => {
-        wake = resolve12;
+      done: new Promise((resolve13) => {
+        wake = resolve13;
       }),
       finish: (result) => {
         if (job.outcome)
@@ -104702,12 +104883,12 @@ class SourceAnswerJobRegistry {
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
       let onAbort;
-      const stop = new Promise((resolve12) => {
-        timer = setTimeout(resolve12, this.limits.resultWaitMs);
+      const stop = new Promise((resolve13) => {
+        timer = setTimeout(resolve13, this.limits.resultWaitMs);
         if (signal) {
-          onAbort = () => resolve12();
+          onAbort = () => resolve13();
           if (signal.aborted)
-            resolve12();
+            resolve13();
           else
             signal.addEventListener("abort", onAbort, { once: true });
         }
@@ -104813,10 +104994,10 @@ class SourceAnswerJobRegistry {
     }
     let state = "queued";
     let detached = false;
-    let resolve12;
+    let resolve13;
     let reject;
     const ready = new Promise((ok, fail) => {
-      resolve12 = ok;
+      resolve13 = ok;
       reject = fail;
     });
     ready.catch(() => {
@@ -104851,7 +105032,7 @@ class SourceAnswerJobRegistry {
         this.runningTotal += 1;
         priority.lastGrant = kind;
         this.unqueue(waiter);
-        resolve12();
+        resolve13();
       },
       cancel: (reason, wake = true) => {
         if (state !== "queued")
@@ -105448,7 +105629,7 @@ async function solveRegistrationPow(bits, nonce, installId, relayHost, signal) {
   for (let counter = 0;; counter += 1) {
     if (counter % 4096 === 0) {
       if (counter > 0)
-        await new Promise((resolve12) => setTimeout(resolve12, 0));
+        await new Promise((resolve13) => setTimeout(resolve13, 0));
       if (signal?.aborted)
         throw new PowCancelledError;
     }
@@ -106117,7 +106298,7 @@ class RelayClient {
   }
   async drained() {
     while (this.socket && this.socket.readyState === WebSocket.OPEN && this.socket.bufferedAmount > SEND_HIGH_WATER_BYTES) {
-      await new Promise((resolve12) => setTimeout(resolve12, 10));
+      await new Promise((resolve13) => setTimeout(resolve13, 10));
     }
   }
 }
@@ -106239,9 +106420,9 @@ async function startRelayRuntime(options) {
 }
 async function runRelayRuntimeProcess(instanceId, overrides = {}) {
   const runtime = await startRelayRuntime({ ...overrides, env: process.env, instanceId });
-  await new Promise((resolve12) => {
+  await new Promise((resolve13) => {
     const shutdown = () => {
-      runtime.stop().finally(resolve12);
+      runtime.stop().finally(resolve13);
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
@@ -106554,7 +106735,7 @@ var init_manifest2 = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawnSync as spawnSync16 } from "node:child_process";
-import { createHash as createHash61, randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash61, randomUUID as randomUUID24 } from "node:crypto";
 import {
   closeSync as closeSync18,
   createReadStream as createReadStream3,
@@ -106823,7 +107004,7 @@ function runtimeInstalled2(runtimeDir, archive) {
   return marker !== undefined && marker.sha256 === archive.sha256 && existsSync58(join89(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID23()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID24()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join89(staging, archive.name);
@@ -106915,7 +107096,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream3(path);
@@ -106928,7 +107109,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error2);
       } else {
-        resolve12();
+        resolve13();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -106946,14 +107127,14 @@ async function sha256File3(path, timeoutMs, onProgress) {
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   const deadline = Date.now() + waitMs;
-  const token = randomUUID23();
+  const token = randomUUID24();
   for (;; ) {
     if (tryAcquireLock2(lockPath, token))
       break;
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve12) => setTimeout(resolve12, LOCK_POLL_MS2));
+    await new Promise((resolve13) => setTimeout(resolve13, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -108316,7 +108497,7 @@ var init_dashboard_session_secret = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile9, realpath as realpath2, stat as stat5 } from "node:fs/promises";
-import { relative as relative9, resolve as resolve12, sep as sep10 } from "node:path";
+import { relative as relative9, resolve as resolve13, sep as sep10 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -108458,7 +108639,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve12(rootRealPath, relativePath);
+    const candidatePath = resolve13(rootRealPath, relativePath);
     const relativeToRoot = relative9(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep10}`)) {
       return;
@@ -108804,7 +108985,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync27, mkdirSync as mkdirSync45 } from "node:fs";
-import { createHash as createHash62, randomUUID as randomUUID24 } from "node:crypto";
+import { createHash as createHash62, randomUUID as randomUUID25 } from "node:crypto";
 import { dirname as dirname65 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
@@ -108962,7 +109143,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID24();
+    const leaseToken = randomUUID25();
     const workerHash = hashString5(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -109901,7 +110082,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID24());
+      `).run(randomUUID25());
     }
   }, {
     version: 4,
@@ -110120,7 +110301,7 @@ function clampInteger(value2, min, max) {
   return Math.min(max, Math.max(min, value2));
 }
 function makeJobId() {
-  return `fx_${randomUUID24()}`;
+  return `fx_${randomUUID25()}`;
 }
 function hashString5(value2) {
   return createHash62("sha256").update(value2).digest("hex");
@@ -112964,7 +113145,7 @@ function createBuiltInTranscriber(options = {}) {
       if (state === "pending" && installing && filesOnDisk()) {
         const pending = installing;
         const waitMs = Math.max(0, Math.min(verifyWaitMs, deadline - now()));
-        await Promise.race([pending, new Promise((resolve13) => setTimeout(resolve13, waitMs).unref?.())]);
+        await Promise.race([pending, new Promise((resolve14) => setTimeout(resolve14, waitMs).unref?.())]);
         state = prepare();
       }
       if (state === "unavailable")
@@ -113531,7 +113712,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve13) => setTimeout(resolve13, pageRetryDelayMs));
+            await new Promise((resolve14) => setTimeout(resolve14, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -116423,7 +116604,7 @@ import {
   rmSync as rmSync22,
   writeFileSync as writeFileSync22
 } from "node:fs";
-import { randomUUID as randomUUID25 } from "node:crypto";
+import { randomUUID as randomUUID26 } from "node:crypto";
 import { homedir as homedir55 } from "node:os";
 import { dirname as dirname68, isAbsolute as isAbsolute27, join as join98 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir55(), type = "text") {
@@ -116633,7 +116814,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID25()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID26()}.tmp`;
   try {
     mkdirSync46(dirname68(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -118293,7 +118474,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve14, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -118316,7 +118497,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve13(response);
+      resolve14(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -120937,12 +121118,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve13, reject) => {
+    return new Promise((resolve14, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve13, reject, timer };
+      pending[id] = { resolve: resolve14, reject, timer };
     });
   }
   function notify(method, params) {
@@ -128852,12 +129033,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve13) => {
+        new Promise((resolve14) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve13({
+              resolve14({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -128884,7 +129065,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 import { createHash as createHash70, randomBytes as randomBytes24, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync66, statSync as statSync29 } from "node:fs";
 import { homedir as homedir58 } from "node:os";
-import { join as join100, resolve as resolve13 } from "node:path";
+import { join as join100, resolve as resolve14 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -130631,8 +130812,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve14) => {
-      release = resolve14;
+    dashboardGrantMutationTail = new Promise((resolve15) => {
+      release = resolve15;
     });
     await previous;
     try {
@@ -130948,7 +131129,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve14) => setTimeout(resolve14, ms));
+  return new Promise((resolve15) => setTimeout(resolve15, ms));
 }
 async function parseConsultAskRequest(request) {
   const record4 = await parseObjectBody(request);
@@ -131964,10 +132145,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve13(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve14(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve13(path)))].sort();
+  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve14(path)))].sort();
   const a = normalize5(left);
   const b = normalize5(right);
   return a.length === b.length && a.every((value2, index) => value2 === b[index]);
@@ -133420,7 +133601,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve14) => setTimeout(resolve14, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -134245,6 +134426,15 @@ function wholeStoreEmbeddingSweepAllowed(sourceId, corpusId) {
   const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
   return allowed === true || Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId);
 }
+function withLocalPrivateEmbeddingBackfill(sources, targetsFor) {
+  return sources.map((source) => {
+    const targets = () => targetsFor(source).filter((target) => target.store.trustDomain === "secure_local" && target.provider.provider === "built-in" && target.provider.backend === "local").map((target) => ({ ...target, wholeStore: true, missingOnly: true }));
+    if (targets().length === 0)
+      return source;
+    const task = embeddingSweepTask(source, targets);
+    return { ...source, tasks: [...source.tasks, { ...task, id: `${source.sourceId}_private_meaning` }] };
+  });
+}
 function withEmbeddingSweep(sources, targetsFor) {
   return sources.map((source) => {
     if (source.tasks.some((task) => task.kind === "embed"))
@@ -134521,7 +134711,27 @@ function createGmailConnectorStoreSchedulerSource(input) {
             throw gmailSchedulerFailure(error2);
           }
         }
-      }
+      },
+      ...input.sync.confirmPrivateScope ? [{
+        id: "gmail.email_private_scope_confirmation_v1",
+        kind: "sync",
+        writer: true,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context2) => {
+          try {
+            const result = await input.sync.confirmPrivateScope({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...context2?.checkpoint ? { checkpoint: context2.checkpoint } : {} });
+            return {
+              status: result.confirmed > 0 ? "progress" : "idle",
+              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              checkpoint: result.checkpoint,
+              ...!result.done ? { continueSoon: true } : {}
+            };
+          } catch (error2) {
+            throw gmailSchedulerFailure(error2);
+          }
+        }
+      }] : []
     ],
     lastSyncCompletedAt: lastCompletedAt
   };
@@ -137656,9 +137866,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve14) => {
+        return new Promise((resolve15) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve14,
+            resolveJson: resolve15,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -138890,7 +139100,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -138901,7 +139111,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve14(db);
+        resolve15(db);
       };
       try {
         const factory = window.indexedDB;
@@ -138928,7 +139138,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -138937,7 +139147,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve14(value2);
+        resolve15(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -139072,10 +139282,10 @@ function chatgptPrivateAnswerProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve14) => setTimeout(resolve14, ms));
+    return new Promise((resolve15) => setTimeout(resolve15, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -139085,7 +139295,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve14(value2);
+        resolve15(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -140296,7 +140506,7 @@ function chatgptPrivateQuestionProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -140307,7 +140517,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return;
         }
         settled = true;
-        resolve14(db);
+        resolve15(db);
       };
       try {
         const factory = window.indexedDB;
@@ -140334,7 +140544,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve14) => {
+    return new Promise((resolve15) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -140343,7 +140553,7 @@ function chatgptPrivateQuestionProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve14(value2);
+        resolve15(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -140407,10 +140617,10 @@ function chatgptPrivateQuestionProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve14) => setTimeout(resolve14, ms));
+    return new Promise((resolve15) => setTimeout(resolve15, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -140420,7 +140630,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve14(value2);
+        resolve15(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -143055,10 +143265,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve14) => {
+  const timeout = new Promise((resolve15) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve14(false);
+      resolve15(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -143129,8 +143339,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none2;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve14) => {
-    const timer = setTimeout(() => resolve14(none2), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve15) => {
+    const timer = setTimeout(() => resolve15(none2), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -151386,7 +151596,7 @@ function createRemoteOAuthHandler(options) {
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
   const pending = new Map;
   const codes = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve14) => setTimeout(resolve14, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -152501,8 +152711,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve14) => {
-          timer = setTimeout(resolve14, holdMs);
+        await Promise.race([settled, new Promise((resolve15) => {
+          timer = setTimeout(resolve15, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -152650,8 +152860,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve14) => {
-      settle = resolve14;
+    const settled = new Promise((resolve15) => {
+      settle = resolve15;
     });
     const analysis = {
       key: key2,
@@ -152847,10 +153057,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve14) => {
+    const stopped = new Promise((resolve15) => {
       if (abort.signal.aborted)
-        resolve14();
-      abort.signal.addEventListener("abort", () => resolve14(), { once: true });
+        resolve15();
+      abort.signal.addEventListener("abort", () => resolve15(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -152877,8 +153087,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve14) => {
-      claimSettled = resolve14;
+    const done = new Promise((resolve15) => {
+      claimSettled = resolve15;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -152917,10 +153127,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve14) => {
+    const stopped = new Promise((resolve15) => {
       if (abort.signal.aborted)
-        resolve14();
-      abort.signal.addEventListener("abort", () => resolve14(), { once: true });
+        resolve15();
+      abort.signal.addEventListener("abort", () => resolve15(), { once: true });
     });
     const record4 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -153051,8 +153261,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve14) => {
-      timer = setTimeout(resolve14, this.resetTimeoutMs);
+    const timeout = new Promise((resolve15) => {
+      timer = setTimeout(resolve15, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -154684,8 +154894,8 @@ function createRemotePrivateParts(options) {
     try {
       return await Promise.race([
         options.probe(request, probeTimeoutMs),
-        new Promise((resolve14) => {
-          timer = setTimeout(() => resolve14("unknown"), probeTimeoutMs);
+        new Promise((resolve15) => {
+          timer = setTimeout(() => resolve15("unknown"), probeTimeoutMs);
           timer.unref?.();
         })
       ]);
@@ -156580,6 +156790,8 @@ __export(exports_server2, {
   parseConnectorStoreMountsFromEnv: () => parseConnectorStoreMountsFromEnv,
   openIngestionDispositionsRuntime: () => openIngestionDispositionsRuntime,
   main: () => main,
+  localPrivateEmbeddingTargets: () => localPrivateEmbeddingTargets,
+  loadSourceWorkerSovereignty: () => loadSourceWorkerSovereignty,
   createXBookmarksConnectorStoreRuntime: () => createXBookmarksConnectorStoreRuntime,
   createWorkerMessagingCaptureOwnership: () => createWorkerMessagingCaptureOwnership,
   createSourceIndexEmbeddingProviderFromSovereignty: () => createSourceIndexEmbeddingProviderFromSovereignty,
@@ -156782,6 +156994,64 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
     ...mediaFetchTimeoutMs !== undefined ? { mediaFetchTimeoutMs } : {},
     ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
   });
+}
+function localPrivateEmbeddingTargets(input) {
+  const {
+    source,
+    sovereigntyEngine,
+    secureLocalPolicyEmbeddingProvider,
+    sourceCorpusRegistry: sourceCorpusRegistry2,
+    scopeRefs,
+    connectorStores,
+    fullCorpusDefinitions,
+    fileSourceScopeAuthority,
+    readScope: connectorStoreReadScope,
+    connectorStoreAccountScopes,
+    gmailAccountScope
+  } = input;
+  const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
+  if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
+    return [];
+  const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
+  corpusIds.add(source.corpusId);
+  const ref = scopeRefs.get(source.sourceId);
+  return connectorStores.flatMap((store) => {
+    if (store.trustDomain !== "secure_local" || !corpusIds.has(store.corpusId))
+      return [];
+    const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+    const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+    if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
+      return [];
+    if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
+      return [];
+    const scope = connectorStoreReadScope(store);
+    if (!scope.allowed || !scope.contentAllowed)
+      return [];
+    const mail = ref?.sourceId === "gmail.email" && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
+    const accountScope = mail ? gmailAccountScope?.trim() || "personal" : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
+    if (mail && !accountScope)
+      return [];
+    const filters = mail ? {
+      provider: "gmail",
+      observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+    } : scope.contentFilters;
+    const provider = ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref) : secureLocalPolicyEmbeddingProvider;
+    return [{
+      store,
+      provider,
+      ...accountScope ? { accountScope } : {},
+      ...filters ? { filters } : {}
+    }];
+  });
+}
+function loadSourceWorkerSovereignty(config2, env) {
+  const options = {
+    env,
+    migratePrivateMeaning: true,
+    ...config2.sovereignty?.policy ? { inlineConfig: config2.sovereignty.policy } : {},
+    ...config2.sovereignty?.configPath ? { configPath: config2.sovereignty.configPath } : {}
+  };
+  return loadSovereigntyEngine(options);
 }
 function createSourceIndexEmbeddingProviderFromSovereignty(engine, trustDomain, env = process.env, bootSecretResolver) {
   const resolved = engine.resolveEmbeddingProfile(trustDomain);
@@ -157517,11 +157787,7 @@ async function main() {
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
     env: process.env
   });
-  const sovereigntyEngine = loadSovereigntyEngine({
-    env: process.env,
-    ...olympusConfig.sovereignty?.policy ? { inlineConfig: olympusConfig.sovereignty.policy } : {},
-    ...olympusConfig.sovereignty?.configPath ? { configPath: olympusConfig.sovereignty.configPath } : {}
-  });
+  const sovereigntyEngine = loadSourceWorkerSovereignty(olympusConfig, process.env);
   const bootSecretResolver = new WorkerBootSecretResolver({
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env })
   });
@@ -158201,6 +158467,31 @@ async function main() {
     };
   };
   const connectorStoreStatusScope = (store) => {
+    if (store === gmailSecureConnectorStore) {
+      const ref = fileSourceScopeAuthority?.mailPolicyRef();
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
+        provider: "gmail",
+        capability: "gmail.email.sync",
+        handles: readActiveConnectedHandles(process.env)
+      });
+      if (!ref || !handle || !fileSourceScopeAuthority)
+        return { itemsAllowed: false, contentAllowed: false };
+      const approval = fileSourceScopeAuthority.assertCurrentMail(ref);
+      const accountScope = handle.accountRole?.trim() || "personal";
+      const itemFilters = {
+        provider: "gmail",
+        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+      };
+      return {
+        accountScope,
+        scopeRevision: ref.revision,
+        itemFilters,
+        contentAllowed: true,
+        contentFilters: itemFilters
+      };
+    }
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed)
       return { itemsAllowed: false, contentAllowed: false };
@@ -158307,12 +158598,14 @@ async function main() {
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+    const privateDefinition = gmailSecureConnectorStore && sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === gmailSecureConnectorStore.corpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget ? createGmailConnectorStoreSyncHandler({
       internalStore: gmailInternalConnectorStore,
       secureStore: gmailSecureConnectorStore,
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      confirmStoredPrivateScope: !!privateDefinition && secureLocalPolicyEmbeddingProvider?.provider === "built-in" && secureLocalPolicyEmbeddingProvider.backend === "local" && privateDefinition?.activationMode !== "lexical_only" && privateDefinition?.embeddingPolicy !== "disabled" && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_shadow" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_primary"),
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -158525,13 +158818,13 @@ async function main() {
       openFile: async (path, eligible) => {
         if (!await eligible())
           throw new Error("open refused");
-        return new Promise((resolve14, reject) => {
+        return new Promise((resolve15, reject) => {
           const args = unreadableOpenArguments(path, unreadableDropboxRoots());
           if (!args) {
             reject(new Error("open refused"));
             return;
           }
-          execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+          execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve15());
         });
       }
     } : {}
@@ -158825,7 +159118,25 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
       return targets().length > 0 ? targets : undefined;
     });
-    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
+    const scopeRefs = new Map;
+    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef]) {
+      if (ref)
+        scopeRefs.set(ref.sourceId, ref);
+    }
+    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, (source) => localPrivateEmbeddingTargets({
+      source,
+      sovereigntyEngine,
+      secureLocalPolicyEmbeddingProvider,
+      sourceCorpusRegistry: sourceCorpusRegistry2,
+      scopeRefs,
+      connectorStores,
+      fullCorpusDefinitions,
+      fileSourceScopeAuthority,
+      readScope: connectorStoreReadScope,
+      connectorStoreAccountScopes,
+      gmailAccountScope: currentGmailHandle?.accountRole
+    }));
+    const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass ? attachSourceWatchSchedulerTask({
@@ -159375,13 +159686,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const openCitedFile = process.platform === "darwin" ? async (path, eligible) => {
     if (!await eligible())
       throw new Error("open refused");
-    return new Promise((resolve14, reject) => {
+    return new Promise((resolve15, reject) => {
       const args = localOpenArguments2(path, localDropboxRoots2());
       if (!args) {
         reject(new Error("open refused"));
         return;
       }
-      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve14());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve15());
     });
   } : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel2({
@@ -161071,7 +161382,7 @@ import { randomBytes as randomBytes29 } from "node:crypto";
 import { readFileSync as readFileSync68, openSync as openSync18, closeSync as closeSync19, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve14 } from "node:path";
+import { resolve as resolve15 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -161403,7 +161714,7 @@ init_pairing_session_paths();
 init_public_source_capabilities();
 init_worker_service();
 init_media_cache();
-import { createHash as createHash45, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash45, randomUUID as randomUUID15 } from "node:crypto";
 import {
   closeSync as closeSync13,
   existsSync as existsSync37,
@@ -161419,7 +161730,7 @@ import {
   statSync as statSync19
 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
-import { basename as basename6, dirname as dirname39, join as join57, relative as relative7, resolve as resolve10, sep as sep7 } from "node:path";
+import { basename as basename6, dirname as dirname39, join as join57, relative as relative7, resolve as resolve11, sep as sep7 } from "node:path";
 import { Database as Database11 } from "bun:sqlite";
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
@@ -161659,7 +161970,7 @@ function exportOlympusData(options) {
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
 }
 function verifyOlympusDataExport(options) {
-  const destination = resolve10(requirePath(options.destination, "--input"));
+  const destination = resolve11(requirePath(options.destination, "--input"));
   const manifestPath = join57(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync36(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
@@ -161668,7 +161979,7 @@ function verifyOlympusDataExport(options) {
   const verified = [];
   for (const value of parsed.artifacts) {
     const artifact = parseExportArtifact(value);
-    const path = resolve10(destination, artifact.relativePath);
+    const path = resolve11(destination, artifact.relativePath);
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
@@ -161973,7 +162284,7 @@ function exportSqliteStore(options) {
     return;
   }
   const destination = join57(destinationRoot, basename6(sqlitePath));
-  const staging = `${destination}.${randomUUID14()}.partial`;
+  const staging = `${destination}.${randomUUID15()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
@@ -162046,7 +162357,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   return {
     sourceId,
     role,
-    relativePath: relative7(resolve10(exportRoot), resolve10(path)),
+    relativePath: relative7(resolve11(exportRoot), resolve11(path)),
     bytes: stats.size,
     sha256: sha256File2(path)
   };
@@ -162099,7 +162410,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current2 = dirname39(resolve10(destination));
+  let current2 = dirname39(resolve11(destination));
   for (;; ) {
     if (existsSync37(current2))
       return current2;
@@ -162111,7 +162422,7 @@ function exportDurabilityBoundary(destination) {
 }
 function makeDurableDirectory(path, boundary) {
   mkdirSync25(path, { recursive: true, mode: 448 });
-  let current2 = resolve10(path);
+  let current2 = resolve11(path);
   for (;; ) {
     syncDirectorySync2(current2);
     if (current2 === boundary)
@@ -162239,8 +162550,8 @@ function isInsideKnownOlympusRoot(path, context2) {
   return knownOlympusDataRoots(context2).some((root) => isSameOrInsidePath(path, root));
 }
 function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve10(path);
-  const absoluteRoot = resolve10(root);
+  const absolutePath = resolve11(path);
+  const absoluteRoot = resolve11(root);
   return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep7}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
@@ -162312,7 +162623,7 @@ import { dirname as dirname54, isAbsolute as isAbsolute22, join as join77 } from
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash54, randomUUID as randomUUID19 } from "node:crypto";
+import { createHash as createHash54, randomUUID as randomUUID20 } from "node:crypto";
 import { spawnSync as spawnSync13 } from "node:child_process";
 import {
   chmodSync as chmodSync21,
@@ -162617,7 +162928,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync50(workingDirectory)) {
-      replacedPath = join75(versionsDir, `.olympus-replaced-${basename10(workingDirectory)}-${randomUUID19()}`);
+      replacedPath = join75(versionsDir, `.olympus-replaced-${basename10(workingDirectory)}-${randomUUID20()}`);
       renameSync14(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
@@ -162659,7 +162970,7 @@ function removeStagingTree(root) {
 init_atomic_file();
 init_file_lease();
 init_operation_error();
-import { randomUUID as randomUUID20 } from "node:crypto";
+import { randomUUID as randomUUID21 } from "node:crypto";
 import { existsSync as existsSync51, linkSync as linkSync2, lstatSync as lstatSync29, readFileSync as readFileSync50 } from "node:fs";
 import { join as join76 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
@@ -162675,7 +162986,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
-      nonce: randomUUID20(),
+      nonce: randomUUID21(),
       action,
       started_at: now().toISOString()
     };
@@ -164034,7 +164345,7 @@ var VENICE_PITCH_TEXT = [
   `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS["local-first"]} tries your local lane first; ${PRIVACY_PRESET_LABELS["private-cloud-only"]} has no local-model requirement.`,
   "In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.",
   "Semantic search uses a small model built into Olympus: it downloads once, runs on this computer, and needs no account or key. Gemini, a local embedding server, or a Venice Private embedding model are opt-in; Private content never goes to ordinary cloud embedding providers.",
-  `Choosing ${PRIVACY_PRESET_LABELS["no-sensitive"]} is a deliberate choice after this screen.`
+  `Choosing ${PRIVACY_PRESET_LABELS["no-sensitive"]} keeps Private meaning search on this computer without configuring an agent answer lane.`
 ];
 function runSetupDependencyCheck(input = {}) {
   const platform2 = normalizeSetupPlatform(input.platform ?? process.platform);
@@ -164560,7 +164871,7 @@ async function followEngineLogs(deps, lines) {
   const child = spawn6("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child.stdout });
   reader.on("line", (line) => console.log(redactLogLine(line)));
-  await new Promise((resolve12) => child.once("exit", () => resolve12()));
+  await new Promise((resolve13) => child.once("exit", () => resolve13()));
 }
 function parseNowArg(command, args) {
   if (args.length === 0)
@@ -164651,7 +164962,7 @@ function expectNoArgs(command, args) {
 init_engine_service();
 init_remote_access();
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve14(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve15(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -165554,7 +165865,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve14(out),
+    out_dir: resolve15(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -165604,7 +165915,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync68(resolve14(input2), "utf8");
+    raw = readFileSync68(resolve15(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -165909,7 +166220,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve14(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve15(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };

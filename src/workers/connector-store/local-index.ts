@@ -1469,6 +1469,11 @@ export interface ConnectorStoreEmbeddingTarget {
    * lanes stay queue-only, embedding under their scope binding.
    */
   wholeStore?: boolean;
+  /** Backfill only on the current provider; never replay historical queue providers. */
+  missingOnly?: boolean;
+  accountScope?: string;
+  filters?: ConnectorStoreSearchFilters;
+  assertAuthorized?: () => void | Promise<void>;
 }
 
 export interface ConnectorStoreEmbedStoreRun {
@@ -1517,11 +1522,11 @@ export async function embedPendingChunks(
       itemsOutOfScope: 0,
     };
     runs.push(run);
-    const groups = store.queuedEmbeddingGroups(options.maxItems);
+    const groups = target.missingOnly ? [] : store.queuedEmbeddingGroups(options.maxItems);
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued)
+      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued, target)
         .filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
     }
@@ -1529,12 +1534,13 @@ export async function embedPendingChunks(
     for (const group of groups) {
       try {
         group.provider.assertBindingCurrent?.();
+        await target.assertAuthorized?.();
       } catch {
         store.completeQueuedEmbedding(group.localItemIds);
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds);
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, target);
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -1563,9 +1569,15 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean }> {
   try {
-    const embed = await store.embedChunks({ provider, localItemIds: [...localItemIds] });
+    const embed = await store.embedChunks({
+      provider, localItemIds: [...localItemIds],
+      ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
+      ...(scope.filters ? { filters: scope.filters } : {}),
+      ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
+    });
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
@@ -1583,7 +1595,7 @@ async function embedItemsIsolated(
     let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const localItemId of localItemIds) {
-      const single = await embedItemsIsolated(store, provider, [localItemId]);
+      const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
       if (single.busy || single.deferredReason) return { ...single, chunksEmbedded, itemsFailed };
@@ -2247,6 +2259,8 @@ export interface ConnectorStoreCorpusIntegrityReport {
 export interface ConnectorStoreSearchFilters {
   /** Exact stored provider identity; internal principal boundary, not a request field. */
   provider?: string;
+  /** An actual provider observation under this connector's current scope binding. */
+  observedConnectorId?: string;
   /**
    * Rooted locator path matched case-insensitively at a segment boundary.
    * Exact path and descendants match; string-prefix siblings do not.
@@ -3002,6 +3016,17 @@ export class LocalConnectorStore {
       normalizeConversationId(identity.providerConversationId),
       identity.providerItemId,
     ) !== null;
+  }
+
+  /** Confirm an immutable stored item's current provider scope without rewriting its body or vectors. */
+  observeStoredItemOwner(identity: SourceItemIdentity, connectorId: string): void {
+    this.db.transaction(() => {
+      const row = this.db.query(`
+        SELECT item_pk, sync_run_id FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as { item_pk: number; sync_run_id: string } | null;
+      if (row) this.rememberItemOwner(row.item_pk, connectorId, 'observed', row.sync_run_id, nowIso(), 'provider_listing');
+    })();
   }
 
   /**
@@ -8540,14 +8565,17 @@ export class LocalConnectorStore {
   missingEmbeddingItemIds(
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
     limit: number,
+    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
   ): string[] {
     if (limit <= 0) return [];
     const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
     const tierExclusion = this.embeddingTierExclusionFilter();
     const privateTier = this.privateTierEmbeddingFilter(embedder);
-    const filter = `${tierExclusion.filter} ${privateTier.filter}`;
-    const params = [...tierExclusion.params, ...privateTier.params];
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
     const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -13393,6 +13421,7 @@ function normalizeOptionalAccountScope(value: string | undefined): string | unde
 
 interface NormalizedConnectorStoreSearchFilters {
   provider?: string;
+  observedConnectorId?: string;
   locatorPathScope?: string;
   locatorPathScopes?: readonly string[];
   locatorPathExcludedScopes?: readonly string[];
@@ -13441,6 +13470,7 @@ export function normalizeConnectorStoreSearchFilters(
   const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...(provider ? { provider } : {}),
+    ...(value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, 'Observed connector id') } : {}),
     ...(locatorPathScope ? { locatorPathScope } : {}),
     ...(locatorPathScopes.length > 0 ? { locatorPathScopes } : {}),
     ...(locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {}),
@@ -13471,6 +13501,10 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
   if (normalized.provider) {
     clauses.push('AND i.provider = ?');
     params.push(normalized.provider);
+  }
+  if (normalized.observedConnectorId) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push('AND i.source_scope_generation = ?');

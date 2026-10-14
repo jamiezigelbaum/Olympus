@@ -184,7 +184,7 @@ type BuiltInEmbeddingState = 'loaded' | 'stale_ready_litert' | 'stale_ready_onnx
  * are replaced. Every install and runtime start is recorded; the stale
  * states fall through to the real installer, which downloads what is missing.
  */
-async function builtInEmbedding(state: BuiltInEmbeddingState) {
+async function builtInEmbedding(state: BuiltInEmbeddingState, meaning = false, real = false) {
   const { dir, cleanup } = tempDir('olympus-local-embedding-');
   cleanups.push(cleanup);
   const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
@@ -192,7 +192,15 @@ async function builtInEmbedding(state: BuiltInEmbeddingState) {
   const installs: string[] = [];
   const starts: string[] = [];
   const embedded: string[] = [];
-  const provider = new BuiltInSourceEmbeddingProvider({
+  const vectorFor = (text: string) => {
+    if (!meaning) return bagOfWords(text, model.dimension);
+    const vector = new Float32Array(model.dimension);
+    // A semantic runtime fixture: equivalent meanings share a vector even
+    // when the strings share no word. Unrelated material has an orthogonal one.
+    vector[text.includes('Doctor advised acetaminophen') || text.includes('Physician recommended paracetamol') ? 0 : 1] = 1;
+    return vector;
+  };
+  const provider = new BuiltInSourceEmbeddingProvider(real ? { env, model } : {
     env,
     model,
     install: async (options) => {
@@ -211,7 +219,7 @@ async function builtInEmbedding(state: BuiltInEmbeddingState) {
           return items.map((item) => {
             const text = typeof item === 'string' ? item : item.text;
             embedded.push(text);
-            return bagOfWords(text, model.dimension);
+            return vectorFor(text);
           });
         },
         async release() {},
@@ -234,7 +242,7 @@ async function builtInEmbedding(state: BuiltInEmbeddingState) {
       configHash: provider.configHash,
       epochId: provider.epochId,
       backend: provider.backend,
-      embed: async (inputs) => inputs.map((input) => Array.from(bagOfWords(input.text, model.dimension))),
+      embed: async (inputs) => inputs.map((input) => Array.from(vectorFor(input.text))),
     };
   return { provider, vectors, installs, starts, embedded, env, model };
 }
@@ -277,6 +285,8 @@ async function localFixture(options: {
   limits?: Partial<PanelAnswerLimits>;
   duringSynthesis?: (fixture: TierFixture) => Promise<void>;
   keywordOnly?: boolean;
+  meaningEmbeddings?: boolean;
+  realEmbeddings?: boolean;
 } = {}) {
   const { dir, cleanup } = tempDir('olympus-local-answer-');
   const fixture = openTierFixture(dir);
@@ -290,7 +300,7 @@ async function localFixture(options: {
   for (const id of options.privateIds ?? ['lease', 'deposit']) {
     await moveTieredItem({ set: fixture.set, identity: identityOf(id), target: { metadataTier: 'secure', contentTier: 'secure' } });
   }
-  const builtIn = await builtInEmbedding(options.embedding ?? 'loaded');
+  const builtIn = await builtInEmbedding(options.embedding ?? 'loaded', options.meaningEmbeddings, options.realEmbeddings);
   if (!options.keywordOnly) {
     await fixture.stores.secure_local!.embedChunks({ provider: builtIn.vectors });
     await fixture.stores.internal!.embedChunks({ provider: fixture.cloud });
@@ -408,6 +418,36 @@ describe('answers on this computer, with every outbound request denied', () => {
     const short = await search('do I xx ox owe anyone anything?');
     expect(short.hits.map(hit => hit.sourceItem.localItemId).sort()).toEqual(['personal:owe', 'personal:rich']);
   });
+
+  for (const real of [false, true]) {
+    const run = real && process.env.OLYMPUS_PRIVATE_MEANING_REAL_MODEL !== '1' ? test.skip : test;
+    run(`Ask privately finds a paraphrase with no shared keyword (${real ? 'real built-in model' : 'semantic runtime fixture'}), with zero egress`, async () => {
+      const text = 'Physician recommended paracetamol for headaches.';
+      const question = 'Doctor advised acetaminophen?';
+      const words = new Set(text.toLowerCase().match(/[a-z]+/g));
+      expect(question.toLowerCase().match(/[a-z]+/g)!.filter(word => words.has(word))).toEqual([]);
+      const local = await localFixture({
+        specs: [{ id: 'document', name: 'document.txt', text, legacyDomain: 'secure_local' }],
+        privateIds: ['document'], meaningEmbeddings: true, realEmbeddings: real,
+        answer: JSON.stringify({ answer: 'Paracetamol [1].', citations: [{ evidence: 1, claim: 'Paracetamol.' }], unanswered: [], sufficient: true }),
+      });
+      expect(local.fixture.stores.secure_local!.searchItems(question, 5)).toEqual([]);
+      if (real) {
+        const lane = await local.fixture.stores.secure_local!.vectorSearchLane(question, local.builtIn.provider, 5);
+        expect(lane.rows[0]?.bestCosine).toBeGreaterThanOrEqual(0.73);
+      }
+      const cloudBefore = local.fixture.cloud.inputs.length;
+      const network = denyNetwork();
+      try {
+        const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => undefined });
+        const outcome = await controller.handle({ action: 'ask', question }, 'session:owner');
+        expect(outcome.body).toMatchObject({ ok: true, status: 'answered', answer: 'Paracetamol.' });
+        expect(JSON.stringify(local.stub.requests)).toContain(text);
+        expect(local.fixture.cloud.inputs.slice(cloudBefore)).toEqual([]);
+        expect(network.attempts).toEqual([]);
+      } finally { network.restore(); }
+    }, real ? 300_000 : 5_000);
+  }
 
   test('Ask privately: retrieval, the built-in embedding, passage ranking and synthesis all run here', async () => {
     const local = await localFixture();

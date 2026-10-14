@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "modelProfiles": {
+    "built-in-embedding": {
+      "provider": "built-in",
+      "trust": "local",
+      "model": "embeddinggemma-2-litert-24d962e",
+      "purpose": "embedding"
+    },
+    "cloud-openclaw-infer": {
+      "provider": "openclaw-infer",
+      "trust": "standard_cloud",
+      "purpose": "analyst"
+    }
+  },
+  "routes": {
+    "secure_local": {
+      "mode": "disabled",
+      "pool": { "members": [] },
+      "disabledReason": "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
+    },
+    "internal": { "analyst": ["cloud-openclaw-infer"] }
+  },
+  "retrieval": {
+    "trustDomains": {
+      "secure_local": {
+        "minimumExecutionTrust": "local",
+        "allowedEmbeddingTrust": ["local"],
+        "embeddingProfile": null,
+        "allowCloudQuery": false,
+        "activationMode": "metadata_only",
+        "secureHandling": "metadata_only_gap"
+      },
+      "internal": {
+        "minimumExecutionTrust": "standard_cloud",
+        "allowedEmbeddingTrust": ["local", "standard_cloud"],
+        "embeddingProfile": "built-in-embedding",
+        "allowCloudQuery": true,
+        "activationMode": "hybrid_shadow"
+      }
+    }
+  }
+}

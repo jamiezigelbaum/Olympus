@@ -3,8 +3,10 @@ export { defaultSovereigntyConfigPath } from './owner-config-read.ts';
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import { OperationError } from './operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
 import { parseOptionalBooleanEnv } from './config.ts';
@@ -172,6 +174,8 @@ export interface LoadSovereigntyOptions {
   env?: Record<string, string | undefined>;
   inlineConfig?: unknown;
   configPath?: string;
+  /** Engine/drain startup only; ordinary policy inspection remains read-only. */
+  migratePrivateMeaning?: boolean;
 }
 
 const BUILTIN_DOMAINS = ['public_safe', 'internal', 'secure_local'] as const;
@@ -194,7 +198,28 @@ export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): Sov
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync(configPath)) {
+    // The Linux engine always names its own default file (OLYMPUS_SOVEREIGNTY_CONFIG),
+    // so eligibility is the resolved path, not whether a path was given.
+    const isDefaultPath = (path: string) => {
+      try { return resolve(path) === resolve(defaultSovereigntyConfigPath(env)); } catch { return false; }
+    };
+    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()
+      && (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
+      && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    if (options.migratePrivateMeaning && standaloneDefault) {
+      try {
+        const backup = migratePrivateMeaningSearch(configPath);
+        if (backup) console.info(`Private meaning search enabled locally; policy backup: ${backup}`);
+      }
+      catch {
+        console.warn('Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.');
+      }
+    }
     const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
+    if (options.migratePrivateMeaning && !standaloneDefault
+      && (parsed as SovereigntyConfig)?.retrieval?.trustDomains?.secure_local?.activationMode === 'metadata_only') {
+      console.info('Pinned or hosted privacy policy still uses the 1.0.0 keyword-only Private setting; no migration was performed.');
+    }
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: 'file',
       path: configPath,
@@ -618,7 +643,12 @@ export function writeSovereigntyConfigFile(input: {
   // privacy profile and the tier rules. It must exist after setup, and at
   // 0700 -- created with the process umask it was world-readable, which is
   // the wrong custody for the directory that holds the owner's privacy rules.
-  publishSovereigntyConfigFile(path, config);
+  withFileLeaseSync(path, lease => {
+    if (existsSync(path) && input.force !== true) {
+      throw new OperationError('invalid_params', `Sovereignty config already exists at ${path}.`, 'Pass --force to overwrite it.');
+    }
+    lease.commit(() => publishSovereigntyConfigFile(path, config));
+  }, { acquireTimeoutMs: 5_000 });
   return path;
 }
 
@@ -724,6 +754,76 @@ export function updateSovereigntyConfigFile(input: {
     if (published) return afterPublish();
     throw error;
   }
+}
+
+/**
+ * Owner-approved 1.0.1 standalone default upgrade. Match the frozen Private
+ * retrieval block and built-in local profile before normalization. Preserve
+ * all other settings; only the shipped disabled-reason copy also changes.
+ * The startup caller owns path eligibility; original bytes are backed up first.
+ */
+export function migratePrivateMeaningSearch(path: string): string | undefined {
+  // Frozen 1.0.0 shape: later preset edits must not broaden migration eligibility.
+  const legacy: SovereigntyConfig = {
+    schemaVersion: 1,
+    modelProfiles: {
+      'built-in-embedding': { provider: 'built-in', trust: 'local', model: 'embeddinggemma-2-litert-24d962e', purpose: 'embedding' },
+      'cloud-openclaw-infer': { provider: 'openclaw-infer', trust: 'standard_cloud', purpose: 'analyst' },
+    },
+    routes: {
+      secure_local: {
+        mode: 'disabled', pool: { members: [] },
+        disabledReason: 'no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured.',
+      },
+      internal: { analyst: ['cloud-openclaw-infer'] },
+    },
+    retrieval: { trustDomains: {
+      secure_local: {
+        minimumExecutionTrust: 'local', allowedEmbeddingTrust: ['local'],
+        embeddingProfile: null, allowCloudQuery: false,
+        activationMode: 'metadata_only', secureHandling: 'metadata_only_gap',
+      },
+      internal: {
+        minimumExecutionTrust: 'standard_cloud', allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding', allowCloudQuery: true, activationMode: 'hybrid_shadow',
+      },
+    } },
+  };
+  if (!existsSync(path)) return undefined;
+  const eligible = (current: unknown) => {
+    const config = current as SovereigntyConfig | undefined;
+    return config?.schemaVersion === 1
+      && isDeepStrictEqual(config.retrieval?.trustDomains?.secure_local, legacy.retrieval.trustDomains.secure_local)
+      && isDeepStrictEqual(config.modelProfiles?.['built-in-embedding'], legacy.modelProfiles['built-in-embedding']);
+  };
+  // A customized/read-only policy needs no writer lease or bundled preset.
+  if (!eligible(JSON.parse(readFileSync(path, 'utf8')))) return undefined;
+  return withFileLeaseSync(path, (lease) => {
+    const original = readFileSync(path, 'utf8');
+    const current = JSON.parse(original) as SovereigntyConfig;
+    // Recheck under the lease without normalizing away owner fields.
+    if (!eligible(current)) return undefined;
+    const nextPolicy = loadSovereigntyPreset('no-sensitive');
+    const nextDisabledReason = nextPolicy.routes.secure_local?.disabledReason;
+    const next = {
+      ...current,
+      ...(nextDisabledReason && current.routes?.secure_local?.disabledReason === legacy.routes.secure_local?.disabledReason ? {
+        routes: { ...current.routes, secure_local: { ...current.routes.secure_local, disabledReason: nextDisabledReason } },
+      } : {}),
+      retrieval: {
+        ...current.retrieval,
+        trustDomains: { ...current.retrieval.trustDomains, secure_local: nextPolicy.retrieval.trustDomains.secure_local! },
+      },
+    };
+    validateSovereigntyConfig(next);
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;
+    lease.commit(() => {
+      // A failed backup must leave the original policy in place.
+      writePrivateFileAtomicSync(backup, original);
+      writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}\n`);
+    });
+    return backup;
+  }, { acquireTimeoutMs: 5_000 });
 }
 
 export function loadSovereigntyPreset(name: SovereigntyPresetName): SovereigntyConfig {

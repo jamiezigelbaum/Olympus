@@ -20,7 +20,9 @@ import {
   guardAccountBoundLanes,
   SourceAccountChangedError,
 } from '../src/workers/source-account-guard.ts';
-import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { withEmbeddingSweep, withLocalPrivateEmbeddingBackfill, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { DropboxApiMetadataClient } from '../src/workers/dropbox-files/provider-client.ts';
 import { readFileSync } from 'node:fs';
 import {
@@ -300,23 +302,45 @@ describe('the account guard', () => {
     expect(await next).toBe('ran');
   });
 
-  test('an embedding sweep appended to a lane is guarded with it (independent review round 10)', async () => {
+  test('sync, embedding sweep and Private backfill are all stopped by a refusing account guard', async () => {
     let swept = 0;
     let synced = 0;
-    const withSweep = withEmbeddingSweep([lane(() => { synced += 1; })], () => () => { swept += 1; return []; });
-    expect(withSweep[0]!.tasks.map((task) => task.kind)).toEqual(['sync', 'embed']);
-    const refusing = { async assertAccount() { throw new SourceAccountChangedError('source_stores_reopen_required', 'reopen'); } };
-    const [guarded] = guardAccountBoundLanes(withSweep, new Map([['dropbox.files', refusing]]));
-    for (const task of guarded!.tasks) {
-      const error = await task.run().catch((reason: unknown) => reason);
-      expect((error as SourceAccountChangedError).code).toBe('source_stores_reopen_required');
+    let backfilled = 0;
+    const store = new LocalConnectorStore({ dbPath: join(tempDir(), 'private.sqlite'), corpusId: 'secure_local.dropbox.files', family: 'file', trustDomain: 'secure_local' });
+    const provider: SourceEmbeddingProvider = {
+      provider: 'built-in', backend: 'local', modelId: 'test', dimension: 2, configHash: 'test', epochId: 'test',
+      async embed(inputs) { return inputs.map(() => [1, 0]); },
+    };
+    try {
+      const withSweep = withEmbeddingSweep([lane(() => { synced += 1; })], () => () => { swept += 1; return []; });
+      const withBackfill = withLocalPrivateEmbeddingBackfill(withSweep, () => {
+        backfilled += 1;
+        return [{ store, provider }];
+      });
+      // Target discovery happens while attaching the task; count only runs.
+      backfilled = 0;
+      expect(withBackfill[0]!.tasks.map((task) => task.id)).toEqual(['dropbox_sync', 'dropbox.files_embeddings', 'dropbox.files_private_meaning']);
+      const refusing = { async assertAccount() { throw new SourceAccountChangedError('source_stores_reopen_required', 'reopen'); } };
+      const [guarded] = guardAccountBoundLanes(withBackfill, new Map([['dropbox.files', refusing]]));
+      for (const task of guarded!.tasks) {
+        const error = await task.run().catch((reason: unknown) => reason);
+        expect((error as SourceAccountChangedError).code).toBe('source_stores_reopen_required');
+      }
+      expect(swept).toBe(0);
+      expect(synced).toBe(0);
+      expect(backfilled).toBe(0);
+      // A permitted run enters the actual backfill task, so the counter proves
+      // the refusal above stopped task execution rather than an inert fixture.
+      await withBackfill[0]!.tasks[2]!.run();
+      expect(backfilled).toBe(1);
+      // The worker applies the guards after both embedding tasks are attached.
+      const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+      expect(server).toContain('withLocalPrivateEmbeddingBackfill(sweptSources,');
+      expect(server).toContain('guardAccountBoundLanes(privateBackfillSources, laneGuards)');
+      expect(server).not.toContain('accountBoundSchedulerSource(');
+    } finally {
+      store.close();
     }
-    expect(swept).toBe(0);
-    expect(synced).toBe(0);
-    // The worker applies the guards after the sweep is attached, not before.
-    const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
-    expect(server).toContain('guardAccountBoundLanes(sweptSources, laneGuards)');
-    expect(server).not.toContain('accountBoundSchedulerSource(');
   });
 
   test('stores deleted while the worker stayed up are reopened before anything is decided or synced (PR review)', async () => {
