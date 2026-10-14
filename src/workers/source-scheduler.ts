@@ -11,6 +11,7 @@ import {
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_FILES_SOURCE_ID,
 } from './dropbox-files/index.ts';
+import { DropboxPathNotFoundError } from './dropbox-files/provider-client.ts';
 import type { DropboxProviderStoreSyncHandler } from './dropbox-files/provider-store-sync.ts';
 import type { FileExtractionRunner } from './file-extraction/runner.ts';
 import { GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from './google-connectors/drive-extraction-source.ts';
@@ -238,6 +239,8 @@ export interface SourceSchedulerTaskRunContext {
 }
 
 export interface SourceSchedulerTask {
+  /** Chosen root, from configuration only; exposed only on a missing-root status. */
+  scopePath?: string | undefined;
   id: string;
   kind: SourceSchedulerTaskKind;
   writer: true;
@@ -405,6 +408,8 @@ export interface SourceSchedulerSourceStatus {
 }
 
 export interface SourceSchedulerTaskStatus {
+  /** Computer dashboard only; never persisted in scheduler state. */
+  missing_scope_path?: string;
   id: string;
   kind: SourceSchedulerTaskKind;
   interval_seconds?: number;
@@ -1152,6 +1157,8 @@ export class SourceScheduler {
     return {
       id: state.task.id,
       kind: state.task.kind,
+      ...(state.lastErrorKind === 'scope_root_missing' && state.task.scopePath
+        ? { missing_scope_path: state.task.scopePath } : {}),
       interval_seconds: Math.round(configuredIntervalMs / 1_000),
       effective_interval_seconds: Math.round(effectiveIntervalMs / 1_000),
       freshness_threshold_seconds: Math.round(freshnessThresholdMs / 1_000),
@@ -1241,14 +1248,32 @@ export function createCanonicalDropboxSchedulerSource(input: {
     const scopeHash = schedulerScopeHash(approvedScopeKey);
     tasks.push({
       id: `dropbox.files_store_pull.${scopeHash}`,
+      scopePath: input.policy.roots.find(root => root.approved_scope_key === approvedScopeKey)?.path,
       kind: 'sync',
       writer: true,
       run: async (context?: SourceSchedulerTaskRunContext) => {
-        const outcome = await input.providerSync!.pull({
-          approved_scope_key: approvedScopeKey,
-          max_items: input.policy.sync.max_entries_per_pass,
-          ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
-        });
+        let outcome;
+        try {
+          outcome = await input.providerSync!.pull({
+            approved_scope_key: approvedScopeKey,
+            max_items: input.policy.sync.max_entries_per_pass,
+            ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
+          });
+        } catch (error) {
+          if (!(error instanceof DropboxPathNotFoundError)) throw error;
+          // A missing chosen root is not a provider outage. The existing
+          // durable deferral keeps this scope on a daily recovery check;
+          // every other scope retains its ordinary cadence.
+          const interval = 24 * 60 * 60 * 1000;
+          throw new SourceSchedulerTaskFailure('A chosen folder is missing.', {
+            errorKind: 'scope_root_missing',
+            retryAt: {
+              at: new Date(Date.parse(context?.attemptedAt ?? new Date().toISOString()) + interval).toISOString(),
+              effectiveIntervalMs: interval,
+              degradedReason: 'scope_root_missing',
+            },
+          });
+        }
         return {
           status: outcome.receipt.status,
           counts: outcome.receipt.counts,
@@ -2411,6 +2436,7 @@ function hash(value: string): string {
 const HONEST_SCHEDULER_ERROR_KINDS: ReadonlySet<string> = new Set([
   'api_request_guard',
   'config_missing_folder_argument',
+  'scope_root_missing',
   'credential_missing',
   'credential_reauth_required',
   'credential_refresh_busy',

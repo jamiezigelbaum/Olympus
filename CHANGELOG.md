@@ -2,6 +2,7 @@
 
 ## 1.0.0 - 2026-10-13
 
+- **Missing Dropbox folders.** Names a missing chosen folder and offers Choose folders. Other folders keep syncing; missing folders are checked once a day.
 - **Olympus 1.0.** The first full release, for Mac and for Omarchy Linux.
 - **Olympus on Linux.** A standalone engine that runs as your user (Omarchy
   first): an installer and uninstaller, an Omarchy launcher and status

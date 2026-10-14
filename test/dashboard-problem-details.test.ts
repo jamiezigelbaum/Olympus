@@ -407,3 +407,54 @@ function mount(serve: Record<string, Serve>): Host {
   hosts.push(host);
   return host;
 }
+
+
+test('a missing chosen folder says what is wrong and offers Choose folders immediately', () => {
+  const raw = viewModelOf(card({
+    scope_selection: { kind: 'folders', status: 'approved', connected: true },
+    schedule: { running: false, consecutive_failures: 1, degraded_reason: 'scope_root_missing', missing_folders: ['/Gone'] },
+  } as any));
+  const model = copyDashboardViewModel(raw);
+  expect(model.sources[0]!.status).toBe('Needs you');
+  expect(model.sources[0]!.progress?.stalledReason).toBe('scope_root_missing');
+  expect(model.sources[0]!.primary?.label).toBe('Choose folders');
+  expect(model.needsYou[0]!.sentence).toBe('Dropbox — A folder you chose is missing');
+  expect(JSON.stringify(model)).not.toContain('/Gone');
+  const host = mount({});
+  host.push({ structuredContent: model });
+  expect(host.text()).toContain('A folder you chose is missing');
+  expect(host.text()).not.toContain("isn't responding");
+});
+
+
+test('real Dropbox 5xx and timeouts retain the provider-unavailable wording', async () => {
+  const { DropboxApiMetadataClient } = await import('../src/workers/dropbox-files/provider-client.ts');
+  const { SourceScheduler } = await import('../src/workers/source-scheduler.ts');
+  for (const failure of ['5xx', 'timeout']) {
+    const client = new DropboxApiMetadataClient({ token: 'test', maxRetries: 0, requestTimeoutMs: 5, fetch: failure === '5xx'
+      ? async () => new Response('{}', { status: 503 })
+      : async () => new Promise<Response>(() => {}) });
+    const scheduler = new SourceScheduler({ enabled: true, tickMs: 1000, errorBackoffMs: 5000, maxTransientRetries: 1, now: () => NOW, sources: [{ sourceId: 'dropbox.files', corpusId: 'secure_local.dropbox.files', cadence: 'continuous', intervalMs: 300000, freshnessThresholdHours: 24, tasks: [{ id: 'sync', kind: 'sync', writer: true, run: async () => { await client.listFolder({ path: '/Here', recursive: true, limit: 10 }); return { status: 'idle' }; } }] }] });
+    try {
+      for (let i = 0; i < 3; i++) await scheduler.runSource('dropbox.files');
+      const task = scheduler.status().sources[0]!.tasks[0]!;
+      expect(task.last_error_kind).not.toBe('scope_root_missing');
+      const view = viewModelOf(card({ schedule: { running: false, consecutive_failures: task.consecutive_failures, last_error_kind: task.last_error_kind } } as any));
+      const host = mount({});
+      host.push({ structuredContent: copyDashboardViewModel(view) });
+      expect(host.text()).toContain("Dropbox isn't responding; Olympus will retry");
+      expect(host.text()).not.toContain('folder you chose is missing');
+    } finally { scheduler.stop(); }
+  }
+});
+
+
+test('missing chosen paths reach only the computer panel metadata', async () => {
+  const { createDashboardPanelTools } = await import('../src/workers/email-source/dashboard-panel-tools.ts');
+  const view = { sources: [card({ scope_selection: { kind: 'folders', status: 'approved', connected: true }, schedule: { running: false, consecutive_failures: 1, degraded_reason: 'scope_root_missing', missing_folders: ['/Gone'] } } as any)], generated_at: NOW.toISOString() } as unknown as SourceDashboardViewModel;
+  const tools = createDashboardPanelTools({ surface: () => ({ dashboardView: async () => view } as any), setup: {} as any, workerFetch: async () => new Response('{}'), makeContext: () => ({} as any), indexFasterState: async () => undefined });
+  const result = await tools.call('olympus_dashboard', {}, { origin: 'http://127.0.0.1:8787' });
+  expect(((result._meta as any)?.['olympus/computer']).missingFolders).toEqual([{ sourceId: 'dropbox.files', paths: ['/Gone'] }]);
+  expect(JSON.stringify(result.structuredContent)).not.toContain('/Gone');
+  expect(JSON.stringify(result.content)).not.toContain('/Gone');
+});

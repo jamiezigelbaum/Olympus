@@ -102,6 +102,15 @@ export class DropboxApiError extends Error {
   }
 }
 
+/** The chosen listing root no longer exists. No provider text crosses. */
+export class DropboxPathNotFoundError extends DropboxApiError {
+  readonly kind = 'dropbox_path_not_found';
+  constructor() {
+    super('Dropbox metadata path was not found (409/path/not_found).', 409, 'path');
+    this.name = 'DropboxPathNotFoundError';
+  }
+}
+
 /**
  * The provider invalidated the continuation cursor (409 `reset`).
  *
@@ -242,6 +251,16 @@ export class DropboxApiMetadataClient implements DropboxMetadataClient {
 
 function dropboxMetadataError(response: Response, detail: string): DropboxApiError {
   const tag = dropboxErrorTag(detail);
+  // Dropbox files.stone: ListFolder{,Continue}Error.path is a LookupError.
+  // Only the nested not_found tag means missing; not_folder and restricted
+  // content need their own disposition. Never infer it from provider prose.
+  if (response.status === 409 && tag === 'path') {
+    let parsed: any;
+    try { parsed = JSON.parse(detail); } catch { /* ordinary API error */ }
+    if (parsed?.error?.['.tag'] === 'path' && parsed.error.path?.['.tag'] === 'not_found') {
+      return new DropboxPathNotFoundError();
+    }
+  }
   // A `reset` tag is Dropbox's closed-vocabulary word for an invalidated
   // list_folder cursor. It arrives as a 409; any other 4xx carrying it means
   // the same thing and is treated the same way.

@@ -841,3 +841,23 @@ function file(id: string) {
     pathDisplay: `/${id}.txt`,
   };
 }
+
+
+test('409 path/not_found is distinct, body discarded; other path errors remain ordinary failures', async () => {
+  for (const continuation of [false, true]) {
+    let attempts = 0;
+    const client = new DropboxApiMetadataClient({ token: 'test-token', fetch: async () => {
+      attempts++;
+      return new Response(JSON.stringify({ error_summary: 'path/not_found/...', error: { '.tag': 'path', path: { '.tag': 'not_found' } }, user_message: { text: '/Do not copy this' } }), { status: 409 });
+    } });
+    const error = await (continuation ? client.listFolderContinue({ cursor: 'c', limit: 10 }) : client.listFolder({ path: '/Gone', recursive: true, limit: 10 })).catch(e => e);
+    expect(error.kind).toBe('dropbox_path_not_found');
+    expect(error.message).not.toContain('/Do not copy this');
+    expect(attempts).toBe(1);
+  }
+  for (const [status, tag] of [[409, 'not_folder'], [503, 'not_found']] as const) {
+    const client = new DropboxApiMetadataClient({ token: 'test-token', maxRetries: 0, fetch: async () => new Response(JSON.stringify({ error: { '.tag': 'path', path: { '.tag': tag } } }), { status }) });
+    const error = await client.listFolder({ path: '/Gone', recursive: true, limit: 10 }).catch(e => e);
+    expect(error.kind).not.toBe('dropbox_path_not_found');
+  }
+});

@@ -136,6 +136,7 @@ export function dashboardSchedulerTaskFailing(
 ): boolean {
   if (task.consecutive_failures <= 0) return false;
   const kind = task.last_error_kind;
+  if (kind === 'scope_root_missing') return true;
   if (kind?.startsWith('credential_') && !DASHBOARD_CREDENTIAL_CONTENTION_KINDS.has(kind)) return true;
   return task.consecutive_failures >= DASHBOARD_PERSISTENT_FAILURE_RUNS;
 }
@@ -393,6 +394,8 @@ export interface DashboardSourceSchedule {
   last_attempt_at?: string;
   next_run_at?: string;
   last_error_kind?: string;
+  /** Chosen paths for the computer-only dashboard metadata. */
+  missing_folders?: string[];
   /**
    * The newest failing task's `error_hash`: the value its log line carries,
    * so an unclassified failure can be found there.
@@ -2848,6 +2851,7 @@ function scheduleFromSchedulers(
   const failing = tasks
     .filter((task) => task.consecutive_failures > 0)
     .sort((left, right) => (Date.parse(right.last_attempt_at ?? '') || 0) - (Date.parse(left.last_attempt_at ?? '') || 0));
+  const missingFolders = tasks.flatMap(task => task.last_error_kind === 'scope_root_missing' && task.missing_scope_path ? [task.missing_scope_path] : []);
   const lastErrorKind = failing.find((task) => task.last_error_kind)?.last_error_kind;
   const lastErrorHash = failing.find((task) => task.last_error_hash)?.last_error_hash;
   const degradedReason = tasks.find((task) => task.degraded_reason)?.degraded_reason;
@@ -2860,6 +2864,7 @@ function scheduleFromSchedulers(
     ...(lastSuccessAt ? { last_success_at: lastSuccessAt } : {}),
     ...(lastAttemptAt ? { last_attempt_at: lastAttemptAt } : {}),
     ...(nextRunAt ? { next_run_at: nextRunAt } : {}),
+    ...(missingFolders.length ? { missing_folders: [...new Set(missingFolders)] } : {}),
     ...(lastErrorKind ? { last_error_kind: lastErrorKind } : {}),
     ...(lastErrorHash ? { last_error_hash: lastErrorHash } : {}),
     ...(degradedReason ? { degraded_reason: degradedReason } : {}),

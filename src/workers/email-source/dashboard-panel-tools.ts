@@ -334,9 +334,12 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       const on = await options.indexFasterState().catch(() => undefined);
       const unpair = computerUnpairEntries(view);
       const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
+      const missingFolders = (view?.sources ?? []).flatMap(source => source.schedule?.missing_folders?.length
+        ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
       const waiting = context.localSession === true ? waitingCount(options) : 0;
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0) return result;
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0) return result;
       const meta: ComputerDashboardMeta = {
+        ...(missingFolders.length ? { missingFolders } : {}),
         ...(on !== undefined ? { indexFaster: { on } } : {}),
         ...(unpair.length > 0 ? { unpair } : {}),
         ...(unreadable.length > 0 ? { unreadable } : {}),
