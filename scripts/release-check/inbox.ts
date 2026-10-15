@@ -213,9 +213,10 @@ export interface InboxContext {
   /** Link ids the model agents received. */
   agentLinks: ReadonlyArray<{ agent: string; id: string }>;
   /**
-   * Whether this install offers an agent the tool that issues the link. `source_answer` is listed only where an answer model runs on
-   * the computer (workers/remote-search.ts); a standard install offers `olympus_search` alone, which carries no link and records
-   * nothing in the Inbox. Absent means the link was expected.
+   * Whether this install offers an agent a tool that issues the link: `olympus_search` (every install the remote surface serves with a
+   * search, a standard one included) or `source_answer` (only where an answer model runs on the computer, workers/remote-search.ts).
+   * Both record the question for the Inbox on a Private match and carry the note with the Open link. `not_offered` is an install that
+   * lists neither. Absent means the link was expected.
    */
   agentLink?: 'issued' | 'not_offered';
   /** The tools the agent was offered, for the report's line when the link path is not available. */
@@ -333,7 +334,7 @@ export function evaluateInbox(obs: InboxObservation, ctx: InboxContext): CheckRe
       id: 'inbox.agent.link-path',
       title: 'An agent\'s Private question reaches the Inbox by the link it is given',
       status: 'skip',
-      detail: `not exercised: this install runs no answer model, so agents are offered ${(ctx.agentTools ?? []).join(', ') || 'no tools'} and not source_answer, and only source_answer issues the Open link and records the question. Needs an install with an answer model (an OpenClaw-hosted analyst or a configured one)`,
+      detail: `not exercised: this install offers agents ${(ctx.agentTools ?? []).join(', ') || 'no tools'}, and neither olympus_search nor source_answer, the two tools that record a Private question for the Inbox and issue the Open link`,
     });
     // The same address, opened for a real entry (the one the Ask page just made): the id resolves to that entry in the Inbox page.
     const askEntry = obs.ask?.entry ?? null;

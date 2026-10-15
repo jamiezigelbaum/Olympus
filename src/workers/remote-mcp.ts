@@ -26,7 +26,9 @@
  * source_answer, source_answer_result, source_index_status and
  * ask_anonymously), plus the evidence search `olympus_search` when the worker
  * supplies one (workers/remote-search.ts), which also hides source_answer
- * while no answer model is set up. Each request is served statelessly:
+ * while no answer model is set up and, for every connection but a demo grant,
+ * settles the connection's Private part (core/remote-private-part.ts) so a
+ * Private match waits in the computer's Inbox. Each request is served statelessly:
  * one MCP server and transport per HTTP request, JSON responses, no session.
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
@@ -189,12 +191,17 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     // The directory endpoint serves the ChatGPT surface only.
     if (surface === 'directory' && !chatgpt) return jsonResponse(404, remoteSurfaceErrorOutput('not_found'));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
+    const demo = options.demoGrant?.(verification.connection) === true;
     const server = chatgpt
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
-      : createOlympusMcpServer('remote', () => ctx, demoGrantLimit(options.demoGrant?.(verification.connection) === true, options.search
-        ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface))
+      : createOlympusMcpServer('remote', () => ctx, demoGrantLimit(demo, options.search
+        ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+          // A demo sign-in grant is a shared password: its searches never write to the owner's Inbox.
+          ...(!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {}),
+          ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
+        })
         : undefined));
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });

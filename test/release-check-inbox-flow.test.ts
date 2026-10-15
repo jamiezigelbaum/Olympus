@@ -8,7 +8,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FIXTURE_ITEMS, PRIVATE_FACTS, PRIVATE_MARKER } from '../scripts/release-check/fixture.ts';
 import { REMOTE_PRIVATE_NOTE } from '../src/core/remote-result.ts';
-import { PRIVATE_MATCH_NOTE } from '../src/workers/chatgpt/response-builder.ts';
 import { SOURCE_ANSWER_HANDOFF_MAX_MS } from '../src/core/source-answer-jobs.ts';
 import { ANSWER_TOOL_CALL_TIMEOUT_MS, INBOX_SELFTEST_FAILS, INBOX_SELFTESTS, newRunId, parseCli, runReleaseCheck, type RunConfigFile } from '../scripts/release-check/run.ts';
 
@@ -49,21 +48,24 @@ if (verb === 'provision') {
   else if (sub === 'mcp-tools' && mode === 'tools-malformed') say({ ok: true, tools: 'olympus_search' });
   else if (sub === 'mcp-tools' && mode === 'tools-empty') say({ ok: true, tools: [] });
   else if (sub === 'mcp-tools' && mode === 'tools-crash') { console.error('agent crashed'); process.exit(1); }
-  else if (sub === 'mcp-tools') say({ ok: true, tools: [{ name: 'olympus_search', annotations: { readOnlyHint: true } }, { name: 'source_answer_result', annotations: { readOnlyHint: true } }, ...(process.env.FAKE_ANSWER_TOOL === '1' ? [{ name: 'source_answer', annotations: { readOnlyHint: true } }] : [])] });
+  else if (sub === 'mcp-tools' && mode === 'tools-none') say({ ok: true, tools: [{ name: 'source_answer_result', annotations: { readOnlyHint: true } }, { name: 'source_index_status', annotations: { readOnlyHint: true } }] });
+  else if (sub === 'mcp-tools') say({ ok: true, tools: [...(process.env.FAKE_NO_SEARCH === '1' ? [] : [{ name: 'olympus_search', annotations: { readOnlyHint: true } }]), { name: 'source_answer_result', annotations: { readOnlyHint: true } }, ...(process.env.FAKE_ANSWER_TOOL === '1' ? [{ name: 'source_answer', annotations: { readOnlyHint: true } }] : [])] });
   else if (sub === 'mcp-call') {
+    const tool = /mcp-call '([^']*)'/.exec(script)?.[1] ?? '';
     const note = process.env.FAKE_NOTE ?? '';
     const counter = state + '/calls';
     const calls = existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0;
     writeFileSync(counter, String(calls + 1));
-    if (process.env.FAKE_WORKING === '1' && calls === 0) {
+    if (tool === 'olympus_search') {
+      // As a standard install returns it: the evidence result, and beside it the fixed note with its Open link when a Private item matched.
+      const structured = { status: 'none', evidence: [], coverage: { searchedSources: 1, unreadableItems: 0, namesOnlyItems: 0, partiallyReadItems: 0, unclassifiedItems: 0, instruction: 'x' }, notes: [], ...(note ? { private_note: note } : {}) };
+      const text = 'Olympus found no Public or Personal evidence for this question in 1 searched source.' + (note ? '\n\nPass this on to the user as written:\n' + note : '');
+      say({ ok: true, status: 200, isError: false, text, structured, noteKind: note ? 'remote' : null });
+    } else if (process.env.FAKE_WORKING === '1' && calls === 0) {
       say({ ok: true, status: 200, isError: false, text: JSON.stringify({ status: 'working', job_id: 'job.install.abc', next_tool: 'source_answer_result' }), structured: null, noteKind: null });
-    } else if (process.env.FAKE_ANSWER_TOOL === '1') {
+    } else {
       const output = { kind: 'source_answer', status: 'answered', answer: 'Nothing public answers this.', citations: [], ...(note ? { private_note: note } : {}) };
       say({ ok: true, status: 200, isError: false, text: JSON.stringify(output, null, 2), structured: null, noteKind: note ? 'remote' : null });
-    } else {
-      // A standard install: the search says some Private items match, in the product's own words, and carries no link.
-      const output = { evidence: [], note: process.env.FAKE_MATCH_NOTE };
-      say({ ok: true, status: 200, isError: false, text: JSON.stringify(output, null, 2), structured: null, noteKind: 'no_panel' });
     }
   }
   else if (sub === 'inbox-check') {
@@ -109,7 +111,7 @@ let dir: string;
 let driverPath: string;
 let candidateDir: string;
 const saved: Record<string, string | undefined> = {};
-const ENV_KEYS = ['FAKE_STATE', 'FAKE_NOTE', 'FAKE_LINK_ID', 'FAKE_INBOX_MODE', 'FAKE_ANSWER_TOOL', 'FAKE_WORKING', 'FAKE_MATCH_NOTE', 'RELEASE_CHECK_ANSWER_POLL_MS'];
+const ENV_KEYS = ['FAKE_STATE', 'FAKE_NOTE', 'FAKE_LINK_ID', 'FAKE_INBOX_MODE', 'FAKE_ANSWER_TOOL', 'FAKE_NO_SEARCH', 'FAKE_WORKING', 'RELEASE_CHECK_ANSWER_POLL_MS'];
 const noteWith = (id: string): string => `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${id})`;
 
 beforeEach(() => {
@@ -127,8 +129,9 @@ beforeEach(() => {
   process.env.FAKE_STATE = dir;
   process.env.FAKE_LINK_ID = ID;
   process.env.FAKE_NOTE = noteWith(ID);
-  process.env.FAKE_ANSWER_TOOL = '1';
-  process.env.FAKE_MATCH_NOTE = PRIVATE_MATCH_NOTE;
+  // A standard install: olympus_search, no source_answer.
+  delete process.env.FAKE_ANSWER_TOOL;
+  delete process.env.FAKE_NO_SEARCH;
   process.env.RELEASE_CHECK_ANSWER_POLL_MS = '10';
   delete process.env.FAKE_INBOX_MODE;
   delete process.env.FAKE_WORKING;
@@ -162,6 +165,12 @@ describe('the Ask page and Inbox leg against a scripted machine', () => {
     const scripted = report.machines[0]!.agents.find((agent) => agent.id === 'scripted')!;
     expect(scripted.scripted).toBe(true);
     expect(scripted.checks.map((c) => c.id)).toEqual(expect.arrayContaining(['private-medical.no-leak', 'private-medical.private-note', 'private-medical.link', 'private-medical.link-carries-nothing', 'private-medical.link-relayed']));
+    // A standard install: the scripted agent asked with olympus_search, the link path is exercised and not skipped.
+    expect(agentLog().some((line) => line.startsWith("mcp-call 'olympus_search'"))).toBe(true);
+    expect(agentLog().some((line) => line.startsWith("mcp-call 'source_answer'"))).toBe(false);
+    expect(checkOf(report, 'inbox.agent.link-path')).toBeUndefined();
+    expect(checkOf(report, 'inbox.agent.entry')?.status).toBe('pass');
+    expect(checkOf(report, 'inbox.agent.page')?.status).toBe('pass');
     expect(checkOf(report, 'inbox.agent.answered')?.status).toBe('pass');
     expect(checkOf(report, 'inbox.screenshots')?.status).toBe('pass');
     // The in-machine check was told the id the link named, and nothing else about the question.
@@ -261,27 +270,28 @@ describe('the Ask page and Inbox leg against a scripted machine', () => {
   }, 120_000);
 });
 
-describe('an install that offers agents no answer tool (a standard install)', () => {
+describe('an install that offers neither olympus_search nor source_answer', () => {
   beforeEach(() => {
-    process.env.FAKE_ANSWER_TOOL = '0';
+    process.env.FAKE_INBOX_MODE = 'tools-none';
     process.env.FAKE_NOTE = '';
     delete process.env.FAKE_LINK_ID;
   });
 
-  test('the scripted agent uses the search, no link is judged, the link path is a visible skip, and the Ask page\'s own entry is opened by address instead', async () => {
+  test('nothing is asked, the link path is a visible skip, and the Ask page\'s own entry is opened by address instead', async () => {
     const opts = options();
     const report = await runReleaseCheck(opts);
     expect(failedIds(report)).toEqual([]);
     const call = agentLog().find((line) => line.startsWith('inbox-check'))!;
     expect(call).toContain("--primary ''");
-    expect(agentLog().some((line) => line.startsWith("mcp-call 'olympus_search'"))).toBe(true);
-    expect(agentLog().some((line) => line.startsWith("mcp-call 'source_answer'"))).toBe(false);
+    expect(agentLog().some((line) => line.startsWith('mcp-call'))).toBe(false);
     const skipped = checkOf(report, 'inbox.agent.link-path')!;
     expect(skipped.status).toBe('skip');
-    expect(skipped.detail).toContain('olympus_search, source_answer_result');
+    expect(skipped.detail).toContain('source_answer_result, source_index_status');
+    expect(skipped.detail).toContain('neither olympus_search nor source_answer');
     expect(checkOf(report, 'inbox.link.opens-entry')?.status).toBe('pass');
     const scripted = report.machines[0]!.agents.find((agent) => agent.id === 'scripted')!;
-    expect(scripted.checks.map((c) => c.id)).toEqual(['private-medical.no-leak', 'private-medical.private-note']);
+    expect(scripted.ran).toBe(false);
+    expect(scripted.checks).toEqual([]);
     expect(checkOf(report, 'inbox.screenshots')?.status).toBe('pass');
   }, 120_000);
 
@@ -292,15 +302,22 @@ describe('an install that offers agents no answer tool (a standard install)', ()
     expect(failedIds(report)).toContain('inbox.link.opens-entry');
     expect(report.selfTest).toContain('inbox.link.opens-entry');
   }, 120_000);
-
-  test('the plant-private-reply self-test still fails the agent\'s leak check', async () => {
-    const report = await runReleaseCheck(options({ inboxSelftest: 'plant-private-reply' }));
-    expect(failedIds(report)).toEqual(['private-medical.no-leak']);
-  }, 120_000);
 });
 
 describe('an install that offers source_answer', () => {
-  test('a working reply is collected with source_answer_result, as the tool tells an agent, and the link in the final answer is judged', async () => {
+  test('beside the search it is not used: the scripted agent asks as a standard install does, with olympus_search', async () => {
+    process.env.FAKE_ANSWER_TOOL = '1';
+    const report = await runReleaseCheck(options());
+    expect(failedIds(report)).toEqual([]);
+    const calls = agentLog().filter((line) => line.startsWith('mcp-call'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("'olympus_search'");
+    expect(checkOf(report, 'private-medical.link')?.status).toBe('pass');
+  }, 120_000);
+
+  test('without the search, a working reply is collected with source_answer_result, as the tool tells an agent, and the link in the final answer is judged', async () => {
+    process.env.FAKE_ANSWER_TOOL = '1';
+    process.env.FAKE_NO_SEARCH = '1';
     process.env.FAKE_WORKING = '1';
     const report = await runReleaseCheck(options());
     expect(failedIds(report)).toEqual([]);
@@ -314,6 +331,8 @@ describe('an install that offers source_answer', () => {
 describe('the tool listing and the answer tool\'s time', () => {
   test('a call to source_answer is given longer than the engine\'s longest hand-off, so a slow answer\'s "working" reply is seen and collected', async () => {
     expect(ANSWER_TOOL_CALL_TIMEOUT_MS).toBeGreaterThan(SOURCE_ANSWER_HANDOFF_MAX_MS + 60_000);
+    process.env.FAKE_ANSWER_TOOL = '1';
+    process.env.FAKE_NO_SEARCH = '1';
     process.env.FAKE_WORKING = '1';
     const report = await runReleaseCheck(options());
     expect(failedIds(report)).toEqual([]);

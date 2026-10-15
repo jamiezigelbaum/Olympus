@@ -1,6 +1,6 @@
 /**
- * The Private part of a remote agent's source answer (summary-rule agents:
- * every remote connection that is not ChatGPT). Design
+ * The Private part of a remote agent's source answer or evidence search
+ * (summary-rule agents: every remote connection that is not ChatGPT). Design
  * docs/design/background-agents.md, section A, "When one is recorded".
  *
  * The typed outcome comes from the answer's actual release decision (its
@@ -34,6 +34,15 @@
  * (core/source-answer-jobs.ts whenFinished), with the asking request and the
  * revocation ticket read when it began, whether or not anyone collects it.
  * A collector (source_answer_result) only reads that settled verdict.
+ *
+ * The evidence search (`olympus_search`, workers/remote-search.ts) is the
+ * only tool a standard install offers these agents, and it never returns
+ * Private items, so it has no outcome to wait for: every question is probed,
+ * with the same probe, the same ticket and the same record (surface
+ * 'remote', no selector but the retrieval mode). The probe starts when the
+ * call does, beside the search, bounded by probeTimeoutMs, so it adds no wait
+ * to a search that takes longer; settle then reads its verdict, and a
+ * `match` that was recorded adds the same sentence and Open link.
  *
  * Revocation: the connection store's `isActive` is asked before a probe and
  * before each re-probe, the store refuses a recording for a connection it
@@ -252,26 +261,72 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       if (!activeNow(ticket.connectionId)) return false;
       const verdict = await probe({ ...selectors, question });
       if (verdict === 'no_match' || closed) return false;
-      let recorded = false;
-      try {
-        const ref = options.store()?.record(ticket, {
-          question,
-          surface: 'remote',
-          state: verdict === 'match' ? 'waiting' : 'unchecked',
-          selectors,
-        });
-        recorded = ref !== undefined;
-        if (ref) recordedId?.(ref.id);
-      } catch {
-        console.warn('[olympus:remote] waiting private question not recorded reason=store_unavailable');
-      }
-      // The sentence says the answer can be seen on the computer: only when
-      // the question really waits there (not refused by a revocation or its
-      // bounds).
-      return verdict === 'match' && recorded;
+      return recordVerdict(ticket, question, selectors, verdict, recordedId);
     } catch {
       return false;
     }
+  };
+
+  /**
+   * Records a question the probe did not clear: waiting on a match, "couldn't
+   * check yet" on `unknown`. True only for a match that was recorded: the
+   * sentence says the answer can be seen on the computer, so only when the
+   * question really waits there (not refused by a revocation or its bounds).
+   */
+  const recordVerdict = (
+    ticket: WaitingQuestionTicket,
+    question: string,
+    selectors: NonNullable<ReturnType<typeof normalizeWaitingSelectors>>,
+    verdict: 'match' | 'unknown',
+    recordedId?: (id: string) => void,
+  ): boolean => {
+    let recorded = false;
+    try {
+      const ref = options.store()?.record(ticket, {
+        question,
+        surface: 'remote',
+        state: verdict === 'match' ? 'waiting' : 'unchecked',
+        selectors,
+      });
+      recorded = ref !== undefined;
+      if (ref) recordedId?.(ref.id);
+    } catch {
+      console.warn('[olympus:remote] waiting private question not recorded reason=store_unavailable');
+    }
+    return verdict === 'match' && recorded;
+  };
+
+  /**
+   * The evidence search's Private part. The ticket is read and the probe
+   * started now, before the search runs; settle (after the search) reads the
+   * verdict, asks the connection store again, and records. A search that fails
+   * never settles, so nothing is recorded for it.
+   */
+  const startSearch = (connectionId: string, args: Readonly<Record<string, unknown>>): RemotePrivatePartCall => {
+    const ticket = ticketFor(connectionId);
+    const question = typeof args.question === 'string' ? args.question.trim() : '';
+    // The search takes the question alone, so nothing narrows a replay of it.
+    const selectors = normalizeWaitingSelectors({});
+    let answerId: string | undefined;
+    const verdict: Promise<PrivateMatchVerdict | undefined> = (async () => {
+      if (closed || !ticket || !question || !selectors) return undefined;
+      if (!activeNow(ticket.connectionId)) return undefined;
+      return probe({ ...selectors, question });
+    })();
+    return {
+      get answerId() { return answerId; },
+      async settle() {
+        try {
+          const found = await verdict;
+          if (found === undefined || found === 'no_match' || closed || !ticket || !selectors) return false;
+          // The probe may have waited: a connection revoked meanwhile records nothing.
+          if (!activeNow(ticket.connectionId)) return false;
+          return recordVerdict(ticket, question, selectors, found, id => { answerId = id; });
+        } catch {
+          return false;
+        }
+      },
+    };
   };
 
   /** A handed-off answer, settled when its job finishes, collected or not. */
@@ -374,6 +429,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     forConnection(connectionId) {
       return {
         start(operation, args, context) {
+          if (operation === 'olympus_search') return startSearch(connectionId, args);
           if (operation === 'source_answer') {
             const ticket = ticketFor(connectionId);
             let answerId: string | undefined;
