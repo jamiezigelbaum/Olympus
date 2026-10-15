@@ -24641,7 +24641,8 @@ function loadSovereigntyEngine(options = {}) {
         return false;
       }
     };
-    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);
@@ -88212,6 +88213,7 @@ function createNativeWorkerService(options) {
         settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else
         delete settings.env[OWNER_BRIDGE_HOST_ENV];
+      settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? "engine" : "gateway";
       const probe = settings.readinessProbe;
       return {
         ...settings,
@@ -88451,7 +88453,7 @@ function stripGatewayBootstrapSecrets(env) {
 function asRecord14(value2) {
   return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
 }
-var SERVICE_ID2 = "olympus-worker", SERVICE_LABEL2 = "worker", READINESS_PROBE_TIMEOUT_MS = 1000, ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250, DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4, DEFAULT_WORKER_STABLE_UPTIME_MS = 30000, NATIVE_CAPTURE_OWNER_ENV_NAMES;
+var SERVICE_ID2 = "olympus-worker", SERVICE_LABEL2 = "worker", READINESS_PROBE_TIMEOUT_MS = 1000, ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250, DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4, DEFAULT_WORKER_STABLE_UPTIME_MS = 30000, NATIVE_CAPTURE_OWNER_ENV_NAMES, WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR";
 var init_native_worker_service = __esm(() => {
   init_linux_owner_bridge_host();
   init_worker_transport();
@@ -88684,7 +88686,7 @@ import { mkdirSync as mkdirSync41 } from "node:fs";
 import { join as join85 } from "node:path";
 function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket) {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {} });
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {} });
   return [
     backgroundNativeProcessService(worker),
     backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
