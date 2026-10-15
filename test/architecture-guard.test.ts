@@ -437,7 +437,7 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
  */
 const REPO_CONTENT_DIRECTORIES = [
   '.claude', '.github', 'assets', 'bin', 'chatgpt-plugin', 'config', 'connect-relay', 'dist', 'docs', 'eval', 'exchange',
-  'integrations', 'relay', 'scripts', 'site', 'skills', 'src', 'test', 'tools',
+  'grok-bot-plugin', 'integrations', 'relay', 'scripts', 'site', 'skills', 'src', 'test', 'tools',
 ];
 
 function repoContentFiles(): string[] {
