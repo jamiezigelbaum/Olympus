@@ -583,12 +583,39 @@ cookies or runs scripts. Old session Hosts and every Host mismatch refuse.
 `olympus dashboard` asks the private socket to open an owner ticket: exclusive
 0600 HTML inside the validated 0700 runtime directory. The trusted desktop
 opener receives only the absolute filename in its separate systemd scope;
-no secret enters argv. The file probes the current session origin in the
-actual browser before navigating to `/owner-proof#<single-use-ticket>`.
+no secret enters argv. The file holds a random challenge and the expected
+HMAC-SHA256(ticket, challenge). Before navigating, its script asks the current
+session origin's `GET /owner-proof?challenge=…` for that answer. Only an exact
+match permits same-window navigation to `/owner-proof#<single-use-ticket>`.
+The probe sends the challenge alone, never the ticket. A fake listener's wrong
+or missing answer leaves a clear refusal in the private file without sending
+the ticket. This is an additional layer, not connection-bound authentication:
+a hostile listener able to relay to a real bridge could relay the challenge
+answer too. Holding both loopback families, and revoking every ticket before
+either is released, is the load-bearing boundary. A restarting worker returns a CORS-readable retry response; both
+the probe and redemption wait with “Olympus is restarting…” wording.
 Resolution failure stays on a clear refusal with the SSH fallback, never the
-fixed origin. Proof consumption is atomic, expires after 60 seconds and
-removes the file. Ticket opening is limited to once per ten seconds globally.
-Only one pending ticket and at most sixteen 12-hour owner sessions are held.
+fixed origin. Redemption claims the ticket exclusively before asynchronous
+session establishment and removes the file. Transport failures and worker 503
+responses retry; other session refusals are final. When the worker restarts,
+only the same live, unexpired, unreplaced claim can retry; its file is not
+recreated and its 60-second expiry is never extended. Success permanently
+spends it before publishing the session. CLI/control-socket and browser confirmation each have a ten-second limiter
+and one pending ticket; browser requests cannot replace the CLI's pending file
+or consume its limiter. The browser lane also permits at most six opens in a
+rolling hour per listener epoch; excess requests receive 429 with `Retry-After`
+and tell the owner too many windows were opened from the browser and to run
+`olympus dashboard` in a terminal on this computer. CLI opens have no hourly cap. Unauthenticated `POST /owner-open`
+ignores the posted target and opens only `/dashboard`. Confirm tells the owner:
+“Approve in the Olympus window that just opened. This page continues by itself.”
+The original tab watches this origin's storage event and polls once a second
+for proof, then fetches its own unchanged path/query and replaces the document.
+The Confirm button stays disabled while opening and waiting; repeat clicks
+leave the pending wait intact. Only a successful replacement open restarts the
+60-second wait; a 429 preserves the current wait. Waiting is bounded by the
+ticket's 60-second lifetime. A different browser
+profile cannot resume it; timeout says “Open this page again from the Olympus window.”
+At most sixteen 12-hour owner sessions are held.
 
 An HttpOnly, SameSite=Lax, host-only cookie is bound to this bridge instance.
 **Cookies alone are insufficient:** cookies cross ports, so every content
@@ -605,8 +632,11 @@ mechanism. No browser request gains an injected bearer.
 
 Browser and socket fetches never follow redirects with the storage proof.
 A browser fetch receives an inert destination and performs ordinary navigation;
-form responses use 303. Upstream document CSP is enforced in the reconstructed
-document, with only the bridge bootstrap additionally authorized; all pages
+form responses use 303. Reconstructed documents use the bridge response-header
+policy and the worker policy as a meta element, with the bridge bootstrap
+additionally authorized. Header-only worker directives (`sandbox`, `report-to`,
+`frame-ancestors`) cannot survive `document.write`; this is not an exact copy
+of the worker response CSP. All pages
 set `worker-src 'none'`, and every `Service-Worker` request is rejected.
 `Clear-Site-Data` clears entry cache/storage and proof-response cache; it is
 not treated as a way to revoke a hostile running tab. Fresh origin isolation
@@ -614,22 +644,65 @@ provides that boundary. All bridge content is no-store.
 
 Live graphical readiness and the current server-mode setting gate startup,
 every request, and post-await publication. A coalesced asynchronous two-second
-observer performs bounded desktop probes (up to three seconds per command);
+observer in the long-lived standalone engine host performs bounded desktop probes (up to three seconds per command);
 HTTP requests only read its snapshot, never spawn subprocesses. When the
 observer detects logout or server-mode enable it closes the listener and
 revokes proofs; requests immediately refuse the unavailable snapshot. Relogin creates a new
-origin. A port collision leaves the owner socket running, opens no replacement
+origin. The bridge binds `127.0.0.1` and `[::1]` at the configured port as one
+listener lifecycle. A collision on either family releases both and reports
+`port_in_use`; no partial listener is published. IPv6 loopback presence comes
+from kernel address state (`os.networkInterfaces()`): an internal interface
+carrying `::1` requires both families. Bind results never decide presence:
+ephemeral-port exhaustion can prevent `bind(::1, 0)` while `::1` still works.
+Any exception reading kernel state is treated as present, failing closed.
+Only an absent loopback address permits IPv4 alone, explicitly reported as
+`desktop_bridge.ipv6=unavailable`. When present, ANY configured-port IPv6
+bind failure is fatal to both families. While IPv6 is unavailable every refresh
+re-checks kernel state. If IPv6 appears, the manager revokes the
+old epoch's sessions and tickets before releasing IPv4 and trying both families
+with a fresh origin. An IPv6 squatter then leaves both families unheld and
+status `port_in_use`, never a live IPv4-only origin beside the squatter.
+Release of either socket revokes the epoch
+and releases both; a subsequent bind gets a new origin. A port collision leaves
+the owner socket running, opens no replacement
 listener and reports `desktop_bridge.state=port_in_use` plus its remedy through
 socket health, engine status and doctor. Headless hosts open no TCP listener.
 Mac browser, socket-free transport, and page output are unchanged.
+
+**Invariant: an origin and its owner sessions may be reused only while their
+TCP listener has remained continuously bound; every release revokes the epoch.**
+The standalone engine host owns the listener, in-memory hashed sessions and
+readiness observer. The host probes the real worker's `/v1/health` over its
+private socket. Two consecutive health failures mark it restarting; one
+success resets the count. Desktop absence still revokes immediately without
+waiting for worker health. Status is durably written only on a change.
+A worker settings reload, crash or kill releases only its
+Unix socket: the host keeps the TCP port bound and returns a constant styled
+“Olympus is restarting…” page with automatic retry in the same window, no
+bootstrap or proof material. The worker asks an owner-only 0600 Unix control
+socket in its validated runtime directory to open tickets and read status.
+No desktop session state is saved or restored from disk; old session files
+are ignored. Stop, host crash/kill, engine restart, logout and server mode
+release TCP and force a fresh random origin, rejecting old cookies/proofs.
+Foreground workers own only their own listener and also rotate on exit;
+startup signals never revoke another instance's runtime state. The stale
+reload-readiness restoration decision is gone: the host continues observing
+desktop presence while the worker is absent, and logout closes the listener.
+The private ticket file is the opening view of the same Olympus window; after
+single-use redemption the bridge renders the requested document there. No
+disposable owner-check window is opened or closed, and no proof is sent with
+a redirect or exposed in opener arguments.
 
 Rejected alternative (kept for the record): retain loopback but require a short-lived, single-use code
 issued only by the owner's CLI, bound to the pending install/client/redirect/
 state/PKCE approval transaction. Never expose it through an unauthenticated
 HTTP endpoint or logs. Bound attempts and atomically consume it; CSRF, origin
 checks and explicit consent still apply. This protects approval but does not
-by itself prevent TCP port squatting; fail on collisions and never submit an
-owner code to an unverified worker.
+by itself prevent TCP port squatting. A stable port number is insufficient:
+the host must hold both loopback families throughout any reused epoch, because
+Chromium may resolve the random `.localhost` name to `::1` first. IPv4 custody
+alone leaves the same port available to an IPv6 squatter from another account.
+Fail on collisions and prove listener identity before submitting an owner code.
 
 Conditional headless connection sequence after the owner's choice:
 
@@ -663,7 +736,7 @@ Doctor reports independent facts and remedies, without printing credentials:
 | Process custody | Manager MainPID/cgroup agrees with current host; no stale competing listener or escaped recorded child; unknown observation is not healthy. |
 | Runtime capabilities | Exact Bun pin, CPU/glibc loadability, model manifests and actual runtime probes; W1–W4 results surfaced separately from engine health. |
 | Credentials | Selected backend and reason; locked/unreachable/corrupt versus absent; unattended unlock state; no secret values, refs or probe residue in output. |
-| Opening and consent | Current desktop session plus xdg-open/handler readiness, or explicit remote mode with configured SSH target/instructions; missing target is actionable. Read-only diagnostics never mint consent or approve. |
+| Opening and consent | The host owns the desktop TCP listener across worker reloads and reports listening/restarting, headless, collision or unavailable without credentials; every listener release rotates the origin. Current desktop session plus xdg-open/handler readiness, or explicit remote mode with configured SSH target/instructions; missing target is actionable. Read-only diagnostics never mint consent or approve. |
 | End-to-end reachability | Worker readiness and relay connection are distinct; relay offline can coexist with a healthy local engine. Connection smoke proof is a separate authorized action. |
 
 ## Independently reviewable landing plan
@@ -1165,7 +1238,18 @@ Expect `desktop_bridge.state` to be `listening`. The command opens a private
 file and then a fresh random `.localhost` origin in Chromium (Omarchy's default)
 or Firefox. The URL printed by the command contains no ticket. Confirm the
 private dashboard loads; connect one client with its original OAuth query,
-then choose Connect on the consent page. Confirm a fresh browser tab can
+then choose Connect on the consent page. In a fresh browser profile with no
+owner proof, visit an agent's authorize URL, click Confirm, and open the private
+ticket in that same profile. The ticket window must show the dashboard and the
+original tab must show the real consent page by itself, without a reload, with
+its query and fragment intact. Approve consent and verify the original state
+and PKCE exchange. Repeat with storage events suppressed to check the poll
+fallback. Prove a ticket in a different profile: the original page must remain
+unproven and after 60 seconds say “Open this page again from the Olympus window.”
+Space six browser Confirm opens at least ten seconds apart within an hour;
+the seventh must return 429 and open nothing. A CLI dashboard open must still
+work and its pending ticket must survive browser attempts. Confirm a fresh
+browser tab can
 reuse the owner session. From a second ordinary account, fixed-entry requests
 may redirect, but dashboard reads and consent must refuse without both proofs.
 Verify copied/previous-instance cookies and forged browser headers do not help.
@@ -1174,12 +1258,47 @@ Repeat with a benign squatter serving the fixed entry while the engine is
 stopped: leave its tab and service worker alive, then stop the squatter and
 start Olympus. Open the owner's ticket using `olympus dashboard`. The old tab
 must not read owner pages or storage or obtain the new cookie. Restart the
-engine and repeat with the old random origin. Confirm `/sw.js` requests with
+worker by saving a setting: its existing window and owner session must survive,
+the host must serve the restarting page during the gap, and a second process
+must fail to bind that port on **both** `127.0.0.1` and `[::1]` with
+EADDRINUSE. Check `ss -ltnp` shows both. Kill the worker and repeat: the
+host still holds both TCP sockets. Restart or kill the host: leave a benign squatter's tab
+at the old random origin alive while the port is released, then reopen Olympus
+and verify a fresh origin refuses the old cookies and proofs. Confirm `/sw.js` requests with
 `Service-Worker: script` refuse and browser registration is blocked by CSP.
 Log out and inspect from another owner SSH session: only the Unix socket
 remains after the bounded reconciliation interval. Log back in and verify a
 new origin. Explicit server mode must likewise remove the listener. Hold the
-port with another process and confirm doctor/status report the collision.
+port on `[::1]` with another ordinary account while IPv4 is free, and repeat
+with IPv4 occupied. Confirm doctor/status report `port_in_use` and the other
+family is released too. Record `cat /proc/sys/net/ipv6/conf/lo/disable_ipv6`
+and `ip -6 addr show lo`. With `::1` assigned, run the review's
+`python3 test/fixtures/review-407-exhaust.py <ready-file> connect` as a second ordinary account while
+the bridge starts: ephemeral-port exhaustion must never produce a live
+IPv4-only bridge. Both families must remain held (or both released on failure);
+a second account must not bind `[::1]:<port>` beside a live bridge or capture
+any ticket through a relay. With the script still running, set
+`OLYMPUS_TEST_PLAYWRIGHT` to an installed Playwright entry and
+`REVIEW407_EXHAUSTED=1`, then run
+`bun test test/linux-owner-bridge-exhaustion.browser.test.ts` for the relaying
+and non-relaying Chromium cases. Record the kernel address state and exhaustion
+result. On a host without IPv6 loopback, verify the dashboard
+works over IPv4 and status explicitly reports `ipv6=unavailable`. Restore IPv6
+loopback: within the refresh interval the origin must rotate, old sessions and
+pending tickets must refuse, and both families must be held. Repeat with a
+benign IPv6 squatter present as IPv6 returns: expect `port_in_use` and IPv4
+released; free the squatter and verify the next refresh takes both families.
+After SIGKILL of the host, inspect `ss -ltnp` and
+verify neither socket is left held by an orphan.
+
+In headful Chromium and Firefox, confirm native `.localhost` resolution on
+real IPv6 loopback. With a benign fake listener answering `/owner-proof`, open
+an unconsumed private file and verify it stays there, reports identity refusal,
+and sends only the challenge; no request or navigation may carry the ticket.
+Restore Olympus, reload the file during worker downtime, and verify the retry
+wording and eventual dashboard in the same window without a flash, popup or
+close. Exercise the real `xdg-open`/`systemd-run` environment and logout/relogin
+against `graphical-session.target`; the engine host now launches the opener.
 
 If browser name resolution fails, the private file must show a refusal with
 SSH instructions, never navigate to the fixed origin. For headless/remote
@@ -1215,7 +1334,7 @@ in the API client, and complete a tool call; revoke that key and verify a
 subsequent call fails. Never paste keys into the shell runbook or logs.
 
 From a separate ordinary Linux account, try reaching the recorded socket
-using `curl --unix-socket "$SOCKET" http://localhost/health` after setting
+using `curl --unix-socket "$SOCKET" http://localhost/v1/health` after setting
 `SOCKET` to the path printed above. Expect permission denied, including when
 browser-like headers are supplied. Do not relax directory/socket permissions.
 Complete one Personal and one Private question; Private content stays in the
@@ -1487,7 +1606,10 @@ Independent review and a real isolated Chromium reproduction found:
 The owner approved fresh random session origins on 2026-10-12. The bridge
 implementation keeps the cookie-independent origin-storage proof, isolates
 old execution contexts with origin rotation, and retains the Unix socket and
-SSH headless path. Disposition: **fix** the browser-origin boundary; no new
+SSH headless path. The 2026-10-14 launch P1 correction removes persisted epochs:
+reusing an origin after releasing its port re-admitted the same-port squatter.
+Only the host's continuously bound listener permits reuse across worker
+restarts; every release (including host death) loses the in-memory epoch. Disposition: **fix** the browser-origin boundary; no new
 release gate or fixed-origin fallback.
 
 

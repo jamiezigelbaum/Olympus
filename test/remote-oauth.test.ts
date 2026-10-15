@@ -422,6 +422,137 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
   };
   beforeEach(() => assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID }));
 
+  test('Claude approval revisited after token exchange stays connected without another code or cookie', async () => {
+    const verifier = 'v'.repeat(50);
+    const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
+    const page = await openConsent(relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, code_challenge: challenge }));
+    const approved = await submitConsent(page, { action: 'approve' });
+    expect(approved.status).toBe(303);
+    const callback = new URL(approved.headers.get('location')!);
+    expect((await exchange(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, callback.searchParams.get('code')!, verifier)).status).toBe(200);
+    // The first response clears the cookie; browser resubmission still has the form.
+    // Go past both the code TTL and the original consent TTL.
+    clock += 11 * 60_000;
+    for (let i = 0; i < 2; i++) {
+      const revisited = await submitConsent({ ...page, cookie: '' }, { action: 'approve' });
+      expect(revisited.status).toBe(200);
+      expect(revisited.headers.get('location')).toBeNull();
+      expect(revisited.headers.get('cache-control')).toBe('no-store');
+      const html = await revisited.text();
+      expect(html).toContain('Connected');
+      expect(html).toContain('You can close this page');
+      expect(html).not.toContain('expired');
+      expect(html).not.toContain('<script');
+      expect(html).not.toContain('http-equiv="refresh"');
+    }
+    expect(store.list()).toHaveLength(1);
+    const forged = await submitConsent({ ...page, csrf: 'wrong' }, { action: 'approve' });
+    expect(forged.status).toBe(400);
+    expect(await forged.text()).not.toContain('<h1>Connected');
+  });
+
+  test('reopening the same Claude authorization reuses the form, then shows success without another callback', async () => {
+    const verifier = 'w'.repeat(50);
+    const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
+    const authorization = relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, code_challenge: challenge });
+    const first = await openConsent(authorization);
+    const second = await openConsent(authorization);
+    expect(second.requestId).toBe(first.requestId);
+    expect(second.csrf).toBe(first.csrf);
+    const approved = await submitConsent(first, { action: 'approve' });
+    expect(approved.status).toBe(303);
+    // Approved but not yet exchanged: a resubmission says Approved, never Connected.
+    const early = await submitConsent(second, { action: 'approve' });
+    expect(early.status).toBe(200);
+    expect(early.headers.get('location')).toBeNull();
+    expect(await early.text()).toContain('<h1>Approved</h1>');
+    const code = new URL(approved.headers.get('location')!).searchParams.get('code')!;
+    expect((await exchange(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, code, verifier)).status).toBe(200);
+    const reopened = await openConsent(authorization);
+    expect(reopened.response.status).toBe(200);
+    expect(reopened.html).toContain('<h1>Connected</h1>');
+    expect(reopened.requestId).toBe('');
+    expect(reopened.response.headers.get('location')).toBeNull();
+    expect(await (await submitConsent(second, { action: 'approve' })).text()).toContain('<h1>Connected</h1>');
+    // A fresh state or PKCE challenge is a new connection, never auto-approved.
+    for (const fields of [{ state: 'fresh' }, { code_challenge: 'y'.repeat(43) }]) {
+      const fresh = await openConsent(relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, ...fields }));
+      expect(fresh.html).toContain('Connect Claude to Olympus?');
+      expect(fresh.requestId).not.toBe('');
+    }
+  });
+
+  test('an approval whose code never became a connection is not reported as Connected', async () => {
+    const verifier = 'x'.repeat(50);
+    const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
+    const authorization = relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, code_challenge: challenge });
+    const page = await openConsent(authorization);
+    const approved = await submitConsent(page, { action: 'approve' });
+    expect(approved.status).toBe(303);
+    const code = new URL(approved.headers.get('location')!).searchParams.get('code')!;
+    // The redirect was lost or the exchange failed (wrong verifier).
+    expect((await exchange(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, code, 'z'.repeat(50))).status).toBe(400);
+    expect(store.list()).toHaveLength(0);
+    const resubmitted = await (await submitConsent({ ...page, cookie: '' }, { action: 'approve' })).text();
+    expect(resubmitted).toContain('<h1>Approved</h1>');
+    expect(resubmitted).not.toContain('<h1>Connected</h1>');
+    // Reopening the same authorization gets a fresh form, not a suppressed callback.
+    const reopened = await openConsent(authorization);
+    expect(reopened.html).toContain('Connect Claude to Olympus?');
+    expect(reopened.requestId).not.toBe('');
+    expect(reopened.requestId).not.toBe(page.requestId);
+  });
+
+  test('a disconnected grant is no longer reported as Connected; reopening gets a fresh form', async () => {
+    const verifier = 'q'.repeat(50);
+    const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
+    const authorization = relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, code_challenge: challenge });
+    const page = await openConsent(authorization);
+    const code = new URL((await submitConsent(page, { action: 'approve' })).headers.get('location')!).searchParams.get('code')!;
+    expect((await exchange(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, code, verifier)).status).toBe(200);
+    expect((await openConsent(authorization)).html).toContain('<h1>Connected</h1>');
+    store.revoke(store.list()[0]!.id);
+    const reopened = await openConsent(authorization);
+    expect(reopened.html).not.toContain('<h1>Connected</h1>');
+    expect(reopened.html).toContain('Connect Claude to Olympus?');
+    expect(await (await submitConsent({ ...page, cookie: '' }, { action: 'approve' })).text()).not.toContain('<h1>Connected</h1>');
+  });
+
+  test('a reopened form stays valid for its full window', async () => {
+    const authorization = relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI });
+    const first = await openConsent(authorization);
+    clock += 9 * 60_000;
+    const again = await openConsent(authorization);
+    expect(again.requestId).toBe(first.requestId);
+    clock += 5 * 60_000;
+    expect((await submitConsent(again, { action: 'approve' })).status).toBe(303);
+  });
+
+  test('a code presented twice revokes the connection and its Connected receipt', async () => {
+    const verifier = 'y'.repeat(50);
+    const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
+    const authorization = relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, code_challenge: challenge });
+    const page = await openConsent(authorization);
+    const code = new URL((await submitConsent(page, { action: 'approve' })).headers.get('location')!).searchParams.get('code')!;
+    expect((await exchange(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, code, verifier)).status).toBe(200);
+    expect((await exchange(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, code, verifier)).status).toBe(400);
+    const reopened = await openConsent(authorization);
+    expect(reopened.html).not.toContain('<h1>Connected</h1>');
+    expect(reopened.html).toContain('Connect Claude to Olympus?');
+  });
+
+  test('an unapproved Claude request really expires and explains how to start again', async () => {
+    const page = await openConsent(relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI }));
+    clock += 10 * 60_000;
+    const expired = await submitConsent(page, { action: 'approve' });
+    expect(expired.status).toBe(400);
+    const html = await expired.text();
+    expect(html).toContain('expired');
+    expect(html).toContain('Start connecting again from the app');
+    expect(html).not.toContain('<h1>Connected');
+    expect(store.list()).toHaveLength(0);
+  });
+
   test('another app is told it gets answers written from Private items, with the Terms beside Connect', async () => {
     const page = await openConsent(relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, resource: `${RELAY_ORIGIN}/mcp` }));
     expect(page.response.status).toBe(200);

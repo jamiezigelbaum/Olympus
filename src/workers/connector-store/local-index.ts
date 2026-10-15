@@ -1,3 +1,4 @@
+import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
@@ -100,6 +101,7 @@ import {
   queryInitialisms,
   sourceIndexFtsQuery,
   sourceIndexFtsTermGroups,
+  sourceIndexTopicTokens,
   type SourceIndexFtsMigrationSpec,
 } from '../../core/source-index/fts.ts';
 import {
@@ -1268,6 +1270,9 @@ export interface ConnectorStoreStatus {
      * 20k of them extracted reported itself fully answer-ready.
      */
     itemsWithText: number;
+    /** Names copies with current content in another store. */
+    contentElsewhereItems?: number;
+    settledUnreadableItems?: number;
     /** Active non-directory rows in the current approved metadata scope. */
     files?: number;
     /** Active directory rows in the current approved metadata scope. */
@@ -10172,11 +10177,11 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     // locate: false is the metadata-only mode: a text match is reported as
     // such, and no chunk text is read to place it.
-    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean; relaxed?: boolean } = {},
+    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
   ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-    const terms = ftsOptions.relaxed ? toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
+    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? this.privateRelaxedFtsQuery(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
@@ -10296,6 +10301,38 @@ export class LocalConnectorStore {
         ])),
       },
     };
+  }
+
+  private privateRelaxedFtsQuery(query: string): string {
+    const terms = relaxedLocalFtsTerms(query);
+    if (terms.length <= 2) return terms.join(' OR ');
+    // A relaxed match can create a waiting question and a panel job. Require
+    // two distinct topic terms, except for short questions (one extra word
+    // must not hide an item) or a term unique to one of at least 20 items.
+    // Rarity is conservative: inspect at most 21 FTS rows per term, including
+    // repeated chunks. Saturation refuses the rarity exception. No corpus
+    // count, text read, schema change or remote model is needed; <=8 terms,
+    // <=28 pairs. Ask privately retains the unrestricted local OR retry.
+    const alternatives: string[] = [];
+    for (let i = 0; i < terms.length; i += 1) {
+      for (let j = i + 1; j < terms.length; j += 1) {
+        alternatives.push(`(${terms[i]} AND ${terms[j]})`);
+      }
+    }
+    const population = this.db.query(
+      'SELECT item_pk FROM items WHERE tombstoned = 0 LIMIT 20',
+    ).all();
+    if (population.length === 20) {
+      for (const term of terms) {
+        const rows = this.db.query(
+          'SELECT item_pk FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT 21',
+        ).all(term) as Array<{ item_pk: number }>;
+        if (rows.length > 0 && rows.length <= 20 && new Set(rows.map(row => row.item_pk)).size === 1) {
+          alternatives.push(term);
+        }
+      }
+    }
+    return alternatives.join(' OR ');
   }
 
   /**
@@ -10662,6 +10699,36 @@ export class LocalConnectorStore {
     return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
   }
 
+  /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
+  settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
+    if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
+    const ledger = this.visibilityLedger();
+    if (!ledger) return [];
+    const identities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_settled_unreadable');
+    const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
+    const account = normalizeOptionalAccountScope(scope?.accountScope);
+    const lookup = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
+      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
+        AND COALESCE(i.provider_conversation_id, '') = ?
+        ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`);
+    const out: ExtractionUnreadableItem[] = [];
+    for (const identity of identities) {
+      const override = ledger.getOverride(identity);
+      if (override?.kind === 'tier' && override.tier === 'secrets') continue;
+      const row = lookup.get(identity.provider, identity.accountScope, identity.providerItemId,
+        identity.providerConversationId ?? '', ...(account ? [account] : []), ...filters.params) as
+        { local_item_id: string; title: string | null; source_version: string | null } | null;
+      const record = ledger.getCurrent(identity);
+      if (!row || !record) continue;
+      out.push({ ref: { corpusId: this.corpusId, provider: identity.provider, accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId, localItemId: row.local_item_id,
+        approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
+        ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
+        failedAt: record.decidedAt });
+    }
+    return out;
+  }
+
   status(scope?: ConnectorStoreStatusScope): ConnectorStoreStatus {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
@@ -10725,6 +10792,8 @@ export class LocalConnectorStore {
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
+          AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -10756,6 +10825,7 @@ export class LocalConnectorStore {
         ) AS full_ingestion_files
     `).get(
       ...itemParams,
+      ...itemParams, JSON.stringify(keptNamesOnlyPks),
       ...itemParams,
       ...itemParams,
       ...itemParams,
@@ -10765,6 +10835,7 @@ export class LocalConnectorStore {
       ...fileScopeParams,
     ) as {
       items: number;
+      content_elsewhere_items: number;
       files: number;
       folders: number;
       tombstoned_items: number;
@@ -10850,6 +10921,7 @@ export class LocalConnectorStore {
           ...namesOnlyKept(this.db, tier.metadataLayer),
         }
       : undefined;
+    const settledUnreadableItems = this.settledUnreadableItems(scope).length;
     // "Last" means most-recently-inserted. started_at has only millisecond
     // resolution, so two runs in the same tick tie on it; sync_run_id is a
     // random UUID, so tie-breaking on it picks a run at random (an
@@ -10872,6 +10944,8 @@ export class LocalConnectorStore {
         embeddedChunks: counts.embedded_chunks,
         syncRuns: counts.sync_runs,
         itemsWithText: counts.items_with_text,
+        ...(counts.content_elsewhere_items > 0 ? { contentElsewhereItems: counts.content_elsewhere_items } : {}),
+        ...(settledUnreadableItems > 0 ? { settledUnreadableItems } : {}),
         ...(scope
           ? {
               files: counts.files,
@@ -11135,7 +11209,7 @@ export interface ConnectorStoreCorpusAdapterOptions {
   embeddingProvider?: SourceEmbeddingProvider;
   retrievalMode?: 'keyword' | 'hybrid';
   /** Trusted local-answer wiring only; never read from a search request. */
-  localKeywordFallback?: boolean;
+  localKeywordFallback?: boolean | 'private_search';
   /** Absolute cosine floor for hybrid vector-lane rows; sub-bar semantic similarity is not evidence. */
   semanticRelevanceBar?: number;
   /** Optional principal account boundary applied to every retrieval lane. */
@@ -11345,13 +11419,11 @@ export function createConnectorStoreCorpusAdapter(
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.hasEmbeddings(embeddingProvider.modelId);
-    const keywordLane = connectorStoreKeywordLaneRows(
-      store,
-      request.query,
-      maxResults,
-      options.accountScope,
-      filters,
-      hybrid ? { prefix: false, locate: false } : { locate: false },
+    const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    const keywordLane = relaxEmptyLocalKeywordLane(
+      store, request.query, maxResults, options.accountScope, filters,
+      connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions),
+      options.localKeywordFallback, ftsOptions,
     );
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
     let semanticOnly = 0;
@@ -11516,7 +11588,7 @@ async function hybridConnectorStoreSearch(
   filters?: ConnectorStoreSearchFilters,
   semanticRelevanceBar?: number,
   resultProjector?: ConnectorStoreResultProjector,
-  localKeywordFallback?: boolean,
+  localKeywordFallback?: boolean | 'private_search',
 ): Promise<SourceIndexCorpusSearchResponse> {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
@@ -11714,7 +11786,7 @@ function connectorStoreKeywordLaneRows(
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  ftsOptions: { prefix?: boolean; locate?: boolean } = {},
+  ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
 ): {
   rows: ConnectorStoreSearchRow[];
   matchCount: SourceIndexCorpusMatchCount;
@@ -11731,7 +11803,7 @@ function connectorStoreKeywordLaneRows(
   // Rows that match every concept of the question, in their name or text.
   const complete = new Set<string>();
   for (const concepts of [plain.concepts, content.concepts]) {
-    for (const [id, matched] of concepts.matched) if (matched >= concepts.total) complete.add(id);
+    for (const [id, matched] of concepts.matched) if (!ftsOptions.relaxed && matched >= concepts.total) complete.add(id);
   }
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
@@ -11750,7 +11822,7 @@ function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
-  const baseline = keywordExpansionDisabled() ? undefined : withKeywordExpansionDisabled(
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : withKeywordExpansionDisabled(
     () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions),
   );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
@@ -11781,24 +11853,13 @@ function relaxEmptyLocalKeywordLane(
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
   strict: ReturnType<typeof connectorStoreKeywordLaneRows>,
-  enabled: boolean | undefined,
+  enabled: boolean | 'private_search' | undefined,
+  ftsOptions: { prefix?: boolean; locate?: boolean } = {},
 ): ReturnType<typeof connectorStoreKeywordLaneRows> {
   if (!enabled || strict.rows.length > 0) return strict;
-  const relaxed = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { relaxed: true });
-  const allRows = relaxed.rows;
-  return {
-    rows: allRows.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
-    allRows,
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
-      saturated: relaxed.saturated,
-    },
-    matchedItemIds: new Set(allRows.map(row => row.sourceItem.localItemId)),
-    // Partial matches stay partial: the retry does not claim every concept matched.
-    completeItemIds: new Set(),
-  };
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === 'private_search' });
+  // OR matches are ranked, but never claim every concept of the question matched.
+  return { ...relaxed, completeItemIds: new Set() };
 }
 
 // A keyword row is content-bearing when it matched a content chunk: the FTS
@@ -14733,16 +14794,23 @@ const LOCAL_RELAXED_STOPWORDS = new Set([
   'can', 'could', 'would', 'should', 'please', 'how', 'when', 'where', 'why',
 ]);
 
-/** Literal terms only: neither FTS operators nor lexical expansions enter the retry. */
-function toRelaxedLocalFtsQuery(query: string): string {
+/**
+ * Literal terms only: neither FTS operators nor lexical expansions enter the
+ * retry. The shared stopword decision comes first, so words the strict search
+ * deliberately ignores ("show", "files", "saved") never become OR matches.
+ */
+function relaxedLocalFtsTerms(query: string): string[] {
   const terms = new Set<string>();
-  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    const term = match[0];
+  for (const term of sourceIndexTopicTokens(query)) {
     if (term.length < 3 || LOCAL_RELAXED_STOPWORDS.has(term)) continue;
     terms.add(term);
     if (terms.size === 8) break;
   }
-  return [...terms].map(term => `"${term.replace(/"/g, '""')}"`).join(' OR ');
+  return [...terms].map(term => `"${term.replace(/"/g, '""')}"`);
+}
+
+function toRelaxedLocalFtsQuery(query: string): string {
+  return relaxedLocalFtsTerms(query).join(' OR ');
 }
 
 function connectorStoreTitleFtsQuery(terms: readonly string[]): string {

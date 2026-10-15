@@ -1,3 +1,7 @@
+import { startLinuxOwnerBridgeHost } from './linux-owner-bridge-host.ts';
+import { linuxGraphicalSessionReadinessAsync } from './linux-desktop-opener.ts';
+import { readWorkerSetupEnv, workerAuthTokenFromConfig } from './worker-auth.ts';
+import { resolveServerMode } from './remote-open.ts';
 import { processInstanceIdentity } from './file-lease.ts';
 import { rotateEngineLog } from './linux-engine-service.ts';
 /**
@@ -38,7 +42,7 @@ import {
 import { createNativeRelayService } from './native-relay-service.ts';
 import { createNativeWorkerService } from './native-worker-service.ts';
 import { resolveRemoteAccessMode } from './remote-access.ts';
-import { removeReleasedWorkerSocket } from './worker-transport.ts';
+import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket } from './worker-transport.ts';
 
 export const ENGINE_STATUS_SCHEMA = 'olympus.engine.status.v1';
 /** EX_CONFIG: launchd's throttle keeps a misconfigured engine from spinning. */
@@ -62,6 +66,7 @@ export interface EngineStatusFile {
   build: string | null;
   remote_mode: string;
   services: Record<string, EngineServiceHealth>;
+  desktop_bridge?: import('./linux-owner-bridge.ts').DesktopBridgeStatus;
 }
 
 export { engineStatusPath } from './engine-service.ts';
@@ -78,6 +83,8 @@ export interface EngineHostOptions {
   installSignalHandlers?: boolean;
   /** Test seam for the stale child-group cleanup that runs before any service starts. */
   reap?: EngineChildReapDeps;
+  /** Desktop OS seams for isolated lifecycle qualification. */
+  desktop?: { ready?: () => Promise<boolean>; openFile?: (path: string) => Promise<void> };
 }
 
 export interface EngineHostHandle {
@@ -85,9 +92,9 @@ export interface EngineHostHandle {
   status(): EngineStatusFile;
 }
 
-export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>): NativeProcessServiceDefinition[] {
+export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>, ownerBridgeHostSocket?: string): NativeProcessServiceDefinition[] {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed });
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...(ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}) });
   return [
     backgroundNativeProcessService(worker),
     backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
@@ -168,18 +175,25 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     remote_mode: remoteMode,
     services: {},
   };
+  let desktopBridge: ReturnType<typeof startLinuxOwnerBridgeHost> | undefined;
   const statusPath = engineStatusPath(dataEnv);
+  let lastStatus: string | undefined;
   const writeStatus = () => {
+    if (desktopBridge) status.desktop_bridge = desktopBridge.status();
+    const content = JSON.stringify({ ...status, updated_at: undefined });
+    if (content === lastStatus) return;
     status.updated_at = now();
     try {
       mkdirSync(join(statusPath, '..'), { recursive: true, mode: 0o700 });
       writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}\n`);
+      lastStatus = content;
     } catch {
       // Advisory: olympus engine status falls back to launchctl alone.
     }
   };
 
-  const services = (options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths)))(pluginConfig);
+  const makeServices = (options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath)));
+  let services: NativeProcessServiceDefinition[] = [];
   const contextFor = (id: string): NativeProcessServiceContext => ({
     // The shape the Gateway hands its services: the services read
     // plugins.entries.olympus.config, exactly as from openclaw.json.
@@ -191,8 +205,10 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     serviceHealth: {
       reportFailure(error) {
         const message = error.message;
+        const state = /is starting\.$/.test(message) ? 'starting' : 'failing';
+        if (status.services[id]?.state === state && status.services[id]?.message === message) { writeStatus(); return; }
         status.services[id] = {
-          state: /is starting\.$/.test(message) ? 'starting' : 'failing',
+          state,
           message,
           updated_at: now(),
         };
@@ -200,19 +216,12 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
         writeStatus();
       },
       clearFailure() {
+        if (status.services[id]?.state === 'ok' && status.services[id]?.message === null) { writeStatus(); return; }
         status.services[id] = { state: 'ok', message: null, updated_at: now() };
         writeStatus();
       },
     },
   });
-
-  log(`engine: starting (pid ${process.pid}, remote access ${remoteMode}).`);
-  writeStatus();
-  for (const service of services) {
-    status.services[service.id] = { state: enabled[service.id] === false ? 'off' : 'starting', message: null, updated_at: now() };
-    await service.start(contextFor(service.id));
-  }
-  writeStatus();
 
   const rotation = paths.linux ? setInterval(() => {
     try { rotateEngineLog(paths.logPath); rotateEngineLog(paths.errorLogPath); }
@@ -223,6 +232,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   const stop = (): Promise<void> => {
     stopping ??= (async () => {
       if (rotation) clearInterval(rotation);
+      desktopBridge?.close();
       status.state = 'stopping';
       writeStatus();
       log('engine: stopping.');
@@ -247,7 +257,51 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     process.once('SIGTERM', onSignal);
     process.once('SIGINT', onSignal);
   }
-  return { stop, status: () => structuredClone(status) };
+  // No worker, no bridge: a worker-disabled engine reserves no port and never
+  // touches the worker socket.
+  if (paths.linux && !stopping && pluginConfig && enabled['olympus-worker'] !== false) {
+    const transport = { platform: 'linux', env: dataEnv };
+    const socketPath = prepareWorkerSocket(transport)!;
+    const config = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
+    const port = Number(new URL(config.email.baseUrl).port || 80);
+    // The bridge forwards every browser request as this origin
+    // (LinuxOwnerBridge.entryOrigin), so the dashboard session is minted for
+    // it too, whatever host name email.baseUrl uses (localhost, [::1]).
+    const base = `http://127.0.0.1:${port}`;
+    const fetchSocket = createWorkerFetch(transport);
+    const authToken = () => workerAuthTokenFromConfig(configFromPluginConfig(readEngineConfig(paths.configPath), { requireResolvedWorkerSecrets: false }), { env: dataEnv, workerEnvPath: paths.workerEnvPath });
+    desktopBridge = startLinuxOwnerBridgeHost({ port, socketPath, transport, ...(options.desktop?.openFile ? { openFile: options.desktop.openFile } : {}), onChange: writeStatus,
+      desktopReady: async () => {
+        const desktop = options.desktop?.ready ? { ready: await options.desktop.ready() } : await linuxGraphicalSessionReadinessAsync();
+        return desktop.ready && !resolveServerMode({ platform: options.platform ?? process.platform, env: dataEnv, fileEnv: readWorkerSetupEnv({ env: dataEnv, workerEnvPath: paths.workerEnvPath }), desktopReady: () => desktop.ready }).remote;
+      },
+      workerReady: async () => {
+        const response = await fetchSocket(base + '/v1/health', { headers: { Authorization: `Bearer ${authToken() ?? ''}` }, signal: AbortSignal.timeout(1_000) });
+        await response.body?.cancel(); return response.ok;
+      },
+      fetchSocket: request => fetchSocket(request, { redirect: 'manual' }),
+      establishDashboard: async () => {
+        const response = await fetchSocket(base + '/dashboard/control/session', { method: 'POST', headers: { Authorization: `Bearer ${authToken() ?? ''}`, Origin: base }, signal: AbortSignal.timeout(5_000) });
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
+          return null;
+        }
+        await response.body?.cancel(); return response.headers.getSetCookie();
+      },
+    });
+  }
+  services = makeServices(pluginConfig);
+  log(`engine: starting (pid ${process.pid}, remote access ${remoteMode}).`);
+  writeStatus();
+  for (const service of services) {
+    status.services[service.id] = { state: enabled[service.id] === false ? 'off' : 'starting', message: null, updated_at: now() };
+    if (stopping) break;
+    await service.start(contextFor(service.id));
+  }
+  writeStatus();
+
+  return { stop, status: () => { writeStatus(); return structuredClone(status); } };
 }
 
 /** `olympus __engine-run`: start the host and stay up until launchd stops it. */

@@ -1,3 +1,4 @@
+import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
 import { removeReleasedWorkerSocket, workerFetch } from './worker-transport.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -55,7 +56,17 @@ export interface NativeWorkerServiceOptions {
   workerEnvPath?: string;
   /** Test seam; production inherits the Gateway working directory. */
   workingDirectory?: string;
+  ownerBridgeHostSocket?: string;
+  /** Set only by the engine host: this worker is the standalone engine's own, not a gateway's. */
+  engineHosted?: boolean;
 }
+
+/**
+ * Who supervises the worker, set after worker.env is loaded so neither it nor an
+ * inherited environment can claim the engine. Engine-only startup work (the 1.0.0
+ * privacy policy migration) reads this instead of the ambient engine markers.
+ */
+export const WORKER_SUPERVISOR_ENV = 'OLYMPUS_WORKER_SUPERVISOR';
 
 interface WorkerLaunchSettings extends NativeProcessStartSettings {
   runtimePath: string;
@@ -116,6 +127,9 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
       });
       if (!settings) return undefined;
+      if (options.ownerBridgeHostSocket) settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
+      else delete settings.env[OWNER_BRIDGE_HOST_ENV];
+      settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? 'engine' : 'gateway';
       const probe = settings.readinessProbe;
       return {
         ...settings,

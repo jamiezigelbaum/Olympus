@@ -25,6 +25,24 @@ Bug reports and rough edges are as valuable as patches — open an issue
 with what you saw, what you expected, and (if it's the install/onboarding
 flow) what your agent said.
 
+## Maintainer notes
+
+- **Private history stays private.** The public repository is a fresh root: the
+  pre-publication history holds personal data and lives only in the private
+  `olympus-archived` repository. Never push `archive/*` tags, `--mirror`,
+  `--all` or any old-history branch to this repository, and never make
+  `olympus-archived` public. The details are in the
+  [public flip runbook](docs/ops/PUBLIC_FLIP_RUNBOOK.md).
+- **Keep the plugin bundle tree-shakeable.** `dist/` is committed. In modules
+  reachable from `src/native-plugin.ts`, a class-field initializer
+  (`private x = new Map()`) counts as a side effect for bun's bundler, so it
+  pulls the whole module graph (including `bun:sqlite` stores) into
+  `dist/index.js`. Declare the field optional and initialize it lazily
+  (`(this.x ??= new Map())`). After a rebuild, an unexplained jump of thousands
+  of lines in the `dist/index.js` diff means tree-shaking broke; confirm by
+  rebuilding with the suspect file reverted.
+  `test/plugin-bundle-no-bun-sqlite.test.ts` catches only the `bun:sqlite` case.
+
 ## Contribution terms
 
 By submitting a pull request or other contribution, you agree that:

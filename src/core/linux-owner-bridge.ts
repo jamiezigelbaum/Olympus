@@ -1,10 +1,10 @@
 /** Linux browser transport. The Unix socket remains the authority; TCP never
  * trusts headers as owner identity. Cookies need a separate origin-storage
  * proof because HTTP cookies are shared across ports. */
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, openSync, writeFileSync, unlinkSync, constants, fstatSync, lstatSync, readFileSync } from 'node:fs';
-import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { closeSync, openSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { validateWorkerSocket, type WorkerTransportOptions } from './worker-transport.ts';
 import { openLinuxOwnerTicketFile } from './linux-desktop-opener.ts';
 import { readBoundedRequestText } from '../workers/remote-request-body.ts';
@@ -44,6 +44,12 @@ function page(body: string, status = 200): Response {
     'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': CSP,
     'Cross-Origin-Opener-Policy': 'same-origin', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
   } });
+}
+/** Constant response: no bootstrap, cookie, ticket or origin-storage proof. */
+function restarting(): Response {
+  const response = page(`${openingView().replace('Opening your dashboard…', 'Olympus is restarting…')}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
+  response.headers.set('Retry-After', '1');
+  return response;
 }
 function refusal(status = 403): Response {
   const response = page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status);
@@ -106,26 +112,73 @@ function metaPolicy(policy: string): string {
 }
 function attribute(value: string): string { return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;'); }
 
+const BROWSER_OPEN_LIMIT_MESSAGE = 'Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.';
+/** Which limiter refused a browser open: `hourly` (six an hour) or `recent` (ten seconds). */
+const OWNER_LIMIT_HEADER = 'X-Olympus-Owner-Limit';
+const BROWSER_OPEN_RECENT_MESSAGE = 'A window was just opened. Look for it, or try again in a few seconds.';
+const BROWSER_OPEN_FAILED_MESSAGE = 'Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.';
+/** A limiter refusal, as opposed to a failure to open the window. */
+class OwnerOpenLimited extends Error {
+  constructor(message: string, readonly hourly: boolean) { super(message); }
+}
+
 function confirmation(): Response {
   return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
 (async function(){
- const message=document.getElementById('message');
- document.getElementById('confirm').onclick=async function(){
-  try{const r=await fetch('/owner-open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:location.pathname+location.search+location.hash})});
-  message.textContent=r.ok?'A private ticket was opened in your desktop browser. Return to it to continue.':'Unable to open the private ticket. Wait a moment and retry, or use the owner SSH socket forward.';}catch{message.textContent='Owner confirmation unavailable. Use the owner SSH socket forward.';}
+ const message=document.getElementById('message'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, opening=false, waiting=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;confirm.disabled=opening;};
+ async function resume(){
+  if(resuming||!localStorage.getItem(key))return;
+  resuming=true;
+  try{const r=await fetch(location.pathname+location.search);if(!r.ok&&r.status!==503){resuming=false;return;}
+   const html=await r.text();stopWaiting();document.open();document.write(html);document.close();
+  }catch{resuming=false;}
+ }
+ function onStorage(event){if(event.key===key)void resume();}
+ confirm.onclick=async function(){
+  if(opening||waiting)return;
+  opening=true;confirm.disabled=true;
+  try{const r=await fetch('/owner-open',{method:'POST'});
+   if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:r.headers.get(${JSON.stringify(OWNER_LIMIT_HEADER)})==='hourly'?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
+   // A refused replacement must leave the current wait intact. Only a
+   // successful open replaces its ticket and starts a fresh 60-second wait.
+   stopWaiting();waiting=true;confirm.disabled=true;
+   message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
+   // Check storage after subscribing too: the opener may already have proved.
+   addEventListener('storage',onStorage);
+   poll=setInterval(resume,1000);
+   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},${TICKET_MS});
+   await resume();
+  }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
+  finally{opening=false;confirm.disabled=waiting;}
  };
- if(!localStorage.getItem(${JSON.stringify(STORAGE)}))return;
- try{const r=await fetch(location.pathname+location.search);if(!r.ok)return;
- const html=await r.text();document.open();document.write(html);document.close();}catch{}
+ await resume();
 })();</script>`);
 }
+// The private file is the first view of the SAME Olympus window, not a
+// disposable owner-check popup. Keep its opening state across the origin hop.
+function openingView(): string {
+  return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
+html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px system-ui,sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
+</style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
+}
 function proofPage(): Response {
-  const response = page(`<p id="message">Confirming the private owner ticket…</p><script>
+  const response = page(`${openingView()}<script>
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
- try{const r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);location.replace(result.target);
+ try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ // Render the requested document in this window. The proof stays at this
+ // origin. The bridge header policy and worker meta policy constrain this view;
+ // header-only worker CSP directives cannot be carried through document.write.
+ // The ticket is spent now, so a worker restart here must wait, not fail.
+ let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
+ if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
+ if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();
+ const html=await documentResponse.text();history.replaceState(null,'',result.target);document.open();document.write(html);document.close();
  }catch{document.getElementById('message').textContent='This private ticket expired or was refused. Run olympus dashboard again. Use the owner SSH socket forward if this browser cannot resolve the session origin.';}
 })();</script>`);
   // The private file probes browser resolution before navigating. No owner
@@ -139,118 +192,99 @@ export interface LinuxOwnerBridgeOptions {
   socketPath: string;
   transport?: WorkerTransportOptions;
   ready: () => boolean;
+  /** Host keeps the listener and epoch while its worker is unavailable. */
+  workerReady?: () => boolean;
   fetchSocket: (request: Request) => Promise<Response>;
   openFile?: (path: string) => Promise<void>;
-  /** Called only after the private single-use owner ticket is consumed. */
-  establishDashboard?: () => Promise<readonly string[]>;
+  /** Called under an exclusive private-ticket claim. Null is a final refusal;
+   * throw for a transient transport failure or worker 503 so the claim retries. */
+  establishDashboard?: () => Promise<readonly string[] | null>;
   now?: () => number;
 }
-interface Ticket { value: string; target: string; path: string; expires: number }
+interface Ticket { value: string; challenge: string; target: string; path: string; expires: number; claimed?: boolean; timer?: ReturnType<typeof setTimeout> }
 interface Session { cookieHash: string; proofHash: string; expires: number }
-const SESSION_FILE = 'owner-bridge-sessions.json';
 const hashSecret = (value: string) => createHash('sha256').update(value).digest('hex');
 function equalHash(value: string | null | undefined, hash: string): boolean {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value)
     && timingSafeEqual(Buffer.from(hashSecret(value), 'hex'), Buffer.from(hash, 'hex'));
 }
-function exactKeys(value: object, keys: string[]): boolean {
-  return Object.keys(value).sort().join(',') === keys.sort().join(',');
-}
-
 export class LinuxOwnerBridge {
   readonly hostname: string;
   readonly origin: string;
   readonly entryOrigin: string;
-  private ticket: Ticket | undefined;
+  private tickets = new Map<'control' | 'browser', Ticket>();
   private sessions: Session[] = [];
-  private lastOpen = -Infinity;
+  private lastOpen = { control: -Infinity, browser: -Infinity };
+  private browserOpens: number[] = [];
   private closed = false;
   private readonly now: () => number;
-  private ticketTimer: ReturnType<typeof setTimeout> | undefined;
   constructor(private readonly options: LinuxOwnerBridgeOptions) {
     this.now = options.now ?? Date.now;
-    const restored = this.restoreSessions();
-    this.origin = restored?.origin ?? `http://${randomOwnerHostname()}:${options.port}`;
+    this.origin = `http://${randomOwnerHostname()}:${options.port}`;
     this.hostname = new URL(this.origin).hostname;
     this.entryOrigin = `http://127.0.0.1:${options.port}`;
-    this.sessions = restored?.sessions.filter(s => s.expires > this.now()) ?? [];
-    if (restored) this.persistSessions();
-  }
-  private sessionPath(): string {
-    // Reuse the socket's complete ancestor, owner and private-mode checks.
-    if (validateWorkerSocket(this.options.transport) !== this.options.socketPath) throw new Error('Owner socket changed.');
-    return join(dirname(this.options.socketPath), SESSION_FILE);
-  }
-  private restoreSessions(): { origin: string; sessions: Session[] } | undefined {
-    let path: string;
-    try { path = this.sessionPath(); } catch { return undefined; }
-    let fd: number | undefined;
-    try {
-      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      const stat = fstatSync(fd), named = lstatSync(path);
-      const uid = this.options.transport?.uid ?? process.getuid?.();
-      if (!stat.isFile() || stat.uid !== uid || (stat.mode & 0o7777) !== 0o600 || stat.nlink !== 1
-        || stat.size > 8192 || stat.dev !== named.dev || stat.ino !== named.ino) throw new Error('Unsafe session state.');
-      const state = JSON.parse(readFileSync(fd, 'utf8'));
-      if (!state || typeof state !== 'object' || !exactKeys(state, ['version', 'origin', 'sessions']) || state.version !== 1
-        || typeof state.origin !== 'string' || !new RegExp('^http://[a-z2-7]{25}[aeimquy4]\\.localhost:' + this.options.port + '$').test(state.origin)
-        || !Array.isArray(state.sessions) || state.sessions.length > 15) throw new Error('Malformed session state.');
-      for (const session of state.sessions) {
-        if (!session || typeof session !== 'object' || !exactKeys(session, ['cookieHash', 'proofHash', 'expires'])
-          || typeof session.cookieHash !== 'string' || !/^[a-f0-9]{64}$/.test(session.cookieHash)
-          || typeof session.proofHash !== 'string' || !/^[a-f0-9]{64}$/.test(session.proofHash)
-          || !Number.isSafeInteger(session.expires) || session.expires <= 0 || session.expires > this.now() + SESSION_MS) throw new Error('Malformed session.');
-      }
-      return state;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { try { unlinkSync(path); } catch {} }
-      return undefined;
-    } finally { if (fd !== undefined) closeSync(fd); }
-  }
-  private persistSessions(): void {
-    this.sessions = this.sessions.filter(s => s.expires > this.now()).slice(-15);
-    let path: string | undefined;
-    try {
-      path = this.sessionPath();
-      writePrivateFileAtomicSync(path, JSON.stringify({ version: 1, origin: this.origin, sessions: this.sessions }) + '\n');
-    } catch {
-      // Unwritable runtime state retains today's process-only behaviour; never
-      // restore an older snapshot after a failed publish of the current cap.
-      if (path) { try { unlinkSync(path); } catch {} }
-    }
   }
   private live(): boolean { return !this.closed && this.options.ready(); }
-  close(revoke = false): void {
+  close(): void {
     this.closed = true; this.sessions = []; this.clearTicket();
-    // A worker shutdown preserves fixed-expiry sessions. Desktop logout must
-    // revoke them, including the origin, before a later login can restore.
-    if (revoke) { try { unlinkSync(this.sessionPath()); } catch {} }
   }
-  private clearTicket(): void {
-    if (this.ticketTimer) clearTimeout(this.ticketTimer);
-    if (this.ticket) { try { unlinkSync(this.ticket.path); } catch {} }
-    this.ticket = undefined;
+  private clearTicket(ticket?: Ticket): void {
+    for (const [lane, current] of this.tickets) {
+      if (ticket && current !== ticket) continue;
+      if (current.timer) clearTimeout(current.timer);
+      try { unlinkSync(current.path); } catch {}
+      this.tickets.delete(lane);
+    }
   }
-  async openTicket(target: string): Promise<void> {
+  async openTicket(target: string, lane: 'control' | 'browser' = 'control'): Promise<void> {
     if (!safeTarget(target) || !this.live()) throw new Error('Desktop owner confirmation is unavailable.');
-    if (this.now() - this.lastOpen < 10_000) throw new Error('Wait ten seconds before opening another owner ticket.');
-    this.lastOpen = this.now();
+    const openedAt = this.now(), previousOpen = this.lastOpen[lane];
+    // The hourly cap is checked first: when both limits apply, it decides the real wait.
+    if (lane === 'browser') {
+      this.browserOpens = this.browserOpens.filter(time => time > openedAt - 60 * 60 * 1000);
+      if (this.browserOpens.length >= 6) throw new OwnerOpenLimited('Wait before opening another owner ticket.', true);
+    }
+    if (openedAt - this.lastOpen[lane] < 10_000) throw new OwnerOpenLimited('Wait ten seconds before opening another owner ticket.', false);
+    if (lane === 'browser') this.browserOpens.push(openedAt);
+    this.lastOpen[lane] = openedAt;
+    try {
+      await this.launchTicket(target, lane);
+    } catch (error) {
+      // No window opened, so the attempt counts toward neither limiter.
+      if (this.lastOpen[lane] === openedAt) this.lastOpen[lane] = previousOpen;
+      if (lane === 'browser') {
+        const index = this.browserOpens.lastIndexOf(openedAt);
+        if (index >= 0) this.browserOpens.splice(index, 1);
+      }
+      throw error;
+    }
+  }
+  private async launchTicket(target: string, lane: 'control' | 'browser'): Promise<void> {
     if (validateWorkerSocket(this.options.transport) !== this.options.socketPath) throw new Error('Owner socket changed.');
-    this.clearTicket();
-    const value = secret();
+    const previous = this.tickets.get(lane);
+    if (previous) this.clearTicket(previous);
+    const value = secret(), challenge = secret();
+    const answer = createHmac('sha256', value).update(challenge).digest('base64url');
     // The filename is independent of the proof. It is the ONLY opener argument.
     const path = join(dirname(this.options.socketPath), `owner-ticket-${randomBytes(16).toString('hex')}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
-    const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus owner confirmation</title><p id="message">Checking the private session origin…</p><script>
-fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'}).then(r=>{if(!r.ok)throw new Error();location.replace(${JSON.stringify(url)});}).catch(()=>{document.getElementById('message').textContent=${JSON.stringify('This browser cannot reach the private *.localhost session origin. ' + DESKTOP_BRIDGE_REMEDY)};});</script>`;
+    const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
+(async function(){
+ const message=document.getElementById('message');
+ try{let r;do{r=await fetch(${JSON.stringify(this.origin + '/owner-proof?challenge=' + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ if(!r.ok||await r.text()!==${JSON.stringify(answer)}){message.textContent='Olympus refused: the private ticket expired or this listener could not prove its identity. The private ticket was not sent. Run olympus dashboard again.';return;}
+ location.replace(${JSON.stringify(url)});
+ }catch{message.textContent=${JSON.stringify('This browser cannot reach the private *.localhost session origin. The private ticket was not sent. ' + DESKTOP_BRIDGE_REMEDY)};}
+})();</script>`;
     const fd = openSync(path, 'wx', 0o600);
     try { writeFileSync(fd, html); } finally { closeSync(fd); }
-    this.ticket = { value, target, path, expires: this.now() + TICKET_MS };
-    this.ticketTimer = setTimeout(() => this.clearTicket(), TICKET_MS); this.ticketTimer.unref();
+    const ticket: Ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
+    this.tickets.set(lane, ticket);
+    ticket.timer = setTimeout(() => this.clearTicket(ticket), TICKET_MS); ticket.timer.unref();
     try {
       await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
       if (!this.live()) throw new Error('Graphical session ended.');
-    } catch (error) { this.clearTicket(); throw error; }
+    } catch (error) { this.clearTicket(ticket); throw error; }
   }
   async handle(request: Request, ownerRequestAdmitted?: () => void): Promise<Response> {
     if (!this.live()) return refusal(503);
@@ -270,20 +304,46 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
     const origin = request.headers.get('origin');
     const site = request.headers.get('sec-fetch-site');
     if (request.method !== 'GET' && request.method !== 'HEAD' && (origin !== this.origin || (site !== null && site !== 'same-origin'))) return refusal();
-    if (url.pathname === '/owner-proof' && request.method === 'GET') return proofPage();
+    if (url.pathname === '/owner-proof' && request.method === 'GET') {
+      if (!url.searchParams.has('challenge')) return proofPage();
+      // Only the private file knows the expected answer. Never reflect the
+      // ticket, or accept a challenge supplied alongside a caller's ticket.
+      const challenge = url.searchParams.get('challenge');
+      const ticket = [...this.tickets.values()].find(t => t.expires > this.now() && equal(challenge, t.challenge));
+      const response = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting()
+        : new Response(createHmac('sha256', ticket.value).update(ticket.challenge).digest('base64url'), { headers: { 'Cache-Control': 'no-store' } });
+      response.headers.set('Access-Control-Allow-Origin', '*');
+      response.headers.set('Access-Control-Expose-Headers', 'Retry-After');
+      return response;
+    }
+    if (this.options.workerReady?.() === false) return restarting();
     if (url.pathname === '/owner-proof' && request.method === 'POST') {
       let body: { ticket?: string };
       try { body = JSON.parse(await boundedBody(request, 1024)); } catch { return refusal(); }
-      const ticket = this.ticket;
+      const ticket = [...this.tickets.values()].find(t => equal(body.ticket, t.value));
       if (!this.live() || !ticket || ticket.expires <= this.now() || !equal(body.ticket, ticket.value)) return refusal();
-      this.clearTicket(); // consume before any asynchronous work
+      if (ticket.claimed) return restarting();
+      ticket.claimed = true; // exclusive claim before any asynchronous work
+      try { unlinkSync(ticket.path); } catch {}
+      const current = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
       let dashboardCookies: readonly string[];
-      try { dashboardCookies = await this.options.establishDashboard?.() ?? []; } catch { return refusal(503); }
-      if (!this.live()) return refusal(503);
+      try {
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (result === null) { this.clearTicket(ticket); return refusal(); }
+        dashboardCookies = result;
+      }
+      catch {
+        // A stale health snapshot may hide a just-restarted worker. Retain
+        // only this live, unexpired claim for retry; never restore a replaced
+        // ticket, recreate its file, or extend its original expiry.
+        if (this.live() && current()) { ticket.claimed = false; return restarting(); }
+        this.clearTicket(ticket); return refusal(503);
+      }
+      if (!this.live() || !current()) { this.clearTicket(ticket); return refusal(503); }
+      this.clearTicket(ticket); // successful redemption is now permanently spent
       const cookie = secret(), proof = secret();
       const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
       this.sessions = [...this.sessions.filter(s => s.expires > this.now()).slice(-14), session];
-      this.persistSessions();
       const response = Response.json({ proof, target: ticket.target }, { headers: {
         'Set-Cookie': `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
         'Cache-Control': 'no-store', 'Clear-Site-Data': '"cache"', 'Content-Security-Policy': CSP,
@@ -293,15 +353,30 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
     }
     if (url.pathname === '/owner-open' && request.method === 'POST') {
       try {
-        const body = JSON.parse(await boundedBody(request, 20_000));
-        await this.openTicket(body.target);
+        // This unauthenticated confirmation button can only open the dashboard.
+        // Its limiter and pending ticket cannot replace or starve a CLI ticket.
+        await this.openTicket('/dashboard', 'browser');
         return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
-      } catch { return refusal(429); }
+      } catch (error) {
+        if (!(error instanceof OwnerOpenLimited)) {
+          // No window opened (launcher, session or socket failure): not the limit.
+          const failed = page(`<p>${BROWSER_OPEN_FAILED_MESSAGE}</p>`, 503);
+          failed.headers.set('X-Olympus-Owner-Refused', '1');
+          return failed;
+        }
+        const response = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
+        response.headers.set('X-Olympus-Owner-Refused', '1');
+        response.headers.set(OWNER_LIMIT_HEADER, error.hourly ? 'hourly' : 'recent');
+        const retryAt = Math.max(this.lastOpen.browser + 10_000,
+          this.browserOpens.length >= 6 ? this.browserOpens[0]! + 60 * 60 * 1000 : 0);
+        response.headers.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
+        return response;
+      }
     }
     // Private control endpoint is NEVER forwarded from TCP, even by an owner.
     if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith('/owner-')) return refusal();
     const cookie = request.headers.get('cookie')?.split(';').map(v => v.trim()).find(v => v.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
-    if (this.sessions.some(s => s.expires <= this.now())) this.persistSessions();
+    if (this.sessions.some(s => s.expires <= this.now())) this.sessions = this.sessions.filter(s => s.expires > this.now()).slice(-15);
     const session = this.sessions.find(s => equalHash(cookie, s.cookieHash));
     let proof = request.headers.get(PROOF_HEADER);
     let body: string | undefined;
@@ -330,9 +405,10 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
     const referer = headers.get('referer');
     if (referer?.startsWith(this.origin + '/')) headers.set('Referer', this.entryOrigin + referer.slice(this.origin.length));
     headers.set('Cookie', (headers.get('cookie') ?? '').split(';').filter(v => !v.trim().startsWith(COOKIE + '=')).join(';'));
-    const response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
+    let response: Response;
+    try { response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
       method: request.method, headers, ...(body !== undefined ? { body } : {}), redirect: 'manual',
-    }));
+    })); } catch { return this.live() ? restarting() : refusal(503); }
     if (!this.live()) return refusal(503);
     const outgoing = new Headers(response.headers);
     outgoing.delete('access-control-allow-origin'); outgoing.delete('access-control-allow-credentials');
@@ -363,33 +439,59 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
   }
 }
 
-export type DesktopBridgeStatus = { state: 'listening' | 'headless' | 'port_in_use' | 'unavailable'; origin?: string; remedy?: string };
+export type DesktopBridgeStatus = { state: 'listening' | 'restarting' | 'headless' | 'port_in_use' | 'unavailable'; origin?: string; remedy?: string; listener_owner?: 'engine-host' | 'worker'; ipv6?: 'listening' | 'unavailable' };
+/** Kernel addresses decide presence. Ephemeral-port exhaustion, permissions
+ * and resource failures can make bind(::1, 0) fail while ::1 remains usable. */
+function ipv6LoopbackPresent(): boolean {
+  return Object.values(networkInterfaces()).some(addresses =>
+    addresses?.some(address => address.internal && address.address === '::1'));
+}
 /** One epoch per active desktop. Rotation also occurs after logout/relogin,
  * not merely after process restart. No reusePort or hostname fallback. */
-export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { platform?: string; listen?: (bridge: LinuxOwnerBridge) => { stop(closeActiveConnections?: boolean): unknown } }) {
+export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { ipv6Present?: () => boolean; platform?: string; listenerOwner?: 'engine-host' | 'worker'; listen?: (bridge: LinuxOwnerBridge) => { stop(closeActiveConnections?: boolean): unknown } }) {
+  const ipv6Present = () => {
+    try { return (options.ipv6Present ?? ipv6LoopbackPresent)(); }
+    catch { return true; } // Uncertain kernel state requires custody of both families.
+  };
   let bridge: LinuxOwnerBridge | undefined;
-  let listener: { stop(closeActiveConnections?: boolean): unknown } | undefined;
+  let listener: { stop(closeActiveConnections?: boolean): unknown; ipv6?: 'listening' | 'unavailable' } | undefined;
   let status: DesktopBridgeStatus = { state: 'headless' };
   let closed = false;
-  const stop = (revoke = false) => {
-    bridge?.close(revoke);
-    if (revoke && !bridge) {
-      // A worker can start after logout: no live instance exists to revoke
-      // the previous worker's saved desktop epoch.
-      try {
-        if (validateWorkerSocket(options.transport) === options.socketPath) unlinkSync(join(dirname(options.socketPath), SESSION_FILE));
-      } catch {}
-    }
-    bridge = undefined; listener?.stop(true); listener = undefined;
+  // Revoke before releasing the listener. No epoch is ever persisted/restored.
+  const stop = () => {
+    bridge?.close(); bridge = undefined;
+    listener?.stop(true); listener = undefined;
   };
   const refresh = () => {
     if (closed) return;
-    if ((options.platform ?? process.platform) !== 'linux' || !options.ready()) { stop(true); status = { state: 'headless' }; return; }
-    if (bridge) return;
+    if ((options.platform ?? process.platform) !== 'linux' || !options.ready()) { stop(); status = { state: 'headless' }; return; }
+    let ipv6Available: boolean | undefined;
+    if (bridge) {
+      if (listener?.ipv6 !== 'unavailable') return;
+      ipv6Available = ipv6Present();
+      if (!ipv6Available) return;
+      // IPv6 appeared: revoke the IPv4 epoch before trying to hold BOTH
+      // families. A squatter must never coexist with a live old origin.
+      stop();
+    }
     const candidate = new LinuxOwnerBridge(options);
     try {
-      listener = options.listen ? options.listen(candidate) : Bun.serve({ hostname: '127.0.0.1', port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) });
-      bridge = candidate; status = { state: 'listening', origin: bridge.origin };
+      if (options.listen) listener = options.listen(candidate);
+      else {
+        const servers: ReturnType<typeof Bun.serve>[] = [];
+        const release = () => {
+          candidate.close(); // revoke before EITHER family can be released
+          for (const server of servers) void server.stop(true);
+        };
+        const ipv6 = (ipv6Available ?? ipv6Present()) ? 'listening' : 'unavailable';
+        try {
+          for (const hostname of ipv6 === 'listening' ? ['127.0.0.1', '::1'] : ['127.0.0.1']) {
+            servers.push(Bun.serve({ hostname, port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) }));
+          }
+        } catch (error) { release(); throw error; }
+        listener = { stop: release, ipv6 };
+      }
+      bridge = candidate; status = { state: 'listening', origin: bridge.origin, listener_owner: options.listenerOwner ?? 'worker', ...(listener.ipv6 ? { ipv6: listener.ipv6 } : {}) };
     } catch (error) {
       candidate.close();
       status = { state: (error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? 'port_in_use' : 'unavailable',
@@ -400,13 +502,16 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
   const timer = setInterval(refresh, 2_000); timer.unref();
   return {
     refresh,
-    status: (): DesktopBridgeStatus => { refresh(); return { ...status }; },
+    status: (): DesktopBridgeStatus => { refresh(); return { ...status, ...(bridge && options.workerReady?.() === false ? { state: 'restarting' as const } : {}) }; },
     async open(target: string): Promise<string> {
       refresh(); if (closed || !bridge) throw new Error(status.remedy ?? DESKTOP_BRIDGE_REMEDY);
       const current = bridge; await current.openTicket(target);
       if (bridge !== current) throw new Error('Desktop session changed.');
       return current.origin;
     },
-    close() { closed = true; clearInterval(timer); stop(); status = { state: 'headless' }; },
+    close() {
+      closed = true; clearInterval(timer);
+      stop(); status = { state: 'headless' };
+    },
   };
 }

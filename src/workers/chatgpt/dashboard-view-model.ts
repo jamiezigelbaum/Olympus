@@ -473,7 +473,12 @@ function unreadableView(definition: DashboardSupportedSourceDefinition, card: Da
   const target = openUnreadableSourceFor(definition.source_id);
   return {
     count,
-    reasons: [{ code: 'damaged_or_unsupported', count }],
+    reasons: [
+      ...(count > (card.coverage.settled_unreadable_items ?? 0)
+        ? [{ code: 'damaged_or_unsupported' as const, count: count - (card.coverage.settled_unreadable_items ?? 0) }] : []),
+      ...((card.coverage.settled_unreadable_items ?? 0) > 0
+        ? [{ code: 'privacy_check_missing' as const, count: Math.min(count, card.coverage.settled_unreadable_items!) }] : []),
+    ],
     ...(card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? { many: true as const } : {}),
     ...(names.length > 0 ? { names } : {}),
     ...(rest > 0
@@ -1124,6 +1129,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ...(finite(card.coverage.answer_ready_eligible_items)
         ? { answer_ready_eligible_items: count(card.coverage.answer_ready_eligible_items) }
         : {}),
+      ...(finite(card.coverage.settled_unreadable_items) ? { settled_unreadable_items: count(card.coverage.settled_unreadable_items) } : {}),
       ...(finite(card.coverage.unreadable_items)
         ? { unreadable_items: count(card.coverage.unreadable_items) }
         : {}),

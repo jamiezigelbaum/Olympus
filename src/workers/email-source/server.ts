@@ -1,5 +1,7 @@
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
+import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
+import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
@@ -21,7 +23,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
+import { workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
@@ -1898,6 +1900,10 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
+  // Startup signals can close only this instance's listener/client. A second
+  // foreground worker never revokes the engine host's epoch or runtime path.
+  let closeDesktopBridge = () => {};
+  const shutdownSignals = installWorkerShutdownSignals({ closeOwnerBridge: () => closeDesktopBridge(), exit: code => process.exit(code) });
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -3287,7 +3293,7 @@ export async function main(): Promise<void> {
   );
   // `embedding: 'built_in_only'` builds the same lanes for answers on this
   // computer alone (source-index/local-answer.ts, source-answer-lanes.ts).
-  let sourceAnswerLanes: ((request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => AnalystAnswerLanes) | undefined;
+  let sourceAnswerLanes: ReturnType<typeof createSourceAnswerLanes> | undefined;
   const analystSourceAnswer = sourceIndexAnswerEnabled
     ? await (async () => {
       const analystLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
@@ -3500,8 +3506,17 @@ export async function main(): Promise<void> {
   // unreadable, on any host; an item no store serves any more is left out of
   // both the count and the list. Source-neutral: every lane's ledger and
   // secret index, by corpus.
+  const locateUnreadableItem = (ref: { corpusId: string; localItemId: string }) => {
+    for (const store of connectorStores) {
+      if (store.corpusId !== ref.corpusId) continue;
+      const found = store.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
+      if (found) return { ...(found.locatorUri ? { locatorUri: found.locatorUri } : {}),
+        ...(found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}) };
+    }
+    return undefined;
+  };
   const unreadableVerdict = createUnreadableVerdict({
-    locate: (ref) => fileExtractionRuntime?.locateItem(ref),
+    locate: locateUnreadableItem,
     lanes: () => tierLanes,
   });
   const extractionReadinessLedger = fileExtractionRuntime
@@ -3550,16 +3565,22 @@ export async function main(): Promise<void> {
   const unreadableOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
     dropbox: unreadableDropboxTargets(),
   };
-  const unreadableFiles = extractionReadinessLedger && fileExtractionRuntime
-    ? createUnreadableFiles({
-        items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
+  const unreadableFiles = createUnreadableFiles({
+        items: (corpusId) => {
+          const items = [...(extractionReadinessLedger?.unreadableItems(corpusId) ?? []),
+            ...connectorStores.filter(store => store.corpusId === corpusId)
+              .flatMap(store => store.settledUnreadableItems(connectorStoreStatusScope(store)))];
+          return Array.from(new Map(items.map(item => [item.ref.localItemId, item])).values());
+        },
         verdict: unreadableVerdict,
-        locate: (ref) => fileExtractionRuntime.locateItem(ref),
+        locate: locateUnreadableItem,
         // The provider's own resolver, else a Drive file's own Google page.
         // Nothing else opens: a locator is provider data, not a link to trust.
         openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
           ? unreadableOpenTargets[provider]!(locator)
-          : provider === 'google_drive' && googleFilePage(locator) ? { url: locator } : undefined),
+          : provider === 'google_drive' && googleFilePage(locator) ? { url: locator }
+          : provider === 'gmail' && /^https:\/\/mail\.google\.com\/mail\/u\/0\/#all\/[A-Za-z0-9_-]+$/.test(locator)
+            ? { url: locator } : undefined),
         ...(process.platform === 'darwin'
           ? {
               openFile: async (path: string, eligible: () => Promise<boolean>) => {
@@ -3575,8 +3596,7 @@ export async function main(): Promise<void> {
               },
             }
           : {}),
-      })
-    : undefined;
+      });
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
       // Read per request: a per-tier store its tier set creates while the
@@ -3585,6 +3605,7 @@ export async function main(): Promise<void> {
         .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
       connectorStores,
       connectorStoreStatusScope,
+      ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId).unreadable } : {}),
       retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain as keyof typeof sovereigntyEngine.config.retrieval.trustDomains],
       retrievalAvailability,
       tierClassification: () => {
@@ -4442,7 +4463,8 @@ export async function main(): Promise<void> {
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
-  let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+  let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
+  closeDesktopBridge = () => desktopBridge?.close();
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
   const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
@@ -5130,6 +5152,8 @@ export async function main(): Promise<void> {
   uncheckedRetry.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
+    // A demo sign-in grant gets only the read-only tools, on /mcp and OpenAPI alike.
+    demoGrant: isDemoGrant,
     publicUrls: remotePublicUrls,
     makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
       ...createInProcessOperationContext({
@@ -5507,7 +5531,12 @@ export async function main(): Promise<void> {
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   updateChecker.start();
-  if (socketPath) {
+  if (socketPath && process.env[OWNER_BRIDGE_HOST_ENV]) {
+    const client = connectLinuxOwnerBridgeHost(process.env[OWNER_BRIDGE_HOST_ENV]!);
+    desktopBridge = client;
+    await client.refresh();
+    desktopPoll = setInterval(() => { void client.refresh(); }, 2_000); desktopPoll.unref();
+  } else if (socketPath) {
     let ready = false;
     let probing = false;
     const probeDesktop = async () => {
@@ -5529,7 +5558,11 @@ export async function main(): Promise<void> {
         const base = `http://127.0.0.1:${port}`;
         const response = await workerFetch(`${base}/dashboard/control/session`, { method: 'POST',
           headers: { Authorization: `Bearer ${authToken ?? ''}`, Origin: base }, redirect: 'error', signal: AbortSignal.timeout(5_000) });
-        if (!response.ok) throw new Error('Owner dashboard session refused.');
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
+          return null;
+        }
         await response.body?.cancel();
         return response.headers.getSetCookie();
       },
@@ -5601,13 +5634,14 @@ export async function main(): Promise<void> {
   // dying, which is not a shutdown so much as an interruption.
   let shuttingDown = false;
   const shutdown = (signal: NodeJS.Signals): void => {
+    // The host keeps its listener; a foreground worker closes only its own.
+    closeDesktopBridge();
     if (shuttingDown) return;
     shuttingDown = true;
     updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
     if (desktopPoll) clearInterval(desktopPoll);
-    desktopBridge?.close();
     clearInterval(captureTick);
     tierSniffer?.stop();
     installedTierClassification.close();
@@ -5627,13 +5661,12 @@ export async function main(): Promise<void> {
     sourceScheduler?.stop();
     void server.stop();
   };
-  requestModelReload = createModelKeyReload({
+  shutdownSignals.setShutdown(shutdown);
+  requestModelReload = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
-    shutdown: async () => { shutdown('SIGTERM'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
+    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
-  process.once('SIGINT', () => shutdown('SIGINT'));
-  process.once('SIGTERM', () => shutdown('SIGTERM'));
 
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));

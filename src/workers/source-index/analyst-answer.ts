@@ -2841,7 +2841,7 @@ const PRIVATE_EVIDENCE_BYTE_BUDGET = 20_000;
 const PRIVATE_NEIGHBOURS_MAX = 4;
 
 export async function searchPrivateEvidence(input: {
-  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  lanes: (request: SourceIndexAnswerRequest, mode?: 'private_search') => AnalystAnswerLanes;
   question: string;
   maxResults?: number;
   maxCharsPerCandidate?: number;
@@ -2859,7 +2859,7 @@ export async function searchPrivateEvidence(input: {
     include_secure_local_content: true,
     max_results: maxResults,
   };
-  const lanes = input.lanes(request);
+  const lanes = input.lanes(request, 'private_search');
   const build = async (adapters: SourceIndexRouterAdapterMap): Promise<PrivateEvidenceCandidate[]> => {
     const detail = await buildEvidencePackDetailed({
       question,
@@ -2949,7 +2949,7 @@ async function privateNeighbours(
  * `unknown` as a match. The verdict goes only to the local waiting record.
  */
 export async function probePrivateMatch(input: {
-  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  lanes: (request: SourceIndexAnswerRequest, mode?: 'private_search') => AnalystAnswerLanes;
   request: SourceIndexAnswerRequest;
   timeoutMs: number;
 }): Promise<'match' | 'no_match' | 'unknown'> {
@@ -2966,7 +2966,7 @@ export async function probePrivateMatch(input: {
       include_secure_local: true,
       include_secure_local_content: false,
     };
-    const lanes = input.lanes(request);
+    const lanes = input.lanes(request, 'private_search');
     const corpusIds = sourceAnswerCorpusIds(request);
     const excluded = lanes.excludedCorpusIds ?? new Set<string>();
     const gate = (hits: SourceIndexRoutedSearchHit[]) => (lanes.visibilityGate ? lanes.visibilityGate(hits) : hits);

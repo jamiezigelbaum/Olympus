@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { spawn as spawnChild, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { engineStatusReport, parseInstallArgs, parseLogsArgs, parseVerifyArgs } from '../src/core/engine-cli.ts';
@@ -316,6 +316,25 @@ describe('engine host without OpenClaw', () => {
     expect(status).toMatchObject({ state: 'running', remote_mode: 'relay' });
     expect(status.services['olympus-worker'].state).toBe('ok');
     expect(status.services['olympus-remote-relay']).toMatchObject({ state: 'failing' });
+    const before = statSync(engineStatusPath({ HOME: home })).mtimeMs;
+    await Bun.sleep(10);
+    seen[0]?.serviceHealth?.clearFailure();
+    seen[1]?.serviceHealth?.reportFailure(new Error('Olympus olympus-remote-relay failed to become ready.'));
+    handle!.status();
+    expect(statSync(engineStatusPath({ HOME: home })).mtimeMs).toBe(before);
+    expect(JSON.parse(readFileSync(engineStatusPath({ HOME: home }), 'utf8'))).toEqual(status);
+    seen[1]?.serviceHealth?.clearFailure();
+    expect(statSync(engineStatusPath({ HOME: home })).mtimeMs).toBeGreaterThan(before);
+    expect(handle!.status().services['olympus-remote-relay']?.state).toBe('ok');
+    // A directory at the destination deterministically fails atomic rename,
+    // even as root. Repeating an unchanged report must retry the failed write.
+    const statusPath = engineStatusPath({ HOME: home }), backup = statusPath + '.saved';
+    renameSync(statusPath, backup); mkdirSync(statusPath);
+    try { seen[1]?.serviceHealth?.reportFailure(new Error('A new failure')); }
+    finally { rmSync(statusPath, { recursive: true }); renameSync(backup, statusPath); }
+    expect(JSON.parse(readFileSync(statusPath, 'utf8')).services['olympus-remote-relay'].state).toBe('ok');
+    seen[1]?.serviceHealth?.reportFailure(new Error('A new failure'));
+    expect(JSON.parse(readFileSync(statusPath, 'utf8')).services['olympus-remote-relay'].message).toBe('A new failure');
     await handle!.stop();
     expect(stopped).toEqual(['olympus-remote-relay', 'olympus-worker']);
     expect(JSON.parse(readFileSync(engineStatusPath({ HOME: home }), 'utf8')).state).toBe('stopped');

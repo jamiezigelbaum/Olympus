@@ -115,7 +115,10 @@ for (const [id, name, redirect] of clients) {
     const callback = new URL(approved.headers.get('location')!);
     expect(callback.origin+callback.pathname).toBe(redirect);
     expect(callback.searchParams.get('state')).toBe('fixture-state');
-    expect((await post()).status).toBe(400);
+    const repeated = await post();
+    expect(repeated.status).toBe(200);
+    expect(repeated.headers.get('location')).toBeNull();
+    expect(await repeated.text()).toContain('<h1>Approved</h1>');
     const tokens = await handler(new Request('https://relay.example/connect/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:String(registered.body.client_id),redirect_uri:redirect,code:callback.searchParams.get('code')!,code_verifier:verifier})}));
     expect(tokens.status).toBe(200);
     expect((await tokens.json() as any).access_token).toBeTruthy();

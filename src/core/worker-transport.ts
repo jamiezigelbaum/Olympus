@@ -46,11 +46,18 @@ export function workerSocketPath(options: WorkerTransportOptions = {}): string |
   return path;
 }
 
-export function validateWorkerSocket(options: WorkerTransportOptions = {}): string | undefined {
+/** Owner state can be revoked before bind or after the socket is released. */
+export function validateWorkerSocketDirectory(options: WorkerTransportOptions = {}): string | undefined {
   const path = workerSocketPath(options);
   if (!path) return undefined;
+  validateDirectory(dirname(path), ownerId(options), true);
+  return path;
+}
+
+export function validateWorkerSocket(options: WorkerTransportOptions = {}): string | undefined {
+  const path = validateWorkerSocketDirectory(options);
+  if (!path) return undefined;
   const uid = ownerId(options);
-  validateDirectory(dirname(path), uid, true);
   const stat = lstatSync(path);
   if (!stat.isSocket() || stat.uid !== uid || (stat.mode & 0o777) !== 0o600) throw new Error('Worker socket must be owner-owned and 0600.');
   return path;

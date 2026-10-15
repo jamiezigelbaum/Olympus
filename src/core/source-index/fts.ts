@@ -104,6 +104,22 @@ export function sourceIndexFtsQuery(
   return terms.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? '' : suffix}`).join(' OR ');
 }
 
+/**
+ * A question's own words that carry a topic, by the same stopword decision the
+ * strict search uses ("show me files about zephyr" is just "zephyr"), with no
+ * synonyms, initialisms or expansions: the literal terms a relaxed retry may OR.
+ */
+export function sourceIndexTopicTokens(query: string): readonly string[] {
+  const foreignStopwords = foreignQueryStopwords(query, FTS_QUERY_STOPWORDS);
+  const tokens: string[] = [];
+  for (const match of query.matchAll(TOKEN_PATTERN)) {
+    const raw = match[0]?.trim().toLowerCase();
+    if (!raw || FTS_QUERY_STOPWORDS.has(raw) || (foreignStopwords.has(raw) && !/^[\p{Lu}]{2,}$/u.test(match[0]!))) continue;
+    tokens.push(raw);
+  }
+  return tokens;
+}
+
 export function sourceIndexFtsTerms(query: string): readonly string[] {
   const seen = new Set<string>();
   const terms: string[] = [];

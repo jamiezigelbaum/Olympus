@@ -260,6 +260,12 @@ export interface DemoSignInPageInput {
   requestId: string;
   csrf: string;
   clientName: string;
+  /**
+   * The app's client_id, repeated on the form's address so the relay sends the
+   * POST to the same demo install as the page (connect-relay/server/relay.ts
+   * demoInstallFor); the install itself reads only the form.
+   */
+  clientId: string;
   redirectHost: string;
   redirectOrigin: string;
   error?: string;
@@ -291,7 +297,7 @@ export function renderDemoSignInPage(input: DemoSignInPageInput): { body: string
 <div class="name">${name}</div>
 <p class="meta">After you sign in, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
-<form method="post" action="/connect/demo/authorize">
+<form method="post" action="${escapeHtml(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
 ${error}
@@ -331,4 +337,34 @@ export function renderConsentErrorPage(message: string): { body: string; headers
 </body>
 </html>`;
   return { body, headers: consentSecurityHeaders(nonce) };
+}
+
+/**
+ * A stable receipt: no script, automatic close, or OAuth credentials. It says
+ * Connected only once the app finished connecting; before that, Approved.
+ */
+export function renderConsentSuccessPage(connected: boolean): { body: string; headers: Record<string, string> } {
+  const nonce = randomBytes(16).toString('base64');
+  const heading = connected ? 'Connected' : 'Approved';
+  const message = connected
+    ? 'You already approved this connection. You can close this page and return to the app.'
+    : 'You approved this connection. Return to the app to finish. If it doesn\'t show Olympus as connected, start connecting again from the app.';
+  return {
+    body: `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${heading} · Olympus</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>${heading}</h1>
+<div class="card"><p>${message}</p></div>
+</main>
+</body>
+</html>`,
+    headers: consentSecurityHeaders(nonce),
+  };
 }

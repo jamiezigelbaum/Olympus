@@ -3015,7 +3015,7 @@ export class TierLedger {
    */
   corpusCopyIdentities(
     corpusId: string,
-    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread',
+    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable',
   ): TierLedgerIdentity[] {
     // `metadata_layer_content_unread`: a names copy here whose text no current
     // copy anywhere holds yet. That item is still waiting to be read (the
@@ -3024,6 +3024,19 @@ export class TierLedger {
       ? `copy_state = 'current' AND embed_hold = 1`
       : filter === 'metadata_layer'
         ? `copy_state = 'current' AND layers = 'metadata'`
+        : filter === 'metadata_layer_settled_unreadable'
+          ? `copy_state = 'current' AND layers = 'metadata'
+            AND EXISTS (SELECT 1 FROM tier_items t
+              WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+                AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+                AND t.state = 'current' AND t.content_read = 0
+                AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+                AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
+                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            AND NOT EXISTS (SELECT 1 FROM tier_copies other
+              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+                AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
+                AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))`
         : filter === 'metadata_layer_content_unread'
           ? `copy_state = 'current' AND layers = 'metadata'
             AND NOT EXISTS (

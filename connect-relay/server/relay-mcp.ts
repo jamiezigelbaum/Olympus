@@ -36,7 +36,7 @@
  * (directory/approved.ts): its tools, narrowed to the directory allowlist, and
  * its UI resources, whatever the current engine source generates for `/mcp`.
  */
-import { toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
+import { DEMO_GRANT_REMOTE_TOOLS, toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
 import type { CredentialSurface } from '../shared/tokens.ts';
 import { OFFLINE_RETRY_AFTER_SECONDS, offlineErrorBody, offlineSentence } from '../shared/offline-result.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notConnectedDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
@@ -118,7 +118,13 @@ export function catalogFor(surface: McpSurface): RelayCatalog {
 
 export type RelayMcpState =
   | { state: 'not_connected'; installUrl: string; protectedResourceMetadataUrl: string }
-  | { state: 'mac_offline'; lastSeenAt: number | undefined; credentialSurface: CredentialSurface };
+  | {
+    state: 'mac_offline';
+    lastSeenAt: number | undefined;
+    credentialSurface: CredentialSurface;
+    /** A per-app demo install (relay.ts demoInstallsByClient): its remote list is the demo grant's. */
+    demoInstall?: boolean;
+  };
 
 type JsonRpcId = string | number;
 
@@ -173,7 +179,11 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
     case 'ping':
       return rpcResult(id, {});
     case 'tools/list':
-      return rpcResult(id, { tools: remote ? REMOTE_TOOLS : toolsForSurface(catalog.tools, surface) });
+      return rpcResult(id, {
+        tools: remote
+          ? (offline?.demoInstall ? REMOTE_TOOLS.filter((tool) => DEMO_GRANT_REMOTE_TOOLS.includes(tool.name)) : REMOTE_TOOLS)
+          : toolsForSurface(catalog.tools, surface),
+      });
     case 'resources/list':
       return rpcResult(id, { resources: remote ? [] : catalog.resources });
     case 'resources/templates/list':
