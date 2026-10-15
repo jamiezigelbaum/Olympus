@@ -294,6 +294,16 @@ Two ordering rules the tests pin:
 The generic runner is `syncAndEmbedFromConnector({store, connector, embeddingProvider, sync})`.
 Do not write your own ingest loop.
 
+**Search filters are opt-in per family.** Beyond the core request fields, a
+family serves `folder`, `chat_scope`, `approved_scope_key` and
+`include_locators` only when it registers the matching capability
+(`folder`, `chatScope`, `approvedScope`, `resultProjector`) in
+`src/workers/connector-store/filter-capabilities.ts`; a request carrying any
+other declared field gets a 400 `unsupported_filter`. `participant_id`,
+`include_deleted` and `attachment_type` are declared but served by no family.
+Serving one needs a schema or representation change under the contract gate in
+`docs/ENGINEERING_PROCESS.md`, not a connector-local patch.
+
 ---
 
 ## Leg 4 — Scheduler tasks
