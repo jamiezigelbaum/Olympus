@@ -58,6 +58,8 @@ export interface StateSnapshot {
   relayConnected: boolean | null;
   policy: PolicyState | null;
   configFiles: string[];
+  /** Names (never contents) in the install's data folder: what a newer release adds there shows in the differences table. */
+  dataFiles?: string[];
   workerEnvKeys: string[];
   tierRuleIds: string[];
   connections: string[];
@@ -165,27 +167,46 @@ export function evaluateUpgrade(before: StateSnapshot, after: StateSnapshot, exp
     before.installId === after.installId ? 'same install id before and after' : 'the install id changed or was not reported',
   ));
 
-  // The migration is only meaningful for an install that was on the earlier default.
+  // The migration only applies to an install on the earlier default. An install the earlier release itself already
+  // migrated (1.0.1 and later) is left alone by the update: same policy, no second backup.
   const wasDefault = isKeywordOnlyPrivate(before.policy);
+  const wasMigrated = isLocalMeaningPrivate(before.policy);
   checks.push(check(
     'upgrade.baseline-default',
-    'The baseline was on the earlier release\'s default privacy settings (so the migration applies to it)',
-    wasDefault,
-    wasDefault ? 'Private search was keyword-only (metadata_only, no embedding profile)' : 'the baseline policy was not the earlier default, so the migration cannot be checked',
+    'The baseline\'s Private search setting is one the migration knows: the earlier default (keyword-only) or the new default (already migrated)',
+    wasDefault || wasMigrated,
+    wasDefault
+      ? 'Private search was keyword-only (metadata_only, no embedding profile): the update must migrate it'
+      : wasMigrated ? 'Private search was already on the new default (searched by meaning on this computer): the update must leave it alone'
+        : 'the baseline policy was neither the earlier default nor the new default, so the migration cannot be checked',
   ));
 
+  const privacyTitle = 'A keyword-only Private setting switched to the new default with its original settings backed up; one already on the new default is left alone, with no second backup';
   if (before.policy && after.policy) {
     const migrated = isLocalMeaningPrivate(after.policy);
     const backedUp = after.policy.backups.some((backup) => backup.sha256 === before.policy!.sha256);
     const secure = after.policy.json?.retrieval?.trustDomains?.secure_local;
-    checks.push(check(
-      'upgrade.privacy-migration',
-      'An install on the earlier default privacy settings switched to the new default, with its original settings backed up',
-      wasDefault && migrated && backedUp,
-      migrated
-        ? `Private search now ${secure?.activationMode} with ${secure?.embeddingProfile}; ${backedUp ? 'a backup holds the original bytes' : `no backup holds the original bytes (${after.policy.backups.length} backup file(s))`}`
-        : `Private search is still ${secure?.activationMode ?? 'unset'} with embedding profile ${secure?.embeddingProfile ?? 'none'}; the policy file was not migrated (${after.policy.backups.length} backup file(s))`,
-    ));
+    if (wasMigrated) {
+      const unchanged = isDeepStrictEqual(before.policy.json, after.policy.json);
+      const newBackups = after.policy.backups.length - before.policy.backups.length;
+      checks.push(check(
+        'upgrade.privacy-migration',
+        privacyTitle,
+        migrated && unchanged && newBackups === 0,
+        migrated && unchanged && newBackups === 0
+          ? `no migration needed and none done: the policy is unchanged and no new backup was written (${after.policy.backups.length} backup file(s), as before)`
+          : `${unchanged ? 'the policy is unchanged' : `the policy changed (${differingPaths(before.policy.json, after.policy.json).join(', ') || 'unknown fields'})`}; ${newBackups} new backup file(s); Private search ${migrated ? 'still searches by meaning' : `is now ${secure?.activationMode ?? 'unset'}`}`,
+      ));
+    } else {
+      checks.push(check(
+        'upgrade.privacy-migration',
+        privacyTitle,
+        wasDefault && migrated && backedUp,
+        migrated
+          ? `Private search now ${secure?.activationMode} with ${secure?.embeddingProfile}; ${backedUp ? 'a backup holds the original bytes' : `no backup holds the original bytes (${after.policy.backups.length} backup file(s))`}`
+          : `Private search is still ${secure?.activationMode ?? 'unset'} with embedding profile ${secure?.embeddingProfile ?? 'none'}; the policy file was not migrated (${after.policy.backups.length} backup file(s))`,
+      ));
+    }
     const moved = differingPaths(withoutMigratedParts(before.policy.json), withoutMigratedParts(after.policy.json));
     checks.push(check(
       'upgrade.settings-kept',
@@ -194,7 +215,7 @@ export function evaluateUpgrade(before: StateSnapshot, after: StateSnapshot, exp
       moved.length === 0 ? `every other field of the policy is unchanged (internal.allowCloudQuery ${String(after.policy.json?.retrieval?.trustDomains?.internal?.allowCloudQuery)})` : `changed: ${moved.join(', ')}`,
     ));
   } else {
-    checks.push(check('upgrade.privacy-migration', 'An install on the earlier default privacy settings switched to the new default, with its original settings backed up', false, 'the privacy policy file could not be read before or after the upgrade'));
+    checks.push(check('upgrade.privacy-migration', privacyTitle, false, 'the privacy policy file could not be read before or after the upgrade'));
     checks.push(check('upgrade.settings-kept', 'The owner\'s other privacy settings are kept (only the Private search setting may change)', false, 'the privacy policy file could not be read before or after the upgrade'));
   }
 
@@ -276,6 +297,11 @@ export function describeDifferences(before: StateSnapshot, after: StateSnapshot)
   const addedFiles = after.configFiles.filter((name) => !before.configFiles.includes(name));
   const removedFiles = before.configFiles.filter((name) => !after.configFiles.includes(name));
   if (addedFiles.length > 0 || removedFiles.length > 0) add('Files in the config folder', `${before.configFiles.length}`, `${after.configFiles.length}: +${addedFiles.join(', ') || 'none'} -${removedFiles.join(', ') || 'none'}`);
+  if (before.dataFiles && after.dataFiles) {
+    const addedData = after.dataFiles.filter((name) => !before.dataFiles!.includes(name));
+    const removedData = before.dataFiles.filter((name) => !after.dataFiles!.includes(name));
+    if (addedData.length > 0 || removedData.length > 0) add('Files in the data folder', `${before.dataFiles.length}`, `${after.dataFiles.length}: +${addedData.join(', ') || 'none'} -${removedData.join(', ') || 'none'}`);
+  }
   if (before.dashboard && after.dashboard) {
     add('Items embedded', String(before.dashboard.embedded), String(after.dashboard.embedded));
     add('Items seen / indexed', `${before.dashboard.seen} / ${before.dashboard.indexed}`, `${after.dashboard.seen} / ${after.dashboard.indexed}`);
