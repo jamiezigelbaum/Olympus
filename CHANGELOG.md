@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 - unreleased
+## 1.0.1 - 2026-10-15
 
 - On Linux, signing out ends the owner session, saving settings keeps your Olympus window working, Olympus opens in one window without a flash, computers without IPv6 keep their dashboard, Confirm continues the original page automatically, and browser confirmation opens are capped at six per hour.
 - On Linux, fixed a way for another account on the same computer to intercept the one-time sign-in that opens the Olympus window. Olympus 1.0.0 had it.
