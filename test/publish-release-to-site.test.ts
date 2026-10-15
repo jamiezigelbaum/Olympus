@@ -16,6 +16,7 @@ import {
   checkSiteRelease,
   fileDigest,
   pinBunExecutable,
+  prepareMacLocalBundle,
   publishLinuxToSite,
   prepareLinuxLocalBundle,
   publishToSite,
@@ -73,6 +74,24 @@ test('local Linux bundle pins the real installer without publishing unqualified 
   expect(readFileSync(join(output, 'SHA256SUMS'), 'utf8')).toContain(fileDigest(artifact).sha256);
   expect(readFileSync(join(output, 'README.txt'), 'utf8')).toContain(`sh ./install-linux.sh --tarball "$(pwd)/olympus-${pins.version}.tgz"`);
 }, 30_000);
+
+test('local Mac bundle is the served installer for the candidate and changes nothing in site/', () => {
+  const { root, artifact } = fixture();
+  const output = join(root, 'release-check');
+  const pins = prepareMacLocalBundle({ root, artifact, output });
+  // The installer is the template with the candidate's pins, byte for byte what the site would serve for it.
+  expect(readFileSync(join(output, 'install.sh'), 'utf8')).toBe(renderInstallScript(TEMPLATE, pins));
+  expect(readInstallScriptPins(readFileSync(join(output, 'install.sh'), 'utf8'))).toEqual({ version: pins.version, sha256: pins.sha256, bytes: pins.bytes });
+  expect(readFileSync(join(output, `olympus-${pins.version}.tgz`))).toEqual(readFileSync(artifact));
+  expect(readFileSync(join(output, 'uninstall.sh'))).toEqual(readFileSync(join(root, 'site/uninstall.sh')));
+  expect(readFileSync(join(output, 'SHA256SUMS'), 'utf8')).toContain(fileDigest(artifact).sha256);
+  expect(existsSync(join(root, 'site/install.sh'))).toBe(false);
+  expect(existsSync(join(root, 'site/releases'))).toBe(false);
+  // A second candidate never mixes into the first one's folder, and a tarball that is not this version is refused.
+  expect(() => prepareMacLocalBundle({ root, artifact, output })).toThrow();
+  const other = fixture('1.0.0-rc.1', { name: 'olympus', version: '9.9.9' });
+  expect(() => prepareMacLocalBundle({ root: other.root, artifact: other.artifact, output: join(other.root, 'out') })).toThrow('identity');
+});
 
 function linuxFixture(qualification: LinuxRuntimePins['bun']['qualification'] = 'qualified-omarchy') {
   const result = fixture();

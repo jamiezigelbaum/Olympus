@@ -12,7 +12,10 @@
  * only test-specific input is the Readwise stand-in, reached through the
  * connector's own base-URL settings (readwise-fake.ts).
  *
- * Linux only for now; the macOS differences are confined to `platform()`.
+ * Linux and macOS. The differences are confined to `platform()` (paths, how the
+ * engine's worker is reached), `findBrowser()` and `collectLogs()`: on Linux the
+ * worker listens on an owner-only Unix socket that a bridge forwards to the port
+ * a browser expects; on macOS the engine itself listens on that loopback port.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
@@ -62,23 +65,38 @@ function emit(result: Record<string, unknown>): never {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---------------------------------------------------------------------------
-// Platform seam (the one place macOS will differ)
+// Platform seam (the one place Linux and macOS differ)
 
 interface Platform {
+  os: 'linux' | 'macos';
   olympusBin: string;
   workerEnvPath: string;
   engineLogPaths: string[];
   /** Fetch against the engine's worker origin as the owner. */
   workerFetch(path: string, init?: RequestInit): Promise<Response>;
+  /** Linux only: the owner socket the worker listens on. macOS has none; the engine listens on the loopback port itself. */
   socketPath?: string;
 }
 
+const WORKER_ORIGIN = 'http://127.0.0.1:8010';
+
 function platform(): Platform {
-  if (process.platform !== 'linux') throw new Error(`the in-machine agent supports Linux only in this release (got ${process.platform})`);
   const home = homedir();
+  if (process.platform === 'darwin') {
+    const logs = join(home, 'Library', 'Logs', 'Olympus');
+    return {
+      os: 'macos',
+      olympusBin: join(home, '.local', 'bin', 'olympus'),
+      workerEnvPath: join(home, '.config', 'olympus', 'worker.env'),
+      engineLogPaths: [join(logs, 'engine.log'), join(logs, 'engine.err'), join(logs, 'install.log')],
+      workerFetch: (path, init = {}) => fetch(`${WORKER_ORIGIN}${path}`, init),
+    };
+  }
+  if (process.platform !== 'linux') throw new Error(`the in-machine agent supports Linux and macOS (got ${process.platform})`);
   const runtime = process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`;
   const socketPath = join(runtime, 'olympus', 'worker.sock');
   return {
+    os: 'linux',
     olympusBin: join(home, '.local', 'bin', 'olympus'),
     workerEnvPath: join(home, '.config', 'olympus', 'worker.env'),
     engineLogPaths: [
@@ -86,7 +104,7 @@ function platform(): Platform {
       join(home, '.local', 'state', 'olympus', 'engine', 'engine.err'),
     ],
     socketPath,
-    workerFetch: (path, init = {}) => fetch(`http://127.0.0.1:8010${path}`, { ...init, unix: socketPath } as RequestInit),
+    workerFetch: (path, init = {}) => fetch(`${WORKER_ORIGIN}${path}`, { ...init, unix: socketPath } as RequestInit),
   };
 }
 
@@ -115,7 +133,7 @@ function workerBearer(): string {
 async function ownerSession(): Promise<{ call(method: string, path: string, body?: unknown): Promise<{ status: number; json: any; text: string }> }> {
   const p = platform();
   const bearer = workerBearer();
-  const origin = 'http://127.0.0.1:8010';
+  const origin = WORKER_ORIGIN;
   const mint = await p.workerFetch('/dashboard/control/session', {
     method: 'POST',
     headers: { authorization: `Bearer ${bearer}`, origin, 'content-type': 'application/json' },
@@ -404,6 +422,8 @@ async function mcpCall(tool: string, rawArgs: string): Promise<never> {
 
 function startBridge(port: number): () => void {
   const p = platform();
+  // macOS: the engine already listens on the loopback port the browser and the smoke use, so there is nothing to forward.
+  if (p.socketPath === undefined) return () => undefined;
   type Upstream = { write(data: Uint8Array): number; end(): void };
   const server = Bun.listen<{ upstream?: Upstream; queue: Uint8Array[]; closed: boolean }>({
     hostname: '127.0.0.1',
@@ -557,6 +577,10 @@ async function cdpConnect(wsUrl: string): Promise<Cdp> {
 }
 
 function findBrowser(): string | undefined {
+  if (process.platform === 'darwin') {
+    const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    return existsSync(chrome) ? chrome : undefined;
+  }
   for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
     const found = spawnSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' });
     if (found.status === 0 && found.stdout.trim()) return found.stdout.trim();
@@ -579,6 +603,8 @@ async function screenshots(outDir: string): Promise<void> {
   const debugPort = 9333;
   const chrome = spawn(browser!, [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
+    // A throwaway profile must not ask the desktop session's keychain for a browser-storage key.
+    ...(process.platform === 'darwin' ? ['--use-mock-keychain', '--password-store=basic'] : []),
     `--user-data-dir=${profile}`, `--remote-debugging-port=${debugPort}`, '--remote-allow-origins=*', 'about:blank',
   ], { stdio: 'ignore' });
   const shots: Array<{ file: string; width: number; theme: 'light' | 'dark'; bytes: number }> = [];
@@ -644,9 +670,16 @@ function collectLogs(outDir: string): never {
       written.push(path.split('/').pop()!);
     }
   }
-  const journal = spawnSync('journalctl', ['--user', '-u', 'olympus-engine', '--no-pager', '-n', '3000'], { encoding: 'utf8' });
-  writeFileSync(join(outDir, 'engine-journal.log'), journal.stdout ?? '');
-  written.push('engine-journal.log');
+  if (p.os === 'macos') {
+    // launchd's own account of the engine agent (state, last exit status, program), the macOS counterpart of the journal.
+    const agent = spawnSync('launchctl', ['print', `gui/${process.getuid?.() ?? 501}/ai.olympusplugin.engine`], { encoding: 'utf8' });
+    writeFileSync(join(outDir, 'engine-launchd.txt'), `${agent.stdout ?? ''}${agent.stderr ?? ''}`);
+    written.push('engine-launchd.txt');
+  } else {
+    const journal = spawnSync('journalctl', ['--user', '-u', 'olympus-engine', '--no-pager', '-n', '3000'], { encoding: 'utf8' });
+    writeFileSync(join(outDir, 'engine-journal.log'), journal.stdout ?? '');
+    written.push('engine-journal.log');
+  }
   writeFileSync(join(outDir, 'engine-status.json'), olympus(['engine', 'status']).stdout);
   written.push('engine-status.json');
   writeFileSync(join(outDir, 'doctor.json'), olympus(['doctor']).stdout);
