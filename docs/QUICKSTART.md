@@ -49,7 +49,7 @@ The preset prerequisites are:
 | `local-first` — Local models with Venice fallback | A funded Venice API key; a local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. |
 | `local-only` — Local models | A local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. No Venice account is needed. |
 | `private-cloud-only` — Venice | A funded Venice API key for Private answers; no local server required. |
-| `no-sensitive` — Private meaning search on this computer | Nothing. Private items are stored and searched by meaning on this computer with the built-in embedding model. Their text and search vectors stay here. Ask privately and the sealed ChatGPT panel can use them; agent answers still say Private sources were not searched. |
+| `no-sensitive` — Private meaning search on this computer | Nothing. Private items are stored and searched by meaning on this computer with the built-in embedding model, and their search vectors are kept here. Ask privately and the sealed ChatGPT panel can use them; agent answers still say Private sources were not searched. |
 
 Every preset makes content searchable with the built-in embedding model: a
 small model (Google's EmbeddingGemma 2) that runs on this computer, downloads
@@ -230,8 +230,9 @@ search meanwhile. To record a no, run `olympus tier classifier decline`;
 approve; if `status` reports any other refusal, the policy names a model the
 classifier may not use, and it stays off.
 
-On `no-sensitive`, setup and doctor still list the Private corpora as configured
-and empty, with `secure_local` routed `"mode": "disabled"`. That is the honest
+On `no-sensitive`, setup and doctor still show `secure_local` routed
+`"mode": "disabled"` with an empty pool: Private items are searched by meaning
+on this computer, but no Private agent answer lane exists. That is the honest
 gap the preset promises, not a misconfiguration.
 
 For a no-write preview of the same setup surface:
