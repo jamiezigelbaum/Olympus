@@ -104,6 +104,38 @@ describe('upgrade comparisons', () => {
     expect(checks.find((c) => c.id === 'upgrade.settings-kept')!.detail).toContain('retrieval.trustDomains.internal.allowCloudQuery');
   });
 
+  describe('a baseline the earlier release already migrated (1.0.1 to a later release)', () => {
+    const migratedBefore = (): StateSnapshot => snapshot('1.0.1', migrated(OLD_POLICY), { configFiles: ['engine.json', 'sovereignty.json', 'sovereignty.json.backup-private-meaning-x', 'worker.env'] }, [{ name: 'sovereignty.json.backup-private-meaning-x', sha256: sha256Hex('first-run original') }]);
+    const noOpAfter = (): StateSnapshot => ({ ...migratedBefore(), version: '1.1.0', build: '1.1.0+abc' });
+
+    test('no migration needed and none done passes: the policy is unchanged and no second backup appears', () => {
+      const checks = evaluateUpgrade(migratedBefore(), noOpAfter(), { fromVersion: '1.0.1', toVersion: '1.1.0' });
+      expect(failing(checks)).toEqual([]);
+      expect(checks.find((c) => c.id === 'upgrade.baseline-default')!.detail).toContain('already on the new default');
+      expect(checks.find((c) => c.id === 'upgrade.privacy-migration')!.detail).toContain('no new backup was written');
+    });
+
+    test('a second backup, a changed Private block, or a policy that fell back to keyword-only each fail the migration check', () => {
+      const second = noOpAfter();
+      second.policy = { ...second.policy!, backups: [...second.policy!.backups, { name: 'sovereignty.json.backup-private-meaning-y', sha256: sha256Hex('again') }] };
+      expect(failing(evaluateUpgrade(migratedBefore(), second))).toEqual(['upgrade.privacy-migration']);
+      expect(evaluateUpgrade(migratedBefore(), second).find((c) => c.id === 'upgrade.privacy-migration')!.detail).toContain('1 new backup file(s)');
+      // The Private block itself changed (still local meaning, but another field moved): a no-op must not touch it.
+      const touched = noOpAfter();
+      touched.policy = { ...touched.policy!, json: { ...touched.policy!.json, routes: { ...touched.policy!.json.routes, secure_local: { ...touched.policy!.json.routes.secure_local, disabledReason: 'rewritten' } } } };
+      expect(failing(evaluateUpgrade(migratedBefore(), touched))).toEqual(['upgrade.privacy-migration']);
+      const regressed = { ...noOpAfter(), policy: { ...noOpAfter().policy!, json: OLD_POLICY } };
+      expect(failing(evaluateUpgrade(migratedBefore(), regressed))).toContain('upgrade.privacy-migration');
+    });
+  });
+
+  test('what a newer release adds to the data folder shows in the differences table, and nothing else does', () => {
+    const a = { ...before(), dataFiles: ['connector.sqlite'] };
+    const b = { ...goodAfter(), dataFiles: ['connector.sqlite', 'private-answers.sqlite'] };
+    expect(describeDifferences(a, b).find((row) => row.what === 'Files in the data folder')).toEqual({ what: 'Files in the data folder', before: '1', after: '2: +private-answers.sqlite -none' });
+    expect(describeDifferences({ ...a }, { ...a }).some((row) => row.what === 'Files in the data folder')).toBe(false);
+  });
+
   test('an install that was not on the earlier default cannot have its migration checked', () => {
     const custom = JSON.parse(JSON.stringify(OLD_POLICY));
     custom.retrieval.trustDomains.secure_local.activationMode = 'lexical_only';
@@ -319,7 +351,7 @@ function options(extra: Record<string, unknown> = {}) {
   const runId = newRunId();
   // No agent asks a question here, so every run also carries the standing "no agent asked a question" problem; the checks are what is asserted.
   const config: RunConfigFile = { driver: [driverPath], agents: [], settleTimeoutS: 5 };
-  return { runId, candidateDir, upgradeFromDir: baselineDir, candidateLabel: 'upgrade test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, ...extra };
+  return { runId, candidateDir, upgradeFromDir: baselineDir, candidateLabel: 'upgrade test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipInbox: true, ...extra };
 }
 const checkOf = (report: Awaited<ReturnType<typeof runReleaseCheck>>, id: string) => {
   const machine = report.machines[0]!;

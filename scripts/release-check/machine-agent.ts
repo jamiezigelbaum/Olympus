@@ -20,13 +20,18 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { desktopSandboxOrigin, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
 import { privateNoteKindIn } from './private-note.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN, startFakeReadwise } from './readwise-fake.ts';
 import type { DashboardCounts, ItemRow, PolicyState, StateSnapshot } from './upgrade.ts';
+import { freshEgress, normalizeIp, outboundFromLsof, outboundFromProcNet, requestsOutsideMachine, type Connection } from './egress.ts';
+import {
+  anchorPresent, ASK_VIEW, centerOf, factsIn, FOCUS_QUESTION, PAGE_STATE, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED, pageApi, rowView, sourceNames,
+} from './inbox-page.ts';
+import type { AskView, CardView, DestinationId, EgressView, EntryView, FixView, InboxObservation, PageView, ShotView } from './inbox.ts';
 
 // ---------------------------------------------------------------------------
 // Configuration the harness puts on the machine
@@ -48,6 +53,11 @@ export interface AgentConfig {
   privateFacts: Record<string, string[]>;
   /** Port the owner-socket bridge listens on; the engine's logical origin port. */
   enginePort: number;
+  /** The 1.1.0 inbox leg: the question an agent asks, the question typed on the Ask page, and what their local answers must state and cite. */
+  inbox?: {
+    agent: { text: string; facts: string[]; citedTitle: string };
+    ask: { text: string; facts: string[]; citedTitle: string };
+  };
 }
 
 const WORKDIR = join(homedir(), 'rc');
@@ -591,16 +601,25 @@ async function smoke(questionsFile: string): Promise<never> {
 // ---------------------------------------------------------------------------
 // Dashboard screenshots (390 and 1280 wide, light and dark) over the owner bridge
 
-interface Cdp { send(method: string, params?: Record<string, unknown>): Promise<any>; close(): void }
+interface Cdp {
+  send(method: string, params?: Record<string, unknown>): Promise<any>;
+  /** Calls `handler` with the parameters of each event of this method the browser sends. */
+  on(method: string, handler: (params: any) => void): void;
+  close(): void;
+}
 
 async function cdpConnect(wsUrl: string): Promise<Cdp> {
   const ws = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = () => reject(new Error('cdp connect failed')); });
   let nextId = 1;
   const pending = new Map<number, { resolve(v: any): void; reject(e: Error): void }>();
+  const listeners = new Map<string, Array<(params: any) => void>>();
   ws.onmessage = (event) => {
-    const message = JSON.parse(String(event.data)) as { id?: number; result?: any; error?: { message: string } };
-    if (message.id === undefined) return;
+    const message = JSON.parse(String(event.data)) as { id?: number; result?: any; error?: { message: string }; method?: string; params?: any };
+    if (message.id === undefined) {
+      if (message.method) for (const handler of listeners.get(message.method) ?? []) handler(message.params);
+      return;
+    }
     const waiter = pending.get(message.id);
     if (!waiter) return;
     pending.delete(message.id);
@@ -612,6 +631,7 @@ async function cdpConnect(wsUrl: string): Promise<Cdp> {
       pending.set(id, { resolve, reject });
       ws.send(JSON.stringify({ id, method, params }));
     }),
+    on: (method, handler) => { listeners.set(method, [...(listeners.get(method) ?? []), handler]); },
     close: () => ws.close(),
   };
 }
@@ -628,28 +648,30 @@ function findBrowser(): string | undefined {
   return undefined;
 }
 
-async function screenshots(outDir: string): Promise<void> {
-  const config = readConfig();
-  const browser = findBrowser();
-  if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
-  mkdirSync(outDir, { recursive: true });
-  const launched = olympus(['dashboard', '--no-open', '--target', 'dashboard'], { timeoutMs: 60_000 });
-  const url = /https?:\/\/[^\s"]+/.exec(launched.stdout + launched.stderr)?.[0];
-  if (!url) emit({ ok: false, detail: 'olympus dashboard --no-open printed no URL' });
-  const port = Number(new URL(url!).port || 80);
-  const stopBridge = startBridge(port);
-  const profile = join(WORKDIR, 'chrome-profile');
+/**
+ * What keeps the browser from opening connections of its own. The rule "MAP * ~NOTFOUND" rewrites every host the browser is asked for,
+ * IP literals included, so the loopback addresses the dashboard is served on must be excluded by name or the page itself would not load.
+ */
+export const ISOLATED_BROWSER_FLAGS: readonly string[] = [
+  '--disable-background-networking', '--disable-sync', '--disable-component-update', '--disable-default-apps', '--no-pings', '--disable-domain-reliability',
+  '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]',
+];
+
+interface OpenedBrowser { cdp: Cdp; pid: number | undefined; close(): void }
+
+/** A headless browser on a throwaway profile, and a debugging connection to its one page. */
+async function openBrowser(browser: string, profileName: string, debugPort: number, isolated = false): Promise<OpenedBrowser> {
+  const profile = join(WORKDIR, profileName);
   mkdirSync(profile, { recursive: true });
-  const debugPort = 9333;
-  const chrome = spawn(browser!, [
+  const chrome = spawn(browser, [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
     // A throwaway profile must not ask the desktop session's keychain for a browser-storage key.
     ...(process.platform === 'darwin' ? ['--use-mock-keychain', '--password-store=basic'] : []),
+    // The Inbox check watches the machine's connections, so the browser must make none of its own: no background services, and no
+    // name but this machine's can be resolved (the dashboard is an address, not a name).
+    ...(isolated ? ISOLATED_BROWSER_FLAGS : []),
     `--user-data-dir=${profile}`, `--remote-debugging-port=${debugPort}`, '--remote-allow-origins=*', 'about:blank',
   ], { stdio: 'ignore' });
-  const shots: Array<{ file: string; width: number; theme: 'light' | 'dark'; bytes: number }> = [];
-  let cdp: Cdp | undefined;
-  let outcome: Record<string, unknown> = { ok: false, detail: 'screenshots did not finish' };
   try {
     let wsUrl: string | undefined;
     for (let i = 0; i < 60 && !wsUrl; i += 1) {
@@ -660,7 +682,30 @@ async function screenshots(outDir: string): Promise<void> {
       if (!wsUrl) await sleep(500);
     }
     if (!wsUrl) throw new Error('the browser did not open a debugging page');
-    cdp = await cdpConnect(wsUrl);
+    const cdp = await cdpConnect(wsUrl);
+    return { cdp, pid: chrome.pid, close: () => { cdp.close(); chrome.kill('SIGKILL'); } };
+  } catch (error) {
+    chrome.kill('SIGKILL');
+    throw error;
+  }
+}
+
+async function screenshots(outDir: string): Promise<void> {
+  const config = readConfig();
+  const browser = findBrowser();
+  if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
+  mkdirSync(outDir, { recursive: true });
+  const launched = olympus(['dashboard', '--no-open', '--target', 'dashboard'], { timeoutMs: 60_000 });
+  const url = /https?:\/\/[^\s"]+/.exec(launched.stdout + launched.stderr)?.[0];
+  if (!url) emit({ ok: false, detail: 'olympus dashboard --no-open printed no URL' });
+  const port = Number(new URL(url!).port || 80);
+  const stopBridge = startBridge(port);
+  const shots: Array<{ file: string; width: number; theme: 'light' | 'dark'; bytes: number }> = [];
+  let opened: OpenedBrowser | undefined;
+  let outcome: Record<string, unknown> = { ok: false, detail: 'screenshots did not finish' };
+  try {
+    opened = await openBrowser(browser!, 'chrome-profile', 9333);
+    const cdp = opened.cdp;
     await cdp.send('Page.enable');
     // The one-time ticket URL signs the browser in; later captures reuse its session.
     await cdp.send('Page.navigate', { url });
@@ -690,11 +735,399 @@ async function screenshots(outDir: string): Promise<void> {
   } catch (error) {
     outcome = { ok: false, detail: error instanceof Error ? error.message : String(error) };
   } finally {
-    cdp?.close();
-    chrome.kill('SIGKILL');
+    opened?.close();
     stopBridge();
   }
   emit(outcome);
+}
+
+// ---------------------------------------------------------------------------
+// The Ask page and the Inbox (1.1.0), driven in the owner's browser
+
+const INBOX_DEBUG_PORT = 9334;
+const squash = (text: string): string => text.replace(/\s+/g, ' ').trim();
+
+/** The live outbound TCP connections the machine has right now. */
+function currentConnections(): Connection[] {
+  if (process.platform === 'darwin') {
+    const listed = spawnSync('lsof', ['-nP', '-iTCP', '-sTCP:ESTABLISHED,SYN_SENT', '-F', 'pcn'], { encoding: 'utf8', timeout: 5_000 });
+    return outboundFromLsof(listed.stdout ?? '');
+  }
+  const rows: Connection[] = [];
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    try { rows.push(...outboundFromProcNet(readFileSync(table, 'utf8'))); } catch { /* table unreadable: nothing to add */ }
+  }
+  return rows;
+}
+
+/** Linux: the name of the process that holds a socket open, found through this user's open files; undefined when it has closed. */
+function ownerOfSocket(inode: string): string | undefined {
+  try {
+    for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
+      let fds: string[];
+      try { fds = readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+      for (const fd of fds) {
+        try {
+          if (readlinkSync(`/proc/${pid}/fd/${fd}`) === `socket:[${inode}]`) return readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+        } catch { /* closed meanwhile */ }
+      }
+    }
+  } catch { /* no /proc */ }
+  return undefined;
+}
+
+/** Linux: the socket inodes held by a process and everything it started (the browser and its network service), read fresh. */
+function socketsOfTree(rootPid: number | undefined): Set<string> {
+  const held = new Set<string>();
+  if (rootPid === undefined || process.platform !== 'linux') return held;
+  try {
+    const parentOf = new Map<number, number>();
+    for (const name of readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+      try {
+        // /proc/<pid>/stat: "pid (comm) state ppid ..."; comm may hold spaces and parentheses, so read after the last ")".
+        const stat = readFileSync(`/proc/${name}/stat`, 'utf8');
+        const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        parentOf.set(Number(name), Number(after[1]));
+      } catch { /* gone meanwhile */ }
+    }
+    const tree = new Set<number>([rootPid]);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const [pid, parent] of parentOf) if (!tree.has(pid) && tree.has(parent)) { tree.add(pid); grew = true; }
+    }
+    for (const pid of tree) {
+      let fds: string[];
+      try { fds = readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+      for (const fd of fds) {
+        try {
+          const target = readlinkSync(`/proc/${pid}/fd/${fd}`);
+          if (target.startsWith('socket:[')) held.add(target.slice(8, -1));
+        } catch { /* closed meanwhile */ }
+      }
+    }
+  } catch { /* no /proc */ }
+  return held;
+}
+
+/**
+ * Samples the machine's connections until stopped. What was connected at the start (the relay a connected agent uses, for one) is the
+ * baseline; anything else that is not loopback, not the check's own browser and not an address of the relay is fresh egress.
+ */
+function startEgressWatch(allowedIps: ReadonlySet<string>, browserPid: () => number | undefined): { stop(): Omit<EgressView, 'pageRequests' | 'pageOutside'> } {
+  const intervalMs = process.platform === 'darwin' ? 500 : 150;
+  const baseline = new Set(currentConnections().map((connection) => connection.remote));
+  const seen: Connection[] = [];
+  const attributed = new Set<string>();
+  let samples = 1;
+  const timer = setInterval(() => {
+    samples += 1;
+    for (const connection of currentConnections()) {
+      if (baseline.has(connection.remote)) continue;
+      const key = `${connection.remote}|${connection.inode ?? connection.pid ?? ''}`;
+      if (attributed.has(key)) continue;
+      attributed.add(key);
+      // The browser's own sockets are found first, in its small process tree, before the connection can close; the whole-machine search is the fallback.
+      const comm = connection.comm ?? (connection.inode && socketsOfTree(browserPid()).has(connection.inode) ? 'chrome' : connection.inode ? ownerOfSocket(connection.inode) : undefined);
+      seen.push({ ...connection, ...(comm ? { comm } : {}) });
+    }
+  }, intervalMs);
+  return {
+    stop() {
+      clearInterval(timer);
+      return { samples, intervalMs, baseline: baseline.size, fresh: freshEgress({ baseline, seen, allowedIps }) };
+    },
+  };
+}
+
+/** The addresses the relay host resolves to: a connected agent's tunnel may reconnect to any of them at any time. */
+async function relayAddresses(relay: string): Promise<Set<string>> {
+  const found = new Set<string>();
+  let host: string;
+  try { host = new URL(relay).hostname; } catch { return found; }
+  const { resolve4, resolve6 } = await import('node:dns/promises');
+  for (const ip of await resolve4(host).catch(() => [] as string[])) found.add(normalizeIp(ip));
+  for (const ip of await resolve6(host).catch(() => [] as string[])) found.add(normalizeIp(ip));
+  return found;
+}
+
+async function inboxCheck(primary: string, otherIds: string[], waitS: number, outDir: string, faultEntryId = false): Promise<void> {
+  const config = readConfig();
+  const inbox = config.inbox;
+  if (!inbox) emit({ ok: false, detail: 'the machine was not given the inbox check settings' });
+  const browser = findBrowser();
+  if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
+  mkdirSync(outDir, { recursive: true });
+
+  const observation: InboxObservation = {
+    ok: false,
+    ownerPath: { bearerStatus: null, unlockOffered: false, unlocked: false },
+    destinations: {},
+    entries: [],
+    pages: [],
+    ask: null,
+    fixes: { venice: null, anonymous: null },
+    refusals: { venice: null },
+    egress: { samples: 0, intervalMs: 0, baseline: 0, fresh: [], pageRequests: 0, pageOutside: [] },
+    shots: [],
+  };
+
+  // This agent holds the engine's bearer. The Inbox route is for an unlocked browser on this computer only, so a bearer-minted
+  // session must be refused: the check never uses it for anything else.
+  try {
+    const session = await ownerSession();
+    observation.ownerPath.bearerStatus = (await session.call('POST', '/dashboard/private-answers', { action: 'list' })).status;
+  } catch { /* the status stays unknown, which the check reports */ }
+
+  let browserPid: number | undefined;
+  const watch = startEgressWatch(await relayAddresses(config.relay), () => browserPid);
+  const requests: string[] = [];
+  let opened: OpenedBrowser | undefined;
+  let stopBridge: () => void = () => undefined;
+  let bridgeStarted = false;
+  let failure: string | undefined;
+  let egress: Omit<EgressView, 'pageRequests' | 'pageOutside'> | undefined;
+  try {
+    opened = await openBrowser(browser!, 'chrome-profile-inbox', INBOX_DEBUG_PORT, true);
+    browserPid = opened.pid;
+    const cdp = opened.cdp;
+    await cdp.send('Page.enable');
+    await cdp.send('Network.enable');
+    cdp.on('Network.requestWillBeSent', (params) => { requests.push(String(params?.request?.url ?? '')); });
+    await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+    const metrics = async (width: number, height = 900): Promise<void> => {
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 600 });
+    };
+    await metrics(1280);
+
+    const evalIn = async (expression: string): Promise<any> => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      if (result.exceptionDetails) throw new Error(`a page script failed: ${String(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text).slice(0, 160)}`);
+      return result.result?.value;
+    };
+    const waitFor = async (expression: string, timeoutMs: number, everyMs = 500): Promise<boolean> => {
+      const until = Date.now() + timeoutMs;
+      for (;;) {
+        try { if ((await evalIn(expression)) === true) return true; } catch { /* the page is changing */ }
+        if (Date.now() >= until) return false;
+        await sleep(everyMs);
+      }
+    };
+    /** A real click: the element is scrolled into view and the mouse pressed on its centre. */
+    const click = async (selector: string): Promise<boolean> => {
+      const raw = await evalIn(centerOf(selector));
+      if (typeof raw !== 'string') return false;
+      const { x, y } = JSON.parse(raw) as { x: number; y: number };
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+      return true;
+    };
+    const stateNow = async (): Promise<any> => JSON.parse(String(await evalIn(PAGE_STATE)));
+    const api = async (body: unknown): Promise<{ status: number; body: any }> => JSON.parse(String(await evalIn(pageApi(body)))) as { status: number; body: any };
+    const shoot = async (name: string, label: string, width: number): Promise<void> => {
+      await metrics(width);
+      await sleep(1_000);
+      const layout = await cdp.send('Page.getLayoutMetrics');
+      await metrics(width, Math.min(6000, Math.ceil(layout.cssContentSize?.height ?? 900)));
+      await sleep(600);
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      const bytes = Buffer.from(shot.data as string, 'base64');
+      writeFileSync(join(outDir, name), bytes);
+      observation.shots.push({ file: join(outDir, name), label, width, theme: 'light', bytes: bytes.length });
+      await metrics(1280);
+    };
+
+    let origin = '';
+    /** The owner's own way in: a one-time opening link for the place, then Unlock on the page. */
+    const openTarget = async (target: string): Promise<{ state: any; unlockOffered: boolean; unlocked: boolean }> => {
+      const minted = olympus(['dashboard', '--no-open', '--target', target], { timeoutMs: 60_000 });
+      const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
+      if (!url) throw new Error(`olympus dashboard --no-open --target ${target.startsWith('private/') ? 'private/<id>' : target} printed no opening link`);
+      origin = new URL(url).origin;
+      if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(url).port || 80)); bridgeStarted = true; }
+      await cdp.send('Page.navigate', { url });
+      if (!(await waitFor(`!!document.querySelector('[data-private-answers]')`, 45_000))) throw new Error('the Private answers page did not open from the owner\'s opening link');
+      const offered = (await evalIn(PAGE_UNLOCK_OFFERED)) === true;
+      if (offered && !(await click('[data-private-answers] form[data-pa-unlock] button'))) throw new Error('the page\'s Unlock button could not be pressed');
+      const unlocked = await waitFor(PAGE_UNLOCKED, 45_000);
+      return { state: await stateNow(), unlockOffered: offered, unlocked };
+    };
+
+    const viewEntry = async (id: string, spec: { question: string | null; facts: string[]; citedTitle: string; waitUntil: number | null }): Promise<EntryView> => {
+      const started = Date.now();
+      const listed = await api({ action: 'list' });
+      const row = (Array.isArray(listed.body?.questions) ? listed.body.questions : []).find((q: any) => q?.id === id);
+      const view: EntryView = {
+        id, listed: row !== undefined, path: typeof row?.path === 'string' ? row.path : null,
+        fromShown: typeof row?.from === 'string' && row.from.trim() !== '',
+        questionMatches: row === undefined || spec.question === null ? null : squash(String(row.question)) === squash(spec.question),
+        status: null, factsStated: [], citations: 0, citesExpected: false, waitedS: 0,
+      };
+      if (row === undefined) return view;
+      for (;;) {
+        const read = await api({ action: 'read', id });
+        if (read.status === 200 && read.body?.ok === true) {
+          view.status = String(read.body.status);
+          if (read.body.status === 'answered') {
+            const citations: any[] = Array.isArray(read.body.citations) ? read.body.citations : [];
+            view.factsStated = factsIn(String(read.body.answer ?? ''), spec.facts);
+            view.citations = citations.length;
+            view.citesExpected = sourceNames(citations.map((c) => [c?.title, c?.source, c?.date].filter(Boolean).join(' · ')), spec.citedTitle);
+            break;
+          }
+        } else {
+          view.status = `http ${read.status}`;
+        }
+        if (spec.waitUntil === null || Date.now() >= spec.waitUntil) break;
+        await sleep(10_000);
+      }
+      view.waitedS = Math.round((Date.now() - started) / 1000);
+      return view;
+    };
+
+    /** Waits (bounded) for the local model to be ready to ask; the page's own refresh turns the card, a reload covers a page that is not refreshing. */
+    const untilComputerReady = async (state: any, timeoutMs: number): Promise<any> => {
+      const until = Date.now() + timeoutMs;
+      let latest = state;
+      let lastReload = Date.now();
+      while (latest.cards?.computer?.state !== 'ready' && Date.now() < until) {
+        await sleep(5_000);
+        if (Date.now() - lastReload > 60_000) { await cdp.send('Page.reload'); lastReload = Date.now(); await waitFor(PAGE_UNLOCKED, 45_000); }
+        latest = await stateNow();
+      }
+      return latest;
+    };
+
+    // 1. The Ask page, opened by the owner's link and unlocked.
+    const first = await openTarget('private');
+    observation.ownerPath.unlockOffered = first.unlockOffered;
+    observation.ownerPath.unlocked = first.unlocked;
+    if (!first.unlocked) throw new Error(`the Private answers page did not open its controls (Unlock ${first.unlockOffered ? 'was pressed' : 'was not offered'})`);
+    const ready = await untilComputerReady(first.state, 300_000);
+    for (const key of ['computer', 'anonymous', 'venice'] as DestinationId[]) {
+      if (ready.cards?.[key]) observation.destinations[key] = ready.cards[key] as CardView;
+    }
+    await shoot('ask-page-1280.png', 'The Ask page, 1280 px wide (the owner\'s unlocked browser)', 1280);
+    await shoot('ask-page-390.png', 'The Ask page, 390 px wide (the owner\'s unlocked browser)', 390);
+
+    // 2. The agent's entry, by the id its link names: the route, waiting for the local model's answer.
+    const agentSpec = { question: inbox.agent.text, facts: inbox.agent.facts, citedTitle: inbox.agent.citedTitle };
+    if (primary) observation.entries.push(await viewEntry(primary, { ...agentSpec, waitUntil: Date.now() + waitS * 1000 }));
+    for (const id of otherIds) {
+      if (id !== primary && !observation.entries.some((entry) => entry.id === id)) observation.entries.push(await viewEntry(id, { question: null, facts: [], citedTitle: '', waitUntil: null }));
+    }
+
+    // The address an Open link names, opened by the owner: the Inbox lands on that entry and opens it.
+    const openByAddress = async (addressId: string, pageId: string, spec: { facts: string[]; citedTitle: string }, shotLabel: string): Promise<PageView> => {
+      const view = await openTarget(`private/${addressId}`);
+      observation.ownerPath.unlocked = observation.ownerPath.unlocked && view.unlocked;
+      let row: any = { found: false };
+      const until = Date.now() + 90_000;
+      for (;;) {
+        row = JSON.parse(String(await evalIn(rowView(pageId))));
+        if (row.opened === true || Date.now() >= until) break;
+        await sleep(2_000);
+      }
+      const now = await stateNow();
+      const sources: string[] = Array.isArray(row.sources) ? row.sources : [];
+      const page: PageView = {
+        id: pageId,
+        landedOnInbox: now.page === true && now.ask === true && /private-answers/.test(String(now.where)),
+        rowFound: row.found === true,
+        opened: row.opened === true,
+        factsStated: factsIn(String(row.answer ?? ''), spec.facts),
+        citations: sources.length,
+        citesExpected: sourceNames(sources, spec.citedTitle),
+      };
+      observation.pages.push(page);
+      if (row.opened === true) {
+        await shoot('inbox-entry-1280.png', `An opened Inbox entry, 1280 px wide (${shotLabel})`, 1280);
+        await shoot('inbox-entry-390.png', `An opened Inbox entry, 390 px wide (${shotLabel})`, 390);
+      }
+      return page;
+    };
+
+    // 3. The link's own address, opened by the owner: the Inbox lands on that entry.
+    if (primary) await openByAddress(primary, primary, { facts: inbox.agent.facts, citedTitle: inbox.agent.citedTitle }, 'from the agent\'s link');
+
+    // 4. Ask the local model: typed into the page and pressed, on a clean Ask page.
+    const second = await openTarget('private');
+    observation.ownerPath.unlocked = observation.ownerPath.unlocked && second.unlocked;
+    const secondReady = await untilComputerReady(second.state, 120_000);
+    const knownRows = new Set<string>((secondReady.rows ?? []).map((row: any) => String(row.id)));
+    const ask: AskView = { pressed: false, answered: false, message: '', factsStated: [], citations: 0, citesExpected: false, ms: 0, entry: null };
+    observation.ask = ask;
+    if ((await evalIn(FOCUS_QUESTION)) === true && secondReady.cards?.computer?.state === 'ready') {
+      await cdp.send('Input.insertText', { text: inbox.ask.text });
+      const started = Date.now();
+      ask.pressed = await click('form[data-pa-ask] button[data-pa-destination="computer"]');
+      if (ask.pressed) {
+        await sleep(1_000);
+        const until = started + waitS * 1000;
+        let view: any = { found: false };
+        for (;;) {
+          view = JSON.parse(String(await evalIn(ASK_VIEW)));
+          if ((view.found === true && view.busy !== true) || Date.now() >= until) break;
+          await sleep(2_000);
+        }
+        ask.ms = Date.now() - started;
+        const answer = typeof view.answer === 'string' ? view.answer : '';
+        const sources: string[] = Array.isArray(view.sources) ? view.sources : [];
+        ask.answered = answer !== '';
+        ask.message = ask.answered ? '' : String(view.message ?? '').slice(0, 120);
+        ask.factsStated = factsIn(answer, inbox.ask.facts);
+        ask.citations = sources.length;
+        ask.citesExpected = sourceNames(sources, inbox.ask.citedTitle);
+        if (ask.answered) {
+          let newId: string | undefined;
+          const listUntil = Date.now() + 90_000;
+          while (newId === undefined && Date.now() < listUntil) {
+            const listed = await api({ action: 'list' });
+            const row = (Array.isArray(listed.body?.questions) ? listed.body.questions : []).find((q: any) => !knownRows.has(String(q?.id)) && squash(String(q?.question)) === squash(inbox.ask.text));
+            if (row) newId = String(row.id); else await sleep(3_000);
+          }
+          if (newId !== undefined) ask.entry = await viewEntry(newId, { question: inbox.ask.text, facts: inbox.ask.facts, citedTitle: inbox.ask.citedTitle, waitUntil: Date.now() + 120_000 });
+          await evalIn(`window.scrollTo(0, 0)`);
+          await shoot('ask-answered-1280.png', 'The Ask page after "Ask the local model": the answer, its sources, and the new Inbox entry', 1280);
+        }
+      }
+    }
+
+    // 5. Destinations that are not set up: Venice's ask is refused by the route; the way to fix each is a link that lands on the right Models section.
+    const venice = secondReady.cards?.venice;
+    if (venice?.state === 'not_set_up') {
+      const refused = await api({ action: 'ask_venice', question: 'Release check: Venice is not set up, so this must be refused.' });
+      observation.refusals.venice = refused.status;
+    }
+    const followFix = async (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => {
+      const clicked = await click(`[data-pa-card="${key}"] .paaction a`);
+      if (!clicked) return { clicked: false, landedAt: '', anchorShown: false };
+      const shown = await waitFor(anchorPresent(anchor), 30_000);
+      const where = String(await evalIn(`location.pathname + location.search + location.hash`));
+      await cdp.send('Page.navigate', { url: `${origin}/dashboard?private-answers` });
+      await waitFor(PAGE_UNLOCKED, 45_000);
+      return { clicked: true, landedAt: where.replace(/token=[^&#]*/g, 'token=…'), anchorShown: shown };
+    };
+    if (secondReady.cards?.venice) observation.fixes.venice = await followFix('venice', 'venice-setup');
+    if (secondReady.cards?.anonymous) observation.fixes.anonymous = await followFix('anonymous', 'anonymous');
+
+    // 6. No link from an agent (this install issues none): the entry the Ask page just made is opened by its address instead, so the
+    //    id-to-entry route is still exercised with a real id. The fault self-test changes the last character of the address.
+    if (!primary && ask.entry) {
+      const entryId = ask.entry.id;
+      const address = faultEntryId ? `${entryId.slice(0, -1)}${entryId.endsWith('A') ? 'B' : 'A'}` : entryId;
+      await openByAddress(address, entryId, { facts: inbox.ask.facts, citedTitle: inbox.ask.citedTitle }, 'from its own address');
+    }
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  } finally {
+    egress = watch.stop();
+    opened?.close();
+    stopBridge();
+  }
+  observation.egress = { ...(egress ?? observation.egress), pageRequests: requests.length, pageOutside: requestsOutsideMachine(requests) };
+  if (failure !== undefined) { observation.ok = false; observation.detail = failure; } else { observation.ok = true; }
+  emit({ ...observation });
 }
 
 // ---------------------------------------------------------------------------
@@ -793,6 +1226,7 @@ async function snapshotState(): Promise<never> {
     relayConnected: remote?.relay?.connected ?? null,
     policy: readPolicy(),
     configFiles: existsSync(p.configDir) ? readdirSync(p.configDir).sort() : [],
+    dataFiles: existsSync(p.dataDir) ? readdirSync(p.dataDir).filter((name) => !/-(wal|shm|journal)$/.test(name)).sort() : [],
     workerEnvKeys: workerEnv,
     tierRuleIds: ((rules?.rules ?? []) as Array<{ id: string }>).map((rule) => rule.id).sort(),
     connections: ((connections?.connections ?? []) as Array<{ id: string }>).map((connection) => connection.id).sort(),
@@ -906,6 +1340,7 @@ async function main(): Promise<void> {
       process.exit(dash.status === 200 ? 0 : 1);
     }
     case 'screenshots': return await screenshots(flag('--out'));
+    case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();
@@ -913,7 +1348,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
       process.exit(2);
   }
 }
