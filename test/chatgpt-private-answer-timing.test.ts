@@ -51,6 +51,11 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 });
 
+/** Waits for background work to settle instead of a fixed sleep, which a loaded CI runner can outlast. */
+async function until(condition: () => boolean, ms = 5_000): Promise<void> {
+  for (const end = Date.now() + ms; !condition() && Date.now() < end;) await Bun.sleep(5);
+}
+
 function model(answer: PrivateAnswerModel['answerPrivately'], extra: Partial<PrivateAnswerModel> = {}): PrivateAnswerModel {
   return { status: () => ({ state: 'ready' }), answerPrivately: answer, ...extra };
 }
@@ -162,11 +167,11 @@ describe('1. every claimed job settles within its deadline', () => {
       observe?.evidence?.({ items: 1, unreadable: 0, bytes: 21 });
       observe?.modelCall?.({ stage: 'main', ms: 12, promptBytes: 3_000, ok: true, promptTokens: 900, promptMs: 4, outputTokens: 40, outputMs: 8 });
       return { answer: 'SENTINEL_ANSWER_91c2', citations: [{ title: 'SENTINEL_EVIDENCE_91c2' }] };
-    });
+    }, { timeoutMs: 5_000 });
     const jobId = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(jobId, panel.publicKey);
-    await Bun.sleep(30);
+    await until(() => lines.length > 0);
     expect((await jobs.claim(jobId, panel.publicKey)).body.status).toBe('ready');
     expect(activity).toMatchObject({ begins: 2, ends: 2 });
     expect(lines).toHaveLength(1);
@@ -180,12 +185,12 @@ describe('1. every claimed job settles within its deadline', () => {
     const { jobs, lines } = harness(async (_question, _evidence, _signal, observe) => {
       observe?.evidence?.({ items: 2, unreadable: 0, bytes: 42 });
       return { answer: 'x', citations: [] };
-    });
+    }, { timeoutMs: 5_000 });
     const evidence = [...EVIDENCE, { ...EVIDENCE[0]!, title: 'SENTINEL_NEIGHBOUR_91c2', neighbour: true }];
     const jobId = jobs.begin({ question: QUESTION, count: 1, evidence, refresh: async () => evidence }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(jobId, panel.publicKey);
-    await Bun.sleep(30);
+    await until(() => lines.length > 0);
     expect((await jobs.claim(jobId, panel.publicKey)).body.status).toBe('ready');
     expect(lines[0]).toContain(' matched=1 neighbours=1 items=2 ');
     expect(lines[0]).not.toMatch(CONTENT);
@@ -195,15 +200,15 @@ describe('1. every claimed job settles within its deadline', () => {
 describe('1b. a shared analysis logs no negative wait', () => {
   test('a later search of the same question shares the ready answer: search_to_ready_ms is 0, never negative', async () => {
     const clock = { now: 1_000 };
-    const { jobs, lines } = harness(async () => ({ answer: 'x', citations: [] }), { precompute: true, now: () => clock.now });
+    const { jobs, lines } = harness(async () => ({ answer: 'x', citations: [] }), { precompute: true, now: () => clock.now, timeoutMs: 5_000 });
     jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
-    await Bun.sleep(20);
+    await until(() => jobs.pendingAnalyses === 0);
     // The first search's analysis is ready; the same question is asked again later.
     clock.now = 61_000;
     const later = jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
     const panel = await generatePanelKeyPair();
     await jobs.claim(later, panel.publicKey);
-    await Bun.sleep(20);
+    await until(() => lines.length > 0);
     expect((await jobs.claim(later, panel.publicKey)).body.status).toBe('ready');
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('precomputed=yes');
