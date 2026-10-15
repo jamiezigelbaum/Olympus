@@ -203,8 +203,9 @@ export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): Sov
     const isDefaultPath = (path: string) => {
       try { return resolve(path) === resolve(defaultSovereigntyConfigPath(env)); } catch { return false; }
     };
-    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()
-      && (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
+    // The engine host supervises its worker with a native service instance id too,
+    // so that id does not mark a gateway; only the engine sets these two.
+    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
       && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {

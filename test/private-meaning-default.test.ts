@@ -183,6 +183,8 @@ test('pinned elsewhere, hosted, or not the standalone engine: the 1.0.0 policy i
   const { path, home, env } = policyFile();
   const elsewhereDir = mkdtempSync(join(tmpdir(), 'private-meaning-pinned-')); homes.push(elsewhereDir);
   const elsewhere = join(elsewhereDir, 'sovereignty.json'); writeFileSync(elsewhere, oldBytes);
+  // An OpenClaw gateway's worker: supervised (instance id) but never started by the engine.
+  const { OLYMPUS_ENGINE_HOST: _engineHost, ...gateway } = env;
   const log = spyOn(console, 'info').mockImplementation(() => {});
   try {
     for (const overrides of [
@@ -190,8 +192,8 @@ test('pinned elsewhere, hosted, or not the standalone engine: the 1.0.0 policy i
       { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: elsewhere } },
       { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG: elsewhere } },
       { config: {}, env: { ...env, OLYMPUS_ENGINE_HOST: '0' } },
-      { config: {}, env: { ...env, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway-fixture' } },
-      { config: {}, env: { ...env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: path, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway-fixture' } },
+      { config: {}, env: { ...gateway, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway-fixture' } },
+      { config: {}, env: { ...gateway, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: path, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway-fixture' } },
     ]) {
       expect(loadSourceWorkerSovereignty(overrides.config, overrides.env).resolveEmbeddingProfile('secure_local')).toBeUndefined();
       expect(readFileSync(path, 'utf8')).toBe(oldBytes);
@@ -202,6 +204,21 @@ test('pinned elsewhere, hosted, or not the standalone engine: the 1.0.0 policy i
     expect(log.mock.calls).toHaveLength(6);
     expect(log.mock.calls[0]![0]).toContain('1.0.0 keyword-only');
   } finally { log.mockRestore(); }
+});
+
+test('the worker the engine supervises migrates: it carries a service instance id like every supervised worker', () => {
+  for (const shape of [
+    (env: Record<string, string>) => ({ ...env, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'engine-worker' }),
+    (env: Record<string, string>, path: string) => ({ ...env, OLYMPUS_STANDALONE: '1', OLYMPUS_SOVEREIGNTY_CONFIG: path, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'engine-worker' }),
+  ]) {
+    const { path, home, env } = policyFile();
+    const log = spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const engine = loadSourceWorkerSovereignty({}, shape(env, path));
+      expect(engine.config.retrieval.trustDomains.secure_local).toEqual(expectedSecure);
+      expect(readdirSync(home).filter(name => name.startsWith('sovereignty.json.backup-private-meaning-'))).toHaveLength(1);
+    } finally { log.mockRestore(); }
+  }
 });
 
 test('the standalone engine naming its own default file (the Linux engine shape) still migrates', () => {
