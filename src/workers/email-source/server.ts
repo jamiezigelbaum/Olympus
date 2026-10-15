@@ -5145,6 +5145,10 @@ export async function main(): Promise<void> {
       : Promise.resolve('unknown' as const)),
     store: waitingQuestionStore,
     isActive: connectionActive,
+    // The re-check is background work: it waits on the model's keyword
+    // translation as long as it needs, and starts no probe while the owner's
+    // own answer is in flight.
+    interactiveBusy: () => answerActivity.interactiveInFlight > 0,
   });
   const uncheckedRetry = setInterval(() => {
     void remotePrivateParts.retryUnchecked().catch(() => undefined);
@@ -5309,8 +5313,10 @@ export async function main(): Promise<void> {
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
     ? async (input: { question: string; limit?: number }) => {
-        // Not an answer: it never uses the private model, so it never
-        // preempts the sniffer (answerActivity is for the private pool).
+        // Not an answer: no answerActivity lease, so it never preempts the
+        // sniffer. It does ask the built-in model, once per new wording, to
+        // translate the question's words (core/source-index/keyword-expansion.ts),
+        // on the model directly, so that call queues behind what the model runs.
         return searchReleasedEvidence({
           lanes: sourceAnswerLanes!,
           question: input.question,

@@ -107,7 +107,13 @@ an answer model offers. On every other install the one answer tool is
 wait for: each search is probed with the same probe, ticket and record
 (surface `remote`, the retrieval mode as its only selector). The probe starts
 with the call and runs beside the search, bounded at two seconds, so a search
-that takes longer waits for nothing; the connection and the search's tiers are
+that takes longer waits for nothing. It does not wait on the local model, which
+the sniffer or an answer may hold, and which is slow on a CPU-only computer: it
+matches on the words alone, then on the words and the meaning, using a
+question's keyword translation only when that is already done, and waits for the
+translation, inside the same bound, only when nothing matched and the
+translation could still change that (`unknown`, never `no_match`, when it does
+not arrive). The connection and the search's tiers are
 checked again once the probe has answered. A `match` that was recorded adds
 `private_note` to the search result, the same sentence and Open link as a source
 answer, for the agent to pass on as written. `no_match`, `unknown`, a refused
@@ -121,7 +127,9 @@ HTTP request and reaches a different stateless server, so it does not stop the
 running search; that search records and is answered as if it had finished
 (review of #427, round 2; follow-up). ChatGPT's
 `olympus_search` is unchanged. `unknown` records an unchecked row and re-probes
-locally every ten minutes; a later match schedules the same answer path.
+locally every ten minutes, with a twenty-second bound instead of two seconds
+(no search is waiting, so it may wait on the translation) and no probe while the
+owner's own answer is in flight; a later match schedules the same answer path.
 Delivered Private summaries and `no_match` record nothing. Stored selectors
 are bounded and replayed exactly; malformed/oversized selectors refuse the
 record rather than widening the search. The local path in B answers under

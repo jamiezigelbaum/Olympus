@@ -11420,6 +11420,8 @@ export function createConnectorStoreCorpusAdapter(
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.hasEmbeddings(embeddingProvider.modelId);
     const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
+    const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const keywordLane = relaxEmptyLocalKeywordLane(
       store, request.query, maxResults, options.accountScope, filters,
       connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions),
@@ -11431,7 +11433,7 @@ export function createConnectorStoreCorpusAdapter(
     // outage, vectors unreadable or of the wrong width, the deadline): what
     // it would have matched is unknown, and the response says so.
     let incomplete = false;
-    if (hybrid) {
+    if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
         const lane = await store.vectorSearchLane(
