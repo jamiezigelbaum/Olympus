@@ -289,8 +289,8 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     const worker = Bun.serve({
       hostname: '127.0.0.1',
       port: 0,
-      fetch: (request) => request.method === 'POST'
-        ? new Response(null, { status: 303, headers: { location: 'https://chatgpt.com/connector_platform_oauth_redirect?code=c' } })
+      fetch: async (request) => request.method === 'POST'
+        ? new Response(null, { status: 303, headers: { location: new URLSearchParams(await request.text()).get('to') ?? 'https://chatgpt.com/connector_platform_oauth_redirect?code=c' } })
         : new Response('<form method="post"></form>', { headers: { 'content-type': 'text/html; charset=utf-8' } }),
     });
     cleanups.push(() => worker.stop(true));
@@ -320,6 +320,14 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     const posted = await fetch(`${relay.url}/connect/demo/authorize`, { method: 'POST', body: 'a=b', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     expect(posted.status).toBe(303);
     expect(posted.headers.get('location')).toStartWith('https://chatgpt.com/');
+    // Grok Bot's sign-in returns to Cursor's callback; anywhere else is refused.
+    const post = (to: string) => fetch(`${relay.url}/connect/demo/authorize`, { method: 'POST', body: new URLSearchParams({ to }).toString(), redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    const cursor = await post('https://www.cursor.com/agents/mcp/oauth/callback?code=c&state=s');
+    expect(cursor.status).toBe(303);
+    expect(cursor.headers.get('location')).toBe('https://www.cursor.com/agents/mcp/oauth/callback?code=c&state=s');
+    const elsewhere = await post('https://evil.example/agents/mcp/oauth/callback?code=c');
+    expect(elsewhere.status).toBe(502);
+    expect(elsewhere.headers.get('location')).toBeNull();
   });
 
   test('the relay origin is not a panel origin by default', async () => {
