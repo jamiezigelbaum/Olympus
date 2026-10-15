@@ -516,6 +516,19 @@ test('browser opens have a rolling six-per-hour cap independent of CLI tickets a
   expect((await f.bridge.handle(f.request('/dashboard.json'))).status).toBe(403);
 });
 
+test('right after the sixth browser open, the refusal is the hourly cap, not the ten-second spacing', async () => {
+  const f = fixture();
+  for (let i = 0; i < 6; i++) {
+    if (i > 0) f.advance(10_000);
+    expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(204);
+  }
+  const refused = await f.bridge.handle(f.post('/owner-open', {}));
+  expect(refused.status).toBe(429);
+  expect(refused.headers.get('X-Olympus-Owner-Limit')).toBe('hourly');
+  expect(Number(refused.headers.get('Retry-After'))).toBeGreaterThan(10);
+  expect(await refused.text()).toContain('Too many windows were opened from the browser.');
+});
+
 test('a browser open whose window fails to launch is reported as a failure, not as the hourly limit', async () => {
   const f = fixture();
   const launch = f.options.openFile;

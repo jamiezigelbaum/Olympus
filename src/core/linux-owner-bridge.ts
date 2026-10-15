@@ -238,13 +238,14 @@ export class LinuxOwnerBridge {
   }
   async openTicket(target: string, lane: 'control' | 'browser' = 'control'): Promise<void> {
     if (!safeTarget(target) || !this.live()) throw new Error('Desktop owner confirmation is unavailable.');
-    if (this.now() - this.lastOpen[lane] < 10_000) throw new OwnerOpenLimited('Wait ten seconds before opening another owner ticket.', false);
     const openedAt = this.now(), previousOpen = this.lastOpen[lane];
+    // The hourly cap is checked first: when both limits apply, it decides the real wait.
     if (lane === 'browser') {
       this.browserOpens = this.browserOpens.filter(time => time > openedAt - 60 * 60 * 1000);
       if (this.browserOpens.length >= 6) throw new OwnerOpenLimited('Wait before opening another owner ticket.', true);
-      this.browserOpens.push(openedAt);
     }
+    if (openedAt - this.lastOpen[lane] < 10_000) throw new OwnerOpenLimited('Wait ten seconds before opening another owner ticket.', false);
+    if (lane === 'browser') this.browserOpens.push(openedAt);
     this.lastOpen[lane] = openedAt;
     try {
       await this.launchTicket(target, lane);
