@@ -36,8 +36,10 @@ and get the remote tool set (`source_answer`, `source_answer_result`,
 private answer panel or `/openai/mcp`. Grok Bot is in 1.0 too (owner
 decision 2026-10-13) and needs no connector of its own: once Olympus is
 connected on grok.com, Grok Bot uses that connection.
-Grok Bot's own sign-in (as Cursor's pinned client), Muse and the Grok API key
-path stay after 1.0.
+Grok Bot's own sign-in uses Cursor's pinned client, which the relay accepts;
+the Grok Bot and Cursor marketplace listing (owner decision 2026-10-15,
+`grok-bot-plugin/SUBMISSION.md`) relies on it. Muse and the Grok API key path
+stay after 1.0.
 
 ### Delivered (branch `claude/chatgpt-plugin`)
 
@@ -113,6 +115,7 @@ waits for a calendar slot.
 | 5d | Listing text (long description, capabilities) moved from the kit into `plugin.json`; the panel's CORS origins confirmed against a live panel; the 5 positive and 3 negative test cases pass on the demo engine from a fresh ChatGPT account, desktop and mobile. | A session | 5b |
 | 5e | Demo video, recorded last from the tested build. | Owner | 5a-5d done |
 | 6 | **Claude and Grok through the relay.** Engine and relay pins, the standard 401 on tokenless `/mcp`, offline answers per credential surface. Then: fresh critical review, relay deploy, an engine release, and a live test on a Mac with real accounts (Claude web on the Mac and then its phone app, Grok on grok.com, plus a ChatGPT developer-mode and plugin regression). | A session; the owner provides the Claude and Grok accounts | Critical review; relay deploy authorized (given 2026-10-12) |
+| 7 | **Grok Bot and Cursor marketplace listing** under OCU Inc., per the [packet](../grok-bot-plugin/SUBMISSION.md) (owner decision 2026-10-15, Decisions): the reviewer demo engine on `olympus-grokbot-review` seeded with `demo-data/` and its tiers confirmed; an end-to-end receipt through the Grok Bot or Cursor demo sign-in; the privacy policy naming Cursor and Anysphere; the legal pass on the final description and testing instructions. Publisher terms accepted 2026-10-15. | A session prepares it; the owner submits | The packet's pre-submission checklist (§5) complete |
 
 ### Deferred to after 1.0
 
@@ -126,9 +129,9 @@ waits for a calendar slot.
   the relay-v1 terms panel, which nothing triggers since relay v2
   (`needsTerms`, `LETS_ENCRYPT_REPOSITORY_URL` in
   `src/workers/agent-connections.ts`); delete it with the dashboard lane.
-- **Hosted agents beyond ChatGPT, Claude and Grok** (Muse, Grok Bot's own
-  sign-in, the Grok API key path) stay out of scope. Claude and Grok moved into
-  1.0 on 2026-10-12; Grok Bot uses the grok.com connection.
+- **Hosted agents beyond ChatGPT, Claude, Grok and Grok Bot** (Muse, the Grok
+  API key path) stay out of scope. Claude and Grok moved into 1.0 on
+  2026-10-12, Grok Bot on 2026-10-13; its marketplace listing on 2026-10-15.
 - **Authenticating the Mac's key to the panel.** A compromised relay could
   swap keys (a residual risk stated in the design); accepted for 1.0.
 - **Outside help on the private answer panel** (frontier consult over
@@ -161,6 +164,20 @@ and Linux installations, every source's actual limits are documented, and beta
 testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
+
+- **2026-10-15 — Grok Bot and Cursor marketplace listing.** Owner decision:
+  list Olympus in the Grok Bot and Cursor marketplace (Anysphere's form,
+  https://x.ai/bot/marketplace/submit-a-plugin), which signs in with Cursor's
+  pinned client. The owner accepted Cursor's Marketplace Publisher Terms for Open
+  Coordination Unlimited, Inc., including the indemnity, on 2026-10-15, and
+  clicks submit himself. Sequence: the Grok Bot or Cursor demo sign-in with a
+  read-only demo grant (PR #416); a reviewer demo engine of its own on the
+  Hetzner server `olympus-grokbot-review`, never `olympus-demo`, which stays
+  frozen for OpenAI's review; the relay's `RELAY_DEMO_CLIENT_INSTALLS` route
+  to it; the hosted logo; an end-to-end test through the demo sign-in; the
+  privacy policy naming Cursor and Anysphere; then submission. The packet and
+  its checklist are `grok-bot-plugin/SUBMISSION.md`. Supersedes "Grok Bot's
+  own sign-in … stays after 1.0" in the 2026-10-13 entry below.
 
 - **2026-10-14 — Private meaning search on the default install (1.0.1).**
   Owner-approved decision A: keep `no-sensitive` as the standalone seed and

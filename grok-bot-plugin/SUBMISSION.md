@@ -3,8 +3,10 @@
 Status: DRAFT 2026-10-15. Test results, and the legal pass on the description
 and testing instructions, are still to come. Form:
 https://x.ai/bot/marketplace/submit-a-plugin. Publisher terms (Anysphere):
-https://cursor.com/marketplace-publisher-terms. Jamie submits, after accepting
-the publisher terms, including their indemnity of Anysphere.
+https://cursor.com/marketplace-publisher-terms. Jamie accepted the publisher
+terms for Open Coordination Unlimited, Inc., including their indemnity of
+Anysphere, on 2026-10-15 ("Yes, I accept the terms."). Jamie clicks submit
+himself.
 
 This file is kit material only. Nothing in it ships in the package.
 
@@ -92,6 +94,9 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
   The engine runs as the unprivileged user `olympus-review`, on OpenClaw
   2026.9.5 and Node 24.20.0, matching olympus-demo. Shut it down after the
   marketplace review ends.
+- Its `worker.env` must not carry `OLYMPUS_ENGINE_HOST=1` (olympus-demo's
+  older build has it): on an OpenClaw-hosted engine it moves the Gateway's
+  data folder away from the relay child's, and the relay never comes up.
 - Holds only `chatgpt-plugin/demo-data/`, carries the demo marker, and has
   `remote.demoConsent` with an Argon2id hash. Credentials are in 1Password
   only.
@@ -103,18 +108,23 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 
 ## 5. Pre-submission checklist
 
-- [ ] PR #416 merged, relay deployed from exact main with
-      `connect-relay/deploy/deploy.sh` (its reviewer check passed).
+- [x] PR #416 merged (8828c376); relay deployed from exact main 149eefe9
+      with `connect-relay/deploy/deploy.sh`, reviewer check passed
+      (2026-10-15). Drop-in `olympus-relay.service.d/grokbot-demo.conf` sets
+      `RELAY_DEMO_CLIENT_INSTALLS` to the reviewer engine's install id.
 - [ ] Reviewer engine running, seeded, and indexed; tiers match
       `chatgpt-plugin/demo-data/README.md`.
 - [ ] End-to-end receipt recorded (§6): Grok Bot and/or Cursor, through the
       demo sign-in, every §3 case.
-- [ ] Logo URL serves 200 `image/png` (site deployed).
+- [x] Logo URL serves 200 `image/png`, same bytes as
+      `site/assets/img/olympus-logo-512.png` (2026-10-15).
 - [ ] Privacy and terms URLs live; the policy names the apps reviewers will
       use (legal pass).
 - [ ] Legal pass (Olympus profile) on §2 and §3 recorded below.
-- [ ] Jamie has accepted the publisher terms (indemnity) and ticked "tested
-      locally and in-app".
+- [x] Jamie has accepted the publisher terms, including the indemnity
+      (2026-10-15).
+- [ ] Jamie ticks "tested locally and in-app" (only after §6) and clicks
+      submit.
 
 ## 6. Receipts
 
