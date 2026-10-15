@@ -122,7 +122,7 @@ const logLines: string[] = [];
 async function makeRelay(
   limits: Partial<RelayLimits> = {},
   registry = new MemoryInstallRegistry(),
-  extra: { demoInstallId?: string } = {},
+  extra: { demoInstallId?: string; demoInstallsByClient?: Record<string, string> } = {},
 ): Promise<RelayHandle> {
   const relay = await startRelay({
     publicHost: PUBLIC_HOST,
@@ -484,6 +484,60 @@ describe('demo sign-in', () => {
     expect(posted.status).toBe(200);
     expect(demoWorker.requests.at(-1)!.headers.origin).toBe(`https://${PUBLIC_HOST}`);
     expect(realWorker.requests).toHaveLength(0);
+  });
+
+  test('an app with a demo of its own signs in there, page and form alike; every other app keeps the default demo', async () => {
+    const CURSOR = 'https://cursor.com/oauth/mcp-client.json';
+    const CHATGPT = 'https://chatgpt.com/oauth/client.json';
+    const chatgptDemo = fakeWorker('chatgpt-demo');
+    const cursorDemo = fakeWorker('cursor-demo');
+    cleanups.push(chatgptDemo.stop, cursorDemo.stop);
+    const chatgptIdentity = loadOrCreateIdentity(tempDir());
+    const cursorIdentity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), {
+      demoInstallId: chatgptIdentity.installId,
+      demoInstallsByClient: { [CURSOR]: cursorIdentity.installId },
+    });
+    await connectInstall(relay, chatgptDemo, chatgptIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    await connectInstall(relay, cursorDemo, cursorIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    const query = (clientId: string) => `?${new URLSearchParams({ client_id: clientId, state: 's' })}`;
+    const post = (search: string) => fetch(`${relay.url}/connect/demo/authorize${search}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: `https://${PUBLIC_HOST}` },
+      body: 'request_id=x&csrf=y',
+    });
+
+    // Cursor's page and its form (the engine repeats client_id on the form's address).
+    expect(await (await fetch(`${relay.url}/connect/demo/authorize${query(CURSOR)}`)).json()).toMatchObject({ worker: 'cursor-demo' });
+    expect((await post(`?${new URLSearchParams({ client_id: CURSOR })}`)).status).toBe(200);
+    expect(cursorDemo.requests.at(-1)!.path).toBe(`/connect/demo/authorize?${new URLSearchParams({ client_id: CURSOR })}`);
+    expect(cursorDemo.requests).toHaveLength(2);
+    // ChatGPT, and a form address without client_id (the submitted engine's), go to the default demo.
+    expect(await (await fetch(`${relay.url}/connect/demo/authorize${query(CHATGPT)}`)).json()).toMatchObject({ worker: 'chatgpt-demo' });
+    expect((await post('')).status).toBe(200);
+    expect((await post(`?${new URLSearchParams({ client_id: CHATGPT })}`)).status).toBe(200);
+    expect(chatgptDemo.requests).toHaveLength(3);
+    expect(cursorDemo.requests).toHaveLength(2);
+    // The bridge offers the demo to both.
+    expect(await (await fetch(`${relay.url}/connect/authorize${query(CURSOR)}`)).text()).toContain('Reviewing Olympus? Sign in to the demo');
+  });
+
+  test('a per-app demo alone is a demo for that app only', async () => {
+    const CURSOR = 'https://cursor.com/oauth/mcp-client.json';
+    const cursorDemo = fakeWorker('cursor-demo');
+    cleanups.push(cursorDemo.stop);
+    const identity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), { demoInstallsByClient: { [CURSOR]: identity.installId } });
+    await connectInstall(relay, cursorDemo, identity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    expect((await fetch(`${relay.url}/connect/demo/authorize?client_id=${encodeURIComponent('https://chatgpt.com/oauth/client.json')}`)).status).toBe(404);
+    expect((await fetch(`${relay.url}/connect/demo/authorize`, { method: 'POST', body: 'a=b' })).status).toBe(404);
+    expect(cursorDemo.requests).toHaveLength(0);
+  });
+
+  test('per-app demo settings must name client metadata URLs and install ids', async () => {
+    const identity = loadOrCreateIdentity(tempDir());
+    await expect(makeRelay({}, new MemoryInstallRegistry(), { demoInstallsByClient: { cursor: identity.installId } })).rejects.toThrow('client metadata URLs');
+    await expect(makeRelay({}, new MemoryInstallRegistry(), { demoInstallsByClient: { 'https://cursor.com/oauth/mcp-client.json': 'nope' } })).rejects.toThrow('install ids');
   });
 
   test('a relay pointed at a non-demo install still cannot reach its demo path', async () => {

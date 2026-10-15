@@ -155,6 +155,13 @@ export interface RelayConfig {
    * `/connect/demo/authorize` answers 404.
    */
   readonly demoInstallId?: string;
+  /**
+   * Demo installs for particular apps, by pinned client_id (the Cursor
+   * marketplace's reviewers sign in to their own demo). A demo sign-in naming
+   * one of these clients goes to its install; every other one goes to
+   * `demoInstallId`. Absent: one demo for every app.
+   */
+  readonly demoInstallsByClient?: Readonly<Record<string, string>>;
   /** Whether the metadata advertises CIMD, read per request (default yes; oauth-metadata.ts). */
   readonly advertiseCimd?: () => boolean;
   /** OpenAI's domain verification token, read per request; empty or undefined answers 404. */
@@ -264,10 +271,18 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   if (config.demoInstallId !== undefined && !INSTALL_ID_PATTERN.test(config.demoInstallId)) {
     throw new Error('demoInstallId must be an install id');
   }
+  const demoInstallsByClient = new Map(Object.entries(config.demoInstallsByClient ?? {}));
+  for (const [clientId, installId] of demoInstallsByClient) {
+    if (!/^https:\/\/[^\s]+$/.test(clientId)) throw new Error('demoInstallsByClient keys must be client metadata URLs');
+    if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('demoInstallsByClient values must be install ids');
+  }
+  /** The demo install a sign-in for this client_id goes to, or undefined (no demo). */
+  const demoInstallFor = (clientId: string | null): string | undefined =>
+    (clientId !== null ? demoInstallsByClient.get(clientId) : undefined) ?? config.demoInstallId;
   const bridge = {
     enginePort: config.enginePort ?? DEFAULT_ENGINE_PORT,
     installUrl: config.installUrl ?? DEFAULT_INSTALL_URL,
-    demo: config.demoInstallId !== undefined,
+    demo: config.demoInstallId !== undefined || demoInstallsByClient.size > 0,
   };
   const sessions = new Map<string, InstallSession>();
   const admission = createInstallAdmission(limits, now);
@@ -785,9 +800,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     });
   };
 
-  /** Reviewer sign-in: GET the page, POST the form, both to the demo install only. */
+  /**
+   * Reviewer sign-in: GET the page, POST the form, both to the demo install
+   * for the app the address names (`client_id`: the authorize query on the
+   * page, repeated on the form's address by the engine), only ever a demo.
+   */
   const demoSignIn = async (request: Request, path: string, ip: string): Promise<Response> => {
-    const demoInstallId = config.demoInstallId;
+    const demoInstallId = demoInstallFor(new URL(path, origin.origin).searchParams.get('client_id'));
     if (!demoInstallId) return json(404, { error: 'not_found' });
     if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
     const read = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES, ip) : { ok: true as const, body: new Uint8Array(), release: () => {} };

@@ -49,7 +49,7 @@ import {
   operationToolSchema,
   type Operation,
 } from '../core/operations.ts';
-import { authenticateRemoteRequest, jsonResponse, remoteOperationCaller, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
+import { authenticateRemoteRequest, DEMO_GRANT_REMOTE_TOOLS, jsonResponse, remoteOperationCaller, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
 import { isJsonContentType, readBoundedRequestText, REMOTE_REQUEST_MAX_BODY_BYTES } from './remote-request-body.ts';
 
 export const REMOTE_OPENAPI_SPEC_PATH = '/openapi.json';
@@ -155,7 +155,9 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
 
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
-  if (!operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
+  // A demo grant reaches only its read-only tools, answered like any unknown name.
+  const demoRefused = options.demoGrant?.(verification.connection) === true && !DEMO_GRANT_REMOTE_TOOLS.includes(name);
+  if (demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
     return failure(404, remoteSurfaceErrorOutput('unknown_operation'));
   }
   // On the published list, but this install has it switched off.
