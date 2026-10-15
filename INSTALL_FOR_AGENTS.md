@@ -689,7 +689,7 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >
 > 4. **Private meaning search on this computer** (`no-sensitive`) — Olympus
 >    stores Private items and finds them by meaning on this computer using
->    the built-in embedding model. Private text and search vectors stay here.
+>    the built-in embedding model, and keeps their search vectors here.
 >    Ask privately and the sealed ChatGPT panel can use them; no Private
 >    agent answer lane is set up. When a question touches health,
 >    finances, or legal matters, the answer says Private sources were not
@@ -751,10 +751,10 @@ not ask for.
 
 **Reading the summary: an honest gap looks like a leak until you know the
 shape.** On `no-sensitive` the summary and later `olympus doctor` output
-still show the Private corpora as configured with no search vectors in them, and the
-sovereignty policy shows `secure_local` with `"mode": "disabled"` and an
-empty pool. That is `no-sensitive` working: the tier exists so Olympus can
-say honestly that Private sources were not searched, and it is routed nowhere. Do not
+still show the sovereignty policy with `secure_local` at `"mode": "disabled"` and an
+empty pool. That is `no-sensitive` working: Private items are searched by
+meaning on this computer, but no agent answer lane exists, so Olympus can
+say honestly that Private sources were not searched for the agent, and it is routed nowhere. Do not
 report it to the operator as a problem, and do not try to "fix" it by
 adding a lane they did not choose.
 
