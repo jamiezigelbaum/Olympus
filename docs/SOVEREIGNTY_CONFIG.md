@@ -543,7 +543,7 @@ loopback address there forwards to the cloud.
     "torSocksPort": 19050,
     "fundingDate": "2026-10-01",
     "depositUsd": 20,
-    "acknowledgements": { "version": 7, "accepted": ["only_when_asked", "provider_reads", "cost", "fees", "expiry", "new_service"] }
+    "acknowledgements": { "version": 8, "accepted": ["only_when_asked", "provider_reads", "cost", "fees", "expiry", "new_service"] }
   }
 }
 ```
