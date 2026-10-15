@@ -85,7 +85,13 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 - Separate from the ChatGPT reviewer demo (`olympus-demo` on olympus-test),
   which stays frozen until OpenAI's review ends; this submission never
   touches it or the pinned `/openai/mcp` listing.
-- Host: [pending Jamie's choice].
+- Host: Hetzner Cloud server `olympus-grokbot-review` (project
+  "multiplayer", Falkenstein; CX23, 2 vCPU, 4 GB RAM plus 4 GB swap, Ubuntu
+  26.04), `ssh claw@2.31.36.62`. The firewall allows inbound SSH only; the
+  engine reaches the relay outbound. Paid; created by Jamie on 2026-10-15.
+  The engine runs as the unprivileged user `olympus-review`, on OpenClaw
+  2026.9.5 and Node 24.20.0, matching olympus-demo. Shut it down after the
+  marketplace review ends.
 - Holds only `chatgpt-plugin/demo-data/`, carries the demo marker, and has
   `remote.demoConsent` with an Argon2id hash. Credentials are in 1Password
   only.
