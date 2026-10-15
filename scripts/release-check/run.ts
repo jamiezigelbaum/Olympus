@@ -59,6 +59,7 @@ import { AgentApiError, readAgentKey, runXaiAgent, type AgentSpec, type ToolBrid
 import { codexLoginAvailable, looksLikeClaudeSetupToken, runClaudeCode, runCodex } from './cli-agents.ts';
 import { cachingRelay, startMcpProxy, type McpExchange, type Relay } from './mcp-proxy.ts';
 import { privateNoteKindIn } from './private-note.ts';
+import { SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS } from '../../src/core/source-answer-jobs.ts';
 import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
@@ -164,6 +165,10 @@ class Run {
   differences: Difference[] = [];
   /** The Open-link ids the model agents were given for the Private question: the Inbox leg checks each resolves. */
   readonly agentLinks: Array<{ agent: string; id: string }> = [];
+  /** The tools the engine's MCP endpoint offers (all of them, not only the read-only ones), read once per stage. */
+  readonly offeredTools = new Map<string, string[]>();
+  /** The check the wrong-link-id self-test failed on, which depends on whether this install issues agents a link. */
+  inboxSelftestFailsOn?: string;
   stage: Stage;
   machine?: Machine;
 
@@ -225,8 +230,16 @@ class Run {
   }
 }
 
+/**
+ * How long one call to source_answer or source_answer_result may take on the machine. The engine holds a source_answer open for its
+ * hand-off (at most SOURCE_ANSWER_HANDOFF_MAX_MS) before it answers "working", and a result call waits up to
+ * SOURCE_ANSWER_RESULT_WAIT_MAX_MS; the margin covers the machine's exec and the agent's start. Shorter, and a slow answer's "working"
+ * reply would never be seen, so a valid install would fail for a note it was about to give.
+ */
+export const ANSWER_TOOL_CALL_TIMEOUT_MS = Math.max(SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) + 120_000;
+
 /** Calls the engine's MCP tools on the machine, one `exec` per call. */
-function machineToolBridge(run: Run): ToolBridge & { tools(): Promise<ToolDefinition[]> } {
+function machineToolBridge(run: Run, callTimeoutMs = 180_000): ToolBridge & { tools(): Promise<ToolDefinition[]> } {
   return {
     async tools() {
       const out = await run.agent('mcp-tools');
@@ -238,7 +251,7 @@ function machineToolBridge(run: Run): ToolBridge & { tools(): Promise<ToolDefini
       const delimiter = `RC_${randomBytes(6).toString('hex')}`;
       const exec = await run.machine!.exec(
         `${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js mcp-call ${sh(name)} "$(cat <<'${delimiter}'\n${JSON.stringify(args)}\n${delimiter}\n)"\n`,
-        { timeoutMs: 180_000 },
+        { timeoutMs: callTimeoutMs },
       );
       const parsed = parseAgentLine(exec.stdout);
       return {
@@ -396,8 +409,46 @@ function skipped(run: Run, spec: AgentSpec, reason: string): void {
   run.log(`agent ${spec.id}: ${reason}`);
 }
 
-function exchangesObservation(question: SuiteQuestion, agentId: string, finalText: string, exchanges: McpExchange[], ms: number, error: string | undefined): QuestionObservation {
+/**
+ * The tools the engine's MCP endpoint lists, read once per stage. Undefined when the listing could not be read (a failed or timed-out
+ * call, a refusal, an empty or malformed list): never an empty list, which would read as an install that offers nothing and make every
+ * agent look correctly tool-less. A standard install lists olympus_search and not source_answer.
+ */
+async function offeredToolNames(run: Run): Promise<string[] | undefined> {
+  const known = run.offeredTools.get(run.stage.id);
+  if (known) return known;
+  let listed: Awaited<ReturnType<Run['agent']>>;
+  try { listed = await run.agent('mcp-tools', '', 60_000); } catch { return undefined; }
+  const tools: unknown = listed.result?.tools;
+  if (listed.result?.ok !== true || !Array.isArray(tools) || tools.length === 0) return undefined;
+  const names = tools.map((tool) => (tool as { name?: unknown } | null)?.name);
+  if (names.some((name) => typeof name !== 'string' || name === '')) return undefined;
+  run.offeredTools.set(run.stage.id, names as string[]);
+  return names as string[];
+}
+
+/** The tool list, or a failing check (once per stage) when it cannot be read: what agents and the link path are judged against is then unknown. */
+async function listedTools(run: Run): Promise<string[] | undefined> {
+  const names = await offeredToolNames(run);
+  if (names === undefined && !run.stage.checks.some((check) => check.id === 'mcp.tool-list')) {
+    run.add({
+      id: 'mcp.tool-list',
+      title: 'The engine\'s MCP endpoint listed its tools',
+      status: 'fail',
+      detail: 'the listing failed, timed out or came back empty or malformed, so which tools agents are offered, and whether the Private-answer link path exists, cannot be judged',
+    });
+  }
+  return names;
+}
+
+/**
+ * What one agent saw for one question. The Open link is judged only for an agent that called the tool that issues it: source_answer (or
+ * source_answer_result, which collects its answer). The model agents are told to use olympus_search alone, whose Private note carries
+ * no link, so they are not failed for one; an agent that did call source_answer and got no link is.
+ */
+export function exchangesObservation(question: SuiteQuestion, agentId: string, finalText: string, exchanges: McpExchange[], ms: number, error: string | undefined): QuestionObservation {
   const toolCalls = exchanges.filter((e) => e.method === 'tools/call');
+  const linkIssued = toolCalls.some((call) => call.tool === 'source_answer' || call.tool === 'source_answer_result');
   return {
     question,
     visible: [
@@ -412,7 +463,7 @@ function exchangesObservation(question: SuiteQuestion, agentId: string, finalTex
     evidenceIds: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.id)),
     privateNote: toolCalls.some((c) => privateNoteKindIn(c.outputText, c.structured) !== null),
     // The note as the tool gave it, link included (a Private question only; any other question has none to judge).
-    ...(question.kind === 'private' ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),
+    ...(question.kind === 'private' && linkIssued ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),
     ms,
     ...(error ? { error } : toolCalls.length === 0 ? { error: 'the agent never called the search tool' } : {}),
   };
@@ -674,6 +725,22 @@ async function captureScreenshots(run: Run, outDir: string): Promise<void> {
   });
 }
 
+/**
+ * Asks source_answer and, while it says the answer is still being prepared, collects it with source_answer_result as the tool tells an
+ * agent to (never asking again). Returns the last result: the answer, or the working reply when the wait ran out.
+ */
+async function askAndCollect(bridge: ReturnType<typeof machineToolBridge>, args: { question: string }): Promise<Awaited<ReturnType<ReturnType<typeof machineToolBridge>['call']>>> {
+  let call = await bridge.call('source_answer', args);
+  const until = Date.now() + 600_000;
+  for (;;) {
+    let reply: { status?: unknown; job_id?: unknown } | null = null;
+    try { reply = JSON.parse(call.text) as { status?: unknown; job_id?: unknown } | null; } catch { reply = null; }
+    if (reply?.status !== 'working' || typeof reply.job_id !== 'string' || Date.now() >= until) return call;
+    await new Promise((done) => setTimeout(done, Number(process.env.RELEASE_CHECK_ANSWER_POLL_MS ?? '10000')));
+    call = await bridge.call('source_answer_result', { job_id: reply.job_id });
+  }
+}
+
 /** Dashboard screenshots the Inbox leg must bring back, by file name. */
 const INBOX_SHOTS = ['ask-page-1280.png', 'ask-page-390.png', 'inbox-entry-1280.png', 'inbox-entry-390.png', 'ask-answered-1280.png'];
 
@@ -685,22 +752,28 @@ const INBOX_SHOTS = ['ask-page-1280.png', 'ask-page-390.png', 'inbox-entry-1280.
  */
 async function runInboxLeg(run: Run, outDir: string): Promise<void> {
   if (run.options.skipInbox) return;
-  const bridge = machineToolBridge(run);
+  // Judged against what this install offers: a listing that cannot be read fails the run, and the leg does not guess.
+  const offered = await listedTools(run);
+  if (offered === undefined) return;
+  const bridge = machineToolBridge(run, ANSWER_TOOL_CALL_TIMEOUT_MS);
   const question = privateQuestion();
   const selftest = run.options.inboxSelftest;
 
   const scripted: AgentReport = { id: 'scripted', label: 'Scripted agent over MCP (no model, nothing billed)', kind: 'model', scripted: true, ran: true, checks: [] };
+  // Only an install with an answer model offers source_answer, the one tool that issues the Open link and records the question.
+  const linkMode: 'issued' | 'not_offered' = offered.includes('source_answer') ? 'issued' : 'not_offered';
+  const tool = linkMode === 'issued' ? 'source_answer' : 'olympus_search';
   let scriptedId: string | undefined;
   await run.phase('agent-scripted', async () => {
     const started = Date.now();
     const args = { question: question.text };
     let call: Awaited<ReturnType<typeof bridge.call>> | undefined;
     let error: string | undefined;
-    try { call = await bridge.call('olympus_search', args); } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
+    try { call = linkMode === 'issued' ? await askAndCollect(bridge, args) : await bridge.call(tool, args); } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
     const note = call ? privateNoteIn(call.text, call.structured) : null;
     // The reply is the note passed on as written, which is what the tool tells an agent to do. The self-test adds a Private fact to it.
     const reply = `${note ?? ''}${selftest === 'plant-private-reply' ? ` Reference: ${PRIVATE_FACTS[0]}.` : ''}`;
-    const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool: 'olympus_search', args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
+    const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool, args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
     const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined));
     scripted.checks.push(...evaluateObservation(observation, run.markers));
     scriptedId = privateLinkIdsIn(observation.privateNoteText ?? '')[0];
@@ -710,15 +783,18 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
 
   // The wrong-link self-test: the id handed to the browser is not the one the link named, so no entry can be found under it.
   const primary = selftest === 'wrong-link-id' && scriptedId ? `${scriptedId.slice(0, 21)}${scriptedId[21] === 'A' ? 'B' : 'A'}` : scriptedId;
+  // Without a link there is nothing to corrupt: the fault goes to the id of the Ask page's own entry, which the in-machine check opens by address.
+  const corruptAskEntry = selftest === 'wrong-link-id' && linkMode === 'not_offered';
+  run.inboxSelftestFailsOn = linkMode === 'issued' ? 'inbox.agent.entry' : 'inbox.link.opens-entry';
   const others = [...new Set(run.agentLinks.map((link) => link.id))];
   const remoteDir = '~/rc/inbox-shots';
-  const done = await run.phase('inbox', () => run.agent('inbox-check', `--primary ${sh(primary ?? '')} --ids ${sh(others.join(','))} --wait-s 600 --out ${remoteDir}`, 2_700_000));
+  const done = await run.phase('inbox', () => run.agent('inbox-check', `--primary ${sh(primary ?? '')} --ids ${sh(others.join(','))} --wait-s 600${corruptAskEntry ? ' --fault-entry-id' : ''} --out ${remoteDir}`, 2_700_000));
   const observation = done.result as InboxObservation | undefined;
   if (!observation || typeof observation.ok !== 'boolean') {
     run.add({ id: 'inbox.ran', title: 'The Ask page and the Inbox were driven in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
     return;
   }
-  for (const check of evaluateInbox(observation, { scriptedId: primary, agentLinks: run.agentLinks })) run.add(check);
+  for (const check of evaluateInbox(observation, { scriptedId: primary, agentLinks: run.agentLinks, agentLink: linkMode, agentTools: offered })) run.add(check);
 
   const localDir = join(outDir, 'screenshots');
   mkdirSync(localDir, { recursive: true });
@@ -945,7 +1021,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     : options.upgradeSelftest
       ? `a fault was deliberately made during the upgrade (${options.upgradeSelftest}); this run is expected to FAIL on ${UPGRADE_SELFTEST_FAILS[options.upgradeSelftest]}`
       : options.inboxSelftest
-        ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
+        ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${run.inboxSelftestFailsOn && options.inboxSelftest === 'wrong-link-id' ? run.inboxSelftestFailsOn : INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
         : undefined;
   let report = buildReport({
     runId: options.runId,

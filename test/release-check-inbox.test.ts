@@ -19,6 +19,9 @@ import {
   freshEgress, isBrowserProcess, normalizeIp, outboundFromLsof, outboundFromProcNet, procAddress, requestsOutsideMachine,
 } from '../scripts/release-check/egress.ts';
 import { evaluateObservation, type QuestionObservation } from '../scripts/release-check/suite.ts';
+import { ISOLATED_BROWSER_FLAGS } from '../scripts/release-check/machine-agent.ts';
+import { exchangesObservation } from '../scripts/release-check/run.ts';
+import type { McpExchange } from '../scripts/release-check/mcp-proxy.ts';
 
 const ID = 'AbCdEfGhIjKlMnOpQrStUv';
 const OTHER = 'ZyXwVuTsRqPoNmLkJiHgFe';
@@ -149,6 +152,30 @@ function good(): InboxObservation {
 const ctx = { scriptedId: ID, agentLinks: [{ agent: 'xai', id: OTHER }] };
 const failing = (obs: InboxObservation, c = ctx): string[] => evaluateInbox(obs, c).filter((check) => check.status === 'fail').map((check) => check.id);
 
+describe('which agents are judged on the Open link', () => {
+  const call = (tool: string, output: unknown): McpExchange => ({ method: 'tools/call', tool, args: { question: privateQuestion.text }, status: 200, outputText: typeof output === 'string' ? output : JSON.stringify(output), isError: false });
+  const noLink = { kind: 'source_answer', status: 'answered', answer: 'a', citations: [], private_note: REMOTE_PRIVATE_NOTE };
+  const withLink = { ...noLink, private_note: productNote(ID) };
+  const judged = (exchanges: McpExchange[]) => evaluateObservation(exchangesObservation(privateQuestion, 'agent', '', exchanges, 1, undefined), markers);
+  const status = (checks: ReturnType<typeof evaluateObservation>, id: string): string | undefined => checks.find((c) => c.id === id)?.status;
+
+  test('an agent that only searched (the model agents are told to use olympus_search alone) is not failed for a link the search does not carry', () => {
+    const checks = judged([call('olympus_search', { evidence: [], note: 'Some items matching this question are marked Private in Olympus.' })]);
+    expect(checks.some((c) => c.id.includes('link'))).toBe(false);
+  });
+
+  test('an agent that called source_answer is judged: no link fails, a well-formed link passes, and collecting the answer with source_answer_result counts the same', () => {
+    expect(status(judged([call('source_answer', noLink)]), 'private-medical.link')).toBe('fail');
+    expect(status(judged([call('source_answer', withLink)]), 'private-medical.link')).toBe('pass');
+    expect(status(judged([call('source_answer', { status: 'working', job_id: 'j' }), call('source_answer_result', noLink)]), 'private-medical.link')).toBe('fail');
+    expect(status(judged([call('source_answer_result', withLink)]), 'private-medical.link')).toBe('pass');
+  });
+
+  test('a source_answer call that returned nothing usable still fails the link: no note is never read as a standard install', () => {
+    expect(status(judged([call('source_answer', { kind: 'source_answer', status: 'answered', answer: 'a', citations: [] })]), 'private-medical.link')).toBe('fail');
+  });
+});
+
 describe('the Inbox checks', () => {
   test('a clean visit passes every check, and each check is named for what it proves', () => {
     const checks = evaluateInbox(good(), ctx);
@@ -223,6 +250,50 @@ describe('the Inbox checks', () => {
     expect(noLink.find((c) => c.id === 'inbox.agent.entry')?.status).toBe('fail');
   });
 
+  describe('an install that offers agents no answer tool (a standard install: olympus_search, no source_answer)', () => {
+    const standard = { agentLinks: [], agentLink: 'not_offered' as const, agentTools: ['olympus_search', 'source_answer_result', 'source_index_status'] };
+    // No link came from an agent: the Ask page's own entry is opened by its address instead.
+    const standardGood = (): InboxObservation => {
+      const obs = good();
+      obs.entries = [];
+      obs.pages = [{ id: NEW, landedOnInbox: true, rowFound: true, opened: true, factsStated: FACTS, citations: 1, citesExpected: true }];
+      return obs;
+    };
+
+    test('the link path is a visible skip that names why and what it needs, and nothing fails', () => {
+      const checks = evaluateInbox(standardGood(), standard);
+      expect(checks.filter((c) => c.status === 'fail')).toEqual([]);
+      const skipped = checks.find((c) => c.id === 'inbox.agent.link-path')!;
+      expect(skipped.status).toBe('skip');
+      expect(skipped.detail).toContain('olympus_search, source_answer_result, source_index_status');
+      expect(skipped.detail).toContain('answer model');
+      expect(checks.some((c) => c.id === 'inbox.agent.entry')).toBe(false);
+      expect(checks.find((c) => c.id === 'inbox.link.opens-entry')?.status).toBe('pass');
+    });
+
+    test('an entry whose own address did not open it fails inbox.link.opens-entry, whether the page was not opened, the row was missing, or the answer was empty', () => {
+      const none = standardGood();
+      none.pages = [];
+      expect(failing(none, standard as never)).toEqual(['inbox.link.opens-entry']);
+      const missing = standardGood();
+      missing.pages[0]!.rowFound = false;
+      missing.pages[0]!.opened = false;
+      expect(failing(missing, standard as never)).toEqual(['inbox.link.opens-entry']);
+      const empty = standardGood();
+      empty.pages[0]!.factsStated = [false, false];
+      expect(failing(empty, standard as never)).toEqual(['inbox.link.opens-entry']);
+      const noEntry = standardGood();
+      noEntry.ask!.entry = null;
+      expect(failing(noEntry, standard as never)).toContain('inbox.link.opens-entry');
+    });
+
+    test('the same observation with a link expected is judged as before: the missing link is a failure, not a skip', () => {
+      const checks = evaluateInbox(standardGood(), { agentLinks: [] });
+      expect(checks.find((c) => c.id === 'inbox.agent.entry')?.status).toBe('fail');
+      expect(checks.some((c) => c.id === 'inbox.agent.link-path')).toBe(false);
+    });
+  });
+
   test('no check detail holds a Private fact, whatever the observation', () => {
     const obs = good();
     obs.ask!.message = '';
@@ -257,6 +328,15 @@ function procHex(bytes: number[]): string {
 }
 const ROW = (local: string, remote: string, state: string, inode: string): string => `   0: ${local} ${remote} ${state} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
 const HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+
+describe('the browser the Inbox check drives', () => {
+  test('every name is unresolvable except this machine\'s own addresses, which the dashboard is served on', () => {
+    const rule = ISOLATED_BROWSER_FLAGS.find((flag) => flag.startsWith('--host-resolver-rules='))!;
+    expect(rule).toContain('MAP * ~NOTFOUND');
+    for (const loopback of ['localhost', '127.0.0.1', '[::1]']) expect(rule).toContain(`EXCLUDE ${loopback}`);
+    expect(ISOLATED_BROWSER_FLAGS).toEqual(expect.arrayContaining(['--disable-background-networking', '--disable-sync']));
+  });
+});
 
 describe('the connection sampler\'s parsers', () => {
   test('addresses are read in the byte order /proc prints them, IPv4, IPv6 and IPv4-mapped', () => {
