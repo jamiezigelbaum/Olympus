@@ -442,13 +442,14 @@ async function listedTools(run: Run): Promise<string[] | undefined> {
 }
 
 /**
- * What one agent saw for one question. The Open link is judged only for an agent that called the tool that issues it: source_answer (or
- * source_answer_result, which collects its answer). The model agents are told to use olympus_search alone, whose Private note carries
- * no link, so they are not failed for one; an agent that did call source_answer and got no link is.
+ * What one agent saw for one question. The Open link is judged for an agent that called a tool that issues it: olympus_search (what every
+ * model agent is told to use, and the only answer tool a standard install offers), source_answer, or source_answer_result, which collects
+ * its answer. An agent that called one of them on the Private question and got no note, or a note with no link, fails; the reply carrying
+ * the link on to the person is a warning only, since a model decides what to pass on.
  */
 export function exchangesObservation(question: SuiteQuestion, agentId: string, finalText: string, exchanges: McpExchange[], ms: number, error: string | undefined): QuestionObservation {
   const toolCalls = exchanges.filter((e) => e.method === 'tools/call');
-  const linkIssued = toolCalls.some((call) => call.tool === 'source_answer' || call.tool === 'source_answer_result');
+  const linkIssued = toolCalls.some((call) => call.tool === 'olympus_search' || call.tool === 'source_answer' || call.tool === 'source_answer_result');
   return {
     question,
     visible: [
@@ -760,24 +761,32 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
   const selftest = run.options.inboxSelftest;
 
   const scripted: AgentReport = { id: 'scripted', label: 'Scripted agent over MCP (no model, nothing billed)', kind: 'model', scripted: true, ran: true, checks: [] };
-  // Only an install with an answer model offers source_answer, the one tool that issues the Open link and records the question.
-  const linkMode: 'issued' | 'not_offered' = offered.includes('source_answer') ? 'issued' : 'not_offered';
-  const tool = linkMode === 'issued' ? 'source_answer' : 'olympus_search';
+  // The scripted agent asks as an agent on a standard install does, with olympus_search: on a Private match it records the question for
+  // the Inbox and carries the note with the Open link. source_answer (collected with source_answer_result) is asked only where the
+  // search is not offered. An install that offers neither has no link path to exercise, and the report says so.
+  const tool = offered.includes('olympus_search') ? 'olympus_search' : offered.includes('source_answer') ? 'source_answer' : undefined;
+  const linkMode: 'issued' | 'not_offered' = tool ? 'issued' : 'not_offered';
   let scriptedId: string | undefined;
-  await run.phase('agent-scripted', async () => {
-    const started = Date.now();
-    const args = { question: question.text };
-    let call: Awaited<ReturnType<typeof bridge.call>> | undefined;
-    let error: string | undefined;
-    try { call = linkMode === 'issued' ? await askAndCollect(bridge, args) : await bridge.call(tool, args); } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
-    const note = call ? privateNoteIn(call.text, call.structured) : null;
-    // The reply is the note passed on as written, which is what the tool tells an agent to do. The self-test adds a Private fact to it.
-    const reply = `${note ?? ''}${selftest === 'plant-private-reply' ? ` Reference: ${PRIVATE_FACTS[0]}.` : ''}`;
-    const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool, args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
-    const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined));
-    scripted.checks.push(...evaluateObservation(observation, run.markers));
-    scriptedId = privateLinkIdsIn(observation.privateNoteText ?? '')[0];
-  });
+  if (tool === undefined) {
+    scripted.ran = false;
+    scripted.skipReason = 'this install offers neither olympus_search nor source_answer, so there is no tool to ask the Private question with';
+    run.log(`agent scripted: ${scripted.skipReason}`);
+  } else {
+    await run.phase('agent-scripted', async () => {
+      const started = Date.now();
+      const args = { question: question.text };
+      let call: Awaited<ReturnType<typeof bridge.call>> | undefined;
+      let error: string | undefined;
+      try { call = tool === 'source_answer' ? await askAndCollect(bridge, args) : await bridge.call(tool, args); } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
+      const note = call ? privateNoteIn(call.text, call.structured) : null;
+      // The reply is the note passed on as written, which is what the tool tells an agent to do. The self-test adds a Private fact to it.
+      const reply = `${note ?? ''}${selftest === 'plant-private-reply' ? ` Reference: ${PRIVATE_FACTS[0]}.` : ''}`;
+      const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool, args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
+      const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined));
+      scripted.checks.push(...evaluateObservation(observation, run.markers));
+      scriptedId = privateLinkIdsIn(observation.privateNoteText ?? '')[0];
+    });
+  }
   for (const check of scripted.checks) run.log(`agent scripted ${check.status.toUpperCase()} ${check.id}${check.detail ? ` - ${check.detail}` : ''}`);
   run.agents.push(scripted);
 

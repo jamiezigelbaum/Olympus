@@ -101,7 +101,26 @@ an owner ask. Agent-initiated rules and ChatGPT's no-duplication rule remain.
 **Arrival.** A ChatGPT Private match records the question independently of
 its panel job. Other agents record when their Private part was withheld,
 required approval, excluded by policy or unavailable and a metadata-only
-local probe says `match`. `unknown` records an unchecked row and re-probes
+local probe says `match`. That is `source_answer`, which only an install with
+an answer model offers. On every other install the one answer tool is
+`olympus_search`, which never returns Private items, so it has no outcome to
+wait for: each search is probed with the same probe, ticket and record
+(surface `remote`, the retrieval mode as its only selector). The probe starts
+with the call and runs beside the search, bounded at two seconds, so a search
+that takes longer waits for nothing; the connection and the search's tiers are
+checked again once the probe has answered. A `match` that was recorded adds
+`private_note` to the search result, the same sentence and Open link as a source
+answer, for the agent to pass on as written. `no_match`, `unknown`, a refused
+record, a connection revoked at any point and a demo sign-in grant tell the
+agent nothing about Private; a demo grant records nothing. A search whose
+request is closed (the agent hangs up, or the relay forwards its caller's
+disconnect) records nothing either: the wait ends at once and a verdict that
+arrives later is ignored, so no row is written, no automatic answer is spent
+and no Inbox slot is taken. An MCP `notifications/cancelled` arrives on its own
+HTTP request and reaches a different stateless server, so it does not stop the
+running search; that search records and is answered as if it had finished
+(review of #427, round 2; follow-up). ChatGPT's
+`olympus_search` is unchanged. `unknown` records an unchecked row and re-probes
 locally every ten minutes; a later match schedules the same answer path.
 Delivered Private summaries and `no_match` record nothing. Stored selectors
 are bounded and replayed exactly; malformed/oversized selectors refuse the

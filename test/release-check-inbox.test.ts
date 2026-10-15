@@ -153,15 +153,41 @@ const ctx = { scriptedId: ID, agentLinks: [{ agent: 'xai', id: OTHER }] };
 const failing = (obs: InboxObservation, c = ctx): string[] => evaluateInbox(obs, c).filter((check) => check.status === 'fail').map((check) => check.id);
 
 describe('which agents are judged on the Open link', () => {
-  const call = (tool: string, output: unknown): McpExchange => ({ method: 'tools/call', tool, args: { question: privateQuestion.text }, status: 200, outputText: typeof output === 'string' ? output : JSON.stringify(output), isError: false });
+  const call = (tool: string, output: unknown, structured?: unknown): McpExchange => ({ method: 'tools/call', tool, args: { question: privateQuestion.text }, status: 200, outputText: typeof output === 'string' ? output : JSON.stringify(output), ...(structured === undefined ? {} : { structured }), isError: false });
   const noLink = { kind: 'source_answer', status: 'answered', answer: 'a', citations: [], private_note: REMOTE_PRIVATE_NOTE };
   const withLink = { ...noLink, private_note: productNote(ID) };
-  const judged = (exchanges: McpExchange[]) => evaluateObservation(exchangesObservation(privateQuestion, 'agent', '', exchanges, 1, undefined), markers);
+  const judged = (exchanges: McpExchange[], reply = '') => evaluateObservation(exchangesObservation(privateQuestion, 'agent', reply, exchanges, 1, undefined), markers);
   const status = (checks: ReturnType<typeof evaluateObservation>, id: string): string | undefined => checks.find((c) => c.id === id)?.status;
+  // olympus_search as a standard install returns it: the evidence result, with the note beside it when a Private item matched.
+  const searched = (note?: string) => {
+    const structured = { status: 'none', evidence: [], coverage: { searchedSources: 1, unreadableItems: 0, namesOnlyItems: 0, partiallyReadItems: 0, unclassifiedItems: 0, instruction: 'x' }, notes: [], ...(note ? { private_note: note } : {}) };
+    return call('olympus_search', `Olympus found no Public or Personal evidence for this question in 1 searched source.${note ? `\n\nPass this on to the user as written:\n${note}` : ''}`, structured);
+  };
 
-  test('an agent that only searched (the model agents are told to use olympus_search alone) is not failed for a link the search does not carry', () => {
-    const checks = judged([call('olympus_search', { evidence: [], note: 'Some items matching this question are marked Private in Olympus.' })]);
-    expect(checks.some((c) => c.id.includes('link'))).toBe(false);
+  test('an agent that called olympus_search on the Private question is judged on the note and its link: a well-formed link passes', () => {
+    const checks = judged([searched(productNote(ID))], `The answer is in Olympus on your computer. ${productNote(ID)}`);
+    expect(status(checks, 'private-medical.private-note')).toBe('pass');
+    expect(status(checks, 'private-medical.link')).toBe('pass');
+    expect(status(checks, 'private-medical.link-carries-nothing')).toBe('pass');
+    expect(status(checks, 'private-medical.link-relayed')).toBe('pass');
+  });
+
+  test('a search that returned no note, or a note with no link, fails; a link the agent did not pass on is a warning, not a failure', () => {
+    const none = judged([searched()]);
+    expect(status(none, 'private-medical.private-note')).toBe('fail');
+    expect(status(none, 'private-medical.link')).toBe('fail');
+    expect(status(judged([searched(REMOTE_PRIVATE_NOTE)]), 'private-medical.link')).toBe('fail');
+    const dropped = judged([searched(productNote(ID))], 'Some of that is in Olympus on your computer.');
+    expect(status(dropped, 'private-medical.link')).toBe('pass');
+    expect(status(dropped, 'private-medical.link-relayed')).toBe('warn');
+  });
+
+  test('the note is found in the search result as the product writes it, in its text or its structured form', () => {
+    const note = productNote(ID);
+    const text = `Olympus found no Public or Personal evidence.\n\nPass this on to the user as written:\n${note}`;
+    expect(privateNoteIn(text)).toBe(note);
+    expect(privateNoteIn('no json here', { private_note: note })).toBe(note);
+    expect(privateLinkIdsIn(text)).toEqual([ID]);
   });
 
   test('an agent that called source_answer is judged: no link fails, a well-formed link passes, and collecting the answer with source_answer_result counts the same', () => {
@@ -250,8 +276,8 @@ describe('the Inbox checks', () => {
     expect(noLink.find((c) => c.id === 'inbox.agent.entry')?.status).toBe('fail');
   });
 
-  describe('an install that offers agents no answer tool (a standard install: olympus_search, no source_answer)', () => {
-    const standard = { agentLinks: [], agentLink: 'not_offered' as const, agentTools: ['olympus_search', 'source_answer_result', 'source_index_status'] };
+  describe('an install that offers agents neither olympus_search nor source_answer', () => {
+    const standard = { agentLinks: [], agentLink: 'not_offered' as const, agentTools: ['source_answer_result', 'source_index_status'] };
     // No link came from an agent: the Ask page's own entry is opened by its address instead.
     const standardGood = (): InboxObservation => {
       const obs = good();
@@ -265,8 +291,8 @@ describe('the Inbox checks', () => {
       expect(checks.filter((c) => c.status === 'fail')).toEqual([]);
       const skipped = checks.find((c) => c.id === 'inbox.agent.link-path')!;
       expect(skipped.status).toBe('skip');
-      expect(skipped.detail).toContain('olympus_search, source_answer_result, source_index_status');
-      expect(skipped.detail).toContain('answer model');
+      expect(skipped.detail).toContain('source_answer_result, source_index_status');
+      expect(skipped.detail).toContain('neither olympus_search nor source_answer');
       expect(checks.some((c) => c.id === 'inbox.agent.entry')).toBe(false);
       expect(checks.find((c) => c.id === 'inbox.link.opens-entry')?.status).toBe('pass');
     });
@@ -285,6 +311,14 @@ describe('the Inbox checks', () => {
       const noEntry = standardGood();
       noEntry.ask!.entry = null;
       expect(failing(noEntry, standard as never)).toContain('inbox.link.opens-entry');
+    });
+
+    test('an install that offers olympus_search is not a skip: the link is expected, and a missing one is a failure', () => {
+      const offered = { agentLinks: [], agentLink: 'issued' as const, agentTools: ['olympus_search', 'source_answer_result', 'source_index_status'] };
+      const checks = evaluateInbox(standardGood(), offered);
+      expect(checks.some((c) => c.id === 'inbox.agent.link-path')).toBe(false);
+      expect(checks.find((c) => c.id === 'inbox.agent.entry')?.status).toBe('fail');
+      expect(failing(good(), { ...ctx, agentLink: 'issued' } as never)).toEqual([]);
     });
 
     test('the same observation with a link expected is judged as before: the missing link is a failure, not a skip', () => {
