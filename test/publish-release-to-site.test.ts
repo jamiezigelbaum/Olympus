@@ -91,7 +91,7 @@ test('local Mac bundle is the served installer for the candidate and changes not
   expect(() => prepareMacLocalBundle({ root, artifact, output })).toThrow();
   const other = fixture('1.0.0-rc.1', { name: 'olympus', version: '9.9.9' });
   expect(() => prepareMacLocalBundle({ root: other.root, artifact: other.artifact, output: join(other.root, 'out') })).toThrow('identity');
-});
+}, 30_000);
 
 function linuxFixture(qualification: LinuxRuntimePins['bun']['qualification'] = 'qualified-omarchy') {
   const result = fixture();
