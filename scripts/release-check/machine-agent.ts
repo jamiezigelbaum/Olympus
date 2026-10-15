@@ -15,12 +15,15 @@
  * Linux only for now; the macOS differences are confined to `platform()`.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { desktopSandboxOrigin, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
 import { privateNoteKindIn } from './private-note.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN, startFakeReadwise } from './readwise-fake.ts';
+import type { DashboardCounts, ItemRow, PolicyState, StateSnapshot } from './upgrade.ts';
 
 // ---------------------------------------------------------------------------
 // Configuration the harness puts on the machine
@@ -35,6 +38,8 @@ export interface AgentConfig {
   /** How many documents the stand-in serves, and how many of them the engine may refuse as Secrets. */
   expectedItems: number;
   expectedSecrets: number;
+  /** How many of the stand-in's items the owner's tier rules make Private. */
+  expectedPrivate: number;
   relay: string;
   /** Per-question private facts, checked inside the machine so Private plaintext never leaves it. */
   privateFacts: Record<string, string[]>;
@@ -66,6 +71,9 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 interface Platform {
   olympusBin: string;
+  configDir: string;
+  dataDir: string;
+  sovereigntyPath: string;
   workerEnvPath: string;
   engineLogPaths: string[];
   /** Fetch against the engine's worker origin as the owner. */
@@ -80,6 +88,9 @@ function platform(): Platform {
   const socketPath = join(runtime, 'olympus', 'worker.sock');
   return {
     olympusBin: join(home, '.local', 'bin', 'olympus'),
+    configDir: join(home, '.config', 'olympus'),
+    dataDir: join(home, '.local', 'share', 'olympus'),
+    sovereigntyPath: join(home, '.config', 'olympus', 'sovereignty.json'),
     workerEnvPath: join(home, '.config', 'olympus', 'worker.env'),
     engineLogPaths: [
       join(home, '.local', 'state', 'olympus', 'engine', 'engine.log'),
@@ -109,6 +120,21 @@ function workerBearer(): string {
   const result = olympus(['dashboard', 'token']);
   if (result.code !== 0 || !result.stdout.trim()) throw new Error('olympus dashboard token failed');
   return result.stdout.trim();
+}
+
+/** The privacy policy file as the engine reads it, with its digest and any owner-only backups the product wrote beside it. */
+function readPolicy(): PolicyState | null {
+  const path = platform().sovereigntyPath;
+  if (!existsSync(path)) return null;
+  const text = readFileSync(path, 'utf8');
+  let json: unknown;
+  try { json = JSON.parse(text); } catch { return null; }
+  const dir = platform().configDir;
+  const backups = readdirSync(dir)
+    .filter((name) => name.startsWith('sovereignty.json.backup-'))
+    .sort()
+    .map((name) => ({ name, sha256: createHash('sha256').update(readFileSync(join(dir, name))).digest('hex') }));
+  return { sha256: createHash('sha256').update(text).digest('hex'), json, backups };
 }
 
 /** A dashboard control session: what the dashboard page itself holds after sign-in. */
@@ -239,7 +265,7 @@ async function syncNow(): Promise<never> {
   emit({ ok: response.status === 200, status: response.status });
 }
 
-interface SettleSnapshot {
+export interface SettleSnapshot {
   seen: number;
   indexed: number;
   contentReady: number;
@@ -274,14 +300,24 @@ function snapshot(json: any): SettleSnapshot | undefined {
   };
 }
 
-function isSettled(s: SettleSnapshot | undefined, config: AgentConfig): boolean {
+/**
+ * Whether the machine's Private items are embedded under its current privacy policy. The earlier default is keyword-only
+ * search for Private items (`metadata_only`): they are stored and classified but never embedded, so a settled install
+ * has embedded only what is not Private. The newer default embeds them too.
+ */
+export function privateEmbeddedUnder(policy: { retrieval?: { trustDomains?: { secure_local?: { activationMode?: string } } } } | null): boolean {
+  return policy?.retrieval?.trustDomains?.secure_local?.activationMode !== 'metadata_only';
+}
+
+export function isSettled(s: SettleSnapshot | undefined, config: AgentConfig, privateEmbedded = true): boolean {
   if (!s) return false;
   const stored = config.expectedItems - config.expectedSecrets;
+  const embeddable = stored - (privateEmbedded ? 0 : config.expectedPrivate);
   return s.lastRun === 'completed'
     && s.seen >= config.expectedItems
     && s.indexed >= stored
     && s.contentReady >= stored
-    && s.embedded >= stored
+    && s.embedded >= embeddable
     && s.pending === 0
     && s.queueWaiting === 0
     && s.queueActive === 0
@@ -300,7 +336,7 @@ async function settle(timeoutS: number): Promise<never> {
       const dash = await dashboardJson();
       last = snapshot(dash.json);
     } catch { /* engine busy */ }
-    stable = isSettled(last, config) ? stable + 1 : 0;
+    stable = isSettled(last, config, privateEmbeddedUnder(readPolicy()?.json ?? null)) ? stable + 1 : 0;
     if (stable >= 2) emit({ ok: true, settled: true, polls, waitedMs: Date.now() - started, snapshot: last });
     await sleep(5_000);
   }
@@ -656,6 +692,128 @@ function collectLogs(outDir: string): never {
   emit({ ok: true, files: written });
 }
 
+// ---------------------------------------------------------------------------
+// Upgrade leg: state before and after the installer runs over an existing install
+
+const CONNECTOR_STORES = ['readwise-connector-store', 'readwise-secure-connector-store'];
+
+/** Stored items and the tier ledger's verdicts for them, read-only. Ids are the stand-in's synthetic ids; no content leaves. */
+function readItems(): { items: ItemRow[] | null; error?: string } {
+  const dir = platform().dataDir;
+  const rows: ItemRow[] = [];
+  try {
+    for (const store of CONNECTOR_STORES) {
+      const itemsPath = join(dir, `${store}.sqlite`);
+      if (!existsSync(itemsPath)) continue;
+      const db = new Database(itemsPath, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000;');
+      let ledger = new Map<string, { metadataTier: string | null; contentTier: string | null }>();
+      try {
+        const ledgerPath = join(dir, `${store}.tier-ledger.sqlite`);
+        if (existsSync(ledgerPath)) {
+          const ledgerDb = new Database(ledgerPath, { readonly: true });
+          ledgerDb.exec('PRAGMA busy_timeout = 10000;');
+          try {
+            ledger = new Map((ledgerDb.query('select provider_item_id as id, metadata_tier as m, content_tier as c from tier_items').all() as Array<{ id: string; m: string | null; c: string | null }>).map((r) => [r.id, { metadataTier: r.m, contentTier: r.c }]));
+          } finally { ledgerDb.close(); }
+        }
+        for (const row of db.query('select provider_item_id as id, trust_tier as tier, tombstoned, content_hash as contentHash from items order by provider_item_id').all() as Array<{ id: string; tier: string | null; tombstoned: number | null; contentHash: string | null }>) {
+          const verdict = ledger.get(row.id);
+          rows.push({ store, id: row.id, tier: row.tier, tombstoned: row.tombstoned, contentHash: row.contentHash, ...(verdict ?? {}) });
+        }
+      } finally { db.close(); }
+    }
+    return { items: rows };
+  } catch (error) {
+    return { items: null, error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160) };
+  }
+}
+
+function jsonOf(result: CliResult): any {
+  try { return JSON.parse(result.stdout); } catch { return undefined; }
+}
+
+async function snapshotState(): Promise<never> {
+  const p = platform();
+  const version = /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\b/.exec(olympus(['--version']).stdout)?.[1] ?? null;
+  const status = jsonOf(olympus(['engine', 'status']));
+  const connections = jsonOf(olympus(['connections', 'list']));
+  const remote = jsonOf(olympus(['connections', 'status']));
+  const rules = jsonOf(olympus(['tier', 'rules', 'list']));
+  let dashboard: DashboardCounts | null = null;
+  try {
+    const dash = await dashboardJson();
+    const snap = snapshot(dash.json);
+    if (snap) dashboard = { seen: snap.seen, indexed: snap.indexed, contentReady: snap.contentReady, embedded: snap.embedded, secretsLocated: snap.secretsLocated, personal: snap.personal, privateItems: snap.privateItems };
+  } catch { /* the engine may still be starting; the harness treats null as unreadable */ }
+  const workerEnv = existsSync(p.workerEnvPath) ? readFileSync(p.workerEnvPath, 'utf8').split('\n').map((line) => line.split('=')[0]!.trim()).filter(Boolean).sort() : [];
+  const found = readItems();
+  const state: StateSnapshot = {
+    version,
+    build: status?.engine?.build ?? null,
+    engineState: status?.engine?.state ?? null,
+    installId: remote?.relay?.install_id ?? null,
+    relayConnected: remote?.relay?.connected ?? null,
+    policy: readPolicy(),
+    configFiles: existsSync(p.configDir) ? readdirSync(p.configDir).sort() : [],
+    workerEnvKeys: workerEnv,
+    tierRuleIds: ((rules?.rules ?? []) as Array<{ id: string }>).map((rule) => rule.id).sort(),
+    connections: ((connections?.connections ?? []) as Array<{ id: string }>).map((connection) => connection.id).sort(),
+    items: found.items,
+    ...(found.error ? { itemsError: found.error } : {}),
+    dashboard,
+  };
+  emit({ ok: true, state });
+}
+
+/**
+ * The owner changes one privacy setting before the upgrade, the way the privacy policy documents: a field of the
+ * policy file the install seeded. Only the internal tier's cloud-query switch moves (a stricter, valid value), and the
+ * file's bytes from before are kept beside the run's files so a self-test can put them back.
+ */
+async function setPolicySetting(): Promise<never> {
+  const p = platform();
+  if (!existsSync(p.sovereigntyPath)) emit({ ok: false, detail: 'no privacy policy file to change' });
+  mkdirSync(WORKDIR, { recursive: true });
+  copyFileSync(p.sovereigntyPath, join(WORKDIR, 'sovereignty.pre-upgrade.json'));
+  const policy = JSON.parse(readFileSync(p.sovereigntyPath, 'utf8'));
+  const internal = policy?.retrieval?.trustDomains?.internal;
+  if (!internal) emit({ ok: false, detail: 'the policy has no internal tier to change' });
+  internal.allowCloudQuery = false;
+  writeFileSync(p.sovereigntyPath, `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
+  emit({ ok: true, changed: 'retrieval.trustDomains.internal.allowCloudQuery', value: false });
+}
+
+/** Waits until the engine reports ready (models included) again after the installer's restart. */
+async function awaitEngine(timeoutS: number): Promise<never> {
+  const readyMs = await waitForEngine(timeoutS * 1000);
+  emit({ ok: true, readyMs });
+}
+
+/**
+ * Self-tests of the upgrade leg: a fault is made to happen so the run must fail. `before-upgrade` modes run after the
+ * baseline snapshot and before the installer (a rule the owner had is gone when the new version starts); `after-upgrade`
+ * modes run once the engine is back (the policy migration did not apply).
+ */
+async function upgradeSelftest(mode: string): Promise<never> {
+  const p = platform();
+  if (mode === 'lose-tier-rules') {
+    // Data loss across the upgrade: the owner's tier rules vanish.
+    const rules = jsonOf(olympus(['tier', 'rules', 'list']));
+    for (const rule of (rules?.rules ?? []) as Array<{ id: string }>) olympus(['tier', 'rules', 'remove', rule.id]);
+    emit({ ok: true, mode });
+  }
+  if (mode === 'revert-policy') {
+    // A migration that did not apply: the pre-upgrade policy bytes are back and the backups are gone.
+    const before = join(WORKDIR, 'sovereignty.pre-upgrade.json');
+    if (!existsSync(before)) emit({ ok: false, detail: 'no pre-upgrade policy copy to restore' });
+    for (const name of readdirSync(p.configDir)) if (name.startsWith('sovereignty.json.backup-')) rmSync(join(p.configDir, name));
+    copyFileSync(before, p.sovereigntyPath);
+    emit({ ok: true, mode });
+  }
+  emit({ ok: false, detail: `unknown self-test mode ${mode}` });
+}
+
 async function engineBuild(): Promise<never> {
   const status = olympus(['engine', 'status']);
   let build: string | null = null;
@@ -671,7 +829,8 @@ async function engineBuild(): Promise<never> {
     const parsed = JSON.parse(conn.stdout) as { relay?: { state?: string; connected?: boolean } };
     relay = { state: parsed.relay?.state ?? null, connected: parsed.relay?.connected ?? null };
   } catch { /* leave null */ }
-  emit({ ok: status.code === 0, build, remoteMode: remote, relay });
+  const version = /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\b/.exec(olympus(['--version']).stdout)?.[1] ?? null;
+  emit({ ok: status.code === 0, build, version, remoteMode: remote, relay });
 }
 
 // ---------------------------------------------------------------------------
@@ -712,8 +871,12 @@ async function main(): Promise<void> {
     case 'screenshots': return await screenshots(flag('--out'));
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
+    case 'snapshot-state': return await snapshotState();
+    case 'set-policy-setting': return await setPolicySetting();
+    case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
+    case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|collect-logs|engine-build>');
+      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
       process.exit(2);
   }
 }
