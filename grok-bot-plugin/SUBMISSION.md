@@ -1,7 +1,8 @@
 # Olympus: Grok Bot and Cursor marketplace submission
 
-Status: DRAFT 2026-10-15. Test results, and the legal pass on the description
-and testing instructions, are still to come. Form:
+Status: READY except two items (§5): the live privacy policy must name Cursor
+(merged in #424, published with the 1.1.0 site), and Jamie's in-app test from
+Grok Bot. Scripted end-to-end receipt and legal pass done 2026-10-15. Form:
 https://x.ai/bot/marketplace/submit-a-plugin. Publisher terms (Anysphere):
 https://cursor.com/marketplace-publisher-terms. Jamie accepted the publisher
 terms for Open Coordination Unlimited, Inc., including their indemnity of
@@ -55,7 +56,7 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 > read-only.
 >
 > 1. Add Olympus (MCP server URL https://mcp.olympusplugin.ai/mcp) in Grok
->    Bot or Cursor. [VERIFY: exact steps in each app]
+>    Bot or Cursor.
 > 2. The app asks you to sign in and opens a page at mcp.olympusplugin.ai.
 >    Choose **Reviewing Olympus? Sign in to the demo**.
 > 3. On "Sign in to the Olympus demo", enter the username and password below
@@ -63,22 +64,25 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 >    is needed. You return to the app, connected.
 > 4. Try these:
 >    - "Use Olympus: what did Sam say about renewing my lease?" Olympus
->      returns excerpts from two emails and a lease summary, which the app
->      answers from with citations. [VERIFY]
+>      returns cited excerpts from Sam's two emails and the lease summary
+>      (renewal from 1 December at $2,215 a month; answer by 15 October;
+>      dishwasher replaced), and the app answers from them.
 >    - "Use Olympus: what did we decide about the kitchen renovation
->      budget?" [VERIFY]
->    - "Use Olympus: are my sources indexed?" Shows the demo's sources and
->      their status. [VERIFY]
+>      budget?" Excerpts from the budget decision, the renovation plan and
+>      Priya's email: capped at $18,000, Hollis & Daughters at $16,400.
+>    - "Use Olympus: are my sources indexed?" Lists the demo's sources and
+>      their status. The demo's files are in Dropbox; the other sources are
+>      set up but empty.
 >    - Private item: "Use Olympus: what does my bank's overdraft notice say?"
->      [VERIFY: what the demo returns for a Private match on this surface]
+>      The notice is labelled Private, so its text is not sent to the app:
+>      Olympus reports that it found no Public or Personal evidence.
 >    - Secret item: "Use Olympus: what's the admin password for my old
->      router?" Olympus returns nothing usable: Secret items are never sent
->      or answered from. [VERIFY]
+>      router?" The same: a Secret is never sent or answered from.
 >
 > The demo belongs to a fictional person, Robin Vale: about 22 sample emails,
 > notes and documents covering a lease renewal, a kitchen renovation budget,
-> a trip to Lisbon and a book club. Nothing in it is real. Answers can take
-> up to a minute.
+> a trip to Lisbon and a book club. Nothing in it is real. The demo's labels
+> were set by its publisher. A search usually returns within a few seconds.
 >
 > Username: [from 1Password]  Password: [from 1Password]
 
@@ -97,9 +101,17 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 - Its `worker.env` must not carry `OLYMPUS_ENGINE_HOST=1` (olympus-demo's
   older build has it): on an OpenClaw-hosted engine it moves the Gateway's
   data folder away from the relay child's, and the relay never comes up.
-- Holds only `chatgpt-plugin/demo-data/`, carries the demo marker, and has
+- Its only source is a demo Dropbox account (folder `/OlympusDemo`) holding
+  `chatgpt-plugin/demo-data/`; it carries the demo marker and has
   `remote.demoConsent` with an Argon2id hash. Credentials are in 1Password
-  only.
+  only. Jamie's own Dropbox is not connected (a first attempt connected the
+  wrong account; it was disconnected before any folder was chosen).
+- Tiers match `chatgpt-plugin/demo-data/README.md`: 18 Personal, 3 Private
+  (the money files), 1 Secret (the router note). On the default preset
+  nothing was flagged Private automatically, so the three Private labels are
+  owner overrides (`olympus tier set … private`), moved with
+  `olympus tier migrate` (3 vectors copied, no re-embedding). §3 says the
+  labels were set by the demo's publisher.
 - The relay sends Grok Bot or Cursor's demo sign-in to it through
   `RELAY_DEMO_CLIENT_INSTALLS` (PR #416). The ChatGPT reviewer path is unchanged.
 - A demo grant on this surface gets only `olympus_search` and
@@ -110,17 +122,25 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 
 - [x] PR #416 merged (8828c376); relay deployed from exact main 149eefe9
       with `connect-relay/deploy/deploy.sh`, reviewer check passed
-      (2026-10-15). Drop-in `olympus-relay.service.d/grokbot-demo.conf` sets
+      (2026-10-15). PR #429 (6d74a540) lets the demo sign-in redirect back to
+      Cursor's callback (before it, the relay refused that redirect with a
+      502); relay redeployed from 6d74a540, reviewer check passed. Drop-in `olympus-relay.service.d/grokbot-demo.conf` sets
       `RELAY_DEMO_CLIENT_INSTALLS` to the reviewer engine's install id.
-- [ ] Reviewer engine running, seeded, and indexed; tiers match
-      `chatgpt-plugin/demo-data/README.md`.
-- [ ] End-to-end receipt recorded (§6): Grok Bot and/or Cursor, through the
-      demo sign-in, every §3 case.
+- [x] Reviewer engine running, seeded, and indexed; tiers match
+      `chatgpt-plugin/demo-data/README.md` (2026-10-15).
+- [x] Scripted end-to-end receipt as Cursor's client, through the demo
+      sign-in, every §3 case (§6, 2026-10-15).
+- [ ] In-app test by Jamie from Grok Bot (his account; demo password from
+      1Password): add the server, sign in to the demo, ask the lease
+      question. Also shows whether Grok Bot uses the `/agents/` callback.
 - [x] Logo URL serves 200 `image/png`, same bytes as
       `site/assets/img/olympus-logo-512.png` (2026-10-15).
-- [ ] Privacy and terms URLs live; the policy names the apps reviewers will
-      use (legal pass).
-- [ ] Legal pass (Olympus profile) on §2 and §3 recorded below.
+- [ ] Privacy and terms URLs live (both 200); the live policy names Cursor
+      and Anysphere. Merged in #424 (f2778d53) but not yet on
+      olympusplugin.ai/privacy: it describes 1.1.0 features, so it goes live
+      with the 1.1.0 site publish (#422).
+- [x] Legal pass (Olympus profile) on §2 and §3 recorded below (re-run on
+      the final §3, 2026-10-15).
 - [x] Jamie has accepted the publisher terms, including the indemnity
       (2026-10-15).
 - [ ] Jamie ticks "tested locally and in-app" (only after §6) and clicks
@@ -128,13 +148,41 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 
 ## 6. Receipts
 
-[pending]
+2026-10-15 23:35Z, against the live relay (olympus-relay 6d74a5404cc7) as
+Cursor's pinned client (`https://cursor.com/oauth/mcp-client.json`, redirect
+`https://www.cursor.com/agents/mcp/oauth/callback`, PKCE S256), password read
+from 1Password on stdin, no token printed:
+
+- `GET /connect/demo/authorize` → 200, "Sign in to the Olympus demo",
+  names Grok Bot or Cursor.
+- Sign-in POST → 303 to `https://www.cursor.com/agents/mcp/oauth/callback`
+  with a code; `/connect/token` → 200, access token (expires_in 3600) and a
+  refresh token.
+- MCP `initialize` → 200 `olympus`; `tools/list` → `olympus_search`,
+  `source_index_status` only. `source_answer` and `ask_anonymously` →
+  `unknown_operation`.
+- `source_index_status` → the demo's sources and their state.
+- `olympus_search`: lease question 737 ms, Sam's two emails and the lease
+  summary; kitchen budget 630 ms, budget decision, plan and Priya's email;
+  bank overdraft notice (Private) and router password (Secret) → "Olympus
+  found no Public or Personal evidence for this question in 5 searched
+  sources."
+- olympus-demo (ChatGPT reviewer engine) untouched; read-only status after
+  each change: Dropbox syncs still completing on schedule, items unchanged
+  (20 Personal, 4 Private).
+
+Full log: the parent session's notes folder,
+`grok-bot-reviewer-path-receipt-2026-10-15.log`.
 
 ## 7. Legal pass (legal-review skill, Olympus profile)
 
 First pass 2026-10-15, on §2 and §3, against origin/main 0510258c plus PR #416
-and Cursor's publisher terms. To be re-run on the final §3 once the test
-results are filled in.
+and Cursor's publisher terms. Re-run on the final §3 the same day, against the
+§6 receipt: each §3 result is what the receipt shows; the Private case says
+only that the text isn't sent (the demo grant has no answer model, so §2's
+"answer written from them" is not claimed for the demo); §3 says the demo's
+labels were set by its publisher, not detected; the timing claim is "usually
+within a few seconds", not a promise.
 
 Fixed in this file:
 - §2 said the app gets "at most an answer written on your computer" for
@@ -151,7 +199,9 @@ Fixed in this file:
   optional third-party services the user pays for directly; they are not
   fees through the Marketplace.
 
-For the privacy policy (not landed here; for the legal workstream):
+For the privacy policy: resolved in #424 (f2778d53), which names Cursor and
+Anysphere in the recipients, the relay section and the accepted clients.
+Not live until the 1.1.0 site publish. The original findings:
 - `site/privacy/index.html` names Grok Bot but not Cursor. Two absolute
   lists omit Cursor, although the relay accepts Cursor's client (Grok Bot
   and Cursor's cloud agents share it): "through the relay only the published
