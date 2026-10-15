@@ -5078,6 +5078,8 @@ export async function main(): Promise<void> {
   uncheckedRetry.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
+    // A demo sign-in grant gets only the read-only tools, on /mcp and OpenAPI alike.
+    demoGrant: isDemoGrant,
     publicUrls: remotePublicUrls,
     makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
       ...createInProcessOperationContext({

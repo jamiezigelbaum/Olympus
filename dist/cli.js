@@ -24641,7 +24641,8 @@ function loadSovereigntyEngine(options = {}) {
         return false;
       }
     };
-    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);
@@ -26304,8 +26305,9 @@ var init_keyword_expansion = __esm(() => {
 function isDirectoryTool(name) {
   return typeof name === "string" && DIRECTORY_TOOLS.has(name);
 }
-var DIRECTORY_MCP_PATH = "/openai/mcp", DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
+var DIRECTORY_MCP_PATH = "/openai/mcp", DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
 var init_directory_tools = __esm(() => {
+  DEMO_GRANT_REMOTE_TOOLS = Object.freeze(["olympus_search", "source_index_status"]);
   DIRECTORY_TOOL_NAMES = Object.freeze([
     "olympus_dashboard",
     "olympus_search",
@@ -88212,6 +88214,7 @@ function createNativeWorkerService(options) {
         settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else
         delete settings.env[OWNER_BRIDGE_HOST_ENV];
+      settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? "engine" : "gateway";
       const probe = settings.readinessProbe;
       return {
         ...settings,
@@ -88451,7 +88454,7 @@ function stripGatewayBootstrapSecrets(env) {
 function asRecord14(value2) {
   return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
 }
-var SERVICE_ID2 = "olympus-worker", SERVICE_LABEL2 = "worker", READINESS_PROBE_TIMEOUT_MS = 1000, ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250, DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4, DEFAULT_WORKER_STABLE_UPTIME_MS = 30000, NATIVE_CAPTURE_OWNER_ENV_NAMES;
+var SERVICE_ID2 = "olympus-worker", SERVICE_LABEL2 = "worker", READINESS_PROBE_TIMEOUT_MS = 1000, ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250, DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4, DEFAULT_WORKER_STABLE_UPTIME_MS = 30000, NATIVE_CAPTURE_OWNER_ENV_NAMES, WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR";
 var init_native_worker_service = __esm(() => {
   init_linux_owner_bridge_host();
   init_worker_transport();
@@ -88684,7 +88687,7 @@ import { mkdirSync as mkdirSync41 } from "node:fs";
 import { join as join85 } from "node:path";
 function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket) {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {} });
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {} });
   return [
     backgroundNativeProcessService(worker),
     backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
@@ -118056,7 +118059,7 @@ function renderDemoSignInPage(input) {
 <div class="name">${name}</div>
 <p class="meta">After you sign in, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
-<form method="post" action="/connect/demo/authorize">
+<form method="post" action="${escapeHtml(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
 ${error2}
@@ -151670,7 +151673,8 @@ __export(exports_remote_mcp, {
   bearerToken: () => bearerToken,
   authenticateRemoteRequest: () => authenticateRemoteRequest,
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH,
-  REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH
+  REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
+  DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
 import { existsSync as existsSync63 } from "node:fs";
 function isRemoteMcpRequest(request) {
@@ -151721,7 +151725,7 @@ function createRemoteMcpHandler(options) {
     if (surface === "directory" && !chatgpt)
       return jsonResponse(404, remoteSurfaceErrorOutput("not_found"));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
-    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface)) : undefined);
+    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, demoGrantLimit(options.demoGrant?.(verification.connection) === true, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface)) : undefined));
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -151736,6 +151740,19 @@ function createRemoteMcpHandler(options) {
       });
     }
   }
+}
+function demoGrantLimit(demo, inner) {
+  if (!demo)
+    return inner;
+  return {
+    tools: (listed) => (inner ? inner.tools(listed) : listed).filter((tool) => DEMO_GRANT_REMOTE_TOOLS.includes(tool.name)),
+    call: async (request, next, signal) => {
+      if (!DEMO_GRANT_REMOTE_TOOLS.includes(request.params.name)) {
+        return { content: [{ type: "text", text: JSON.stringify(remoteSurfaceErrorOutput("unknown_operation"), null, 2) }], isError: true };
+      }
+      return inner ? await inner.call(request, next, signal) : await next();
+    }
+  };
 }
 async function withToolRetryAfter(response) {
   if (response.status !== 200 || !(response.headers.get("Content-Type") ?? "").includes("application/json"))
@@ -151976,7 +151993,8 @@ __export(exports_demo_consent, {
   demoSignInLimiter: () => demoSignInLimiter,
   demoGrantDisplayName: () => demoGrantDisplayName,
   DEMO_SIGN_IN_WINDOW_MS: () => DEMO_SIGN_IN_WINDOW_MS,
-  DEMO_SIGN_IN_BURST: () => DEMO_SIGN_IN_BURST
+  DEMO_SIGN_IN_BURST: () => DEMO_SIGN_IN_BURST,
+  DEMO_CLIENT_HOSTS: () => DEMO_CLIENT_HOSTS
 });
 import { timingSafeEqual as timingSafeEqual9 } from "node:crypto";
 function resolveDemoConsent(remote, markerPresent) {
@@ -152026,12 +152044,13 @@ function demoGrantDisplayName(clientName) {
 }
 function isDemoGrant(connection) {
   const pinned = connection.clientId ? pinnedClient(connection.clientId) : undefined;
-  return pinned?.host === "chatgpt" && connection.displayName === demoGrantDisplayName(pinned.clientName);
+  return pinned !== undefined && DEMO_CLIENT_HOSTS.includes(pinned.host) && connection.displayName === demoGrantDisplayName(pinned.clientName);
 }
-var DEMO_SIGN_IN_BURST = 10, DEMO_SIGN_IN_WINDOW_MS;
+var DEMO_SIGN_IN_BURST = 10, DEMO_SIGN_IN_WINDOW_MS, DEMO_CLIENT_HOSTS;
 var init_demo_consent = __esm(() => {
   init_pinned_clients();
   DEMO_SIGN_IN_WINDOW_MS = 15 * 60000;
+  DEMO_CLIENT_HOSTS = Object.freeze(["chatgpt", "cursor"]);
 });
 
 // src/workers/remote-oauth/redirect-uris.ts
@@ -152199,8 +152218,8 @@ function createRemoteOAuthHandler(options) {
     const client = resolveClient(clientId, u);
     if (typeof client === "string")
       return errorPage(400, client);
-    if (demo && client.host !== "chatgpt")
-      return errorPage(400, "The demo connects ChatGPT only.");
+    if (demo && (client.host === undefined || !DEMO_CLIENT_HOSTS.includes(client.host)))
+      return errorPage(400, "The demo connects ChatGPT, Grok Bot and Cursor only.");
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {
       return errorPage(400, "The return address is not one this app registered.");
     }
@@ -152259,6 +152278,7 @@ function createRemoteOAuthHandler(options) {
       requestId,
       csrf: entry.csrf,
       clientName: entry.client.clientName,
+      clientId: entry.client.clientId,
       redirectHost: redirectHost(entry.redirectUri),
       redirectOrigin: new URL(entry.redirectUri).origin,
       ...error2 ? { error: error2 } : {}
@@ -155757,7 +155777,8 @@ async function callTool(request, name, options) {
   }
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
-  if (!operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
+  const demoRefused = options.demoGrant?.(verification.connection) === true && !DEMO_GRANT_REMOTE_TOOLS.includes(name);
+  if (demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
     return failure2(404, remoteSurfaceErrorOutput("unknown_operation"));
   }
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
@@ -160502,6 +160523,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   uncheckedRetry.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
+    demoGrant: isDemoGrant2,
     publicUrls: remotePublicUrls,
     makeOperationContext: (caller, signal) => ({
       ...createInProcessOperationContext2({

@@ -48,7 +48,8 @@ import { createBuiltInPrivateAnswerModel } from '../src/workers/chatgpt/private-
 import { PRIVATE_QUESTION_META_KEY, type PrivateQuestionMetaV1 } from '../src/workers/chatgpt/private-question-contract.ts';
 import { PrivateQuestionJobs } from '../src/workers/chatgpt/private-question-jobs.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
+import { createInProcessOperationContext, createRemoteMcpHandler, DEMO_GRANT_REMOTE_TOOLS, withRemoteMcpRoute, type RemoteMcpHandlerOptions } from '../src/workers/remote-mcp.ts';
+import { createRemoteOpenApiHandler } from '../src/workers/remote-openapi.ts';
 import { isDemoGrant, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
 import { createRemoteOAuthHandler, protectedResourceMetadata, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
 import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
@@ -80,6 +81,8 @@ let jobs: PrivateAnswerJobs;
 let questions: PrivateQuestionJobs;
 let questionsAsked: number;
 let demoSettings: DemoConsentSettings | undefined;
+/** The remote-agent options the fixture's /mcp handler is built from (no ChatGPT surface). */
+let remoteOptions: RemoteMcpHandlerOptions;
 /** The directory allowlist the engine uses; a test narrows it to prove default-deny. */
 let directoryAllows: ((name: string) => boolean) | undefined;
 
@@ -137,10 +140,14 @@ beforeEach(async () => {
       });
     },
   };
-  const mcp = createRemoteMcpHandler({
+  remoteOptions = {
     connections: () => store,
     publicUrls: urls,
     makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }), releaseCheck: scriptedSearchReleaseCheck }),
+    demoGrant: isDemoGrant,
+  };
+  const mcp = createRemoteMcpHandler({
+    ...remoteOptions,
     chatgpt: {
       servesRequest: (_request, connection) => isChatGptGrant(connection),
       readOnlyFor: isDemoGrant,
@@ -652,13 +659,90 @@ describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the r
     expect(await lookalike.text()).toContain('does not recognize this app');
   });
 
-  test('the reviewer demo sign-in connects ChatGPT only', async () => {
-    for (const host of HOSTS) {
+  test('the reviewer demo sign-in connects ChatGPT, and Grok Bot or Cursor, never Claude or Grok', async () => {
+    for (const host of HOSTS.filter((h) => h.clientId !== CURSOR_CLIENT_ID)) {
       const response = await fetch(hostAuthorizeUrl('/connect/demo/authorize', host.clientId, host.redirectUri, pkce().challenge), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
       expect(response.status).toBe(400);
-      expect(await response.text()).toContain('The demo connects ChatGPT only.');
+      expect(await response.text()).toContain('The demo connects ChatGPT, Grok Bot and Cursor only.');
     }
+    expect(isDemoGrant({ clientId: CLAUDE_CLIENT_ID, displayName: 'Claude (demo sign-in)' })).toBe(false);
+    expect(isDemoGrant({ clientId: GROK_CLIENT_ID, displayName: 'Grok (demo sign-in)' })).toBe(false);
     // ChatGPT still can.
     expect((await grant(undefined, 'demo')).access_token).toBeTruthy();
+  });
+
+  /** A Cursor marketplace reviewer: the demo sign-in, as the relay forwards it, then the token. */
+  const cursorDemoGrant = async () => {
+    const { verifier, challenge } = pkce();
+    const page = await fetch(hostAuthorizeUrl('/connect/demo/authorize', CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI, challenge, MCP_RESOURCE), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
+    const html = await page.text();
+    expect(page.status).toBe(200);
+    expect(html).toContain('Sign in to the Olympus demo');
+    expect(html).toContain('Grok Bot or Cursor');
+    const approved = await fetch(`${base}/connect/demo/authorize`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'x-olympus-relay': 'per-boot', Origin: RELAY_ORIGIN },
+      body: new URLSearchParams({
+        request_id: /name="request_id" value="([^"]+)"/.exec(html)![1]!,
+        csrf: /name="csrf" value="([^"]+)"/.exec(html)![1]!,
+        action: 'approve', username: 'reviewer', password: DEMO_PASSWORD,
+      }).toString(),
+    });
+    expect(approved.status).toBe(303);
+    const callback = new URL(approved.headers.get('location')!);
+    expect(`${callback.origin}${callback.pathname}`).toBe(CURSOR_REDIRECT_URI);
+    const response = await tokenRequest({
+      grant_type: 'authorization_code', client_id: CURSOR_CLIENT_ID, redirect_uri: CURSOR_REDIRECT_URI,
+      code: callback.searchParams.get('code')!, code_verifier: verifier, resource: MCP_RESOURCE,
+    });
+    expect(response.status).toBe(200);
+    return await response.json() as { access_token: string };
+  };
+
+  test('a Grok Bot or Cursor demo grant gets only the read-only remote tools, on /mcp and OpenAPI', async () => {
+    const tokens = await cursorDemoGrant();
+    const [connection] = store.list().filter((c) => c.kind === 'oauth');
+    expect(connection).toMatchObject({ displayName: 'Grok Bot or Cursor (demo sign-in)', clientId: CURSOR_CLIENT_ID });
+    expect(isDemoGrant(connection!)).toBe(true);
+    expect(isChatGptGrant(connection!)).toBe(false);
+    // The fixture's /mcp has no evidence search: source_index_status alone.
+    expect(names((await result(await rpc('/mcp', tokens.access_token, 'tools/list'))).tools)).toEqual(['source_index_status']);
+    for (const name of ['source_answer', 'source_answer_result', 'ask_anonymously']) {
+      const called = await result(await rpc('/mcp', tokens.access_token, 'tools/call', { name, arguments: { question: 'q' } }));
+      expect(called.isError).toBe(true);
+      expect(called.content[0].text).toContain('unknown_operation');
+    }
+    expect(questionsAsked).toBe(0);
+    // source_index_status runs (the fixture's worker has no index, so it may fail, but not as unknown).
+    expect(JSON.stringify(await result(await rpc('/mcp', tokens.access_token, 'tools/call', { name: 'source_index_status', arguments: {} })))).not.toContain('unknown_operation');
+    // Never the directory endpoint.
+    expect((await rpc(DIRECTORY_MCP_PATH, tokens.access_token, 'tools/list')).status).toBe(401);
+
+    // With the evidence search, as the worker builds it: exactly the demo tools.
+    const withSearch = createRemoteMcpHandler({
+      ...remoteOptions,
+      search: { evidenceSearch: async () => ({ evidence: [], coverage: {} }), answerModelAvailable: () => true },
+    });
+    const listed = await withSearch(new Request(`${base}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${tokens.access_token}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    }));
+    expect(names((await result(listed)).tools).sort()).toEqual([...DEMO_GRANT_REMOTE_TOOLS].sort());
+
+    // The OpenAPI paths: the same limit, answered as an unknown name.
+    const openApi = createRemoteOpenApiHandler(remoteOptions);
+    const callRest = (name: string) => openApi(new Request(`${base}/api/v1/tools/${name}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokens.access_token}` },
+      body: JSON.stringify({ question: 'q' }),
+    }));
+    for (const name of ['source_answer', 'ask_anonymously']) expect((await callRest(name)).status).toBe(404);
+    expect((await callRest('source_index_status')).status).not.toBe(404);
+
+    // The owner's own Cursor grant on the same install keeps the full remote surface.
+    const own = await hostGrant(CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI);
+    expect(names((await result(await rpc('/mcp', own.tokens.access_token, 'tools/list'))).tools)).toContain('source_answer');
   });
 });
