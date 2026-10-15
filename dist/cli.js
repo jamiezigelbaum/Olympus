@@ -153366,7 +153366,9 @@ async function runSearch(args, options, authorized, context2, signal) {
       return refusedAccess(afterWait);
     const evidence = result.structuredContent?.evidence;
     if (context2.releaseCheck && Array.isArray(evidence) && evidence.length > 0 && answerReleaseWithheldReason(manifests.manifests, context2.releaseCheck, "personal") !== undefined) {
-      result = searchToolResult({ evidence: [], withheld: evidence.length });
+      const rawRecord = raw;
+      const withheldBefore = typeof rawRecord.withheld === "number" && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
+      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length });
     }
     if (recorded)
       note = remotePrivateNote(privateCall.answerId);

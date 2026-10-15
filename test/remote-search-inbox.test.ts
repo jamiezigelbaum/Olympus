@@ -765,6 +765,8 @@ describe('the tiers are read again after the probe\'s wait', () => {
       expect(JSON.stringify(result)).not.toContain(PERSONAL_EXCERPT);
       expect(JSON.stringify(result)).not.toContain('Lease renewal');
       expect((result.structuredContent as { evidence: unknown[] }).evidence).toEqual([]);
+      // The search still ran over the one source it reported; only its evidence is withheld.
+      expect((result.structuredContent as { coverage: { searchedSources: number } }).coverage.searchedSources).toBe(1);
       expect((result.structuredContent as { private_note: string }).private_note).toMatch(NOTE_WITH_LINK);
     } finally {
       await client.close();
