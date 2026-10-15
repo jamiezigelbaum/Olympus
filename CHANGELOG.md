@@ -3,6 +3,7 @@
 ## 1.0.1 - unreleased
 
 - On Linux, signing out ends the owner session, saving settings keeps your Olympus window working, Olympus opens in one window without a flash, computers without IPv6 keep their dashboard, Confirm continues the original page automatically, and browser confirmation opens are capped at six per hour.
+- On Linux, fixed a way for another account on the same computer to intercept the one-time sign-in that opens the Olympus window. Olympus 1.0.0 had it.
 - Connecting an agent no longer shows an expired approval after it worked.
 - Private search finds items when not every word matches, keeping readable content ahead of title-only matches. For longer questions, one shared common word is not enough to report a Private match to your AI app.
 - Progress finishes when names-only copies have content elsewhere; items settled without readable content appear under problems with a way to find them.
