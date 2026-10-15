@@ -28,6 +28,7 @@
 //   audits — never raw chunks, packets, or pack internals.
 
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
+import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
@@ -137,6 +138,8 @@ export interface AnalystAnswerLanes {
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
+  // Live authorization repeated after a shared model-slot wait, for synthesis and audit.
+  inferenceGuard?: (pack: EvidencePack, request: SourceIndexAnswerRequest, corpusIds: readonly string[]) => Promise<void>;
   // The local analyst (Argus on Delphi/local models).
   analyst: Analyst;
   // Fresh tier-ledger snapshot at each dispatch, including in-flight promotions.
@@ -287,7 +290,7 @@ export function createAnalystSourceIndexAnswerHandler(
   const secureAnalystPoolState = options.secureAnalystPoolState
     ?? new SecureAnalystPoolState(options.secureAnalystPool);
   return {
-    async answer(request: SourceIndexAnswerRequest): Promise<SourceIndexAnswerResult> {
+    async answer(request: SourceIndexAnswerRequest, local?: Parameters<SourceIndexAnswerHandler['answer']>[1]): Promise<SourceIndexAnswerResult> {
       const startedAt = Date.now();
       const question = request.question?.trim();
       if (!question) {
@@ -474,6 +477,30 @@ export function createAnalystSourceIndexAnswerHandler(
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
       // so a rebuilt pack (the private-outage fallback below) is fitted and its
       // matchCounts restated against its own candidates, never the first build's.
+      const assertDispatchAllowed = (analysisDetail: EvidencePackBuildDetail) => {
+        if (options.releaseCheck) {
+          const reason = answerReleaseWithheldReason([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
+          if (reason) throw new OperationError('source_index_policy_violation', reason);
+        }
+        if (lanes.visibilityGate) {
+          // The hydrated corpus is the serving layer. A move hides that
+          // copy even when a higher-tier copy is now current elsewhere.
+          const hits: SourceIndexRoutedSearchHit[] = analysisDetail.pack.candidates.map((candidate, index) => ({
+            corpusId: analysisDetail.candidateCorpusIds[index] ?? '',
+            servingLayer: candidate.chunks.length > 0 || (candidate.tables?.length ?? 0) > 0 || (candidate.facts?.length ?? 0) > 0 ? 'content' : 'metadata',
+            sourceItem: candidate.provenance.sourceItem,
+            provenance: candidate.provenance,
+            trustDomain: candidate.trustDomain,
+            trustTier: candidate.trustTier,
+            rawExposed: false,
+          }));
+          const kept = new Set(lanes.visibilityGate(hits));
+          if (hits.some((hit) => !kept.has(hit))) {
+            throw new OperationError('source_index_policy_violation',
+              'Olympus withheld this answer because an item changed privacy tier before analysis.');
+          }
+        }
+      };
       const legFitting = (analysisDetail: EvidencePackBuildDetail) => {
         const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
           candidate,
@@ -481,35 +508,22 @@ export function createAnalystSourceIndexAnswerHandler(
         ] as const));
         const guarded = (analyst: Analyst): Analyst => ({
           analyze: (dispatchPack, analyzeOptions) => {
-            if (options.releaseCheck) {
-              const reason = answerReleaseWithheldReason([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
-              if (reason) throw new OperationError('source_index_policy_violation', reason);
-            }
-            if (lanes.visibilityGate) {
-              // The hydrated corpus is the serving layer. A move hides that
-              // copy even when a higher-tier copy is now current elsewhere.
-              const hits: SourceIndexRoutedSearchHit[] = analysisDetail.pack.candidates.map((candidate, index) => ({
-                corpusId: analysisDetail.candidateCorpusIds[index] ?? '',
-                servingLayer: candidate.chunks.length > 0 || (candidate.tables?.length ?? 0) > 0 || (candidate.facts?.length ?? 0) > 0 ? 'content' : 'metadata',
-                sourceItem: candidate.provenance.sourceItem,
-                provenance: candidate.provenance,
-                trustDomain: candidate.trustDomain,
-                trustTier: candidate.trustTier,
-                rawExposed: false,
-              }));
-              const kept = new Set(lanes.visibilityGate(hits));
-              if (hits.some((hit) => !kept.has(hit))) {
-                throw new OperationError('source_index_policy_violation',
-                  'Olympus withheld this answer because an item changed privacy tier before analysis.');
-              }
-            }
+            assertDispatchAllowed(analysisDetail);
             return analyst.analyze(dispatchPack, analyzeOptions);
           },
         });
         return {
           localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
           cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
-          trustedLeg: guarded,
+          trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
+            // Page asks use the same content-bearing candidates as the computer path.
+            // Keep the full detail for the existing fail-closed release checks.
+            const skip = new Set([...(analysisDetail.namesOnlyCandidateIndexes ?? []), ...(analysisDetail.contentPrivateCandidateIndexes ?? [])]);
+            const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
+            const sentPack = local ? { ...dispatchPack, candidates: dispatchPack.candidates.filter(candidate => !omitted.has(candidate)) } : dispatchPack;
+            local?.beforeVeniceDispatch(sentPack, sentPack.candidates.map(candidate => candidateCorpus.get(candidate) ?? ''));
+            return analyst.analyze(sentPack, analyzeOptions);
+          } }),
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -540,13 +554,33 @@ export function createAnalystSourceIndexAnswerHandler(
       // are the product posture, so no default-path cap cuts them short.
       const analyze = (analysisDetail: EvidencePackBuildDetail, analysisLocalOnly: boolean) => {
         const { localLeg, cloudLeg, trustedLeg } = legFitting(analysisDetail);
-        return routeAnalysis({
+        const guard = async () => {
+          try {
+            await options.inferenceGuard?.(analysisDetail.pack, request, analysisDetail.candidateCorpusIds);
+          } catch {
+            currentAnalystAbortSignal()?.throwIfAborted();
+            // Authorization failures are terminal, including unreadable policy.
+            throw new OperationError('source_index_policy_violation', 'Source evidence is no longer allowed.', 'Ask again under the current source policy.');
+          }
+          // Also repeated after a shared model-slot wait, including audits.
+          assertDispatchAllowed(analysisDetail);
+        };
+        // Await live authorization before the synchronous release/tier check.
+        // Repeat at every route leg too: an unqueued fallback may start after
+        // a model failure, by which time the earlier pack can be disallowed.
+        const live = (analyst: Analyst): Analyst => options.inferenceGuard ? {
+          async analyze(legPack, legOptions) {
+            await guard();
+            return analyst.analyze(legPack, legOptions);
+          },
+        } : analyst;
+        const dispatch = () => routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
-          local: localLeg(options.analyst),
-          ...(options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {}),
-          ...(veniceAnalyst ? { venice: trustedLeg(veniceAnalyst) } : {}),
+          local: live(localLeg(options.analyst)),
+          ...(options.cloudAnalyst ? { cloud: live(cloudLeg(options.cloudAnalyst)) } : {}),
+          ...(veniceAnalyst ? { venice: live(trustedLeg(veniceAnalyst)) } : {}),
           // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
           // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
           // it must never inflate this bound, or a ~20s Venice attempt silently
@@ -554,8 +588,10 @@ export function createAnalystSourceIndexAnswerHandler(
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
+          // An owner Venice ask uses the already-approved Private pool even
+          // when this particular pack matched only Personal items. Agent routing is unchanged.
           ...(options.sovereigntyAnalystRoute
-            ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg, trustedLeg) }
+            ? { sovereigntyAnalystRoute: withLegPromptBudgets(local ? input => options.sovereigntyAnalystRoute!({ ...input, localOnly: true }) : options.sovereigntyAnalystRoute, analyst => live(localLeg(analyst)), analyst => live(cloudLeg(analyst)), analyst => live(trustedLeg(analyst))) }
             : {}),
           secureAnalystPoolState,
           ...(options.secureAnalystPool?.sloMs !== undefined
@@ -565,6 +601,11 @@ export function createAnalystSourceIndexAnswerHandler(
             ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs }
             : {}),
           secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs,
+        });
+        if (!options.inferenceGuard) return dispatch();
+        return runWithLocalInferenceGuard(guard, async () => {
+          await guard();
+          return dispatch();
         });
       };
       const analystStartedAt = Date.now();
@@ -902,7 +943,7 @@ function withLegPromptBudgets(
   route: NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']>,
   localLeg: (analyst: Analyst) => Analyst,
   cloudLeg: (analyst: Analyst) => Analyst,
-  trustedLeg: (analyst: Analyst) => Analyst,
+  veniceLeg: (analyst: Analyst) => Analyst,
 ): NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']> {
   return (input) => {
     const resolved = route(input);
@@ -911,7 +952,7 @@ function withLegPromptBudgets(
         ? { ...step, analyst: localLeg(step.analyst) }
         : step.backend === 'cloud'
           ? { ...step, analyst: cloudLeg(step.analyst) }
-          : { ...step, analyst: trustedLeg(step.analyst) }
+          : { ...step, analyst: veniceLeg(step.analyst) }
     ));
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
@@ -1494,6 +1535,7 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
         analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result, backend: 'cloud' };
     } catch (error) {
+      if (isAnalystPolicyRefusal(error)) throw error;
       if (isCallerCancellation(error)) throw error;
       const fallback = await observeImplicitAnalystLeg('local', localAnalystTimeoutMs, () =>
         analyzeWithOptionalTimeout(local, pack, { localOnly }, localAnalystTimeoutMs));
@@ -1535,6 +1577,7 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
         analyzeWithOptionalTimeout(cloud, pack, { localOnly }, cloudAnalystTimeoutMs));
       return { result, backend: 'cloud' };
     } catch (error) {
+      if (isAnalystPolicyRefusal(error) || isCallerCancellation(error)) throw error;
       // FALLBACK: any cloud failure (transport, HTTP, parse) drops to local.
       // The answer must never fail just because the cloud lane is down.
       const fallback = await observeImplicitAnalystLeg('local', localAnalystTimeoutMs, () =>
@@ -2996,6 +3039,38 @@ export async function probePrivateMatch(input: {
     return 'unknown';
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+// Recheck every source identity under the request's current scope before model dispatch.
+export async function guardSourceAnswerEvidence(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  request: SourceIndexAnswerRequest;
+  pack: EvidencePack;
+  corpusIds: readonly string[];
+}): Promise<void> {
+  const lanes = input.lanes(input.request);
+  for (const [index, candidate] of input.pack.candidates.entries()) {
+    const corpusId = input.corpusIds[index];
+    const adapter = corpusId ? lanes.adapters[corpusId] : undefined;
+    const provider = corpusId ? lanes.contentProviders[corpusId] as
+      (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }) => boolean }) | undefined : undefined;
+    let allowed = Boolean(corpusId && lanes.registry.get(corpusId)?.trustDomain === candidate.trustDomain && adapter && provider);
+    const hasContent = Boolean(candidate.chunks.length || candidate.tables?.length || candidate.facts?.length);
+    if (allowed && hasContent && adapter?.selectedItemServable) allowed = adapter.selectedItemServable(candidate.provenance.sourceItem);
+    // Metadata-only candidates remain usable, but their identity must still be
+    // visible under current tiers. Content-bearing candidates need content scope.
+    if (allowed) {
+      if (hasContent && provider?.contentServable) {
+        allowed = provider.contentServable({ provenance: candidate.provenance, trustDomain: candidate.trustDomain });
+      } else {
+        const content = await provider?.fetchLocalContent({ provenance: candidate.provenance, trustDomain: candidate.trustDomain, maxChars: 1 });
+        allowed = Boolean(content && (!hasContent || (!content.namesOnly && !content.contentPrivate && content.chunks.length))
+          && content.sensitivity.trustDomain === candidate.trustDomain
+          && content.sensitivity.trustTier === candidate.trustTier);
+      }
+    }
+    if (!allowed) throw new OperationError('source_index_policy_violation', 'Source evidence is no longer allowed.', 'Ask again under the current source policy.');
   }
 }
 

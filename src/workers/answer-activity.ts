@@ -1,3 +1,25 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+let localInferencePriority: AsyncLocalStorage<AnswerLeaseKind | 'maintenance'> | undefined;
+let localInferenceGuards: AsyncLocalStorage<readonly (() => Promise<void>)[]> | undefined;
+/** Provider-internal context, outside the frozen Analyst contract. A queued
+ * call repeats these live guards after waiting, immediately before dispatch. */
+export function runWithLocalInferenceGuard<T>(guard: () => Promise<void>, work: () => Promise<T>): Promise<T> {
+  localInferenceGuards ??= new AsyncLocalStorage();
+  return localInferenceGuards.run([...(localInferenceGuards?.getStore() ?? []), guard], work);
+}
+/** Applies at each shared model dispatch, including later synthesis/audit calls. */
+export function runBackgroundInference<T>(work: () => Promise<T>): Promise<T> {
+  localInferencePriority ??= new AsyncLocalStorage();
+  return localInferencePriority.run('background', work);
+}
+
+/** Classification dispatches precede automatic inbox inference on a shared model. */
+export function runClassificationInference<T>(work: () => Promise<T>): Promise<T> {
+  localInferencePriority ??= new AsyncLocalStorage();
+  return localInferencePriority.run('maintenance', work);
+}
+
 /**
  * Answers in flight on this worker (source answers, ChatGPT evidence
  * searches, private answer panel jobs). These leases coordinate owner and
@@ -149,13 +171,35 @@ export function localModelResourceKey(profile: { baseUrl?: string; model?: strin
 }
 
 export function createLocalModelActivity() {
+  const queues = new Map<string, { running: boolean; tasks: Array<{ priority: number; run: () => Promise<void> }> }>();
+  const dispatch = <T>(key: string, work: () => Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+    let queue = queues.get(key);
+    if (!queue) { queue = { running: false, tasks: [] }; queues.set(key, queue); }
+    const pending = queue;
+    const pump = () => {
+      if (pending.running) return;
+      const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best]!.priority ? index : best, 0);
+      const next = pending.tasks.splice(first, 1)[0];
+      if (!next) return;
+      pending.running = true;
+      void next.run().finally(() => { pending.running = false; pump(); });
+    };
+    const kind = localInferencePriority?.getStore() ?? 'owner';
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 2 : localInferencePriority?.getStore() === 'maintenance' ? 1 : 0, run: async () => {
+      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key).run(work)) : get(key).run(work))); } catch (error) { reject(error); }
+    } });
+    // Gather simultaneous dispatches before choosing owner-first.
+    queueMicrotask(pump);
+  });
   const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
   const busyListeners = new Map<string, Set<() => void>>();
   const get = (key: string) => {
     let activity = resources.get(key);
     if (!activity) {
       activity = createAnswerActivity(() => {
-        for (const listener of busyListeners.get(key) ?? []) listener();
+        if (localInferencePriority?.getStore() !== 'background' && localInferencePriority?.getStore() !== 'maintenance') {
+          for (const listener of busyListeners.get(key) ?? []) listener();
+        }
       });
       resources.set(key, activity);
     }
@@ -171,8 +215,22 @@ export function createLocalModelActivity() {
       return () => { listeners.delete(listener); };
     },
     onIdle: (key: string, listener: () => void) => get(key).onInteractiveIdle(listener),
-    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T): T {
-      return { ...model, complete: request => get(key).run(() => model.complete(request)) };
+    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T, options: { serialize?: boolean } = {}): T {
+      return { ...model, complete: request => {
+        const guards = localInferenceGuards?.getStore() ?? [];
+        const run = options.serialize === false ? <R>(work: () => Promise<R>) => get(key).run(work) : <R>(work: () => Promise<R>) => dispatch(key, work);
+        return run(async () => {
+          request.signal?.throwIfAborted();
+          for (const guard of guards) {
+            try { await guard(); } catch (error) {
+              request.signal?.throwIfAborted();
+              throw error;
+            }
+          }
+          request.signal?.throwIfAborted();
+          return model.complete(request);
+        });
+      } };
     },
   };
 }

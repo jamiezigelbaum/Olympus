@@ -14838,7 +14838,7 @@ function openRejudgeQuestionOf(row) {
   return { decision: stored.decision, keepVisible: stored.keepVisible === true };
 }
 function tierLedgerIdentityKey(identity) {
-  return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
+  return TIER_LEDGER_IDENTITY_FIELDS.map((field) => identity[field] ?? "").join("\x00");
 }
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
@@ -15365,7 +15365,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -15393,6 +15393,7 @@ var init_tier_ledger = __esm(() => {
       this.name = "TierLedgerSecretsRollbackRefusedError";
     }
   };
+  TIER_LEDGER_IDENTITY_FIELDS = ["provider", "accountScope", "providerConversationId", "providerItemId"];
   TRUST_DOMAIN_RANK = {
     public_safe: 0,
     internal: 1,
@@ -20924,7 +20925,7 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf) {
+    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false) {
       if (rows.length === 0)
         return [];
       let copies;
@@ -20933,7 +20934,9 @@ var init_local_index = __esm(() => {
         if (!ledger || !ledger.corpusHasCopies(this.corpusId))
           return [...rows];
         copies = ledger.copiesForMany(rows.map(identityOf));
-      } catch {
+      } catch (error) {
+        if (throwOnUnavailable)
+          throw error;
         return [];
       }
       return rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row)));
@@ -25615,7 +25618,7 @@ var init_local_index = __esm(() => {
         return false;
       }
     }
-    contentServedNow(localItemId) {
+    contentServedNow(localItemId, throwOnUnavailable = false) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
       FROM items WHERE local_item_id = ? AND tombstoned = 0
@@ -25639,7 +25642,7 @@ var init_local_index = __esm(() => {
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       };
-      return this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+      return this.tierVisibleRows([identity], (entry) => entry, () => "content", throwOnUnavailable).length > 0;
     }
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
@@ -29183,6 +29186,12 @@ var init_dropbox2 = __esm(() => {
   init_credential_broker();
   init_approved_scope_filter();
 });
+// src/workers/answer-activity.ts
+var DEFAULT_ANSWER_LEASE_MS;
+var init_answer_activity = __esm(() => {
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+});
+
 // src/core/opsec.ts
 var init_opsec = __esm(() => {
   init_secret_patterns();
@@ -29645,6 +29654,7 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();
   init_evidence_pack();
@@ -29694,1026 +29704,177 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
-// src/workers/dropbox-files/open-target.ts
-var OPENABLE_EXTENSIONS;
-var init_open_target = __esm(() => {
-  OPENABLE_EXTENSIONS = new Set([
-    "pdf",
-    "txt",
-    "md",
-    "markdown",
-    "rtf",
-    "csv",
-    "tsv",
-    "epub",
-    "doc",
-    "docx",
-    "xls",
-    "xlsx",
-    "ppt",
-    "pptx",
-    "odt",
-    "ods",
-    "odp",
-    "pages",
-    "numbers",
-    "key",
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "heic",
-    "heif",
-    "tif",
-    "tiff",
-    "bmp",
-    "webp",
-    "mp3",
-    "m4a",
-    "aac",
-    "wav",
-    "aiff",
-    "aif",
-    "flac",
-    "mp4",
-    "m4v",
-    "mov"
+// src/core/google-handle-compatibility.ts
+var init_google_handle_compatibility = () => {};
+
+// src/core/google-signin-full-copy.ts
+var GOOGLE_SIGNIN_FULL_SENTENCE = "Google sign-in is full for the moment. We're working on it. For now, you can still connect Google by using your own Google app.", GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE;
+var init_google_signin_full_copy = __esm(() => {
+  GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE = `${GOOGLE_SIGNIN_FULL_SENTENCE} Open Olympus on your computer to set it up.`;
+});
+
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+});
+
+// src/core/ingestion-throughput.ts
+var init_ingestion_throughput = __esm(() => {
+  init_operation_error();
+});
+// src/workers/dashboard/scheduler-markers.ts
+var OPERATOR_PAUSED_SCHEDULER_MARKERS;
+var init_scheduler_markers = __esm(() => {
+  OPERATOR_PAUSED_SCHEDULER_MARKERS = new Set([
+    "daily_api_request_guard",
+    "daily_resource_read_guard",
+    "daily_cost_guard",
+    "readwise_daily_api_request_guard",
+    "gmail_daily_api_request_guard",
+    "google_drive_daily_api_request_guard",
+    "head_api_request_reserve_guard",
+    "head_resource_read_reserve_guard",
+    "head_cost_reserve_guard",
+    "provider_rate_limit"
   ]);
 });
 
-// src/core/linux-desktop-opener.ts
-import { accessSync as accessSync2, constants as fsConstants2, lstatSync as lstatSync7, realpathSync as realpathSync3 } from "node:fs";
-import { execFile, spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
-import { randomBytes as randomBytes2 } from "node:crypto";
-import { dirname as dirname19, extname, isAbsolute as isAbsolute8, join as join21 } from "node:path";
-import { pathToFileURL as pathToFileURL2 } from "node:url";
-function linuxGraphicalSessionReadiness(dependencies = {}) {
-  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
-  const trustExecutable = dependencies.trustExecutable ?? isTrustedExecutable;
-  if (!absoluteExecutables(executables) || !trustExecutable(executables.systemctl)) {
-    return { ready: false, reason: "untrusted_systemctl" };
-  }
-  const runSync = dependencies.runSync ?? runCommandSync;
-  const active = runSync([executables.systemctl, "--user", "is-active", "graphical-session.target"], COMMAND_TIMEOUT_MS);
-  if (active.status !== 0 || active.timedOut === true || active.stdout.trim() !== "active") {
-    return { ready: false, reason: "inactive_graphical_session" };
-  }
-  const shown = runSync([executables.systemctl, "--user", "show-environment"], COMMAND_TIMEOUT_MS);
-  if (shown.status !== 0 || shown.timedOut === true) {
-    return { ready: false, reason: "manager_environment_unavailable" };
-  }
-  const manager = parseManagerEnvironment(shown.stdout);
-  const uid = dependencies.uid ?? (typeof process.getuid === "function" ? process.getuid() : -1);
-  const inspectPath = dependencies.inspectPath ?? inspectLinuxPath;
-  const runtime = manager.XDG_RUNTIME_DIR;
-  if (!runtime || !isAbsolute8(runtime) || runtime.includes("\x00") || runtime.includes(`
-`) || runtime.includes("\r")) {
-    return { ready: false, reason: "unsafe_runtime_directory" };
-  }
-  const runtimeInfo = inspectPath(runtime);
-  const resolveRealpath = dependencies.realpath ?? resolvedRealpath;
-  if (resolveRealpath(runtime) !== runtime || !runtimeInfo || runtimeInfo.symbolicLink || runtimeInfo.kind !== "directory" || runtimeInfo.uid !== uid || (runtimeInfo.mode & 63) !== 0) {
-    return { ready: false, reason: "unsafe_runtime_directory" };
-  }
-  const baseEnvironment = sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath);
-  const wayland = manager.WAYLAND_DISPLAY;
-  if (wayland && /^[A-Za-z0-9_.-]{1,128}$/.test(wayland)) {
-    const socket = join21(runtime, wayland);
-    const socketInfo = inspectPath(socket);
-    if (resolveRealpath(socket) === socket && socketInfo && !socketInfo.symbolicLink && socketInfo.kind === "socket" && socketInfo.uid === uid) {
-      return {
-        ready: true,
-        kind: "wayland",
-        environment: { ...baseEnvironment, XDG_RUNTIME_DIR: runtime, WAYLAND_DISPLAY: wayland },
-        displaySocket: socket
-      };
-    }
-  }
-  const display = manager.DISPLAY;
-  const displayMatch = display?.match(/^(?:(?:unix)?)(?::)(\d{1,4})(?:\.\d+)?$/);
-  if (display && displayMatch) {
-    const socket = `/tmp/.X11-unix/X${Number(displayMatch[1])}`;
-    const socketInfo = inspectPath(socket);
-    if (resolveRealpath(socket) === socket && socketInfo && !socketInfo.symbolicLink && socketInfo.kind === "socket" && (socketInfo.uid === uid || socketInfo.uid === 0)) {
-      return {
-        ready: true,
-        kind: "x11",
-        environment: { ...baseEnvironment, XDG_RUNTIME_DIR: runtime, DISPLAY: display },
-        displaySocket: socket
-      };
-    }
-  }
-  return { ready: false, reason: "stale_display" };
-}
-function isActiveLinuxScope(output, scopeUnit) {
-  if (!/^olympus-open-[a-z0-9-]{1,80}$/.test(scopeUnit))
-    return false;
-  const fields = new Map;
-  for (const line of output.trim().split(/\r?\n/)) {
-    const separator = line.indexOf("=");
-    if (separator <= 0)
-      continue;
-    fields.set(line.slice(0, separator), line.slice(separator + 1));
-  }
-  const controlGroup = fields.get("ControlGroup");
-  return fields.get("ActiveState") === "active" && typeof controlGroup === "string" && controlGroup.startsWith("/") && controlGroup.endsWith(`/${scopeUnit}.scope`) && !/[\0\r\n]/.test(controlGroup);
-}
-function parseManagerEnvironment(output) {
-  const allowed = new Set([
-    "XDG_RUNTIME_DIR",
-    "WAYLAND_DISPLAY",
-    "DISPLAY",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "XAUTHORITY",
-    "XDG_CURRENT_DESKTOP",
-    "XDG_SESSION_DESKTOP",
-    "XDG_SESSION_TYPE",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE"
-  ]);
-  const parsed = {};
-  for (const line of output.split(`
-`)) {
-    const separator = line.indexOf("=");
-    if (separator <= 0)
-      continue;
-    const key2 = line.slice(0, separator);
-    const value = line.slice(separator + 1);
-    if (allowed.has(key2) && value.length <= 4096 && !/[\0\r\n]/.test(value))
-      parsed[key2] = value;
-  }
-  return parsed;
-}
-function sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath) {
-  const environment = { PATH: "/usr/bin:/bin" };
-  const safeText = /^(?:[A-Za-z0-9_.@+,:/ -]){1,512}$/;
-  for (const key2 of ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "XDG_SESSION_TYPE", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE"]) {
-    const value = manager[key2];
-    if (value && safeText.test(value))
-      environment[key2] = value;
-  }
-  const home = manager.HOME;
-  if (home && isAbsolute8(home) && !/[\0\r\n]/.test(home))
-    environment.HOME = home;
-  const bus = manager.DBUS_SESSION_BUS_ADDRESS;
-  if (bus === `unix:path=${join21(runtime, "bus")}`)
-    environment.DBUS_SESSION_BUS_ADDRESS = bus;
-  const authority = manager.XAUTHORITY;
-  if (authority && isAbsolute8(authority)) {
-    const info = inspectPath(authority);
-    if (info && !info.symbolicLink && info.kind === "file" && info.uid === uid)
-      environment.XAUTHORITY = authority;
-  }
-  return environment;
-}
-function inspectLinuxPath(path) {
-  try {
-    const stat3 = lstatSync7(path);
-    return {
-      kind: stat3.isDirectory() ? "directory" : stat3.isFile() ? "file" : stat3.isSocket() ? "socket" : "other",
-      uid: stat3.uid,
-      mode: stat3.mode,
-      symbolicLink: stat3.isSymbolicLink()
-    };
-  } catch {
-    return;
-  }
-}
-function resolvedRealpath(path) {
-  try {
-    return realpathSync3.native(path);
-  } catch {
-    return;
-  }
-}
-function isTrustedExecutable(path) {
-  if (!isAbsolute8(path))
-    return false;
-  try {
-    accessSync2(path, fsConstants2.X_OK);
-    const stat3 = lstatSync7(path);
-    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
-    return stat3.isFile() && !stat3.isSymbolicLink() && (stat3.uid === 0 || stat3.uid === uid) && (stat3.mode & 18) === 0;
-  } catch {
-    return false;
-  }
-}
-function absoluteExecutables(executables) {
-  return Object.values(executables).every((path) => isAbsolute8(path) && !/[\0\r\n]/.test(path));
-}
-function runCommandSync(argv, timeoutMs) {
-  const result = spawnSync3(argv[0], argv.slice(1), { encoding: "utf8", timeout: timeoutMs, maxBuffer: MAX_COMMAND_OUTPUT });
-  return {
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    ...result.error && result.error.code === "ETIMEDOUT" ? { timedOut: true } : {}
-  };
-}
-function runCommand2(argv, options) {
-  return new Promise((resolve7) => {
-    execFile(argv[0], argv.slice(1), {
-      encoding: "utf8",
-      timeout: options.timeoutMs,
-      maxBuffer: MAX_COMMAND_OUTPUT,
-      env: { ...options.env },
-      windowsHide: true
-    }, (error, stdout, stderr) => {
-      const failure = error;
-      const status = typeof failure?.code === "number" ? failure.code : failure ? null : 0;
-      resolve7({ status, stdout, stderr, ...failure?.killed === true ? { timedOut: true } : {} });
-    });
-  });
-}
-function launchInUserScope(argv, options) {
-  return new Promise((resolve7) => {
-    let settled = false;
-    let exited = false;
-    let overallTimer;
-    const child = spawn2(argv[0], argv.slice(1), {
-      detached: true,
-      stdio: "ignore",
-      env: { ...options.env },
-      windowsHide: true
-    });
-    const finish = (result) => {
-      if (settled)
-        return;
-      settled = true;
-      if (overallTimer)
-        clearTimeout(overallTimer);
-      child.unref();
-      resolve7(result);
-    };
-    child.once("error", (error) => finish({ established: false, stderr: error.message }));
-    child.once("exit", (code) => {
-      exited = true;
-      finish({ established: code === 0, stderr: "" });
-    });
-    const verifyScope = async () => {
-      if (settled || exited)
-        return;
-      const shown = await runCommand2([
-        options.systemctl,
-        "--user",
-        "show",
-        `${options.scopeUnit}.scope`,
-        "--property=ActiveState",
-        "--property=ControlGroup"
-      ], { timeoutMs: COMMAND_TIMEOUT_MS, env: options.env });
-      if (settled || exited)
-        return;
-      if (shown.status === 0 && shown.timedOut !== true && isActiveLinuxScope(shown.stdout, options.scopeUnit)) {
-        finish({ established: true, stderr: "" });
-        return;
-      }
-      const retry = setTimeout(() => {
-        verifyScope();
-      }, 50);
-      retry.unref();
-    };
-    child.once("spawn", () => {
-      verifyScope();
-    });
-    overallTimer = setTimeout(() => {
-      finish({ established: false, stderr: "systemd scope was not confirmed before the launch deadline" });
-    }, options.observeMs);
-    overallTimer.unref();
-  });
-}
-function mime(...values) {
-  return new Set(values);
-}
-async function openLinuxOwnerTicketFile(path, dependencies = {}) {
-  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
-  const trusted = dependencies.trustExecutable ?? isTrustedExecutable;
-  if (![executables.systemctl, executables.systemdRun, executables.xdgOpen].every(trusted))
-    throw new Error("Trusted desktop opener unavailable.");
-  const readiness = dependencies.readiness?.() ?? linuxGraphicalSessionReadiness(dependencies);
-  if (!readiness.ready)
-    throw new Error("No live graphical session.");
-  const runtime = readiness.environment.XDG_RUNTIME_DIR;
-  if (!runtime || dirname19(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname19(path).length + 1)))
-    throw new Error("Invalid owner ticket path.");
-  const stat3 = lstatSync7(path);
-  const parent = lstatSync7(dirname19(path));
-  const uid = dependencies.uid ?? process.getuid?.();
-  if (realpathSync3(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
-    throw new Error("Unsafe owner ticket file.");
-  const dispatch = async (opener) => {
-    const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
-    const result = await (dependencies.launch ?? launchInUserScope)([executables.systemdRun, "--user", "--scope", `--unit=${scopeUnit}`, "--", ...opener], { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl });
-    return result.established;
-  };
-  if (trusted(executables.omarchyWebApp) && await dispatch([executables.omarchyWebApp, pathToFileURL2(path).href]))
-    return;
-  if (!await dispatch([executables.xdgOpen, path]))
-    throw new Error("Desktop browser did not open the owner ticket.");
-}
-var SYSTEMCTL = "/usr/bin/systemctl", SYSTEMD_RUN = "/usr/bin/systemd-run", XDG_OPEN = "/usr/bin/xdg-open", XDG_MIME = "/usr/bin/xdg-mime", FILE = "/usr/bin/file", OMARCHY_WEB_APP = "/usr/bin/omarchy-launch-webapp", COMMAND_TIMEOUT_MS = 3000, LAUNCH_OBSERVATION_MS = 3000, MAX_COMMAND_OUTPUT = 65536, DEFAULT_EXECUTABLES, EXPECTED_MIME_TYPES;
-var init_linux_desktop_opener = __esm(() => {
-  init_open_target();
-  DEFAULT_EXECUTABLES = {
-    systemctl: SYSTEMCTL,
-    systemdRun: SYSTEMD_RUN,
-    xdgOpen: XDG_OPEN,
-    xdgMime: XDG_MIME,
-    file: FILE,
-    omarchyWebApp: OMARCHY_WEB_APP
-  };
-  EXPECTED_MIME_TYPES = Object.freeze({
-    pdf: mime("application/pdf"),
-    txt: mime("text/plain"),
-    md: mime("text/markdown", "text/plain"),
-    markdown: mime("text/markdown", "text/plain"),
-    rtf: mime("application/rtf", "text/rtf"),
-    csv: mime("text/csv", "text/plain"),
-    tsv: mime("text/tab-separated-values", "text/plain"),
-    epub: mime("application/epub+zip"),
-    doc: mime("application/msword"),
-    docx: mime("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-    xls: mime("application/vnd.ms-excel"),
-    xlsx: mime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-    ppt: mime("application/vnd.ms-powerpoint"),
-    pptx: mime("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
-    odt: mime("application/vnd.oasis.opendocument.text"),
-    ods: mime("application/vnd.oasis.opendocument.spreadsheet"),
-    odp: mime("application/vnd.oasis.opendocument.presentation"),
-    pages: mime("application/vnd.apple.pages", "application/x-iwork-pages-sffpages"),
-    numbers: mime("application/vnd.apple.numbers", "application/x-iwork-numbers-sffnumbers"),
-    key: mime("application/vnd.apple.keynote", "application/x-iwork-keynote-sffkey"),
-    png: mime("image/png"),
-    jpg: mime("image/jpeg"),
-    jpeg: mime("image/jpeg"),
-    gif: mime("image/gif"),
-    heic: mime("image/heic", "image/heif"),
-    heif: mime("image/heif", "image/heic"),
-    tif: mime("image/tiff"),
-    tiff: mime("image/tiff"),
-    bmp: mime("image/bmp", "image/x-ms-bmp"),
-    webp: mime("image/webp"),
-    mp3: mime("audio/mpeg"),
-    m4a: mime("audio/mp4", "audio/x-m4a"),
-    aac: mime("audio/aac", "audio/x-aac"),
-    wav: mime("audio/wav", "audio/x-wav"),
-    aiff: mime("audio/aiff", "audio/x-aiff"),
-    aif: mime("audio/aiff", "audio/x-aiff"),
-    flac: mime("audio/flac", "audio/x-flac"),
-    mp4: mime("video/mp4"),
-    m4v: mime("video/x-m4v", "video/mp4"),
-    mov: mime("video/quicktime")
-  });
-  for (const extension of OPENABLE_EXTENSIONS) {
-    if (!EXPECTED_MIME_TYPES[extension])
-      throw new Error(`Missing Linux MIME contract for .${extension}`);
-  }
+// src/workers/dashboard/source-failure.ts
+var SOURCE_FAILURE_KINDS, KIND_SET;
+var init_source_failure = __esm(() => {
+  init_scheduler_markers();
+  SOURCE_FAILURE_KINDS = [
+    "sign_in",
+    "network",
+    "timeout",
+    "rate_limited",
+    "provider_busy",
+    "provider_refused",
+    "daily_limit",
+    "search_model_unavailable",
+    "reader_unavailable",
+    "busy_here",
+    "setup",
+    "not_started",
+    "unknown"
+  ];
+  KIND_SET = new Set(SOURCE_FAILURE_KINDS);
 });
 
-// src/core/worker-transport.ts
-import { lstatSync as lstatSync8, mkdirSync as mkdirSync13, realpathSync as realpathSync4, chmodSync as chmodSync6 } from "node:fs";
-import { dirname as dirname20, isAbsolute as isAbsolute9, join as join22, normalize as normalize4, parse } from "node:path";
-function ownerId(options) {
-  const uid = options.uid ?? process.getuid?.();
-  if (uid === undefined)
-    throw new Error("Worker socket requires a Unix owner.");
-  return uid;
-}
-function validateDirectory(path, uid, privateMode) {
-  if (!isAbsolute9(path) || normalize4(path) !== path || /[\x00-\x1f\x7f]/.test(path))
-    throw new Error("Unsafe worker socket directory.");
-  let current2 = parse(path).root;
-  for (const part of path.slice(current2.length).split("/").filter(Boolean)) {
-    current2 = join22(current2, part);
-    const stat4 = lstatSync8(current2);
-    if (!stat4.isDirectory() || stat4.isSymbolicLink() || stat4.uid !== uid && stat4.uid !== 0)
-      throw new Error("Unsafe worker socket ancestor.");
-    if (stat4.mode & 18 && !(stat4.uid === 0 && stat4.mode & 512))
-      throw new Error("Writable worker socket ancestor.");
-  }
-  const stat3 = lstatSync8(path);
-  if (privateMode && (stat3.uid !== uid || (stat3.mode & 511) !== 448))
-    throw new Error("Worker runtime directory must be owner-owned and 0700.");
-  if (realpathSync4(path) !== path)
-    throw new Error("Worker socket directory must not contain symlinks.");
-}
-function workerSocketPath(options = {}) {
-  if ((options.platform ?? process.platform) !== "linux")
-    return;
-  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
-  const runtime = layout.runtimeHome;
-  if (!runtime)
-    throw new Error("Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.");
-  validateDirectory(runtime, ownerId(options), true);
-  if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime))
-    throw new Error("XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.");
-  const path = layout.workerSocketPath;
-  if (Buffer.byteLength(path) > 107)
-    throw new Error("Worker Unix socket path exceeds the Linux limit.");
-  return path;
-}
-function validateWorkerSocketDirectory(options = {}) {
-  const path = workerSocketPath(options);
-  if (!path)
-    return;
-  validateDirectory(dirname20(path), ownerId(options), true);
-  return path;
-}
-function validateWorkerSocket(options = {}) {
-  const path = validateWorkerSocketDirectory(options);
-  if (!path)
-    return;
-  const uid = ownerId(options);
-  const stat3 = lstatSync8(path);
-  if (!stat3.isSocket() || stat3.uid !== uid || (stat3.mode & 511) !== 384)
-    throw new Error("Worker socket must be owner-owned and 0600.");
-  return path;
-}
-var init_worker_transport = __esm(() => {
+// src/workers/dashboard/answer-ready-coverage.ts
+var init_answer_ready_coverage = () => {};
+
+// src/workers/dashboard/phases.ts
+var init_phases = __esm(() => {
+  init_source_dashboard();
+  init_vocabulary();
+  init_vocabulary();
+});
+
+// src/workers/credential-health.ts
+var ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
+var init_credential_health = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
+  init_connected_handles();
+  init_credential_broker();
+  ROTATING_PROVIDERS = new Set(["x"]);
+  PASSIVE_EVIDENCE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+  CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS = 28 * 60 * 60 * 1000;
+  CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
+  CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
 
-// src/workers/remote-request-body.ts
-async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES, options = {}) {
-  const declared = request.headers.get("Content-Length");
-  if (declared !== null) {
-    const length = Number(declared);
-    if (Number.isFinite(length) && length > maxBytes)
-      return { ok: false, reason: "too_large" };
-  }
-  if (!request.body)
-    return { ok: true, text: "" };
-  const reader = request.body.getReader();
-  const chunks = [];
-  let total = 0;
-  let timer;
-  const deadline = new AbortController;
-  const timeout = new Error("request body timeout");
-  if (options.deadlineMs !== undefined)
-    timer = setTimeout(() => deadline.abort(timeout), options.deadlineMs);
-  try {
-    for (;; ) {
-      const { done, value } = options.deadlineMs === undefined ? await reader.read() : await untilAborted(reader.read(), deadline.signal);
-      if (done)
-        break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => {
-          return;
-        });
-        return { ok: false, reason: "too_large" };
+// src/core/embedding-cost-estimates.ts
+var init_embedding_cost_estimates = () => {};
+
+// src/core/invocation-provenance.ts
+function sourceInvocationProvenance(value) {
+  return value === "operator" ? "operator" : "scheduled";
+}
+
+// src/core/source-scope-approval.ts
+var init_source_scope_approval = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+});
+
+// src/core/mail-source-scope.ts
+function gmailAfterBound(input) {
+  const cutoffSeconds = input.contentAfterMs !== undefined ? Math.floor(input.contentAfterMs / 1000) - 1 : undefined;
+  const watermarkSeconds = input.watermarkMs !== undefined ? Math.floor(input.watermarkMs / 1000) : undefined;
+  const seconds = cutoffSeconds === undefined ? watermarkSeconds : watermarkSeconds === undefined ? cutoffSeconds : Math.max(cutoffSeconds, watermarkSeconds);
+  return seconds !== undefined && seconds > 0 ? `after:${seconds}` : undefined;
+}
+function gmailBeforeBound(contentAfterMs) {
+  return `before:${Math.floor(contentAfterMs / 1000)}`;
+}
+var GMAIL_SCOPE_SENDER_SAMPLE = 100, GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
+var init_mail_source_scope = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+  init_source_scope_approval();
+  GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
+});
+
+// src/workers/email-source/ingest-filter.ts
+function classifyEmailIngestSkip(candidate, options = {}) {
+  const skipOtp = options.skipOtp ?? true;
+  if (skipOtp && isOtpMail(candidate))
+    return "otp";
+  const skipCategories = options.skipCategories ?? DEFAULT_SKIP_CATEGORIES;
+  if (skipCategories.length > 0 && candidate.labels) {
+    const skip = new Set(skipCategories.map((label) => label.trim().toUpperCase()).filter(Boolean));
+    for (const label of candidate.labels) {
+      if (skip.has(label.toUpperCase())) {
+        return `category:${label.toUpperCase()}`;
       }
-      chunks.push(value);
     }
-  } catch (error) {
-    await reader.cancel().catch(() => {
-      return;
-    });
-    return { ok: false, reason: error === timeout ? "timeout" : "unreadable" };
-  } finally {
-    clearTimeout(timer);
   }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return { ok: true, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
-  } catch {
-    return { ok: false, reason: "unreadable" };
-  }
-}
-var REMOTE_REQUEST_MAX_BODY_BYTES;
-var init_remote_request_body = __esm(() => {
-  init_http_timeout();
-  REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
-});
-
-// src/core/package-root.ts
-var init_package_root = () => {};
-
-// src/core/open-targets.ts
-function allOpenTargets() {
-  return [
-    { kind: "dashboard" },
-    { kind: "private_answers" },
-    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
-  ];
-}
-function openTargetToken(target) {
-  if (target.kind === "private_answers")
-    return "page.private";
-  if (target.kind === "connect")
-    return `connect.${target.source}`;
-  if (target.kind === "fix")
-    return `fix.${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable.${target.source}`;
   return;
 }
-function openTargetTokenPattern() {
-  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function isKeysOpenTarget(target) {
-  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
-}
-function keysOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function privateAnswersOpenTargetTokenPattern() {
-  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
-}
-function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
-}
-function panelOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
-var init_open_targets = __esm(() => {
-  OPEN_CONNECT_SOURCES = {
-    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
-    readwise: { sourceId: "readwise.library", label: "Readwise" },
-    telegram: { sourceId: "telegram.messages", label: "Telegram" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
-  OPEN_UNREADABLE_SOURCES = {
-    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
-    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-});
-
-// src/core/dashboard-launch.ts
-import { createHash as createHash17, randomBytes as randomBytes4 } from "node:crypto";
-
-class DashboardLaunchTickets {
-  tickets = new Map;
-  now;
-  maxTickets;
-  constructor(options = {}) {
-    this.now = options.now ?? Date.now;
-    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
-    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
-      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
-    }
+function isOtpMail(candidate) {
+  if (candidate.subject && OTP_SUBJECT.test(candidate.subject))
+    return true;
+  const body = candidate.body?.trim();
+  if (body && body.length > 0 && body.length <= OTP_BODY_MAX_CHARS && OTP_BODY_CODE.test(body) && OTP_BODY_HINT.test(body)) {
+    return true;
   }
-  mint(origin, options = {}) {
-    const nowMs = this.now();
-    this.prune(nowMs);
-    if (options.remote === true) {
-      for (const [ticket2, record] of this.tickets) {
-        if (record.remote)
-          this.tickets.delete(ticket2);
-      }
-    }
-    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
-    const expiresAtMs = nowMs + ttlSeconds * 1000;
-    const ticket = randomBytes4(32).toString("base64url");
-    this.tickets.set(ticket, {
-      expiresAtMs,
-      originTag: dashboardLaunchOriginTag(origin),
-      ...options.remote === true ? { remote: true } : {}
-    });
-    while (this.tickets.size > this.maxTickets) {
-      const oldest = this.tickets.keys().next();
-      if (oldest.done)
-        break;
-      this.tickets.delete(oldest.value);
-    }
-    return ticket;
-  }
-  consume(ticket, origin) {
-    if (!isWellFormedDashboardLaunchTicket(ticket))
-      return { status: "unknown" };
-    const record = this.tickets.get(ticket);
-    if (!record)
-      return { status: "unknown" };
-    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
-      return { status: "origin_mismatch" };
-    }
-    this.tickets.delete(ticket);
-    if (record.expiresAtMs <= this.now())
-      return { status: "expired" };
-    return { status: "ok", ticket };
-  }
-  get size() {
-    return this.tickets.size;
-  }
-  prune(nowMs) {
-    for (const [ticket, record] of this.tickets) {
-      if (record.expiresAtMs <= nowMs)
-        this.tickets.delete(ticket);
-    }
-  }
+  return false;
 }
-function dashboardLaunchOriginTag(origin) {
-  return createHash17("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
-}
-function isWellFormedDashboardLaunchTicket(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
-}
-var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_PAGE_HTML;
-var init_dashboard_launch = __esm(() => {
-  init_open_targets();
-  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
-    <title>Olympus</title>
-    <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
-      main { max-width: 32rem; margin: 0 auto; }
-      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
-      p { margin: 0; color: #a9a4ae; }
-      a { color: #cfc7ff; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
-    </main>
-    <script>
-      (function () {
-        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
-        var OPEN = /${openTargetTokenPattern()}/;
-        var KEYS = /${keysOpenTargetTokenPattern()}/;
-        var PANEL = /${panelOpenTargetTokenPattern()}/;
-        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
-        var status = document.getElementById('status');
-        var open = '';
-        function take() {
-          var hash = window.location.hash.slice(1);
-          // Clear even malformed fragments before parsing or making a request.
-          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
-          catch (e) { return ''; }
-          var params = new URLSearchParams(hash);
-          // Where to land: one of a closed list, or the plain dashboard.
-          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
-          if (OPEN.test(wanted)) open = wanted;
-          return params.get(KEY) || '';
-        }
-        var ticket = take();
-        if (!ticket) {
-          status.textContent = 'This link is missing its opening ticket.';
-          return;
-        }
-        fetch('/dashboard/control/launch/redeem', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticket: ticket })
-        }).then(function (response) {
-          if (response.ok) {
-            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
-            // sheets and Models live; it only opens a panel there, never submits anything.
-            // A panel target (See why on one source) lands on the dashboard there.
-            // Private answers lands on that page, carrying nothing.
-            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open)
-              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PRIVATE.test(open) ? '/dashboard?private-answers' : '/dashboard');
-            return;
-          }
-          status.textContent = response.status === 403
-            ? 'This opening link is no longer valid.'
-            : 'Opening failed.';
-        }).catch(function () {
-          status.textContent = 'Opening failed.';
-        });
-      }());
-    </script>
-  </body>
-</html>
-`;
-});
-
-// src/core/dashboard-opening.ts
-var init_dashboard_opening = __esm(() => {
-  init_worker_transport();
-  init_dashboard_launch();
-  init_open_targets();
-  init_operation_error();
-});
-
-// src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+function parseEmailIngestFilterOptionsFromEnv(env = process.env) {
+  const categoriesRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_CATEGORIES;
+  const skipOtpRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_OTP;
   return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
+    ...categoriesRaw !== undefined ? { skipCategories: categoriesRaw.split(",").map((label) => label.trim()).filter(Boolean) } : {},
+    ...skipOtpRaw !== undefined ? { skipOtp: skipOtpRaw === "true" } : {}
   };
 }
-function ggmlOrgAsrFile(name, bytes, sha256) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
-var init_manifest2 = __esm(() => {
-  GIB = 1024 ** 3;
-  QWEN35_2B = {
-    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-    displayName: "Qwen3.5 2B",
-    sizeClass: "small",
-    baseRepository: "Qwen/Qwen3.5-2B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-2B-GGUF",
-    revision: QWEN35_2B_REVISION,
-    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_4B = {
-    modelId: "qwen3.5-4b-q4_k_m-e87f176",
-    displayName: "Qwen3.5 4B",
-    sizeClass: "standard",
-    baseRepository: "Qwen/Qwen3.5-4B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-4B-GGUF",
-    revision: QWEN35_4B_REVISION,
-    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_9B = {
-    modelId: "qwen3.5-9b-q4_k_m-3885219",
-    displayName: "Qwen3.5 9B",
-    sizeClass: "large",
-    baseRepository: "Qwen/Qwen3.5-9B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-9B-GGUF",
-    revision: QWEN35_9B_REVISION,
-    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-  LLAMA_SERVER_RUNTIME = {
-    release: LLAMA_CPP_RELEASE,
-    license: "MIT",
-    archives: [
-      {
-        platform: "darwin-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        bytes: 11827796,
-        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-        gpu: true
-      },
-      {
-        platform: "linux-x64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        bytes: 17544875,
-        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-        gpu: false
-      },
-      {
-        platform: "linux-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        bytes: 13590823,
-        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-        gpu: false
-      }
-    ]
-  };
-  QWEN3_ASR_06B = {
-    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-    displayName: "Qwen3-ASR 0.6B",
-    baseRepository: "Qwen/Qwen3-ASR-0.6B",
-    license: "Apache-2.0",
-    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-    revision: QWEN3_ASR_06B_REVISION,
-    files: [
-      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-    ],
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 4096
-  };
-});
-
-// src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
-var init_install = __esm(() => {
-  init_pinned_download();
-  init_linux_engine_layout();
-  init_manifest2();
-  STALE_LOCK_MS2 = 60 * 60000;
-  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-  SPACE_BACKOFF_MS = 15 * 60000;
-  DOWNLOAD_STALL_MS2 = 2 * 60000;
-  VERIFY_TIMEOUT_MS = 15 * 60000;
-  EXTRACT_TIMEOUT_MS = 5 * 60000;
-});
-
-// src/workers/source-index/built-in-reasoning/server.ts
-var init_server = __esm(() => {
-  init_model_transport();
-});
-
-// src/core/analyst-built-in.ts
-var GAP_GENERIC_WORDS, utf82;
-var init_analyst_built_in = __esm(() => {
-  init_analyst();
-  init_operation_error();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_install();
-  init_manifest2();
-  init_server();
-  GAP_GENERIC_WORDS = new Set([
-    "the",
-    "and",
-    "for",
-    "are",
-    "was",
-    "were",
-    "with",
-    "from",
-    "that",
-    "this",
-    "these",
-    "those",
-    "not",
-    "any",
-    "all",
-    "its",
-    "their",
-    "there",
-    "which",
-    "what",
-    "when",
-    "where",
-    "who",
-    "whom",
-    "how",
-    "why",
-    "does",
-    "did",
-    "has",
-    "have",
-    "had",
-    "been",
-    "being",
-    "into",
-    "about",
-    "than",
-    "then",
-    "also",
-    "such",
-    "other",
-    "only",
-    "more",
-    "most",
-    "some",
-    "can",
-    "could",
-    "would",
-    "should",
-    "may",
-    "might",
-    "will",
-    "shall",
-    "but",
-    "nor",
-    "yet",
-    "per",
-    "via",
-    "each",
-    "your",
-    "you",
-    "user",
-    "his",
-    "her",
-    "our",
-    "they",
-    "them",
-    "one",
-    "out",
-    "over",
-    "under",
-    "between",
-    "within",
-    "specific",
-    "exact",
-    "precise",
-    "actual",
-    "value",
-    "values",
-    "level",
-    "levels",
-    "number",
-    "numbers",
-    "amount",
-    "detail",
-    "details",
-    "detailed",
-    "information",
-    "info",
-    "result",
-    "results",
-    "data",
-    "figure",
-    "figures",
-    "provided",
-    "provide",
-    "evidence",
-    "found",
-    "find",
-    "missing",
-    "available",
-    "unavailable",
-    "mentioned",
-    "mention",
-    "listed",
-    "list",
-    "given",
-    "give",
-    "stated",
-    "state",
-    "states",
-    "shown",
-    "show",
-    "shows",
-    "included",
-    "include",
-    "includes",
-    "contain",
-    "contains",
-    "contained",
-    "reported",
-    "report",
-    "reports",
-    "document",
-    "documents",
-    "item",
-    "items",
-    "text",
-    "source",
-    "sources",
-    "record",
-    "records",
-    "file",
-    "files",
-    "full",
-    "complete",
-    "entire",
-    "whole",
-    "unknown",
-    "unclear",
-    "unspecified",
-    "specified",
-    "answer",
-    "question",
-    "none",
-    "no",
-    "citations",
-    "citation",
-    "unanswered",
-    "sufficient",
-    "insufficient",
-    "claim",
-    "claims"
-  ]);
-  utf82 = new TextEncoder;
-});
-
-// src/core/engine-maintenance.ts
-var PROBE_OPTIONS, MAINTENANCE_OPTIONS;
-var init_engine_maintenance = __esm(() => {
-  init_file_lease();
-  PROBE_OPTIONS = {
-    acquireTimeoutMs: 1,
-    pollIntervalMs: 1,
-    staleAfterMs: Number.MAX_SAFE_INTEGER
-  };
-  MAINTENANCE_OPTIONS = {
-    staleAfterMs: Number.MAX_SAFE_INTEGER
-  };
+var DEFAULT_SKIP_CATEGORIES, OTP_SUBJECT, OTP_BODY_CODE, OTP_BODY_HINT, OTP_BODY_MAX_CHARS = 900;
+var init_ingest_filter = __esm(() => {
+  DEFAULT_SKIP_CATEGORIES = ["CATEGORY_PROMOTIONS"];
+  OTP_SUBJECT = new RegExp([
+    "verification code",
+    "security code",
+    "one[- ]?time (pass)?(word|code)",
+    "login code",
+    "sign[- ]?in code",
+    "access code",
+    "confirmation code",
+    "your (\\w+ )?code is",
+    "\\botp\\b",
+    "2fa code"
+  ].join("|"), "i");
+  OTP_BODY_CODE = /\b\d{4,8}\b/;
+  OTP_BODY_HINT = /\b(code|verification|expires? in|valid for)\b/i;
 });
 
 // src/workers/google-connectors/classification.ts
@@ -30735,98 +29896,6 @@ function metadataStringArray2(metadata, key2) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
-// src/workers/credential-broker/unpaired-sources.ts
-var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
-var init_unpaired_sources = __esm(() => {
-  init_atomic_file();
-  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-});
-
-// src/core/google-handle-compatibility.ts
-var init_google_handle_compatibility = () => {};
-
-// src/core/worker-service.ts
-var WORKER_LOG_TAIL_BYTES;
-var init_worker_service = __esm(() => {
-  init_linux_engine_layout();
-  init_atomic_file();
-  init_openclaw_executable();
-  init_operation_error();
-  init_worker_auth();
-  WORKER_LOG_TAIL_BYTES = 64 * 1024;
-});
-
-// src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
-var init_provider_account_identity = __esm(() => {
-  init_http_timeout();
-  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-    x: "https://api.x.com/2/users/me",
-    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-  };
-  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-});
-
-// src/core/source-account-binding.ts
-var init_source_account_binding = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_provider_account_identity();
-});
-
-// src/core/connect.ts
-var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
-var init_connect = __esm(() => {
-  init_owner_config_read();
-  init_linux_engine_layout();
-  init_google_handle_compatibility();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_secret_store();
-  init_worker_service();
-  init_http_timeout();
-  init_oauth_relay();
-  init_publisher_oauth_client();
-  init_connected_handles();
-  init_unpaired_sources();
-  init_credential_broker();
-  init_provider_account_identity();
-  init_source_account_binding();
-  DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
-  DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
-  OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  KNOWN_OAUTH_ERROR_CODES = new Set([
-    "invalid_request",
-    "invalid_client",
-    "invalid_grant",
-    "unauthorized_client",
-    "unsupported_grant_type",
-    "invalid_scope",
-    "access_denied",
-    "server_error",
-    "temporarily_unavailable",
-    "slow_down",
-    "expired_token",
-    "redirect_uri_mismatch"
-  ]);
-});
-
-// src/core/remote-open.ts
-var init_remote_open = __esm(() => {
-  init_linux_desktop_opener();
-  init_worker_transport();
-  init_open_targets();
-});
-
-// src/core/invocation-provenance.ts
-function sourceInvocationProvenance(value) {
-  return value === "operator" ? "operator" : "scheduled";
-}
-
 // src/workers/google-connectors/request-budget.ts
 var GoogleRequestBudgetError;
 var init_request_budget = __esm(() => {
@@ -30846,10 +29915,662 @@ var init_request_budget = __esm(() => {
   };
 });
 
-// src/workers/google-connectors/drive.ts
-import { createHash as createHash19 } from "node:crypto";
+// src/workers/google-connectors/gmail.ts
+import { createHash as createHash16 } from "node:crypto";
 import { homedir as homedir12 } from "node:os";
-import { join as join24 } from "node:path";
+import { join as join21 } from "node:path";
+
+class GoogleGmailSourceConnector {
+  id = GMAIL_PROVIDER;
+  family = "email";
+  credentialBroker;
+  credentialHandle;
+  account;
+  fetchImpl;
+  apiBaseUrl;
+  defaultMaxMessages;
+  query;
+  scope;
+  now;
+  requestBudget;
+  provenance;
+  maxRetries;
+  sleepImpl;
+  injectedClient;
+  client;
+  providerRequests = 0;
+  fetchItemCacheHits = 0;
+  attachmentsDeclared = 0;
+  attachmentBytesDeclared = 0;
+  attachmentsNotIngested = 0;
+  itemsSkippedOtp = 0;
+  itemsSkippedCategory = 0;
+  itemsSkippedStored = 0;
+  ingestFilterOptions;
+  itemsByLocalId = new Map;
+  constructor(options = {}) {
+    const env = options.env ?? process.env;
+    this.fetchImpl = options.fetch ?? fetch;
+    this.credentialBroker = options.credentialBroker ?? createEnvCredentialBroker({
+      env,
+      fetch: this.fetchImpl
+    });
+    this.credentialHandle = options.credentialHandle?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE?.trim() || "gmail.personal";
+    this.account = options.account?.trim() || accountFromGoogleHandle(this.credentialHandle);
+    this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, "") || GMAIL_API_BASE_URL;
+    this.defaultMaxMessages = normalizeGmailMaxMessages(options.maxMessages);
+    this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim() || undefined;
+    this.requestBudget = options.requestBudget;
+    this.provenance = sourceInvocationProvenance(options.provenance);
+    this.maxRetries = options.maxRetries;
+    this.sleepImpl = options.sleep;
+    this.injectedClient = options.apiClient;
+    this.scope = options.scope;
+    this.now = options.now ?? (() => Date.now());
+    const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
+    this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
+    if (this.scope?.skippedLabelIds?.length) {
+      this.ingestFilterOptions = {
+        ...this.ingestFilterOptions,
+        skipCategories: [
+          ...this.ingestFilterOptions.skipCategories ?? ["CATEGORY_PROMOTIONS"],
+          ...this.scope.skippedLabelIds
+        ]
+      };
+    }
+  }
+  async authenticate() {
+    await this.clientForRequest();
+  }
+  async* listItems(options = {}) {
+    const client = await this.clientForRequest();
+    let scopeConfirmationsFetched = 0;
+    let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
+    const resume = decodeGmailCursor(options.cursor);
+    const cutoffMs = this.scope?.contentAfterMs;
+    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
+    const staleLeg = resume.phase === "metadata" && !metadataLeg;
+    const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
+    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
+    const nowMs = this.now();
+    const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
+    let pageToken = staleLeg ? undefined : resume.pageToken;
+    const requestedPageTokens = new Set;
+    let listPages = 0;
+    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+      if (pageToken)
+        assertNewProviderPage(requestedPageTokens, pageToken);
+      this.providerRequests += 1;
+      listPages += 1;
+      const page = await client.listMessages({
+        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
+        ...pageToken ? { pageToken } : {},
+        ...query ? { query } : {}
+      });
+      const listed = page.messages.filter((message2) => message2.id);
+      const items = [];
+      let messagesExamined = 0;
+      let messagesFetched = 0;
+      for (const message2 of listed) {
+        if (messagesFetched >= remaining)
+          break;
+        messagesExamined += 1;
+        const stored = this.scope?.storedItem?.(message2.id);
+        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
+          continue;
+        if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
+            scopeConfirmationsFetched += 1;
+            messagesFetched += 1;
+            this.providerRequests += 1;
+            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
+            const received = internalDateNumber({ internalDate: metadata.internalDate });
+            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const subject2 = metadataString2(item2.metadata, "subject");
+            const from2 = metadataString2(item2.metadata, "from");
+            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
+            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
+              this.scope.storedItemObserved(item2);
+          }
+          this.itemsSkippedStored += 1;
+          continue;
+        }
+        messagesFetched += 1;
+        this.providerRequests += 1;
+        const fetched = await client.getMessage(message2.id, metadataLeg ? { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS } : undefined);
+        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
+        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
+        if (metadataLeg && !beforeCutoff)
+          continue;
+        if (beforeCutoff && stored) {
+          this.itemsSkippedStored += 1;
+          continue;
+        }
+        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
+        this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
+        this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
+        this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
+        const internalDateMs = internalDateNumber(item.metadata);
+        if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
+          highWaterMs = Math.min(internalDateMs, nowMs);
+        }
+        const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
+        const from = metadataString2(item.metadata, "from");
+        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
+          this.itemsSkippedCategory += 1;
+          continue;
+        }
+        const body = item.content.kind === "text" ? item.content.text : metadataString2(item.metadata, "snippet");
+        const skip = classifyEmailIngestSkip({
+          ...subject !== undefined ? { subject } : {},
+          ...from !== undefined ? { from } : {},
+          ...body !== undefined ? { body } : {},
+          labels: metadataStringArray2(item.metadata, "labels")
+        }, this.ingestFilterOptions);
+        if (skip) {
+          if (skip === "otp")
+            this.itemsSkippedOtp += 1;
+          else
+            this.itemsSkippedCategory += 1;
+          continue;
+        }
+        this.itemsByLocalId.set(item.identity.localItemId, item);
+        items.push(item);
+      }
+      remaining -= messagesFetched;
+      pageToken = page.nextPageToken;
+      const pageTruncated = messagesExamined < listed.length;
+      const legDone = !pageToken && !pageTruncated;
+      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
+      const done = legDone && !enterMetadataLeg;
+      const promoted = promotedWatermark({
+        highWaterMs,
+        watermarkMs,
+        ...this.scope && startedMs !== undefined ? { floorMs: startedMs - TRAVERSAL_START_MARGIN_MS } : {},
+        ...cutoffMs !== undefined ? { cutoffMs } : {},
+        nowMs
+      });
+      const nextCursor = done ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {}) : enterMetadataLeg ? encodeGmailCursor({
+        phase: "metadata",
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...startedMs !== undefined ? { startedMs } : {}
+      }) : encodeGmailCursor({
+        ...watermarkMs !== undefined ? { watermarkMs } : {},
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...pageToken ? { pageToken } : {},
+        ...metadataLeg ? { phase: "metadata" } : {},
+        ...startedMs !== undefined ? { startedMs } : {}
+      });
+      yield {
+        items,
+        ...nextCursor ? { nextCursor } : {},
+        done
+      };
+      if (done || pageTruncated)
+        break;
+      if (enterMetadataLeg) {
+        metadataLeg = true;
+        query = this.metadataLegQuery(cutoffMs);
+        requestedPageTokens.clear();
+      } else if (!pageToken)
+        break;
+    }
+  }
+  async fetchItem(localItemId) {
+    const item = this.itemsByLocalId.get(localItemId) ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
+    if (!item) {
+      throw new Error(`Gmail connector cannot fetch unknown item ${hashString3(localItemId).slice(0, 16)}.`);
+    }
+    this.fetchItemCacheHits += 1;
+    return item;
+  }
+  traversalStatus() {
+    return {
+      providerRequests: this.providerRequests,
+      fetchItemCacheHits: this.fetchItemCacheHits,
+      attachmentsDeclared: this.attachmentsDeclared,
+      attachmentBytesDeclared: this.attachmentBytesDeclared,
+      attachmentsNotIngested: this.attachmentsNotIngested,
+      itemsSkippedOtp: this.itemsSkippedOtp,
+      itemsSkippedCategory: this.itemsSkippedCategory,
+      itemsSkippedStored: this.itemsSkippedStored
+    };
+  }
+  requestBudgetStatus() {
+    return this.requestBudget?.status();
+  }
+  async apiClientForTooling() {
+    return this.clientForRequest();
+  }
+  classificationSignals(item) {
+    const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
+    const sender = metadataString2(item.metadata, "from");
+    const labels = metadataStringArray2(item.metadata, "labels");
+    return {
+      ...subject ? { title: subject } : {},
+      ...sender ? { sender } : {},
+      ...labels.length > 0 ? { labels } : {}
+    };
+  }
+  async clientForRequest() {
+    if (this.client)
+      return this.client;
+    if (this.injectedClient) {
+      this.client = this.requestBudget ? budgetedGmailApiClient(this.injectedClient, this.requestBudget, this.provenance) : this.injectedClient;
+      return this.client;
+    }
+    this.client = await this.restClient();
+    return this.client;
+  }
+  async restClient() {
+    const session = requireBearerTokenCredentialSession(await this.credentialBroker.issueSession({
+      handle: this.credentialHandle,
+      provider: GMAIL_PROVIDER,
+      capability: "gmail.email.sync",
+      trustDomain: "secure_local"
+    }), this.credentialHandle);
+    return new RestGmailApiClient({
+      token: session.token,
+      fetch: this.fetchImpl,
+      baseUrl: this.apiBaseUrl,
+      ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
+      provenance: this.provenance,
+      ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
+      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
+    });
+  }
+  queryForWatermark(watermarkMs) {
+    if (this.scope) {
+      return this.scopedQuery(gmailAfterBound({ contentAfterMs: this.scope.contentAfterMs, watermarkMs }));
+    }
+    if (watermarkMs === undefined)
+      return this.query;
+    const after = `after:${Math.floor(watermarkMs / 1000)}`;
+    return this.query ? `${after} (${this.query})` : after;
+  }
+  metadataLegQuery(cutoffMs) {
+    return this.scopedQuery(gmailBeforeBound(cutoffMs));
+  }
+  scopedQuery(bound) {
+    const parts = [bound, this.scope?.baseQuery, this.query ? `(${this.query})` : undefined].filter((part) => Boolean(part?.trim()));
+    return parts.length > 0 ? parts.join(" ") : undefined;
+  }
+}
+function budgetedGmailApiClient(inner, budget, provenance) {
+  return {
+    listMessages(request) {
+      budget.reserve(provenance);
+      return inner.listMessages(request);
+    },
+    getMessage(id, options) {
+      budget.reserve(provenance);
+      return inner.getMessage(id, options);
+    },
+    ...inner.listLabels ? {
+      listLabels() {
+        budget.reserve(provenance);
+        return inner.listLabels();
+      }
+    } : {},
+    ...inner.getLabel ? {
+      getLabel(id) {
+        budget.reserve(provenance);
+        return inner.getLabel(id);
+      }
+    } : {}
+  };
+}
+function promotedWatermark(input) {
+  const candidates = [
+    input.highWaterMs,
+    input.watermarkMs,
+    input.floorMs,
+    input.cutoffMs !== undefined ? input.cutoffMs - 1000 : undefined
+  ].filter((value) => value !== undefined && Number.isFinite(value));
+  if (candidates.length === 0)
+    return;
+  return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
+}
+function encodeGmailCursor(cursor) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
+    return;
+  }
+  return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
+}
+function decodeGmailCursor(value) {
+  if (!value)
+    return {};
+  if (value.length > MAX_GMAIL_CURSOR_LENGTH || !value.startsWith(GMAIL_CURSOR_PREFIX)) {
+    throw new TypeError("Gmail connector cursor is invalid.");
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), "base64url").toString("utf8"));
+    const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
+    const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
+    const startedMs = decodeCursorEpochMs(parsed.startedMs);
+    if (parsed.pageToken !== undefined && (typeof parsed.pageToken !== "string" || !parsed.pageToken.trim() || parsed.pageToken.length > MAX_GMAIL_CURSOR_LENGTH)) {
+      throw new Error("invalid");
+    }
+    if (parsed.phase !== undefined && parsed.phase !== "metadata")
+      throw new Error("invalid");
+    return {
+      ...watermarkMs !== undefined ? { watermarkMs } : {},
+      ...highWaterMs !== undefined ? { highWaterMs } : {},
+      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
+      ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
+      ...startedMs !== undefined ? { startedMs } : {}
+    };
+  } catch {
+    throw new TypeError("Gmail connector cursor is invalid.");
+  }
+}
+function decodeCursorEpochMs(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("invalid");
+  }
+  return value;
+}
+function assertNewProviderPage(seen, pageToken) {
+  if (seen.has(pageToken))
+    throw new Error("Gmail connector pagination cursor repeated.");
+  seen.add(pageToken);
+}
+function internalDateNumber(metadata) {
+  const value = metadata["internalDate"];
+  if (typeof value !== "string" || !/^\d+$/.test(value))
+    return;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
+  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
+    return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
+  }
+  const dataHome = env.XDG_DATA_HOME?.trim() || join21(homedir12(), ".local", "share");
+  return join21(standaloneLinuxDataDir(env) ?? join21(dataHome, "openclaw", "olympus"), "gmail-secure-connector-store.sqlite");
+}
+
+class RestGmailApiClient {
+  token;
+  fetchImpl;
+  baseUrl;
+  maxRetries;
+  sleep;
+  requestBudget;
+  provenance;
+  constructor(options) {
+    this.token = options.token;
+    this.fetchImpl = options.fetch;
+    this.baseUrl = options.baseUrl;
+    this.requestBudget = options.requestBudget;
+    this.provenance = sourceInvocationProvenance(options.provenance);
+    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+  }
+  async listMessages(request) {
+    const params = new URLSearchParams({
+      maxResults: String(request.maxResults),
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
+    });
+    if (request.pageToken)
+      params.set("pageToken", request.pageToken);
+    if (request.query)
+      params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
+    const json = await this.getJson(`users/me/messages?${params.toString()}`);
+    const record = asRecord6(json, "Gmail messages list response");
+    return {
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord6(item, "Gmail message list item")).map((item) => ({
+        id: stringValue(item.id),
+        threadId: stringValue(item.threadId)
+      })).filter((item) => item.id) : [],
+      ...optionalStringProp(record, "nextPageToken"),
+      ...typeof record.resultSizeEstimate === "number" && Number.isFinite(record.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) } : {}
+    };
+  }
+  async getMessage(id, options = {}) {
+    const params = new URLSearchParams({ format: options.format ?? "full" });
+    if (options.format === "metadata") {
+      for (const header of options.metadataHeaders ?? [])
+        params.append("metadataHeaders", header);
+    }
+    const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
+    return json;
+  }
+  async listLabels() {
+    const record = asRecord6(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord6(item, "Gmail label"))).filter((label) => label.id) : [];
+  }
+  async getLabel(id) {
+    return gmailLabelFromJson(asRecord6(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
+  }
+  async getJson(path) {
+    let attempt = 0;
+    for (;; ) {
+      this.requestBudget?.reserve(this.provenance);
+      const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${this.token}`
+        }
+      });
+      const text2 = await response.text();
+      if (response.ok)
+        return text2 ? JSON.parse(text2) : {};
+      if (isRetryableGmailStatus(response.status) && attempt < this.maxRetries) {
+        attempt += 1;
+        await this.sleep(gmailRetryDelayMs(response, attempt));
+        continue;
+      }
+      throw new Error(`Gmail API request failed (${response.status}): ${safeProviderDetail(text2)}`);
+    }
+  }
+}
+function isRetryableGmailStatus(status) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+function gmailRetryDelayMs(response, attempt) {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    const seconds = Number.parseFloat(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, MAX_GMAIL_RETRY_DELAY_MS);
+    }
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) {
+      return Math.max(0, Math.min(dateMs - Date.now(), MAX_GMAIL_RETRY_DELAY_MS));
+    }
+  }
+  return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
+}
+function gmailLabelFromJson(record) {
+  const type = record.type === "system" || record.type === "user" ? record.type : undefined;
+  return {
+    id: stringValue(record.id),
+    name: stringValue(record.name),
+    ...type ? { type } : {},
+    ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
+  };
+}
+function rawItemFromGmailMessage(message2, account, options = {}) {
+  const headers = headersFromPart(message2.payload);
+  const subject = headers.get("subject") ?? "(no subject)";
+  const rawFrom = headers.get("from") ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
+  const metadataOnly = options.metadataOnly === true;
+  const text2 = metadataOnly ? "" : extractMessageText(message2);
+  const attachments = gmailAttachmentInventory(message2.payload);
+  const fetchedAt = new Date().toISOString();
+  return {
+    identity: {
+      family: "email",
+      provider: "gmail",
+      accountScope: account,
+      providerItemId: message2.id,
+      ...message2.threadId ? { providerThreadId: message2.threadId } : {},
+      localItemId: `${account}:${message2.id}`,
+      ...message2.historyId ? { sourceVersion: message2.historyId } : {}
+    },
+    mimeType: "message/rfc822",
+    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: subject,
+      subject,
+      from,
+      ...date ? { authoredAt: date } : {},
+      ...message2.internalDate ? { internalDate: message2.internalDate } : {},
+      ...message2.historyId ? { historyId: message2.historyId } : {},
+      ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
+      ...metadataOnly ? { mailScopeContent: "metadata_only" } : {},
+      labels: message2.labelIds ?? [],
+      attachmentCount: attachments.count,
+      attachmentBytesDeclared: attachments.bytes,
+      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
+      attachmentsNotIngested: attachments.count,
+      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message2.id)}`,
+      contentHash: hashString3(`${message2.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
+    }),
+    fetchedAt
+  };
+}
+function gmailAttachmentInventory(part) {
+  if (!part)
+    return { count: 0, bytes: 0, lines: [] };
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  let count = filename ? 1 : 0;
+  let bytes = size ?? 0;
+  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
+  for (const child of part.parts ?? []) {
+    const nested = gmailAttachmentInventory(child);
+    count += nested.count;
+    bytes += nested.bytes;
+    lines.push(...nested.lines);
+  }
+  return { count, bytes, lines };
+}
+function gmailAttachmentLine(filename, part, size) {
+  const details = [
+    part.mimeType?.trim() || undefined,
+    size !== undefined ? `${size} bytes` : undefined,
+    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
+}
+function metadataCount(metadata, key2) {
+  const value = metadata[key2];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+function extractMessageText(message2) {
+  const plain = [];
+  const html2 = [];
+  collectPartText(message2.payload, plain, html2);
+  const selected = plain.length > 0 ? plain.join(`
+
+`) : html2.map(stripHtml).join(`
+
+`);
+  return [headersSummary(message2.payload), message2.snippet, selected].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
+
+`);
+}
+function collectPartText(part, plain, html2) {
+  if (!part)
+    return;
+  if (part.filename?.trim())
+    return;
+  const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
+  if (decoded && part.mimeType === "text/plain")
+    plain.push(decoded);
+  if (decoded && part.mimeType === "text/html")
+    html2.push(decoded);
+  for (const child of part.parts ?? [])
+    collectPartText(child, plain, html2);
+}
+function headersFromPart(part) {
+  const headers = new Map;
+  for (const header of part?.headers ?? []) {
+    const name = header.name?.trim().toLowerCase();
+    const value = header.value?.trim();
+    if (name && value)
+      headers.set(name, value);
+  }
+  return headers;
+}
+function headersSummary(part) {
+  const headers = headersFromPart(part);
+  return [
+    headers.get("subject") ? `Subject: ${headers.get("subject")}` : undefined,
+    headers.get("from") ? `From: ${headers.get("from")}` : undefined,
+    headers.get("to") ? `To: ${headers.get("to")}` : undefined,
+    headers.get("date") ? `Date: ${headers.get("date")}` : undefined
+  ].filter(Boolean).join(`
+`);
+}
+function decodeBase64Url(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized, "base64").toString("utf8");
+}
+function stripHtml(value) {
+  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+function parsedDate(value) {
+  if (!value)
+    return;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function internalDateIso(value) {
+  if (!value)
+    return;
+  const ms = Number.parseInt(value, 10);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function normalizeGmailMaxMessages(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
+  return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
+}
+function asRecord6(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  return value;
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : "";
+}
+function optionalStringProp(record, key2) {
+  const value = stringValue(record[key2]).trim();
+  return value ? { [key2]: value } : {};
+}
+function safeProviderDetail(value) {
+  return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
+}
+function hashString3(value) {
+  return createHash16("sha256").update(value).digest("hex");
+}
+var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var init_gmail = __esm(() => {
+  init_linux_engine_layout();
+  init_mail_source_scope();
+  init_sender_rules();
+  init_credential_broker();
+  init_ingest_filter();
+  init_request_budget();
+  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
+});
+
+// src/workers/google-connectors/drive.ts
+import { createHash as createHash17 } from "node:crypto";
+import { homedir as homedir13 } from "node:os";
+import { join as join22 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -30915,13 +30636,13 @@ class GoogleDriveSourceConnector {
       if (contentBudget <= 0)
         break;
       if (pageToken)
-        assertNewProviderPage(requestedPageTokens, pageToken);
-      const page2 = await client.listFiles({
+        assertNewProviderPage2(requestedPageTokens, pageToken);
+      const page = await client.listFiles({
         pageSize: Math.min(DEFAULT_GOOGLE_DRIVE_PAGE_SIZE, remaining, contentBudget),
         ...pageToken ? { pageToken } : {},
         query
       });
-      const files = page2.files.filter((file) => file.id);
+      const files = page.files.filter((file) => file.id);
       const items = [];
       let processedFiles = 0;
       for (const file of files) {
@@ -30943,7 +30664,7 @@ class GoogleDriveSourceConnector {
         }
       }
       remaining -= items.length;
-      pageToken = page2.nextPageToken;
+      pageToken = page.nextPageToken;
       const pageTruncated = processedFiles < files.length;
       const done = !pageToken && !pageTruncated;
       const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
@@ -30965,7 +30686,7 @@ class GoogleDriveSourceConnector {
   async fetchItem(localItemId) {
     const item = this.itemsByLocalId.get(localItemId);
     if (!item) {
-      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString3(localItemId).slice(0, 16)}.`);
+      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString4(localItemId).slice(0, 16)}.`);
     }
     return item;
   }
@@ -31035,7 +30756,7 @@ class GoogleDriveSourceConnector {
         content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
         metadata: Object.freeze({
           ...metadata,
-          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString3(`${file.version ?? ""}:${text2 ?? title}`) }
+          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString4(`${file.version ?? ""}:${text2 ?? title}`) }
         }),
         fetchedAt: new Date().toISOString()
       }
@@ -31232,7 +30953,7 @@ function decodeCursorTimestamp(value) {
     throw new Error("invalid");
   return new Date(parsed).toISOString();
 }
-function assertNewProviderPage(seen, pageToken) {
+function assertNewProviderPage2(seen, pageToken) {
   if (seen.has(pageToken))
     throw new Error("Google Drive connector pagination cursor repeated.");
   seen.add(pageToken);
@@ -31241,8 +30962,8 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join24(homedir12(), ".local", "share");
-  return join24(standaloneLinuxDataDir(env) ?? join24(dataHome, "openclaw", "olympus"), "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir13(), ".local", "share");
+  return join22(standaloneLinuxDataDir(env) ?? join22(dataHome, "openclaw", "olympus"), "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -31260,7 +30981,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -31273,20 +30994,20 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord6(json, "Google Drive files list response");
+    const record = asRecord7(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord6(item, "Google Drive file"))).filter((file) => file.id) : [],
-      ...optionalStringProp(record, "nextPageToken")
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord7(item, "Google Drive file"))).filter((file) => file.id) : [],
+      ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord6(json, "Google Drive folder");
+    const record = asRecord7(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
-      ...optionalStringProp(record, "name"),
+      ...optionalStringProp2(record, "name"),
       ...Array.isArray(record.parents) ? { parents: record.parents.filter((entry) => typeof entry === "string") } : {}
     };
   }
@@ -31343,7 +31064,7 @@ class RestGoogleDriveApiClient {
         await this.sleep(driveRetryDelayMs(response, attempt));
         continue;
       }
-      throw new GoogleDriveApiError(`${context2} failed (${response.status}): ${safeProviderDetail(detail)}`, response.status);
+      throw new GoogleDriveApiError(`${context2} failed (${response.status}): ${safeProviderDetail2(detail)}`, response.status);
     }
   }
 }
@@ -31366,25 +31087,25 @@ function driveRetryDelayMs(response, attempt) {
 }
 function normalizeDriveFile(record) {
   return {
-    id: stringValue(record.id),
-    ...optionalStringProp(record, "name"),
-    ...optionalStringProp(record, "mimeType"),
-    ...optionalStringProp(record, "createdTime"),
-    ...optionalStringProp(record, "modifiedTime"),
-    ...optionalStringProp(record, "version"),
-    ...optionalStringProp(record, "driveId"),
-    ...optionalStringProp(record, "webViewLink"),
-    ...optionalStringProp(record, "size"),
-    ...optionalStringProp(record, "md5Checksum"),
-    ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord6(owner, "Google Drive owner")).map((owner) => optionalStringProp(owner, "emailAddress")) } : {}
+    id: stringValue2(record.id),
+    ...optionalStringProp2(record, "name"),
+    ...optionalStringProp2(record, "mimeType"),
+    ...optionalStringProp2(record, "createdTime"),
+    ...optionalStringProp2(record, "modifiedTime"),
+    ...optionalStringProp2(record, "version"),
+    ...optionalStringProp2(record, "driveId"),
+    ...optionalStringProp2(record, "webViewLink"),
+    ...optionalStringProp2(record, "size"),
+    ...optionalStringProp2(record, "md5Checksum"),
+    ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord7(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
-  const mime2 = mimeType?.toLowerCase() ?? "";
-  if (mime2.startsWith("text/"))
+  const mime = mimeType?.toLowerCase() ?? "";
+  if (mime.startsWith("text/"))
     return true;
-  if (["application/json", "application/xml", "application/csv", "text/csv"].includes(mime2))
+  if (["application/json", "application/xml", "application/csv", "text/csv"].includes(mime))
     return true;
   const lower = name?.toLowerCase() ?? "";
   return [".md", ".txt", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml"].some((suffix) => lower.endsWith(suffix));
@@ -31405,24 +31126,24 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord6(value, label) {
+function asRecord7(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
   return value;
 }
-function stringValue(value) {
+function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
-function optionalStringProp(record, key2) {
-  const value = stringValue(record[key2]).trim();
+function optionalStringProp2(record, key2) {
+  const value = stringValue2(record[key2]).trim();
   return value ? { [key2]: value } : {};
 }
-function safeProviderDetail(value) {
+function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
-function hashString3(value) {
-  return createHash19("sha256").update(value).digest("hex");
+function hashString4(value) {
+  return createHash17("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -31447,1006 +31168,6 @@ var init_drive = __esm(() => {
   FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
 });
 
-// src/workers/connector-store/capture-spool-secrets.ts
-var init_capture_spool_secrets = __esm(() => {
-  init_engine();
-  init_secrets_disposition();
-});
-
-// src/workers/whatsapp/reaction-index.ts
-var init_reaction_index = __esm(() => {
-  init_reactions();
-});
-
-// src/workers/whatsapp/live-connector.ts
-var init_live_connector = __esm(() => {
-  init_capture_spool_secrets();
-  init_reaction_index();
-});
-
-// src/workers/whatsapp/store-sync.ts
-import { homedir as homedir13 } from "node:os";
-import { join as join25 } from "node:path";
-function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join25(env.HOME?.trim() || homedir13(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join25(dataHome, "olympus", "whatsapp-live");
-}
-function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join25(defaultWhatsAppStateDir(env), "connector-store.db");
-}
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
-var init_store_sync = __esm(() => {
-  init_connector_store();
-  init_tiered_store_set();
-  init_capture_spool_secrets();
-  init_live_connector();
-  WHATSAPP_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local"
-  });
-});
-
-// src/workers/file-extraction/extractors/bounded-text.ts
-var TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, GENERIC_MIME_TYPES;
-var init_bounded_text = __esm(() => {
-  TEXT_MIME_TYPES = new Set([
-    "application/json",
-    "application/x-ndjson",
-    "application/xml",
-    "text/csv",
-    "text/html",
-    "text/markdown",
-    "text/plain",
-    "text/tab-separated-values",
-    "text/xml"
-  ]);
-  TABLE_MIME_TYPES = new Set([
-    "text/csv",
-    "text/tab-separated-values"
-  ]);
-  IMAGE_MIME_TYPES = new Set([
-    "image/bmp",
-    "image/gif",
-    "image/heic",
-    "image/heif",
-    "image/jpeg",
-    "image/png",
-    "image/tiff",
-    "image/webp"
-  ]);
-  GENERIC_MIME_TYPES = new Set([
-    "application/octet-stream",
-    "binary/octet-stream",
-    "application/binary"
-  ]);
-});
-
-// src/workers/file-extraction/extractors/apple-vision-ocr.ts
-var init_apple_vision_ocr = __esm(() => {
-  init_bounded_text();
-  init_command_runner();
-});
-
-// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
-var OCR_PROBE_IMAGE_BASE64;
-var init_ocr_probe_fixture = __esm(() => {
-  OCR_PROBE_IMAGE_BASE64 = [
-    "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"
-  ].join("");
-});
-
-// src/workers/file-extraction/extractors/ocr-capability.ts
-var OCR_READY_TTL_MS;
-var init_ocr_capability = __esm(() => {
-  init_command_runner();
-  init_ocr_probe_fixture();
-  OCR_READY_TTL_MS = 10 * 60000;
-});
-
-// src/core/log-redaction.ts
-function redactLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
-}
-function boundedLogErrorMessage(error) {
-  const message2 = error instanceof Error ? error.message : String(error);
-  const oneLine = message2.replace(/\s+/g, " ").trim();
-  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
-}
-var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
-
-// src/workers/dashboard/answer-ready-coverage.ts
-var init_answer_ready_coverage = () => {};
-
-// src/workers/file-extraction/unreadable-files.ts
-var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
-var init_unreadable_files = __esm(() => {
-  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
-  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
-  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
-});
-
-// src/core/google-signin-full-copy.ts
-var GOOGLE_SIGNIN_FULL_SENTENCE = "Google sign-in is full for the moment. We're working on it. For now, you can still connect Google by using your own Google app.", GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE;
-var init_google_signin_full_copy = __esm(() => {
-  GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE = `${GOOGLE_SIGNIN_FULL_SENTENCE} Open Olympus on your computer to set it up.`;
-});
-
-// src/workers/remote-oauth/consent-page.ts
-var init_consent_page = () => {};
-
-// src/core/email-policy.ts
-var FORBIDDEN_RAW_RESPONSE_KEYS;
-var init_email_policy = __esm(() => {
-  init_operation_error();
-  FORBIDDEN_RAW_RESPONSE_KEYS = new Set([
-    "body",
-    "bodies",
-    "message",
-    "messages",
-    "raw_email",
-    "raw_emails",
-    "raw_message",
-    "raw_messages",
-    "snippet",
-    "snippets",
-    "embedding",
-    "embeddings",
-    "embedding_vector",
-    "embedding_vectors",
-    "vector",
-    "vectors"
-  ]);
-});
-
-// src/core/operation-caller.ts
-var inProcessRemoteRequests;
-var init_operation_caller = __esm(() => {
-  inProcessRemoteRequests = new WeakSet;
-});
-
-// src/core/ingestion-throughput.ts
-var init_ingestion_throughput = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/source-index/selected-item-safety.ts
-var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
-var init_selected_item_safety = __esm(() => {
-  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
-    "body",
-    "boundedtext",
-    "chunk",
-    "chunks",
-    "content",
-    "document",
-    "html",
-    "markdown",
-    "message",
-    "messages",
-    "packet",
-    "passage",
-    "raw",
-    "rawpacket",
-    "rawsource",
-    "rawtext",
-    "snippet",
-    "sourcepacket",
-    "sourcesnippet",
-    "sourcetext",
-    "text"
-  ]);
-});
-
-// src/core/embedding-cost-estimates.ts
-var init_embedding_cost_estimates = () => {};
-
-// src/core/privacy-language.ts
-var SENSITIVITY_TIER_LABELS;
-var init_privacy_language = __esm(() => {
-  SENSITIVITY_TIER_LABELS = {
-    public: "Public",
-    private: "Personal",
-    secure: "Private",
-    secrets: "Secrets"
-  };
-});
-
-// src/core/source-scope-approval.ts
-var init_source_scope_approval = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_operation_error();
-});
-
-// src/core/mail-source-scope.ts
-function gmailAfterBound(input) {
-  const cutoffSeconds = input.contentAfterMs !== undefined ? Math.floor(input.contentAfterMs / 1000) - 1 : undefined;
-  const watermarkSeconds = input.watermarkMs !== undefined ? Math.floor(input.watermarkMs / 1000) : undefined;
-  const seconds = cutoffSeconds === undefined ? watermarkSeconds : watermarkSeconds === undefined ? cutoffSeconds : Math.max(cutoffSeconds, watermarkSeconds);
-  return seconds !== undefined && seconds > 0 ? `after:${seconds}` : undefined;
-}
-function gmailBeforeBound(contentAfterMs) {
-  return `before:${Math.floor(contentAfterMs / 1000)}`;
-}
-var GMAIL_SCOPE_SENDER_SAMPLE = 100, GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
-var init_mail_source_scope = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_operation_error();
-  init_source_scope_approval();
-  GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
-});
-
-// src/workers/email-source/ingest-filter.ts
-function classifyEmailIngestSkip(candidate, options = {}) {
-  const skipOtp = options.skipOtp ?? true;
-  if (skipOtp && isOtpMail(candidate))
-    return "otp";
-  const skipCategories = options.skipCategories ?? DEFAULT_SKIP_CATEGORIES;
-  if (skipCategories.length > 0 && candidate.labels) {
-    const skip = new Set(skipCategories.map((label) => label.trim().toUpperCase()).filter(Boolean));
-    for (const label of candidate.labels) {
-      if (skip.has(label.toUpperCase())) {
-        return `category:${label.toUpperCase()}`;
-      }
-    }
-  }
-  return;
-}
-function isOtpMail(candidate) {
-  if (candidate.subject && OTP_SUBJECT.test(candidate.subject))
-    return true;
-  const body = candidate.body?.trim();
-  if (body && body.length > 0 && body.length <= OTP_BODY_MAX_CHARS && OTP_BODY_CODE.test(body) && OTP_BODY_HINT.test(body)) {
-    return true;
-  }
-  return false;
-}
-function parseEmailIngestFilterOptionsFromEnv(env = process.env) {
-  const categoriesRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_CATEGORIES;
-  const skipOtpRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_OTP;
-  return {
-    ...categoriesRaw !== undefined ? { skipCategories: categoriesRaw.split(",").map((label) => label.trim()).filter(Boolean) } : {},
-    ...skipOtpRaw !== undefined ? { skipOtp: skipOtpRaw === "true" } : {}
-  };
-}
-var DEFAULT_SKIP_CATEGORIES, OTP_SUBJECT, OTP_BODY_CODE, OTP_BODY_HINT, OTP_BODY_MAX_CHARS = 900;
-var init_ingest_filter = __esm(() => {
-  DEFAULT_SKIP_CATEGORIES = ["CATEGORY_PROMOTIONS"];
-  OTP_SUBJECT = new RegExp([
-    "verification code",
-    "security code",
-    "one[- ]?time (pass)?(word|code)",
-    "login code",
-    "sign[- ]?in code",
-    "access code",
-    "confirmation code",
-    "your (\\w+ )?code is",
-    "\\botp\\b",
-    "2fa code"
-  ].join("|"), "i");
-  OTP_BODY_CODE = /\b\d{4,8}\b/;
-  OTP_BODY_HINT = /\b(code|verification|expires? in|valid for)\b/i;
-});
-
-// src/workers/google-connectors/gmail.ts
-import { createHash as createHash20 } from "node:crypto";
-import { homedir as homedir15 } from "node:os";
-import { join as join27 } from "node:path";
-
-class GoogleGmailSourceConnector {
-  id = GMAIL_PROVIDER;
-  family = "email";
-  credentialBroker;
-  credentialHandle;
-  account;
-  fetchImpl;
-  apiBaseUrl;
-  defaultMaxMessages;
-  query;
-  scope;
-  now;
-  requestBudget;
-  provenance;
-  maxRetries;
-  sleepImpl;
-  injectedClient;
-  client;
-  providerRequests = 0;
-  fetchItemCacheHits = 0;
-  attachmentsDeclared = 0;
-  attachmentBytesDeclared = 0;
-  attachmentsNotIngested = 0;
-  itemsSkippedOtp = 0;
-  itemsSkippedCategory = 0;
-  itemsSkippedStored = 0;
-  ingestFilterOptions;
-  itemsByLocalId = new Map;
-  constructor(options = {}) {
-    const env = options.env ?? process.env;
-    this.fetchImpl = options.fetch ?? fetch;
-    this.credentialBroker = options.credentialBroker ?? createEnvCredentialBroker({
-      env,
-      fetch: this.fetchImpl
-    });
-    this.credentialHandle = options.credentialHandle?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE?.trim() || "gmail.personal";
-    this.account = options.account?.trim() || accountFromGoogleHandle(this.credentialHandle);
-    this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, "") || GMAIL_API_BASE_URL;
-    this.defaultMaxMessages = normalizeGmailMaxMessages(options.maxMessages);
-    this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim() || undefined;
-    this.requestBudget = options.requestBudget;
-    this.provenance = sourceInvocationProvenance(options.provenance);
-    this.maxRetries = options.maxRetries;
-    this.sleepImpl = options.sleep;
-    this.injectedClient = options.apiClient;
-    this.scope = options.scope;
-    this.now = options.now ?? (() => Date.now());
-    const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
-    this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
-    if (this.scope?.skippedLabelIds?.length) {
-      this.ingestFilterOptions = {
-        ...this.ingestFilterOptions,
-        skipCategories: [
-          ...this.ingestFilterOptions.skipCategories ?? ["CATEGORY_PROMOTIONS"],
-          ...this.scope.skippedLabelIds
-        ]
-      };
-    }
-  }
-  async authenticate() {
-    await this.clientForRequest();
-  }
-  async* listItems(options = {}) {
-    const client = await this.clientForRequest();
-    let scopeConfirmationsFetched = 0;
-    let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
-    const resume = decodeGmailCursor(options.cursor);
-    const cutoffMs = this.scope?.contentAfterMs;
-    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
-    const staleLeg = resume.phase === "metadata" && !metadataLeg;
-    const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
-    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
-    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
-    let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
-    const nowMs = this.now();
-    const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
-    let pageToken = staleLeg ? undefined : resume.pageToken;
-    const requestedPageTokens = new Set;
-    let listPages = 0;
-    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
-      if (pageToken)
-        assertNewProviderPage2(requestedPageTokens, pageToken);
-      this.providerRequests += 1;
-      listPages += 1;
-      const page2 = await client.listMessages({
-        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
-        ...pageToken ? { pageToken } : {},
-        ...query ? { query } : {}
-      });
-      const listed = page2.messages.filter((message2) => message2.id);
-      const items = [];
-      let messagesExamined = 0;
-      let messagesFetched = 0;
-      for (const message2 of listed) {
-        if (messagesFetched >= remaining)
-          break;
-        messagesExamined += 1;
-        const stored = this.scope?.storedItem?.(message2.id);
-        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
-          continue;
-        if (stored && (metadataLeg || stored.hasContent)) {
-          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
-            scopeConfirmationsFetched += 1;
-            messagesFetched += 1;
-            this.providerRequests += 1;
-            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
-            const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
-            const subject2 = metadataString2(item2.metadata, "subject");
-            const from2 = metadataString2(item2.metadata, "from");
-            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
-            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
-              this.scope.storedItemObserved(item2);
-          }
-          this.itemsSkippedStored += 1;
-          continue;
-        }
-        messagesFetched += 1;
-        this.providerRequests += 1;
-        const fetched = await client.getMessage(message2.id, metadataLeg ? { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS } : undefined);
-        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
-        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
-        if (metadataLeg && !beforeCutoff)
-          continue;
-        if (beforeCutoff && stored) {
-          this.itemsSkippedStored += 1;
-          continue;
-        }
-        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
-        this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
-        this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
-        this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
-        const internalDateMs = internalDateNumber(item.metadata);
-        if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
-          highWaterMs = Math.min(internalDateMs, nowMs);
-        }
-        const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
-        const from = metadataString2(item.metadata, "from");
-        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
-          this.itemsSkippedCategory += 1;
-          continue;
-        }
-        const body = item.content.kind === "text" ? item.content.text : metadataString2(item.metadata, "snippet");
-        const skip = classifyEmailIngestSkip({
-          ...subject !== undefined ? { subject } : {},
-          ...from !== undefined ? { from } : {},
-          ...body !== undefined ? { body } : {},
-          labels: metadataStringArray2(item.metadata, "labels")
-        }, this.ingestFilterOptions);
-        if (skip) {
-          if (skip === "otp")
-            this.itemsSkippedOtp += 1;
-          else
-            this.itemsSkippedCategory += 1;
-          continue;
-        }
-        this.itemsByLocalId.set(item.identity.localItemId, item);
-        items.push(item);
-      }
-      remaining -= messagesFetched;
-      pageToken = page2.nextPageToken;
-      const pageTruncated = messagesExamined < listed.length;
-      const legDone = !pageToken && !pageTruncated;
-      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
-      const done = legDone && !enterMetadataLeg;
-      const promoted = promotedWatermark({
-        highWaterMs,
-        watermarkMs,
-        ...this.scope && startedMs !== undefined ? { floorMs: startedMs - TRAVERSAL_START_MARGIN_MS } : {},
-        ...cutoffMs !== undefined ? { cutoffMs } : {},
-        nowMs
-      });
-      const nextCursor = done ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {}) : enterMetadataLeg ? encodeGmailCursor({
-        phase: "metadata",
-        ...highWaterMs !== undefined ? { highWaterMs } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
-      }) : encodeGmailCursor({
-        ...watermarkMs !== undefined ? { watermarkMs } : {},
-        ...highWaterMs !== undefined ? { highWaterMs } : {},
-        ...pageToken ? { pageToken } : {},
-        ...metadataLeg ? { phase: "metadata" } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
-      });
-      yield {
-        items,
-        ...nextCursor ? { nextCursor } : {},
-        done
-      };
-      if (done || pageTruncated)
-        break;
-      if (enterMetadataLeg) {
-        metadataLeg = true;
-        query = this.metadataLegQuery(cutoffMs);
-        requestedPageTokens.clear();
-      } else if (!pageToken)
-        break;
-    }
-  }
-  async fetchItem(localItemId) {
-    const item = this.itemsByLocalId.get(localItemId) ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
-    if (!item) {
-      throw new Error(`Gmail connector cannot fetch unknown item ${hashString4(localItemId).slice(0, 16)}.`);
-    }
-    this.fetchItemCacheHits += 1;
-    return item;
-  }
-  traversalStatus() {
-    return {
-      providerRequests: this.providerRequests,
-      fetchItemCacheHits: this.fetchItemCacheHits,
-      attachmentsDeclared: this.attachmentsDeclared,
-      attachmentBytesDeclared: this.attachmentBytesDeclared,
-      attachmentsNotIngested: this.attachmentsNotIngested,
-      itemsSkippedOtp: this.itemsSkippedOtp,
-      itemsSkippedCategory: this.itemsSkippedCategory,
-      itemsSkippedStored: this.itemsSkippedStored
-    };
-  }
-  requestBudgetStatus() {
-    return this.requestBudget?.status();
-  }
-  async apiClientForTooling() {
-    return this.clientForRequest();
-  }
-  classificationSignals(item) {
-    const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
-    const sender = metadataString2(item.metadata, "from");
-    const labels = metadataStringArray2(item.metadata, "labels");
-    return {
-      ...subject ? { title: subject } : {},
-      ...sender ? { sender } : {},
-      ...labels.length > 0 ? { labels } : {}
-    };
-  }
-  async clientForRequest() {
-    if (this.client)
-      return this.client;
-    if (this.injectedClient) {
-      this.client = this.requestBudget ? budgetedGmailApiClient(this.injectedClient, this.requestBudget, this.provenance) : this.injectedClient;
-      return this.client;
-    }
-    this.client = await this.restClient();
-    return this.client;
-  }
-  async restClient() {
-    const session = requireBearerTokenCredentialSession(await this.credentialBroker.issueSession({
-      handle: this.credentialHandle,
-      provider: GMAIL_PROVIDER,
-      capability: "gmail.email.sync",
-      trustDomain: "secure_local"
-    }), this.credentialHandle);
-    return new RestGmailApiClient({
-      token: session.token,
-      fetch: this.fetchImpl,
-      baseUrl: this.apiBaseUrl,
-      ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
-      provenance: this.provenance,
-      ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
-      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
-    });
-  }
-  queryForWatermark(watermarkMs) {
-    if (this.scope) {
-      return this.scopedQuery(gmailAfterBound({ contentAfterMs: this.scope.contentAfterMs, watermarkMs }));
-    }
-    if (watermarkMs === undefined)
-      return this.query;
-    const after = `after:${Math.floor(watermarkMs / 1000)}`;
-    return this.query ? `${after} (${this.query})` : after;
-  }
-  metadataLegQuery(cutoffMs) {
-    return this.scopedQuery(gmailBeforeBound(cutoffMs));
-  }
-  scopedQuery(bound) {
-    const parts = [bound, this.scope?.baseQuery, this.query ? `(${this.query})` : undefined].filter((part) => Boolean(part?.trim()));
-    return parts.length > 0 ? parts.join(" ") : undefined;
-  }
-}
-function budgetedGmailApiClient(inner, budget, provenance) {
-  return {
-    listMessages(request) {
-      budget.reserve(provenance);
-      return inner.listMessages(request);
-    },
-    getMessage(id, options) {
-      budget.reserve(provenance);
-      return inner.getMessage(id, options);
-    },
-    ...inner.listLabels ? {
-      listLabels() {
-        budget.reserve(provenance);
-        return inner.listLabels();
-      }
-    } : {},
-    ...inner.getLabel ? {
-      getLabel(id) {
-        budget.reserve(provenance);
-        return inner.getLabel(id);
-      }
-    } : {}
-  };
-}
-function promotedWatermark(input) {
-  const candidates = [
-    input.highWaterMs,
-    input.watermarkMs,
-    input.floorMs,
-    input.cutoffMs !== undefined ? input.cutoffMs - 1000 : undefined
-  ].filter((value) => value !== undefined && Number.isFinite(value));
-  if (candidates.length === 0)
-    return;
-  return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
-}
-function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
-    return;
-  }
-  return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
-}
-function decodeGmailCursor(value) {
-  if (!value)
-    return {};
-  if (value.length > MAX_GMAIL_CURSOR_LENGTH || !value.startsWith(GMAIL_CURSOR_PREFIX)) {
-    throw new TypeError("Gmail connector cursor is invalid.");
-  }
-  try {
-    const parsed = JSON.parse(Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), "base64url").toString("utf8"));
-    const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
-    const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
-    const startedMs = decodeCursorEpochMs(parsed.startedMs);
-    if (parsed.pageToken !== undefined && (typeof parsed.pageToken !== "string" || !parsed.pageToken.trim() || parsed.pageToken.length > MAX_GMAIL_CURSOR_LENGTH)) {
-      throw new Error("invalid");
-    }
-    if (parsed.phase !== undefined && parsed.phase !== "metadata")
-      throw new Error("invalid");
-    return {
-      ...watermarkMs !== undefined ? { watermarkMs } : {},
-      ...highWaterMs !== undefined ? { highWaterMs } : {},
-      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
-      ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
-      ...startedMs !== undefined ? { startedMs } : {}
-    };
-  } catch {
-    throw new TypeError("Gmail connector cursor is invalid.");
-  }
-}
-function decodeCursorEpochMs(value) {
-  if (value === undefined)
-    return;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error("invalid");
-  }
-  return value;
-}
-function assertNewProviderPage2(seen, pageToken) {
-  if (seen.has(pageToken))
-    throw new Error("Gmail connector pagination cursor repeated.");
-  seen.add(pageToken);
-}
-function internalDateNumber(metadata) {
-  const value = metadata["internalDate"];
-  if (typeof value !== "string" || !/^\d+$/.test(value))
-    return;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
-  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join27(homedir15(), ".local", "share");
-  return join27(standaloneLinuxDataDir(env) ?? join27(dataHome, "openclaw", "olympus"), "gmail-secure-connector-store.sqlite");
-}
-
-class RestGmailApiClient {
-  token;
-  fetchImpl;
-  baseUrl;
-  maxRetries;
-  sleep;
-  requestBudget;
-  provenance;
-  constructor(options) {
-    this.token = options.token;
-    this.fetchImpl = options.fetch;
-    this.baseUrl = options.baseUrl;
-    this.requestBudget = options.requestBudget;
-    this.provenance = sourceInvocationProvenance(options.provenance);
-    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
-  }
-  async listMessages(request) {
-    const params = new URLSearchParams({
-      maxResults: String(request.maxResults),
-      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
-    });
-    if (request.pageToken)
-      params.set("pageToken", request.pageToken);
-    if (request.query)
-      params.set("q", request.query);
-    for (const labelId of request.labelIds ?? [])
-      params.append("labelIds", labelId);
-    const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord7(json, "Gmail messages list response");
-    return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord7(item, "Gmail message list item")).map((item) => ({
-        id: stringValue2(item.id),
-        threadId: stringValue2(item.threadId)
-      })).filter((item) => item.id) : [],
-      ...optionalStringProp2(record, "nextPageToken"),
-      ...typeof record.resultSizeEstimate === "number" && Number.isFinite(record.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) } : {}
-    };
-  }
-  async getMessage(id, options = {}) {
-    const params = new URLSearchParams({ format: options.format ?? "full" });
-    if (options.format === "metadata") {
-      for (const header of options.metadataHeaders ?? [])
-        params.append("metadataHeaders", header);
-    }
-    const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
-    return json;
-  }
-  async listLabels() {
-    const record = asRecord7(await this.getJson("users/me/labels"), "Gmail labels list response");
-    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord7(item, "Gmail label"))).filter((label) => label.id) : [];
-  }
-  async getLabel(id) {
-    return gmailLabelFromJson(asRecord7(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
-  }
-  async getJson(path) {
-    let attempt = 0;
-    for (;; ) {
-      this.requestBudget?.reserve(this.provenance);
-      const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${this.token}`
-        }
-      });
-      const text2 = await response.text();
-      if (response.ok)
-        return text2 ? JSON.parse(text2) : {};
-      if (isRetryableGmailStatus(response.status) && attempt < this.maxRetries) {
-        attempt += 1;
-        await this.sleep(gmailRetryDelayMs(response, attempt));
-        continue;
-      }
-      throw new Error(`Gmail API request failed (${response.status}): ${safeProviderDetail2(text2)}`);
-    }
-  }
-}
-function isRetryableGmailStatus(status) {
-  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-}
-function gmailRetryDelayMs(response, attempt) {
-  const retryAfter = response.headers.get("retry-after")?.trim();
-  if (retryAfter) {
-    const seconds = Number.parseFloat(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(seconds * 1000, MAX_GMAIL_RETRY_DELAY_MS);
-    }
-    const dateMs = Date.parse(retryAfter);
-    if (Number.isFinite(dateMs)) {
-      return Math.max(0, Math.min(dateMs - Date.now(), MAX_GMAIL_RETRY_DELAY_MS));
-    }
-  }
-  return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
-}
-function gmailLabelFromJson(record) {
-  const type = record.type === "system" || record.type === "user" ? record.type : undefined;
-  return {
-    id: stringValue2(record.id),
-    name: stringValue2(record.name),
-    ...type ? { type } : {},
-    ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
-  };
-}
-function rawItemFromGmailMessage(message2, account, options = {}) {
-  const headers = headersFromPart(message2.payload);
-  const subject = headers.get("subject") ?? "(no subject)";
-  const rawFrom = headers.get("from") ?? "";
-  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
-  const metadataOnly = options.metadataOnly === true;
-  const text2 = metadataOnly ? "" : extractMessageText(message2);
-  const attachments = gmailAttachmentInventory(message2.payload);
-  const fetchedAt = new Date().toISOString();
-  return {
-    identity: {
-      family: "email",
-      provider: "gmail",
-      accountScope: account,
-      providerItemId: message2.id,
-      ...message2.threadId ? { providerThreadId: message2.threadId } : {},
-      localItemId: `${account}:${message2.id}`,
-      ...message2.historyId ? { sourceVersion: message2.historyId } : {}
-    },
-    mimeType: "message/rfc822",
-    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
-    metadata: Object.freeze({
-      title: subject,
-      subject,
-      from,
-      ...date ? { authoredAt: date } : {},
-      ...message2.internalDate ? { internalDate: message2.internalDate } : {},
-      ...message2.historyId ? { historyId: message2.historyId } : {},
-      ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
-      ...metadataOnly ? { mailScopeContent: "metadata_only" } : {},
-      labels: message2.labelIds ?? [],
-      attachmentCount: attachments.count,
-      attachmentBytesDeclared: attachments.bytes,
-      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
-      attachmentsNotIngested: attachments.count,
-      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message2.id)}`,
-      contentHash: hashString4(`${message2.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
-    }),
-    fetchedAt
-  };
-}
-function gmailAttachmentInventory(part) {
-  if (!part)
-    return { count: 0, bytes: 0, lines: [] };
-  const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
-  let count = filename ? 1 : 0;
-  let bytes = size ?? 0;
-  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
-  for (const child of part.parts ?? []) {
-    const nested = gmailAttachmentInventory(child);
-    count += nested.count;
-    bytes += nested.bytes;
-    lines.push(...nested.lines);
-  }
-  return { count, bytes, lines };
-}
-function gmailAttachmentLine(filename, part, size) {
-  const details = [
-    part.mimeType?.trim() || undefined,
-    size !== undefined ? `${size} bytes` : undefined,
-    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
-  ].filter((value) => Boolean(value));
-  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
-}
-function metadataCount(metadata, key2) {
-  const value = metadata[key2];
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-function extractMessageText(message2) {
-  const plain = [];
-  const html2 = [];
-  collectPartText(message2.payload, plain, html2);
-  const selected = plain.length > 0 ? plain.join(`
-
-`) : html2.map(stripHtml).join(`
-
-`);
-  return [headersSummary(message2.payload), message2.snippet, selected].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
-
-`);
-}
-function collectPartText(part, plain, html2) {
-  if (!part)
-    return;
-  if (part.filename?.trim())
-    return;
-  const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
-  if (decoded && part.mimeType === "text/plain")
-    plain.push(decoded);
-  if (decoded && part.mimeType === "text/html")
-    html2.push(decoded);
-  for (const child of part.parts ?? [])
-    collectPartText(child, plain, html2);
-}
-function headersFromPart(part) {
-  const headers = new Map;
-  for (const header of part?.headers ?? []) {
-    const name = header.name?.trim().toLowerCase();
-    const value = header.value?.trim();
-    if (name && value)
-      headers.set(name, value);
-  }
-  return headers;
-}
-function headersSummary(part) {
-  const headers = headersFromPart(part);
-  return [
-    headers.get("subject") ? `Subject: ${headers.get("subject")}` : undefined,
-    headers.get("from") ? `From: ${headers.get("from")}` : undefined,
-    headers.get("to") ? `To: ${headers.get("to")}` : undefined,
-    headers.get("date") ? `Date: ${headers.get("date")}` : undefined
-  ].filter(Boolean).join(`
-`);
-}
-function decodeBase64Url(value) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  return Buffer.from(normalized, "base64").toString("utf8");
-}
-function stripHtml(value) {
-  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-function parsedDate(value) {
-  if (!value)
-    return;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function internalDateIso(value) {
-  if (!value)
-    return;
-  const ms = Number.parseInt(value, 10);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function normalizeGmailMaxMessages(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
-  return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
-}
-function asRecord7(value, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value;
-}
-function stringValue2(value) {
-  return typeof value === "string" ? value : "";
-}
-function optionalStringProp2(record, key2) {
-  const value = stringValue2(record[key2]).trim();
-  return value ? { [key2]: value } : {};
-}
-function safeProviderDetail2(value) {
-  return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
-}
-function hashString4(value) {
-  return createHash20("sha256").update(value).digest("hex");
-}
-var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
-var init_gmail = __esm(() => {
-  init_linux_engine_layout();
-  init_mail_source_scope();
-  init_sender_rules();
-  init_credential_broker();
-  init_ingest_filter();
-  init_request_budget();
-  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
-});
-
 // src/workers/google-connectors/corpora.ts
 var init_corpora = __esm(() => {
   init_privacy_language();
@@ -32465,14 +31186,14 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { homedir as homedir16 } from "node:os";
-import { dirname as dirname23, join as join28 } from "node:path";
+import { homedir as homedir14 } from "node:os";
+import { dirname as dirname19, join as join23 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join28(homedir16(), ".local", "share");
-  return join28(standaloneLinuxDataDir(env) ?? join28(dataHome, "openclaw", "olympus"), "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir14(), ".local", "share");
+  return join23(standaloneLinuxDataDir(env) ?? join23(dataHome, "openclaw", "olympus"), "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
@@ -32576,14 +31297,14 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { homedir as homedir17 } from "node:os";
-import { join as join29 } from "node:path";
+import { homedir as homedir15 } from "node:os";
+import { join as join24 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join29(homedir17(), ".local", "share");
-  return join29(standaloneLinuxDataDir(env) ?? join29(dataHome, "openclaw", "olympus"), "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join24(homedir15(), ".local", "share");
+  return join24(standaloneLinuxDataDir(env) ?? join24(dataHome, "openclaw", "olympus"), "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
@@ -32691,19 +31412,25 @@ var init_x_bookmarks = __esm(() => {
 });
 
 // src/workers/telegram-messages/corpus-adapter.ts
-import { homedir as homedir18 } from "node:os";
-import { join as join30 } from "node:path";
+import { homedir as homedir16 } from "node:os";
+import { join as join25 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join30(standaloneLinuxDataDir(env) ?? join30(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
+  return join25(standaloneLinuxDataDir(env) ?? join25(env.HOME?.trim() || homedir16(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join30(standaloneLinuxDataDir(env) ?? join30(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
+  return join25(standaloneLinuxDataDir(env) ?? join25(env.HOME?.trim() || homedir16(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_linux_engine_layout();
   init_source_corpus_registry();
   init_corpus();
 });
+// src/workers/connector-store/capture-spool-secrets.ts
+var init_capture_spool_secrets = __esm(() => {
+  init_engine();
+  init_secrets_disposition();
+});
+
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
 var init_capture_spool_connector = __esm(() => {
@@ -32719,7 +31446,7 @@ var init_capture_spool_connector = __esm(() => {
 
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
-var init_store_sync2 = __esm(() => {
+var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
   init_capture_spool_secrets();
@@ -32731,7 +31458,7 @@ var init_store_sync2 = __esm(() => {
 var init_telegram_messages = __esm(() => {
   init_corpus_adapter4();
   init_capture_spool_connector();
-  init_store_sync2();
+  init_store_sync();
 });
 
 // src/workers/source-index/status.ts
@@ -32749,80 +31476,182 @@ var init_status = __esm(() => {
   init_secret_locations();
 });
 
-// src/core/source-watch.ts
-var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
-var init_source_watch = __esm(() => {
-  init_linux_engine_layout();
-  init_sqlite_migrations();
-  SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
-  SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
-  SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
-  SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
-  MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
-  MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
-  MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
-  OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
-  CREATE_WATCH_FIELDS = new Set([
-    "watchId",
-    "corpusId",
-    "queryText",
-    "mode",
-    "expiresAt",
-    "maxDeliveryAttempts"
-  ]);
-  CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
-  WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
-  OUTBOX_STATUS_VALUES = new Set([
-    "pending",
-    "leased",
-    "retry",
-    "delivered",
-    "dead_letter",
-    "cancelled"
-  ]);
-  ownedContexts = new WeakSet;
-  executorCapabilities = new WeakSet;
-  SYSTEM_CLOCK = Object.freeze({
-    now: () => new Date
-  });
-});
-// src/workers/dashboard/scheduler-markers.ts
-var OPERATOR_PAUSED_SCHEDULER_MARKERS;
-var init_scheduler_markers = __esm(() => {
-  OPERATOR_PAUSED_SCHEDULER_MARKERS = new Set([
-    "daily_api_request_guard",
-    "daily_resource_read_guard",
-    "daily_cost_guard",
-    "readwise_daily_api_request_guard",
-    "gmail_daily_api_request_guard",
-    "google_drive_daily_api_request_guard",
-    "head_api_request_reserve_guard",
-    "head_resource_read_reserve_guard",
-    "head_cost_reserve_guard",
-    "provider_rate_limit"
-  ]);
+// src/core/public-source-capabilities.ts
+var V0_4_PUBLIC_SOURCE_CAPABILITIES, CAPABILITIES_BY_SOURCE;
+var init_public_source_capabilities = __esm(() => {
+  init_source_corpus_registry();
+  V0_4_PUBLIC_SOURCE_CAPABILITIES = [
+    {
+      source_id: "gmail.email",
+      label: "Gmail",
+      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
+      contextual_scopes: ["mail query", "exclude Spam and Trash"],
+      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
+      provider_ceiling: "Provider history traversal and incremental refresh remain bounded by Gmail quota and pagination.",
+      supported_formats: ["headers", "snippet", "text/plain", "text/html (stripped)", "attachment metadata"],
+      doctor_lane: {
+        provider: "gmail",
+        capability: "gmail.email.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED",
+        default_off_when_absent: true
+      }
+    },
+    {
+      source_id: "google_drive.docs",
+      label: "Google Drive",
+      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
+      contextual_scopes: ["inclusion roots", "shared drives", "exclude trashed items", "fail-closed ancestry exclusions"],
+      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
+      provider_ceiling: "Provider history and change traversal remain bounded by Drive quota, pagination, and export limits.",
+      supported_formats: ["Google Docs text export", "text", "PDF", "common images"],
+      doctor_lane: {
+        provider: "google_drive",
+        capability: "google_drive.docs.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED",
+        default_off_when_absent: true
+      }
+    },
+    {
+      source_id: "dropbox.files",
+      label: "Dropbox",
+      authentication: { type: "oauth2", ownership: "one user-owned Dropbox account" },
+      contextual_scopes: ["approved path roots", "metadata-only or full-extract policy per root"],
+      dependencies: [
+        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
+        { id: "local_embedding_lane", label: "Approved local embedding lane", required_for: "optional semantic retrieval" }
+      ],
+      provider_ceiling: "Folder-ID scope is unsupported; traversal is bounded by provider pagination and configured work budgets.",
+      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"],
+      doctor_lane: {
+        provider: "dropbox",
+        capability: "dropbox.files.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED"
+      }
+    },
+    {
+      source_id: "x.bookmarks",
+      label: "X bookmarks",
+      authentication: { type: "oauth2", ownership: "user-owned X developer application and API plan" },
+      contextual_scopes: ["bookmark folders retained as provenance"],
+      dependencies: [{ id: "x_developer_app", label: "X developer application", required_for: "OAuth and bookmark API access" }],
+      provider_ceiling: "Plan availability, cost, rate limits, pagination, and provider windows can prevent complete history.",
+      supported_formats: ["post text", "author", "URL", "folder memberships", "media URLs"],
+      doctor_lane: {
+        provider: "x",
+        capability: "x.bookmarks.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED"
+      }
+    },
+    {
+      source_id: "telegram.messages",
+      label: "Telegram",
+      authentication: { type: "paired_session", ownership: "one user-owned MTProto session" },
+      contextual_scopes: ["explicit approved chats"],
+      dependencies: [{ id: "python_telethon", label: "Python with Telethon", required_for: "pairing and capture" }],
+      provider_ceiling: "Only captured approved-chat history is available; attachment bytes are not extracted in v0.4.",
+      supported_formats: ["message text", "replies", "forwards", "reactions", "attachment metadata"],
+      doctor_lane: {
+        provider: "telegram",
+        capability: "telegram.messages.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_INDEX_ENABLED"
+      }
+    },
+    {
+      source_id: "whatsapp.personal.messages",
+      label: "WhatsApp",
+      authentication: { type: "paired_session", ownership: "one linked user device" },
+      contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
+      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
+      provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
+      supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
+      doctor_lane: {
+        provider: "whatsapp_personal",
+        capability: "whatsapp.personal.messages.sync"
+      }
+    },
+    {
+      source_id: "readwise.library",
+      label: "Readwise",
+      authentication: { type: "api_key", ownership: "one user-owned Readwise API key" },
+      contextual_scopes: ["category", "location"],
+      dependencies: [{ id: "readwise_api_key", label: "Readwise API key", required_for: "Reader and Export API access" }],
+      provider_ceiling: "Reader v3 and Export v2 traversal are bounded by provider pagination and the daily request guard.",
+      supported_formats: ["document text", "highlight text", "HTML", "user annotations", "author", "tags", "URL", "category", "location"],
+      doctor_lane: {
+        provider: "readwise",
+        capability: "readwise.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED"
+      }
+    }
+  ];
+  CAPABILITIES_BY_SOURCE = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => [capability.source_id, capability]));
 });
 
-// src/workers/dashboard/source-failure.ts
-var SOURCE_FAILURE_KINDS, KIND_SET;
-var init_source_failure = __esm(() => {
+// src/workers/source-dashboard.ts
+var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var init_source_dashboard = __esm(() => {
+  init_linux_engine_layout();
+  init_google_handle_compatibility();
+  init_google_signin_full_copy();
+  init_publisher_oauth_client();
+  init_privacy_language();
+  init_sqlite_migrations();
+  init_ingestion_throughput();
+  init_source_corpus_registry();
+  init_types();
+  init_sovereignty();
   init_scheduler_markers();
-  SOURCE_FAILURE_KINDS = [
-    "sign_in",
-    "network",
-    "timeout",
-    "rate_limited",
-    "provider_busy",
-    "provider_refused",
-    "daily_limit",
-    "search_model_unavailable",
-    "reader_unavailable",
-    "busy_here",
-    "setup",
-    "not_started",
-    "unknown"
-  ];
-  KIND_SET = new Set(SOURCE_FAILURE_KINDS);
+  init_source_failure();
+  init_answer_ready_coverage();
+  init_vocabulary();
+  init_phases();
+  init_credential_health();
+  init_status();
+  init_public_source_capabilities();
+  DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
+    "credential_refresh_busy",
+    "credential_session_latched"
+  ]);
+  DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60000;
+  MIN_PROGRESS_WINDOW_MS = 5 * 60000;
+  SAMPLE_RETENTION_MS = 24 * 60 * 60000;
+  DASHBOARD_SENSITIVITY_TIERS = {
+    policy_basis: "enforced",
+    tiers: [
+      {
+        name: SENSITIVITY_TIER_LABELS.secrets,
+        tier_label: "S5",
+        meaning: "Refused before storage — content never stored and never reaches any model",
+        local: false,
+        venice: false,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.secure,
+        tier_label: "S4",
+        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
+        local: true,
+        venice: true,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.private,
+        tier_label: "S1–S3",
+        meaning: "Everyday mail, files, and notes",
+        local: true,
+        venice: true,
+        frontier: true
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.public,
+        tier_label: "S0",
+        meaning: "Freely shareable material",
+        local: true,
+        venice: true,
+        frontier: true
+      }
+    ]
+  };
 });
 
 // src/workers/dashboard/vocabulary.ts
@@ -33107,10 +31936,10 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      privateAnswers: { title: "Private answers", line: "Questions answered only on this computer" },
+      privateAnswers: { title: "Inbox", line: "Answers from every model, kept on this computer." },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
-    waiting: { one: "1 private question is waiting", many: "{count} private questions are waiting" },
+    waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
     locked: "Open dashboard controls first",
     readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
     indexFaster: DASHBOARD_INDEX_FASTER
@@ -33474,203 +32303,1445 @@ var init_vocabulary = __esm(() => {
   };
 });
 
-// src/workers/dashboard/phases.ts
-var init_phases = __esm(() => {
-  init_source_dashboard();
-  init_vocabulary();
-  init_vocabulary();
-});
-
-// src/workers/credential-health.ts
-var ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
-var init_credential_health = __esm(() => {
-  init_linux_engine_layout();
-  init_atomic_file();
-  init_connected_handles();
-  init_credential_broker();
-  ROTATING_PROVIDERS = new Set(["x"]);
-  PASSIVE_EVIDENCE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
-  CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS = 28 * 60 * 60 * 1000;
-  CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
-  CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
-});
-
-// src/core/public-source-capabilities.ts
-var V0_4_PUBLIC_SOURCE_CAPABILITIES, CAPABILITIES_BY_SOURCE;
-var init_public_source_capabilities = __esm(() => {
-  init_source_corpus_registry();
-  V0_4_PUBLIC_SOURCE_CAPABILITIES = [
-    {
-      source_id: "gmail.email",
-      label: "Gmail",
-      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
-      contextual_scopes: ["mail query", "exclude Spam and Trash"],
-      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
-      provider_ceiling: "Provider history traversal and incremental refresh remain bounded by Gmail quota and pagination.",
-      supported_formats: ["headers", "snippet", "text/plain", "text/html (stripped)", "attachment metadata"],
-      doctor_lane: {
-        provider: "gmail",
-        capability: "gmail.email.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED",
-        default_off_when_absent: true
-      }
-    },
-    {
-      source_id: "google_drive.docs",
-      label: "Google Drive",
-      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
-      contextual_scopes: ["inclusion roots", "shared drives", "exclude trashed items", "fail-closed ancestry exclusions"],
-      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
-      provider_ceiling: "Provider history and change traversal remain bounded by Drive quota, pagination, and export limits.",
-      supported_formats: ["Google Docs text export", "text", "PDF", "common images"],
-      doctor_lane: {
-        provider: "google_drive",
-        capability: "google_drive.docs.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED",
-        default_off_when_absent: true
-      }
-    },
-    {
-      source_id: "dropbox.files",
-      label: "Dropbox",
-      authentication: { type: "oauth2", ownership: "one user-owned Dropbox account" },
-      contextual_scopes: ["approved path roots", "metadata-only or full-extract policy per root"],
-      dependencies: [
-        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
-        { id: "local_embedding_lane", label: "Approved local embedding lane", required_for: "optional semantic retrieval" }
-      ],
-      provider_ceiling: "Folder-ID scope is unsupported; traversal is bounded by provider pagination and configured work budgets.",
-      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"],
-      doctor_lane: {
-        provider: "dropbox",
-        capability: "dropbox.files.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED"
-      }
-    },
-    {
-      source_id: "x.bookmarks",
-      label: "X bookmarks",
-      authentication: { type: "oauth2", ownership: "user-owned X developer application and API plan" },
-      contextual_scopes: ["bookmark folders retained as provenance"],
-      dependencies: [{ id: "x_developer_app", label: "X developer application", required_for: "OAuth and bookmark API access" }],
-      provider_ceiling: "Plan availability, cost, rate limits, pagination, and provider windows can prevent complete history.",
-      supported_formats: ["post text", "author", "URL", "folder memberships", "media URLs"],
-      doctor_lane: {
-        provider: "x",
-        capability: "x.bookmarks.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED"
-      }
-    },
-    {
-      source_id: "telegram.messages",
-      label: "Telegram",
-      authentication: { type: "paired_session", ownership: "one user-owned MTProto session" },
-      contextual_scopes: ["explicit approved chats"],
-      dependencies: [{ id: "python_telethon", label: "Python with Telethon", required_for: "pairing and capture" }],
-      provider_ceiling: "Only captured approved-chat history is available; attachment bytes are not extracted in v0.4.",
-      supported_formats: ["message text", "replies", "forwards", "reactions", "attachment metadata"],
-      doctor_lane: {
-        provider: "telegram",
-        capability: "telegram.messages.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_INDEX_ENABLED"
-      }
-    },
-    {
-      source_id: "whatsapp.personal.messages",
-      label: "WhatsApp",
-      authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
-      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
-      provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
-      supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
-      doctor_lane: {
-        provider: "whatsapp_personal",
-        capability: "whatsapp.personal.messages.sync"
-      }
-    },
-    {
-      source_id: "readwise.library",
-      label: "Readwise",
-      authentication: { type: "api_key", ownership: "one user-owned Readwise API key" },
-      contextual_scopes: ["category", "location"],
-      dependencies: [{ id: "readwise_api_key", label: "Readwise API key", required_for: "Reader and Export API access" }],
-      provider_ceiling: "Reader v3 and Export v2 traversal are bounded by provider pagination and the daily request guard.",
-      supported_formats: ["document text", "highlight text", "HTML", "user annotations", "author", "tags", "URL", "category", "location"],
-      doctor_lane: {
-        provider: "readwise",
-        capability: "readwise.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED"
-      }
-    }
-  ];
-  CAPABILITIES_BY_SOURCE = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => [capability.source_id, capability]));
-});
-
-// src/workers/source-dashboard.ts
-var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
-var init_source_dashboard = __esm(() => {
-  init_linux_engine_layout();
-  init_google_handle_compatibility();
-  init_google_signin_full_copy();
-  init_publisher_oauth_client();
-  init_privacy_language();
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS;
+var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
-  init_ingestion_throughput();
-  init_source_corpus_registry();
-  init_types();
-  init_sovereignty();
-  init_scheduler_markers();
-  init_source_failure();
-  init_answer_ready_coverage();
-  init_vocabulary();
-  init_phases();
-  init_credential_health();
-  init_status();
-  init_public_source_capabilities();
-  DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
-    "credential_refresh_busy",
-    "credential_session_latched"
-  ]);
-  DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60000;
-  MIN_PROGRESS_WINDOW_MS = 5 * 60000;
-  SAMPLE_RETENTION_MS = 24 * 60 * 60000;
-  DASHBOARD_SENSITIVITY_TIERS = {
-    policy_basis: "enforced",
-    tiers: [
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    perConnection: 20,
+    total: 50,
+    totalBytes: 256 * 1024,
+    answeredPerConnection: 50,
+    answeredBytesPerConnection: 1024 * 1024,
+    autoAnswersPerWindow: 5,
+    autoAnswerWindowMs: 60 * 60000,
+    answeredTotal: 500,
+    answeredBytes: 16 * 1024 * 1024,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000
+  });
+});
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
       {
-        name: SENSITIVITY_TIER_LABELS.secrets,
-        tier_label: "S5",
-        meaning: "Refused before storage — content never stored and never reaches any model",
-        local: false,
-        venice: false,
-        frontier: false
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
       },
       {
-        name: SENSITIVITY_TIER_LABELS.secure,
-        tier_label: "S4",
-        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
-        local: true,
-        venice: true,
-        frontier: false
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
       },
       {
-        name: SENSITIVITY_TIER_LABELS.private,
-        tier_label: "S1–S3",
-        meaning: "Everyday mail, files, and notes",
-        local: true,
-        venice: true,
-        frontier: true
-      },
-      {
-        name: SENSITIVITY_TIER_LABELS.public,
-        tier_label: "S0",
-        meaning: "Freely shareable material",
-        local: true,
-        venice: true,
-        frontier: true
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
       }
     ]
   };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
+var init_install = __esm(() => {
+  init_pinned_download();
+  init_linux_engine_layout();
+  init_manifest2();
+  STALE_LOCK_MS2 = 60 * 60000;
+  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+  SPACE_BACKOFF_MS = 15 * 60000;
+  DOWNLOAD_STALL_MS2 = 2 * 60000;
+  VERIFY_TIMEOUT_MS = 15 * 60000;
+  EXTRACT_TIMEOUT_MS = 5 * 60000;
+});
+
+// src/workers/source-index/built-in-reasoning/server.ts
+var init_server = __esm(() => {
+  init_model_transport();
+});
+
+// src/core/analyst-built-in.ts
+var GAP_GENERIC_WORDS, utf82;
+var init_analyst_built_in = __esm(() => {
+  init_analyst();
+  init_operation_error();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_install();
+  init_manifest2();
+  init_server();
+  GAP_GENERIC_WORDS = new Set([
+    "the",
+    "and",
+    "for",
+    "are",
+    "was",
+    "were",
+    "with",
+    "from",
+    "that",
+    "this",
+    "these",
+    "those",
+    "not",
+    "any",
+    "all",
+    "its",
+    "their",
+    "there",
+    "which",
+    "what",
+    "when",
+    "where",
+    "who",
+    "whom",
+    "how",
+    "why",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "been",
+    "being",
+    "into",
+    "about",
+    "than",
+    "then",
+    "also",
+    "such",
+    "other",
+    "only",
+    "more",
+    "most",
+    "some",
+    "can",
+    "could",
+    "would",
+    "should",
+    "may",
+    "might",
+    "will",
+    "shall",
+    "but",
+    "nor",
+    "yet",
+    "per",
+    "via",
+    "each",
+    "your",
+    "you",
+    "user",
+    "his",
+    "her",
+    "our",
+    "they",
+    "them",
+    "one",
+    "out",
+    "over",
+    "under",
+    "between",
+    "within",
+    "specific",
+    "exact",
+    "precise",
+    "actual",
+    "value",
+    "values",
+    "level",
+    "levels",
+    "number",
+    "numbers",
+    "amount",
+    "detail",
+    "details",
+    "detailed",
+    "information",
+    "info",
+    "result",
+    "results",
+    "data",
+    "figure",
+    "figures",
+    "provided",
+    "provide",
+    "evidence",
+    "found",
+    "find",
+    "missing",
+    "available",
+    "unavailable",
+    "mentioned",
+    "mention",
+    "listed",
+    "list",
+    "given",
+    "give",
+    "stated",
+    "state",
+    "states",
+    "shown",
+    "show",
+    "shows",
+    "included",
+    "include",
+    "includes",
+    "contain",
+    "contains",
+    "contained",
+    "reported",
+    "report",
+    "reports",
+    "document",
+    "documents",
+    "item",
+    "items",
+    "text",
+    "source",
+    "sources",
+    "record",
+    "records",
+    "file",
+    "files",
+    "full",
+    "complete",
+    "entire",
+    "whole",
+    "unknown",
+    "unclear",
+    "unspecified",
+    "specified",
+    "answer",
+    "question",
+    "none",
+    "no",
+    "citations",
+    "citation",
+    "unanswered",
+    "sufficient",
+    "insufficient",
+    "claim",
+    "claims"
+  ]);
+  utf82 = new TextEncoder;
+});
+
+// src/workers/chatgpt/private-answer-contract.ts
+var PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_ANSWER_NONE_META;
+var init_private_answer_contract = __esm(() => {
+  PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
+  PRIVATE_ANSWER_NONE_META = Object.freeze({ v: 1, count: 0, state: "none" });
+});
+
+// src/workers/chatgpt/private-answer-model.ts
+var init_private_answer_model = __esm(() => {
+  init_answer_activity();
+  init_source_model_policy();
+  init_evidence_versions();
+  init_private_answer_contract();
+});
+
+// src/workers/source-index/local-answer.ts
+var IN_SCOPE_SKIPS;
+var init_local_answer = __esm(() => {
+  init_evidence_pack();
+  init_source_model_policy();
+  init_private_answer_contract();
+  init_analyst_answer();
+  init_embeddings();
+  IN_SCOPE_SKIPS = new Set(["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"]);
+});
+
+// src/workers/email-source/local-private-answers.ts
+var TOKEN_TTL_MS;
+var init_local_private_answers = __esm(() => {
+  init_vocabulary();
+  init_tier_ledger();
+  init_release_manifest();
+  init_waiting_private_questions();
+  init_analyst_built_in();
+  init_private_answer_model();
+  init_local_answer();
+  TOKEN_TTL_MS = 30 * 60000;
+});
+
+// src/workers/dropbox-files/open-target.ts
+var OPENABLE_EXTENSIONS;
+var init_open_target = __esm(() => {
+  OPENABLE_EXTENSIONS = new Set([
+    "pdf",
+    "txt",
+    "md",
+    "markdown",
+    "rtf",
+    "csv",
+    "tsv",
+    "epub",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "odt",
+    "ods",
+    "odp",
+    "pages",
+    "numbers",
+    "key",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "heic",
+    "heif",
+    "tif",
+    "tiff",
+    "bmp",
+    "webp",
+    "mp3",
+    "m4a",
+    "aac",
+    "wav",
+    "aiff",
+    "aif",
+    "flac",
+    "mp4",
+    "m4v",
+    "mov"
+  ]);
+});
+
+// src/core/linux-desktop-opener.ts
+import { accessSync as accessSync2, constants as fsConstants2, lstatSync as lstatSync7, realpathSync as realpathSync3 } from "node:fs";
+import { execFile, spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
+import { randomBytes as randomBytes2 } from "node:crypto";
+import { dirname as dirname20, extname, isAbsolute as isAbsolute8, join as join26 } from "node:path";
+import { pathToFileURL as pathToFileURL2 } from "node:url";
+function linuxGraphicalSessionReadiness(dependencies = {}) {
+  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
+  const trustExecutable = dependencies.trustExecutable ?? isTrustedExecutable;
+  if (!absoluteExecutables(executables) || !trustExecutable(executables.systemctl)) {
+    return { ready: false, reason: "untrusted_systemctl" };
+  }
+  const runSync = dependencies.runSync ?? runCommandSync;
+  const active = runSync([executables.systemctl, "--user", "is-active", "graphical-session.target"], COMMAND_TIMEOUT_MS);
+  if (active.status !== 0 || active.timedOut === true || active.stdout.trim() !== "active") {
+    return { ready: false, reason: "inactive_graphical_session" };
+  }
+  const shown = runSync([executables.systemctl, "--user", "show-environment"], COMMAND_TIMEOUT_MS);
+  if (shown.status !== 0 || shown.timedOut === true) {
+    return { ready: false, reason: "manager_environment_unavailable" };
+  }
+  const manager = parseManagerEnvironment(shown.stdout);
+  const uid = dependencies.uid ?? (typeof process.getuid === "function" ? process.getuid() : -1);
+  const inspectPath = dependencies.inspectPath ?? inspectLinuxPath;
+  const runtime = manager.XDG_RUNTIME_DIR;
+  if (!runtime || !isAbsolute8(runtime) || runtime.includes("\x00") || runtime.includes(`
+`) || runtime.includes("\r")) {
+    return { ready: false, reason: "unsafe_runtime_directory" };
+  }
+  const runtimeInfo = inspectPath(runtime);
+  const resolveRealpath = dependencies.realpath ?? resolvedRealpath;
+  if (resolveRealpath(runtime) !== runtime || !runtimeInfo || runtimeInfo.symbolicLink || runtimeInfo.kind !== "directory" || runtimeInfo.uid !== uid || (runtimeInfo.mode & 63) !== 0) {
+    return { ready: false, reason: "unsafe_runtime_directory" };
+  }
+  const baseEnvironment = sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath);
+  const wayland = manager.WAYLAND_DISPLAY;
+  if (wayland && /^[A-Za-z0-9_.-]{1,128}$/.test(wayland)) {
+    const socket = join26(runtime, wayland);
+    const socketInfo = inspectPath(socket);
+    if (resolveRealpath(socket) === socket && socketInfo && !socketInfo.symbolicLink && socketInfo.kind === "socket" && socketInfo.uid === uid) {
+      return {
+        ready: true,
+        kind: "wayland",
+        environment: { ...baseEnvironment, XDG_RUNTIME_DIR: runtime, WAYLAND_DISPLAY: wayland },
+        displaySocket: socket
+      };
+    }
+  }
+  const display = manager.DISPLAY;
+  const displayMatch = display?.match(/^(?:(?:unix)?)(?::)(\d{1,4})(?:\.\d+)?$/);
+  if (display && displayMatch) {
+    const socket = `/tmp/.X11-unix/X${Number(displayMatch[1])}`;
+    const socketInfo = inspectPath(socket);
+    if (resolveRealpath(socket) === socket && socketInfo && !socketInfo.symbolicLink && socketInfo.kind === "socket" && (socketInfo.uid === uid || socketInfo.uid === 0)) {
+      return {
+        ready: true,
+        kind: "x11",
+        environment: { ...baseEnvironment, XDG_RUNTIME_DIR: runtime, DISPLAY: display },
+        displaySocket: socket
+      };
+    }
+  }
+  return { ready: false, reason: "stale_display" };
+}
+function isActiveLinuxScope(output, scopeUnit) {
+  if (!/^olympus-open-[a-z0-9-]{1,80}$/.test(scopeUnit))
+    return false;
+  const fields = new Map;
+  for (const line of output.trim().split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator <= 0)
+      continue;
+    fields.set(line.slice(0, separator), line.slice(separator + 1));
+  }
+  const controlGroup = fields.get("ControlGroup");
+  return fields.get("ActiveState") === "active" && typeof controlGroup === "string" && controlGroup.startsWith("/") && controlGroup.endsWith(`/${scopeUnit}.scope`) && !/[\0\r\n]/.test(controlGroup);
+}
+function parseManagerEnvironment(output) {
+  const allowed = new Set([
+    "XDG_RUNTIME_DIR",
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XAUTHORITY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_DESKTOP",
+    "XDG_SESSION_TYPE",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE"
+  ]);
+  const parsed = {};
+  for (const line of output.split(`
+`)) {
+    const separator = line.indexOf("=");
+    if (separator <= 0)
+      continue;
+    const key2 = line.slice(0, separator);
+    const value = line.slice(separator + 1);
+    if (allowed.has(key2) && value.length <= 4096 && !/[\0\r\n]/.test(value))
+      parsed[key2] = value;
+  }
+  return parsed;
+}
+function sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath) {
+  const environment = { PATH: "/usr/bin:/bin" };
+  const safeText = /^(?:[A-Za-z0-9_.@+,:/ -]){1,512}$/;
+  for (const key2 of ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "XDG_SESSION_TYPE", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE"]) {
+    const value = manager[key2];
+    if (value && safeText.test(value))
+      environment[key2] = value;
+  }
+  const home = manager.HOME;
+  if (home && isAbsolute8(home) && !/[\0\r\n]/.test(home))
+    environment.HOME = home;
+  const bus = manager.DBUS_SESSION_BUS_ADDRESS;
+  if (bus === `unix:path=${join26(runtime, "bus")}`)
+    environment.DBUS_SESSION_BUS_ADDRESS = bus;
+  const authority = manager.XAUTHORITY;
+  if (authority && isAbsolute8(authority)) {
+    const info = inspectPath(authority);
+    if (info && !info.symbolicLink && info.kind === "file" && info.uid === uid)
+      environment.XAUTHORITY = authority;
+  }
+  return environment;
+}
+function inspectLinuxPath(path) {
+  try {
+    const stat3 = lstatSync7(path);
+    return {
+      kind: stat3.isDirectory() ? "directory" : stat3.isFile() ? "file" : stat3.isSocket() ? "socket" : "other",
+      uid: stat3.uid,
+      mode: stat3.mode,
+      symbolicLink: stat3.isSymbolicLink()
+    };
+  } catch {
+    return;
+  }
+}
+function resolvedRealpath(path) {
+  try {
+    return realpathSync3.native(path);
+  } catch {
+    return;
+  }
+}
+function isTrustedExecutable(path) {
+  if (!isAbsolute8(path))
+    return false;
+  try {
+    accessSync2(path, fsConstants2.X_OK);
+    const stat3 = lstatSync7(path);
+    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+    return stat3.isFile() && !stat3.isSymbolicLink() && (stat3.uid === 0 || stat3.uid === uid) && (stat3.mode & 18) === 0;
+  } catch {
+    return false;
+  }
+}
+function absoluteExecutables(executables) {
+  return Object.values(executables).every((path) => isAbsolute8(path) && !/[\0\r\n]/.test(path));
+}
+function runCommandSync(argv, timeoutMs) {
+  const result = spawnSync3(argv[0], argv.slice(1), { encoding: "utf8", timeout: timeoutMs, maxBuffer: MAX_COMMAND_OUTPUT });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    ...result.error && result.error.code === "ETIMEDOUT" ? { timedOut: true } : {}
+  };
+}
+function runCommand2(argv, options) {
+  return new Promise((resolve7) => {
+    execFile(argv[0], argv.slice(1), {
+      encoding: "utf8",
+      timeout: options.timeoutMs,
+      maxBuffer: MAX_COMMAND_OUTPUT,
+      env: { ...options.env },
+      windowsHide: true
+    }, (error, stdout, stderr) => {
+      const failure = error;
+      const status = typeof failure?.code === "number" ? failure.code : failure ? null : 0;
+      resolve7({ status, stdout, stderr, ...failure?.killed === true ? { timedOut: true } : {} });
+    });
+  });
+}
+function launchInUserScope(argv, options) {
+  return new Promise((resolve7) => {
+    let settled = false;
+    let exited = false;
+    let overallTimer;
+    const child = spawn2(argv[0], argv.slice(1), {
+      detached: true,
+      stdio: "ignore",
+      env: { ...options.env },
+      windowsHide: true
+    });
+    const finish = (result) => {
+      if (settled)
+        return;
+      settled = true;
+      if (overallTimer)
+        clearTimeout(overallTimer);
+      child.unref();
+      resolve7(result);
+    };
+    child.once("error", (error) => finish({ established: false, stderr: error.message }));
+    child.once("exit", (code) => {
+      exited = true;
+      finish({ established: code === 0, stderr: "" });
+    });
+    const verifyScope = async () => {
+      if (settled || exited)
+        return;
+      const shown = await runCommand2([
+        options.systemctl,
+        "--user",
+        "show",
+        `${options.scopeUnit}.scope`,
+        "--property=ActiveState",
+        "--property=ControlGroup"
+      ], { timeoutMs: COMMAND_TIMEOUT_MS, env: options.env });
+      if (settled || exited)
+        return;
+      if (shown.status === 0 && shown.timedOut !== true && isActiveLinuxScope(shown.stdout, options.scopeUnit)) {
+        finish({ established: true, stderr: "" });
+        return;
+      }
+      const retry = setTimeout(() => {
+        verifyScope();
+      }, 50);
+      retry.unref();
+    };
+    child.once("spawn", () => {
+      verifyScope();
+    });
+    overallTimer = setTimeout(() => {
+      finish({ established: false, stderr: "systemd scope was not confirmed before the launch deadline" });
+    }, options.observeMs);
+    overallTimer.unref();
+  });
+}
+function mime(...values) {
+  return new Set(values);
+}
+async function openLinuxOwnerTicketFile(path, dependencies = {}) {
+  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
+  const trusted = dependencies.trustExecutable ?? isTrustedExecutable;
+  if (![executables.systemctl, executables.systemdRun, executables.xdgOpen].every(trusted))
+    throw new Error("Trusted desktop opener unavailable.");
+  const readiness = dependencies.readiness?.() ?? linuxGraphicalSessionReadiness(dependencies);
+  if (!readiness.ready)
+    throw new Error("No live graphical session.");
+  const runtime = readiness.environment.XDG_RUNTIME_DIR;
+  if (!runtime || dirname20(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname20(path).length + 1)))
+    throw new Error("Invalid owner ticket path.");
+  const stat3 = lstatSync7(path);
+  const parent = lstatSync7(dirname20(path));
+  const uid = dependencies.uid ?? process.getuid?.();
+  if (realpathSync3(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
+    throw new Error("Unsafe owner ticket file.");
+  const dispatch = async (opener) => {
+    const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
+    const result = await (dependencies.launch ?? launchInUserScope)([executables.systemdRun, "--user", "--scope", `--unit=${scopeUnit}`, "--", ...opener], { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl });
+    return result.established;
+  };
+  if (trusted(executables.omarchyWebApp) && await dispatch([executables.omarchyWebApp, pathToFileURL2(path).href]))
+    return;
+  if (!await dispatch([executables.xdgOpen, path]))
+    throw new Error("Desktop browser did not open the owner ticket.");
+}
+var SYSTEMCTL = "/usr/bin/systemctl", SYSTEMD_RUN = "/usr/bin/systemd-run", XDG_OPEN = "/usr/bin/xdg-open", XDG_MIME = "/usr/bin/xdg-mime", FILE = "/usr/bin/file", OMARCHY_WEB_APP = "/usr/bin/omarchy-launch-webapp", COMMAND_TIMEOUT_MS = 3000, LAUNCH_OBSERVATION_MS = 3000, MAX_COMMAND_OUTPUT = 65536, DEFAULT_EXECUTABLES, EXPECTED_MIME_TYPES;
+var init_linux_desktop_opener = __esm(() => {
+  init_open_target();
+  DEFAULT_EXECUTABLES = {
+    systemctl: SYSTEMCTL,
+    systemdRun: SYSTEMD_RUN,
+    xdgOpen: XDG_OPEN,
+    xdgMime: XDG_MIME,
+    file: FILE,
+    omarchyWebApp: OMARCHY_WEB_APP
+  };
+  EXPECTED_MIME_TYPES = Object.freeze({
+    pdf: mime("application/pdf"),
+    txt: mime("text/plain"),
+    md: mime("text/markdown", "text/plain"),
+    markdown: mime("text/markdown", "text/plain"),
+    rtf: mime("application/rtf", "text/rtf"),
+    csv: mime("text/csv", "text/plain"),
+    tsv: mime("text/tab-separated-values", "text/plain"),
+    epub: mime("application/epub+zip"),
+    doc: mime("application/msword"),
+    docx: mime("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    xls: mime("application/vnd.ms-excel"),
+    xlsx: mime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    ppt: mime("application/vnd.ms-powerpoint"),
+    pptx: mime("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    odt: mime("application/vnd.oasis.opendocument.text"),
+    ods: mime("application/vnd.oasis.opendocument.spreadsheet"),
+    odp: mime("application/vnd.oasis.opendocument.presentation"),
+    pages: mime("application/vnd.apple.pages", "application/x-iwork-pages-sffpages"),
+    numbers: mime("application/vnd.apple.numbers", "application/x-iwork-numbers-sffnumbers"),
+    key: mime("application/vnd.apple.keynote", "application/x-iwork-keynote-sffkey"),
+    png: mime("image/png"),
+    jpg: mime("image/jpeg"),
+    jpeg: mime("image/jpeg"),
+    gif: mime("image/gif"),
+    heic: mime("image/heic", "image/heif"),
+    heif: mime("image/heif", "image/heic"),
+    tif: mime("image/tiff"),
+    tiff: mime("image/tiff"),
+    bmp: mime("image/bmp", "image/x-ms-bmp"),
+    webp: mime("image/webp"),
+    mp3: mime("audio/mpeg"),
+    m4a: mime("audio/mp4", "audio/x-m4a"),
+    aac: mime("audio/aac", "audio/x-aac"),
+    wav: mime("audio/wav", "audio/x-wav"),
+    aiff: mime("audio/aiff", "audio/x-aiff"),
+    aif: mime("audio/aiff", "audio/x-aiff"),
+    flac: mime("audio/flac", "audio/x-flac"),
+    mp4: mime("video/mp4"),
+    m4v: mime("video/x-m4v", "video/mp4"),
+    mov: mime("video/quicktime")
+  });
+  for (const extension of OPENABLE_EXTENSIONS) {
+    if (!EXPECTED_MIME_TYPES[extension])
+      throw new Error(`Missing Linux MIME contract for .${extension}`);
+  }
+});
+
+// src/core/worker-transport.ts
+import { lstatSync as lstatSync8, mkdirSync as mkdirSync13, realpathSync as realpathSync4, chmodSync as chmodSync6 } from "node:fs";
+import { dirname as dirname21, isAbsolute as isAbsolute9, join as join27, normalize as normalize4, parse } from "node:path";
+function ownerId(options) {
+  const uid = options.uid ?? process.getuid?.();
+  if (uid === undefined)
+    throw new Error("Worker socket requires a Unix owner.");
+  return uid;
+}
+function validateDirectory(path, uid, privateMode) {
+  if (!isAbsolute9(path) || normalize4(path) !== path || /[\x00-\x1f\x7f]/.test(path))
+    throw new Error("Unsafe worker socket directory.");
+  let current2 = parse(path).root;
+  for (const part of path.slice(current2.length).split("/").filter(Boolean)) {
+    current2 = join27(current2, part);
+    const stat4 = lstatSync8(current2);
+    if (!stat4.isDirectory() || stat4.isSymbolicLink() || stat4.uid !== uid && stat4.uid !== 0)
+      throw new Error("Unsafe worker socket ancestor.");
+    if (stat4.mode & 18 && !(stat4.uid === 0 && stat4.mode & 512))
+      throw new Error("Writable worker socket ancestor.");
+  }
+  const stat3 = lstatSync8(path);
+  if (privateMode && (stat3.uid !== uid || (stat3.mode & 511) !== 448))
+    throw new Error("Worker runtime directory must be owner-owned and 0700.");
+  if (realpathSync4(path) !== path)
+    throw new Error("Worker socket directory must not contain symlinks.");
+}
+function workerSocketPath(options = {}) {
+  if ((options.platform ?? process.platform) !== "linux")
+    return;
+  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
+  const runtime = layout.runtimeHome;
+  if (!runtime)
+    throw new Error("Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.");
+  validateDirectory(runtime, ownerId(options), true);
+  if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime))
+    throw new Error("XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.");
+  const path = layout.workerSocketPath;
+  if (Buffer.byteLength(path) > 107)
+    throw new Error("Worker Unix socket path exceeds the Linux limit.");
+  return path;
+}
+function validateWorkerSocketDirectory(options = {}) {
+  const path = workerSocketPath(options);
+  if (!path)
+    return;
+  validateDirectory(dirname21(path), ownerId(options), true);
+  return path;
+}
+function validateWorkerSocket(options = {}) {
+  const path = validateWorkerSocketDirectory(options);
+  if (!path)
+    return;
+  const uid = ownerId(options);
+  const stat3 = lstatSync8(path);
+  if (!stat3.isSocket() || stat3.uid !== uid || (stat3.mode & 511) !== 384)
+    throw new Error("Worker socket must be owner-owned and 0600.");
+  return path;
+}
+var init_worker_transport = __esm(() => {
+  init_linux_engine_layout();
+  init_atomic_file();
+});
+
+// src/workers/remote-request-body.ts
+async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES, options = {}) {
+  const declared = request.headers.get("Content-Length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes)
+      return { ok: false, reason: "too_large" };
+  }
+  if (!request.body)
+    return { ok: true, text: "" };
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  let timer;
+  const deadline = new AbortController;
+  const timeout = new Error("request body timeout");
+  if (options.deadlineMs !== undefined)
+    timer = setTimeout(() => deadline.abort(timeout), options.deadlineMs);
+  try {
+    for (;; ) {
+      const { done, value } = options.deadlineMs === undefined ? await reader.read() : await untilAborted(reader.read(), deadline.signal);
+      if (done)
+        break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {
+          return;
+        });
+        return { ok: false, reason: "too_large" };
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {
+      return;
+    });
+    return { ok: false, reason: error === timeout ? "timeout" : "unreadable" };
+  } finally {
+    clearTimeout(timer);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return { ok: true, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+}
+var REMOTE_REQUEST_MAX_BODY_BYTES;
+var init_remote_request_body = __esm(() => {
+  init_http_timeout();
+  REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
+});
+
+// src/core/package-root.ts
+var init_package_root = () => {};
+
+// src/core/open-targets.ts
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    { kind: "private_answers" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+  ];
+}
+function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return target.answerId ? `page.private.${target.answerId}` : "page.private";
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function keysOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var init_open_targets = __esm(() => {
+  OPEN_CONNECT_SOURCES = {
+    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+    readwise: { sourceId: "readwise.library", label: "Readwise" },
+    telegram: { sourceId: "telegram.messages", label: "Telegram" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+});
+
+// src/core/dashboard-launch.ts
+import { createHash as createHash19, randomBytes as randomBytes4 } from "node:crypto";
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin, options = {}) {
+    const nowMs = this.now();
+    this.prune(nowMs);
+    if (options.remote === true) {
+      for (const [ticket2, record] of this.tickets) {
+        if (record.remote)
+          this.tickets.delete(ticket2);
+      }
+    }
+    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
+    const expiresAtMs = nowMs + ttlSeconds * 1000;
+    const ticket = randomBytes4(32).toString("base64url");
+    this.tickets.set(ticket, {
+      expiresAtMs,
+      originTag: dashboardLaunchOriginTag(origin),
+      ...options.remote === true ? { remote: true } : {}
+    });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash19("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_PAGE_HTML;
+var init_dashboard_launch = __esm(() => {
+  init_open_targets();
+  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
+        var status = document.getElementById('status');
+        var open = '';
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          var params = new URLSearchParams(hash);
+          // Where to land: one of a closed list, or the plain dashboard.
+          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
+          if (OPEN.test(wanted)) open = wanted;
+          return params.get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          status.textContent = 'This link is missing its opening ticket.';
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (response.ok) {
+            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
+            // sheets and Models live; it only opens a panel there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(KEYS.test(open)
+              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
+            return;
+          }
+          status.textContent = response.status === 403
+            ? 'This opening link is no longer valid.'
+            : 'Opening failed.';
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+});
+
+// src/core/dashboard-opening.ts
+var init_dashboard_opening = __esm(() => {
+  init_worker_transport();
+  init_dashboard_launch();
+  init_open_targets();
+  init_operation_error();
+});
+
+// src/core/engine-maintenance.ts
+var PROBE_OPTIONS, MAINTENANCE_OPTIONS;
+var init_engine_maintenance = __esm(() => {
+  init_file_lease();
+  PROBE_OPTIONS = {
+    acquireTimeoutMs: 1,
+    pollIntervalMs: 1,
+    staleAfterMs: Number.MAX_SAFE_INTEGER
+  };
+  MAINTENANCE_OPTIONS = {
+    staleAfterMs: Number.MAX_SAFE_INTEGER
+  };
+});
+
+// src/workers/credential-broker/unpaired-sources.ts
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
+var init_unpaired_sources = __esm(() => {
+  init_atomic_file();
+  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+});
+
+// src/core/worker-service.ts
+var WORKER_LOG_TAIL_BYTES;
+var init_worker_service = __esm(() => {
+  init_linux_engine_layout();
+  init_atomic_file();
+  init_openclaw_executable();
+  init_operation_error();
+  init_worker_auth();
+  WORKER_LOG_TAIL_BYTES = 64 * 1024;
+});
+
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+});
+
+// src/core/source-account-binding.ts
+var init_source_account_binding = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_provider_account_identity();
+});
+
+// src/core/connect.ts
+var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
+var init_connect = __esm(() => {
+  init_owner_config_read();
+  init_linux_engine_layout();
+  init_google_handle_compatibility();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_secret_store();
+  init_worker_service();
+  init_http_timeout();
+  init_oauth_relay();
+  init_publisher_oauth_client();
+  init_connected_handles();
+  init_unpaired_sources();
+  init_credential_broker();
+  init_provider_account_identity();
+  init_source_account_binding();
+  DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
+  DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
+  OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  KNOWN_OAUTH_ERROR_CODES = new Set([
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "access_denied",
+    "server_error",
+    "temporarily_unavailable",
+    "slow_down",
+    "expired_token",
+    "redirect_uri_mismatch"
+  ]);
+});
+
+// src/core/remote-open.ts
+var init_remote_open = __esm(() => {
+  init_linux_desktop_opener();
+  init_worker_transport();
+  init_open_targets();
+});
+
+// src/workers/whatsapp/reaction-index.ts
+var init_reaction_index = __esm(() => {
+  init_reactions();
+});
+
+// src/workers/whatsapp/live-connector.ts
+var init_live_connector = __esm(() => {
+  init_capture_spool_secrets();
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/store-sync.ts
+import { homedir as homedir17 } from "node:os";
+import { join as join29 } from "node:path";
+function defaultWhatsAppStateDir(env = process.env) {
+  const dataHome = env.XDG_DATA_HOME?.trim() || join29(env.HOME?.trim() || homedir17(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join29(dataHome, "olympus", "whatsapp-live");
+}
+function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join29(defaultWhatsAppStateDir(env), "connector-store.db");
+}
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
+var init_store_sync2 = __esm(() => {
+  init_connector_store();
+  init_tiered_store_set();
+  init_capture_spool_secrets();
+  init_live_connector();
+  WHATSAPP_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local"
+  });
+});
+
+// src/workers/file-extraction/extractors/bounded-text.ts
+var TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, GENERIC_MIME_TYPES;
+var init_bounded_text = __esm(() => {
+  TEXT_MIME_TYPES = new Set([
+    "application/json",
+    "application/x-ndjson",
+    "application/xml",
+    "text/csv",
+    "text/html",
+    "text/markdown",
+    "text/plain",
+    "text/tab-separated-values",
+    "text/xml"
+  ]);
+  TABLE_MIME_TYPES = new Set([
+    "text/csv",
+    "text/tab-separated-values"
+  ]);
+  IMAGE_MIME_TYPES = new Set([
+    "image/bmp",
+    "image/gif",
+    "image/heic",
+    "image/heif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp"
+  ]);
+  GENERIC_MIME_TYPES = new Set([
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/binary"
+  ]);
+});
+
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+var init_apple_vision_ocr = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+});
+
+// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
+var OCR_PROBE_IMAGE_BASE64;
+var init_ocr_probe_fixture = __esm(() => {
+  OCR_PROBE_IMAGE_BASE64 = [
+    "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"
+  ].join("");
+});
+
+// src/workers/file-extraction/extractors/ocr-capability.ts
+var OCR_READY_TTL_MS;
+var init_ocr_capability = __esm(() => {
+  init_command_runner();
+  init_ocr_probe_fixture();
+  OCR_READY_TTL_MS = 10 * 60000;
+});
+
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function boundedLogErrorMessage(error) {
+  const message2 = error instanceof Error ? error.message : String(error);
+  const oneLine = message2.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+
+// src/workers/file-extraction/unreadable-files.ts
+var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var init_unreadable_files = __esm(() => {
+  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
+
+// src/workers/remote-oauth/consent-page.ts
+var init_consent_page = () => {};
+
+// src/core/email-policy.ts
+var FORBIDDEN_RAW_RESPONSE_KEYS;
+var init_email_policy = __esm(() => {
+  init_operation_error();
+  FORBIDDEN_RAW_RESPONSE_KEYS = new Set([
+    "body",
+    "bodies",
+    "message",
+    "messages",
+    "raw_email",
+    "raw_emails",
+    "raw_message",
+    "raw_messages",
+    "snippet",
+    "snippets",
+    "embedding",
+    "embeddings",
+    "embedding_vector",
+    "embedding_vectors",
+    "vector",
+    "vectors"
+  ]);
+});
+
+// src/core/operation-caller.ts
+var inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  inProcessRemoteRequests = new WeakSet;
+});
+
+// src/core/source-index/selected-item-safety.ts
+var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
+var init_selected_item_safety = __esm(() => {
+  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
+    "body",
+    "boundedtext",
+    "chunk",
+    "chunks",
+    "content",
+    "document",
+    "html",
+    "markdown",
+    "message",
+    "messages",
+    "packet",
+    "passage",
+    "raw",
+    "rawpacket",
+    "rawsource",
+    "rawtext",
+    "snippet",
+    "sourcepacket",
+    "sourcesnippet",
+    "sourcetext",
+    "text"
+  ]);
+});
+
+// src/core/source-watch.ts
+var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
+var init_source_watch = __esm(() => {
+  init_linux_engine_layout();
+  init_sqlite_migrations();
+  SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
+  SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
+  MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
+  MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
+  MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
+  OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
+  CREATE_WATCH_FIELDS = new Set([
+    "watchId",
+    "corpusId",
+    "queryText",
+    "mode",
+    "expiresAt",
+    "maxDeliveryAttempts"
+  ]);
+  CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
+  WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
+  OUTBOX_STATUS_VALUES = new Set([
+    "pending",
+    "leased",
+    "retry",
+    "delivered",
+    "dead_letter",
+    "cancelled"
+  ]);
+  ownedContexts = new WeakSet;
+  executorCapabilities = new WeakSet;
+  SYSTEM_CLOCK = Object.freeze({
+    now: () => new Date
+  });
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
@@ -38277,7 +38348,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_tier_set2();
   init_x_bookmarks();
   init_tier_set3();
-  init_store_sync();
+  init_store_sync2();
   init_dropbox_files();
   init_telegram_messages();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
@@ -38644,13 +38715,17 @@ import { createHash as createHash25 } from "node:crypto";
 import { existsSync as existsSync19, lstatSync as lstatSync9, mkdirSync as mkdirSync16, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname26, isAbsolute as isAbsolute11 } from "node:path";
 
+// src/workers/email-source/server.ts
+init_vocabulary();
+init_local_private_answers();
+
 // src/core/linux-owner-bridge-host.ts
 init_linux_desktop_opener();
 
 // src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash16, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash18, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync7, openSync as openSync7, writeFileSync as writeFileSync6, unlinkSync as unlinkSync2 } from "node:fs";
-import { dirname as dirname21, join as join23 } from "node:path";
+import { dirname as dirname22, join as join28 } from "node:path";
 init_worker_transport();
 init_linux_desktop_opener();
 init_remote_request_body();
@@ -38736,7 +38811,7 @@ document.addEventListener('submit',function(event){
 },true);
 })();</script>`;
 function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash16("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const hash = "'sha256-" + createHash18("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
   const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
   const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
@@ -38829,7 +38904,7 @@ function proofPage() {
   response.headers.set("Access-Control-Allow-Origin", "*");
   return response;
 }
-var hashSecret = (value) => createHash16("sha256").update(value).digest("hex");
+var hashSecret = (value) => createHash18("sha256").update(value).digest("hex");
 function equalHash(value, hash) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
 }
@@ -38907,7 +38982,7 @@ class LinuxOwnerBridge {
       this.clearTicket(previous);
     const value = secret(), challenge = secret();
     const answer = createHmac("sha256", value).update(challenge).digest("base64url");
-    const path = join23(dirname21(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
+    const path = join28(dirname22(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
     const html2 = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
@@ -39195,7 +39270,7 @@ init_credential_broker();
 init_types();
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
   source_item_not_found: "failed_terminal",
   source_permission_denied: "failed_terminal",
@@ -39223,7 +39298,7 @@ class FileExtractionSourceError extends Error {
     this.errorKind = errorKind;
     this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
     this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash18("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+    const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
   }
@@ -39621,7 +39696,7 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
 ]);
 
 // src/workers/email-source/file-extraction-runtime.ts
-init_store_sync();
+init_store_sync2();
 
 // src/workers/file-extraction/job-store.ts
 init_sqlite_migrations();
@@ -39831,8 +39906,8 @@ import {
   writeFileSync as writeFileSync7
 } from "node:fs";
 import { randomUUID as randomUUID8 } from "node:crypto";
-import { homedir as homedir14 } from "node:os";
-import { dirname as dirname22, isAbsolute as isAbsolute10, join as join26 } from "node:path";
+import { homedir as homedir18 } from "node:os";
+import { dirname as dirname23, isAbsolute as isAbsolute10, join as join30 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -39840,15 +39915,15 @@ var CACHE_SCHEMA_VERSION = 1;
 var MAX_CATALOG_TIMEOUT_MS = 30000;
 var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir14(), type = "text") {
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir18(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute10(configuredRoot) ? configuredRoot : join26(homeDir, ".cache");
-  return join26(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute10(configuredRoot) ? configuredRoot : join30(homeDir, ".cache");
+  return join30(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
   const type = options.type ?? "text";
-  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir14(), type);
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir18(), type);
   const cacheKey = `${cachePath}
 ${type}`;
   const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
@@ -40049,7 +40124,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID8()}.tmp`;
   try {
-    mkdirSync14(dirname22(path), { recursive: true, mode: 448 });
+    mkdirSync14(dirname23(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync7(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -40711,6 +40786,7 @@ var CODEX_SNIPPET = [
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();
+init_vocabulary();
 var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
 var CONNECTOR_PROMPT = [
   "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
@@ -41005,7 +41081,7 @@ init_x_bookmarks();
 init_live_control2();
 // src/workers/whatsapp/index.ts
 init_live_connector();
-init_store_sync();
+init_store_sync2();
 
 // src/workers/source-scheduler.ts
 init_telegram_messages();
@@ -42068,11 +42144,7 @@ class InstalledTierClassification {
 
 // src/workers/email-source/server.ts
 init_built_in_sniffer();
-
-// src/workers/answer-activity.ts
-var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
-
-// src/workers/email-source/server.ts
+init_answer_activity();
 init_privacy_profile();
 
 // src/workers/classification/sniffer-service.ts
@@ -42710,6 +42782,9 @@ class TierSnifferService {
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
+  }
+  get hasPriority() {
+    return this.running || this.continuation !== undefined;
   }
   status() {
     return {

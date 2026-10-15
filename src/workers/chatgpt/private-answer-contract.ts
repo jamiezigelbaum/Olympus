@@ -154,6 +154,8 @@ export type PrivateEvidenceItem = Readonly<Record<string, unknown>>;
  * sizes and milliseconds only, never content.
  */
 export interface PrivateAnswerObserver {
+  /** Called immediately before synthesis, after the live evidence guard. */
+  modelStarting?: () => void;
   /**
    * The evidence the model reads: items kept, items without readable text,
    * their text bytes, and (`used`) every input item that can reach the

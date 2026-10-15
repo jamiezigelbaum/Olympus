@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createAnswerActivity, createLocalModelActivity } from '../src/workers/answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
 
 describe('answer activity', () => {
   test('preempts on the first answer and releases each lease once', () => {
@@ -65,4 +65,39 @@ test('cloud-only search never aborts local sorting; only the same local model do
   });
   await Promise.resolve();
   expect(wakes).toBe(1);
+});
+
+
+test('classification queues before automatic inference; background dispatch never preempts sorting', async () => {
+  const activity = createLocalModelActivity();
+  const order: string[] = [];
+  let preempts = 0;
+  activity.onBusy('built_in', () => preempts++);
+  const tracked = activity.track('built_in', { complete: async (request: { prompt: string }) => {
+    order.push(request.prompt); return { text: '', modelId: 'fixture' };
+  } });
+  const request = (prompt: string) => ({ system: '', prompt, localOnly: true });
+  await Promise.all([
+    runBackgroundInference(() => tracked.complete(request('inbox'))),
+    runClassificationInference(() => tracked.complete(request('classification'))),
+    tracked.complete(request('owner')),
+  ]);
+  expect(order).toEqual(['owner', 'classification', 'inbox']);
+  expect(preempts).toBe(1);
+});
+
+test('configured analysts can complete concurrently without queue wait consuming their timeout', async () => {
+  const activity = createLocalModelActivity();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const entered: string[] = [];
+  const tracked = activity.track('remote-model', { complete: async (request: { prompt: string }) => {
+    entered.push(request.prompt); await gate; return { text: '', modelId: 'fixture' };
+  } }, { serialize: false });
+  const a = tracked.complete({ prompt: 'one' });
+  const b = tracked.complete({ prompt: 'two' });
+  await Promise.resolve();
+  expect(entered).toEqual(['one', 'two']);
+  release();
+  await Promise.all([a, b]);
 });

@@ -69,6 +69,7 @@ export type LocalAnswerResult =
       status: 'answered';
       answer: string;
       citations: PrivateAnswerSourceCitation[];
+      sentItems?: Array<{ title?: string; source?: string; date?: string }>;
       unanswered: string[];
       /** Sources that could not be searched on this computer, by name. */
       leftOut: string[];
@@ -84,6 +85,7 @@ export type LocalAnswerResult =
   | { status: 'no_model' }
   | { status: 'model_downloading'; percent?: number }
   /** An item the answer read changed tier or went away before it was shown. */
+  | { status: 'withdrawn'; sentItems: Array<{ title?: string; source?: string; date?: string }>; reason: string }
   | { status: 'changed' }
   | { status: 'failed' };
 
@@ -93,6 +95,10 @@ export interface LocalAnswerRequest {
   selectors?: WaitingQuestionSelectors;
   detail?: PrivateAnswerDetail;
   signal?: AbortSignal;
+  /** Owner inbox generation; checked at a remote dispatch, never accepted from the wire. */
+  stillAuthorized?: () => boolean;
+  /** Marks the start of synthesis so pre-model failures do not spend the inbox budget. */
+  onModelCall?: () => void;
 }
 
 export interface LocalAnswerOptions {
@@ -188,9 +194,10 @@ export async function answerOnThisComputer(
       evidence: (stats) => {
         used = stats.used;
       },
+      ...(input.onModelCall ? { modelStarting: input.onModelCall } : {}),
     }, { detail: input.detail === 'full' ? 'full' : 'summary' });
   } catch (error) {
-    if (error instanceof NoPrivateEvidenceError) return { status: 'not_found', leftOut };
+    if (error instanceof NoPrivateEvidenceError) return { status: 'failed' };
     return { status: 'failed' };
   }
   // Before anything is shown: every item that can reach the output (the items
@@ -252,12 +259,15 @@ function leftOutSources(
 export async function checkLocalEvidenceItems(input: {
   lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
   items: readonly Readonly<Record<string, unknown>>[];
+  /** Preserve an unavailable check for callers that must retain stored answers. */
+  throwOnUnavailable?: boolean;
 }): Promise<boolean[]> {
   if (input.items.length === 0) return [];
   let lanes: AnalystAnswerLanes;
   try {
     lanes = input.lanes(localAnswerRequest('eligibility', { retrieval_mode: 'keyword' }));
-  } catch {
+  } catch (error) {
+    if (input.throwOnUnavailable) throw error;
     return input.items.map(() => false);
   }
   return Promise.all(input.items.map(async (item) => {
@@ -268,18 +278,20 @@ export async function checkLocalEvidenceItems(input: {
       if (!corpusId || !provenance?.sourceItem?.localItemId || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain)) return false;
       if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain) return false;
       const provider = lanes.contentProviders[corpusId] as
-        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }) => boolean })
+        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain; throwOnUnavailable?: boolean }) => boolean })
         | undefined;
       if (!provider) return false;
       if (typeof provider.contentServable === 'function') {
-        return provider.contentServable({ provenance, trustDomain }) === true;
+        return provider.contentServable({ provenance, trustDomain, throwOnUnavailable: input.throwOnUnavailable === true }) === true;
       }
       const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
       if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0) return false;
       if (content.sensitivity.trustDomain !== trustDomain) return false;
+      if (content.sensitivity.trustTier === 'S5') return false;
       assertModelTrustTierAllowed(content.sensitivity.trustTier);
       return true;
-    } catch {
+    } catch (error) {
+      if (input.throwOnUnavailable) throw error;
       return false;
     }
   }));

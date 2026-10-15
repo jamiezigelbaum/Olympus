@@ -4,6 +4,9 @@
 // is on the same rail.
 
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import type { ReadwiseConnectorStoreSyncHandler } from '../src/workers/readwise/index.ts';
@@ -12,6 +15,8 @@ const PROVIDER_BODY_ECHO = 'Token abcdefghijklmnopqrstuvwxyz0123456789';
 
 describe('post-connect first sync logging', () => {
   test('a failed first sync is reported through the worker scrubber', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-post-connect-log-'));
+    const registryPath = join(dir, 'handles.json');
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => {
@@ -27,13 +32,16 @@ describe('post-connect first sync logging', () => {
           },
         } as unknown as ReadwiseConnectorStoreSyncHandler,
         sourceDashboard: {
+          // A logging fixture must not read another test's/default registry.
+          registryPath,
+          secretStore: { label: 'synthetic', get: async () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
           sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
           async connectApiKey({ source }) {
             return {
               ok: true,
               source,
               handles: ['readwise.personal'],
-              registryPath: '/dev/null',
+              registryPath,
               secretRefs: [],
             };
           },
@@ -46,7 +54,7 @@ describe('post-connect first sync logging', () => {
         headers: { 'Content-Type': 'application/json' },
       }));
 
-      expect(response.status).toBe(200);
+      expect({ status: response.status, body: await response.clone().json() }).toMatchObject({ status: 200, body: { ok: true } });
       // The acknowledgment is returned before the background import finishes.
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(warnings).toHaveLength(1);
@@ -57,6 +65,7 @@ describe('post-connect first sync logging', () => {
       expect(warning.length).toBeLessThan(300);
     } finally {
       console.warn = originalWarn;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

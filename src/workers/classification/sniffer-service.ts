@@ -359,6 +359,9 @@ export class TierSnifferService {
     };
   }
 
+  /** A running or continuing classification pass outranks automatic inbox work. */
+  get hasPriority(): boolean { return this.running || this.continuation !== undefined; }
+
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting } {
     return {
       lane: this.options.lane.kind,

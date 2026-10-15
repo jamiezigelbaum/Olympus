@@ -3,6 +3,7 @@
 // generation that refuses an insert in flight; the acknowledgment compare;
 // and that it survives a restart (a reopen).
 
+import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -61,6 +62,7 @@ describe('waiting private questions: what is stored', () => {
     expect(questions).toEqual([{
       id: ref!.id,
       connectionId: CONN_A,
+      path: 'private',
       surface: 'chatgpt',
       question: 'What did the June lab report say?',
       detail: 'full',
@@ -69,6 +71,7 @@ describe('waiting private questions: what is stored', () => {
       seen: false,
       generation: 1,
       askedAt: new Date(1_000_000).toISOString(),
+      attempts: 0, nextAttemptAt: 0,
     }]);
     // Owner-only file in an owner-only directory, like the Private stores.
     expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -511,4 +514,21 @@ describe('waiting private questions: separate processes', () => {
     expect(worker.record(worker.ticket(grok.id), { question: 'grok later', surface: 'remote', state: 'waiting' })).toBeUndefined();
     expect(worker.record(worker.ticket(muse.id), { question: 'muse later', surface: 'remote', state: 'waiting' })).toBeDefined();
   }, 30_000);
+});
+
+test('v3 retained private answers migrate additively to v4 alongside anonymous answers', () => {
+  const { store, path } = open();
+  const ref = store.record(store.ticket(CONN_A), { question: 'Old private question', state: 'waiting', surface: 'remote' })!;
+  store.saveAnswer(ref, { status: 'answered', answer: 'Old local reply', citations: [], read: [], leftOut: [], unanswered: [] });
+  store.close();
+  // Reconstruct the v3 shape an already-installed inbox has, preserving its data.
+  const legacy = new Database(path);
+  legacy.exec('ALTER TABLE waiting_questions DROP COLUMN answer_path; ALTER TABLE waiting_questions DROP COLUMN destination');
+  legacy.query('UPDATE schema_version SET version = 3 WHERE store_id = ?').run('waiting-private-questions');
+  legacy.close();
+  const upgraded = openWaitingPrivateQuestionStore(path); stores.push(upgraded);
+  expect(upgraded.get(ref.id)).toMatchObject({ path: 'private', question: 'Old private question', result: { answer: 'Old local reply' } });
+  const anonymous = upgraded.record(upgraded.ticket(CONN_A), { question: 'Sent outside', state: 'waiting', surface: 'remote', path: 'anonymous' })!;
+  expect(upgraded.saveAnswer(anonymous, { status: 'answered', answer: 'Outside reply', citations: [], read: [], leftOut: [], unanswered: [] }, 'Exact sent text')).toBe(true);
+  expect(upgraded.list().questions).toHaveLength(2);
 });

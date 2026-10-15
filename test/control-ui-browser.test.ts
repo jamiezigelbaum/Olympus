@@ -807,3 +807,19 @@ describe('dashboard controller DOM lifetime', () => {
     expect(reads).toBe(readCount);
   });
 });
+
+test('changed model settings reload their document so anonymous controls stay bound', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = '<section data-outside-help><button>Turn on</button></section>';
+  document.body.append(root);
+  const navigations: string[] = [];
+  const controller = mountDashboardController({
+    root, transport: { control: async () => ({ status: 200, body: {} }) },
+    navigate: href => navigations.push(href), returnUrl: '/dashboard?keys#anonymous', canWrite: true,
+    signal: new AbortController().signal, signature: 'old', pollIntervalMs: -1,
+    refresh: async () => ({ status: 200, title: 'Models', body: '<section data-outside-help>Changed</section>', controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: -1 }),
+  });
+  await controller.refresh(); controller.dispose();
+  expect(navigations).toEqual(['/dashboard?keys#anonymous']);
+  expect(root.querySelector('button')!.textContent).toBe('Turn on');
+});

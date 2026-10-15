@@ -10,7 +10,7 @@
  * - Agents (`?agents`): remote access and connected agents.
  * - Build a connector (`?connector`): the prompt for a coding agent.
  *
- * Outside help keeps its own page (outside-help.ts). Each page holds the
+ * Anonymous model settings live here in Models (outside-help.ts). Each page holds the
  * "Open dashboard controls" gate while the controls are locked, so a page
  * opened on its own still says what to do.
  *
@@ -42,8 +42,10 @@ import {
   setupRow,
   type DashboardActionInput,
 } from '../components.ts';
+import { DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
+import { DASHBOARD_OUTSIDE_HELP_CSS } from '../static-styles.ts';
 import { renderModelSetup, renderModelSetupBlocker } from '../model-setup.ts';
-import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
+import { renderOutsideHelpCard, type DashboardOutsideHelpStatus } from '../outside-help.ts';
 import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_COMPUTER_PANEL_COPY,
@@ -66,7 +68,7 @@ export interface DashboardPageOptions {
   /** OPENER supplies the current desktop/headless approval handoff. */
   agentConnectHost?: AgentConnectHost;
   /** The Outside help card's facts, for that page only, with the control session. */
-  outsideHelp?: DashboardOutsideHelpStatus;
+  outsideHelp?: DashboardOutsideHelpStatus | undefined;
   /** True when the live control session was minted locally (the only grade the consult routes take). */
   outsideHelpLocalSession?: boolean;
   /**
@@ -75,18 +77,23 @@ export interface DashboardPageOptions {
    */
   privateAnswers?: {
     available: boolean;
+    destinations?: import('../../email-source/venice-inbox-answer.ts').AskDestinationStates | undefined;
     waiting?: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean };
   };
 }
 
 /** One question waiting for this computer, as the Private answers page lists it. */
 export interface DashboardWaitingQuestion {
+  path?: 'private' | 'anonymous' | 'venice';
   id: string;
   question: string;
   /** Who asked: the connection's name. */
   from: string;
   askedAt: string;
   unchecked: boolean;
+  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
+  unread?: boolean;
+  answeredAt?: string;
 }
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';
@@ -148,7 +155,10 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view.model_setup),
-    renderModelSetup(view.model_setup),
+    `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup)}</div>`,
+    view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySetting)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySettingHelp)}</p></section>`,
+    `<section id="anonymous"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...(options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
     sources.length === 0 ? '' : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0
       ? ''
@@ -158,7 +168,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     crumb: W.keys.title,
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
-    styles: [MODEL_SETUP_CSS],
+    styles: [MODEL_SETUP_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
     options,
   });
 }

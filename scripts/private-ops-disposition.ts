@@ -45,6 +45,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/consult-m1-results/runs-2-10.json',
   'docs/design/consult-writer-instructions.md',
   'docs/design/cross-language-keyword-matching.md',
+  'docs/design/frontier-consult-lane.md',
   'docs/design/hosted-agent-compatibility.md',
   'docs/design/linux-zkapi-confinement.md',
   'docs/design/open-on-computer.md',

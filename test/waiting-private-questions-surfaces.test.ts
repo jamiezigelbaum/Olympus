@@ -22,6 +22,7 @@ import { recordReleaseManifest, type ReleaseCheck } from '../src/core/release-ma
 import { REMOTE_ANSWER_CHANGED, REMOTE_OUTPUT_SCHEMAS, REMOTE_PRIVATE_NOTE, remoteOperationOutput, withRemotePrivateNote } from '../src/core/remote-result.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { callChatGptTool, OPEN_PRIVATE_QUESTION_TOOL, SEARCH_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_ANSWER_TOOL, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_META_KEY, type PrivateAnswerModel } from '../src/workers/chatgpt/private-answer-contract.ts';
@@ -204,12 +205,20 @@ describe('ChatGPT: recorded at the match, never from the private question panel'
     };
 
     const first = await search('When does the lease end?');
+    const recorded = store.list().questions[0]!;
+    let backgroundCalls = 0;
+    const inbox = createLocalPrivateAnswers({ store: () => store, now: () => Date.now() + 31_000,
+      panelClaimed: ref => jobs.hasClaimedWaiting(ref), answer: async () => { backgroundCalls++; return { status: 'failed' }; } });
     await Bun.sleep(30);
     // Claim-time synthesis: a job no panel claims never runs the model.
     expect(model.calls).toEqual([]);
     const panel = await generatePanelKeyPair();
     const opened = await collect(first, panel.publicKey, panel.privateKey);
     expect(model.calls).toHaveLength(1);
+    expect(jobs.hasClaimedWaiting(recorded)).toBe(true);
+    await inbox.tick();
+    expect(backgroundCalls).toBe(0);
+    expect(inbox.waiting()?.questions).toEqual([]);
     expect(opened.ack).toMatch(/^[A-Za-z0-9_-]{43}$/);
     // Rendered but not yet acknowledged (or the ack was lost): still waiting.
     expect(store.list().questions).toHaveLength(1);
@@ -224,6 +233,10 @@ describe('ChatGPT: recorded at the match, never from the private question panel'
     expect(acked.status).toBe(200);
     expect(await acked.json()).toEqual({ status: 'acknowledged' });
     expect(store.list().questions).toEqual([]);
+    await inbox.tick();
+    expect(inbox.waiting()?.questions).toEqual([]);
+    expect(backgroundCalls).toBe(0);
+    inbox.close();
     // Single use: a replay is refused.
     expect((await post(first, { v: 1, publicKey: panel.publicKey, ack: opened.ack })).status).toBe(410);
 
@@ -481,7 +494,7 @@ describe('remote: the fixed sentence in slice 2\'s closed schema', () => {
     expect(plain).not.toHaveProperty('private_note');
     const noted = withRemotePrivateNote(remoteOperationOutput('source_answer', answerResult(POLICY_SKIP)));
     expect(noted.private_note).toBe(REMOTE_PRIVATE_NOTE);
-    expect(REMOTE_PRIVATE_NOTE).toBe('Private items may answer this; the person can see that answer in Olympus on their computer.');
+    expect(REMOTE_PRIVATE_NOTE).toBe('Your answer is in Olympus on your computer.');
     for (const operation of ['source_answer', 'source_answer_result'] as const) {
       expect(valid(operation, plain)).toBe(true);
       expect(valid(operation, noted)).toBe(true);
@@ -567,7 +580,7 @@ describe('remote: over /mcp and the REST surface', () => {
     }) as unknown as Parameters<Client['connect']>[0]);
     try {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as { content: Array<{ text: string }> };
-      expect(JSON.parse(result.content[0]!.text)).toMatchObject({ kind: 'source_answer', status: 'answered', private_note: REMOTE_PRIVATE_NOTE });
+      expect(JSON.parse(result.content[0]!.text)).toMatchObject({ kind: 'source_answer', status: 'answered', private_note: expect.stringMatching(/^Your answer is in Olympus on your computer\. \[Open answer\]\(olympus:\/\/open\/private\/[A-Za-z0-9_-]{22}\)$/) });
     } finally {
       await client.close();
     }
@@ -577,7 +590,7 @@ describe('remote: over /mcp and the REST surface', () => {
       body: JSON.stringify({ question: 'Who signed the lease?' }),
     });
     expect(rest.status).toBe(200);
-    expect(await rest.json()).toMatchObject({ status: 'answered', private_note: REMOTE_PRIVATE_NOTE });
+    expect(await rest.json()).toMatchObject({ status: 'answered', private_note: expect.stringMatching(/^Your answer is in Olympus on your computer\. \[Open answer\]\(olympus:\/\/open\/private\/[A-Za-z0-9_-]{22}\)$/) });
     expect(store.list().questions.map((question) => [question.surface, question.question]).sort()).toEqual([
       ['remote', 'When does the lease end?'],
       ['remote', 'Who signed the lease?'],
@@ -645,7 +658,7 @@ describe('remote: over /mcp and the REST surface', () => {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: 'Where is the lease?' }),
     });
-    expect(await kept.json()).toMatchObject({ kind: 'source_answer', status: 'answered', private_note: REMOTE_PRIVATE_NOTE });
+    expect(await kept.json()).toMatchObject({ kind: 'source_answer', status: 'answered', private_note: expect.stringMatching(/^Your answer is in Olympus on your computer\. \[Open answer\]\(olympus:\/\/open\/private\/[A-Za-z0-9_-]{22}\)$/) });
   });
 
   test('a handed-off answer nobody collects still waits on the computer', async () => {

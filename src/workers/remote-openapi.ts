@@ -198,7 +198,7 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
     const output = privatePart ? release() : approved;
-    return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output) : output);
+    return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId) : output);
   } catch (error) {
     return operationErrorResponse(error, declaredParams);
   }

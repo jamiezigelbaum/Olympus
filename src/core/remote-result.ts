@@ -71,7 +71,7 @@ export const REMOTE_ANSWER_CHANGED = 'Olympus withheld this answer because an it
 /** The answer's inputs could not be checked against the current tiers. */
 export const REMOTE_ANSWER_UNVERIFIED = 'Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.';
 /** The one sentence a remote agent is told when Private items it was not given may answer its question. */
-export const REMOTE_PRIVATE_NOTE = 'Private items may answer this; the person can see that answer in Olympus on their computer.';
+export const REMOTE_PRIVATE_NOTE = 'Your answer is in Olympus on your computer.';
 export const REMOTE_ANSWER_WITHHELD = 'Olympus withheld this answer under the owner\'s privacy rules.';
 export const REMOTE_REPLY_WITHHELD = 'Olympus withheld the reply because it looked like it contained a password, key or token.';
 const REMOTE_REFUSAL_FALLBACK = 'Olympus could not ask anonymously.';
@@ -329,9 +329,9 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
  * matching Private items (core/remote-private-part.ts). The fixed sentence
  * and nothing else about them. Any other output is returned unchanged.
  */
-export function withRemotePrivateNote(output: Record<string, unknown>): Record<string, unknown> {
+export function withRemotePrivateNote(output: Record<string, unknown>, answerId?: string): Record<string, unknown> {
   return output.kind === 'source_answer' && output.status === 'answered'
-    ? { ...output, private_note: REMOTE_PRIVATE_NOTE }
+    ? { ...output, private_note: answerId && /^[A-Za-z0-9_-]{22}$/.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE }
     : output;
 }
 
@@ -706,7 +706,7 @@ const SOURCE_ANSWER_SCHEMA = {
     status: { enum: ['answered', 'withheld'] },
     answer: { type: 'string', maxLength: MAX_ANSWER },
     citations: { type: 'array', maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-    private_note: { const: REMOTE_PRIVATE_NOTE },
+    private_note: { type: 'string', pattern: '^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?$' },
   },
 } as const;
 

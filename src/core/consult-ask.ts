@@ -1,7 +1,7 @@
 // "Ask anonymously" (owner decisions 2026-10-10): the user asks from their own
 // agent ("use Olympus zkAPI to ask ...") through the ask_anonymously tool; it
-// is the only way a question goes to zkAPI (the dashboard's own box and the
-// automatic consult after a private answer were retired). The typed question is prepared at
+// shares its lane with the dashboard's anonymous question box. Nothing is
+// asked automatically after a private answer. The typed question is prepared at
 // the chosen level (Standard: as written, light cleanup, or the user's own
 // instruction; Strict: the writer's general questions under Vitalik's rules),
 // checked by the gate (Standard: secrets only; Strict: the thin net under the
@@ -165,10 +165,10 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   settingsInvalid: 'The anonymous answers settings file could not be read, so nothing was sent.',
   /**
    * The dashboard switch is off (or anonymous answers were never set up): the
-   * agent tools send nothing. The link opens Private answers on the computer,
+   * agent tools send nothing. The link opens Models on the computer,
    * so an agent passes on the exact page instead of guessing one.
    */
-  off: `Not sent: anonymous answers are off. Turn them on in Private answers on your computer (${openPageUrl({ kind: 'private_answers' })}), then ask again.`,
+  off: `Not sent: anonymous answers are off. Turn them on in Models on your computer (${openPageUrl({ kind: 'fix', section: 'models' })}), then ask again.`,
   declined: 'Your model chose not to send anything.',
   writerFailed: 'Your model could not prepare the question, so nothing was sent.',
   secret: 'Not sent: the question looks like it contains a password, key or token.',

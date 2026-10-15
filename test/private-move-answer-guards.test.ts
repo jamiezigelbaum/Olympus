@@ -48,6 +48,32 @@ function pipeline(tier: ReturnType<typeof mutableTier>, promoteOnHydration = fal
   return { handler, calls: () => calls };
 }
 
+test.each(['local', 'cloud', 'venice', 'sovereignty-local', 'sovereignty-cloud', 'sovereignty-venice'] as const)('%s repeats release check after the live async inference guard', async route => {
+  const tier = mutableTier();
+  let calls = 0;
+  let guards = 0;
+  const identity = { family: 'email' as const, provider: 'gmail', accountScope: input.accountScope, providerItemId: input.providerItemId, localItemId: 'message-1' };
+  const analyst = { async analyze() { calls++; return { answer: SENTINEL, citations: [], unanswered: [] }; } };
+  const backend = route.replace('sovereignty-', '') as 'local' | 'cloud' | 'venice';
+  const handler = createAnalystSourceIndexAnswerHandler({
+    analyst, cloudAnalyst: analyst, veniceAnalyst: () => analyst,
+    releaseCheck: tier.check,
+    inferenceGuard: async () => { await Promise.resolve(); if (++guards === 2) tier.promote(); },
+    ...(route.startsWith('sovereignty-') ? { sovereigntyAnalystRoute: () => ({
+      poolId: 'synthetic', trustDomain: 'internal' as const, selection: 'explicit_order' as const,
+      steps: [{ profile: { id: 'synthetic', profile: { provider: backend === 'local' ? 'local-openai-compatible' as const : 'venice' as const, trust: backend === 'local' ? 'local' as const : backend === 'cloud' ? 'standard_cloud' as const : 'encrypted_cloud' as const, model: 'synthetic', purpose: 'analyst' as const } }, backend, analyst }],
+    }) } : {}),
+    lanes: () => ({
+      registry: buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId: CORPUS, family: 'email', trustDomain: 'internal' })]),
+      adapters: { [CORPUS]: () => ({ hits: [{ sourceItem: identity, provenance: { sourceItem: identity }, score: 1, rawExposed: false as const }], latencyMs: 1, rawExposed: false as const }) },
+      contentProviders: { [CORPUS]: { async fetchLocalContent() { return { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: [SENTINEL] }; } } },
+    }),
+  });
+  await expect(handler.answer({ question: 'What is in the message?', analyst_provider: route.startsWith('sovereignty-') ? 'default' : backend })).rejects.toMatchObject({ code: 'source_index_policy_violation' });
+  expect(guards).toBe(2);
+  expect(calls).toBe(0);
+});
+
 test('analyst dispatch refuses a Personal pack promoted during hydration, before any model reads it', async () => {
   const tier = mutableTier();
   const source = pipeline(tier, true);

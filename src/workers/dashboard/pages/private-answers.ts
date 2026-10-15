@@ -1,28 +1,18 @@
-/**
- * Private answers: the computer's own page for questions answered only here
- * (design docs/design/background-agents.md, sections A and B, and
- * "Dashboard changes" 1 and 2). It replaced the Anonymous answers page in the
- * local nav; that page's card now sits beneath, collapsed, as outside help.
- *
- * Top to bottom: Ask privately; the questions waiting for this computer
- * (question · who asked · when, Answer and Dismiss, the answer in place);
- * Anonymous answers (zkAPI), collapsed.
- *
- * Everything that reads or answers is held to a local control session: the
- * worker renders the waiting list only for one, and its one POST route
- * (/dashboard/private-answers) refuses every other grade at the HTTP
- * boundary. Neither ChatGPT nor the OpenClaw Control UI tab opens this page.
+/** One owner question, three destinations, then the local Inbox.
+ * Copy is in vocabulary.ts and layout in PRIVATE_ANSWERS_CSS.
+ * Waiting text and every action require a locally minted control session.
  */
 import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } from '../components.ts';
 import { chatgptMarkdownRender, CHATGPT_MARKDOWN_CSS } from '../chatgpt/markdown.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
-import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard, summaryOf } from '../outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS, summaryOf } from '../outside-help.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
   dashboardRelativeFromMs,
 } from '../vocabulary.ts';
+import type { AskDestinationStates } from '../../email-source/venice-inbox-answer.ts';
 import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
@@ -30,10 +20,14 @@ export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous';
 const POST_PATH = '/dashboard/private-answers';
 
 const PRIVATE_ANSWERS_CSS = `
+.pa { width: 100%; min-width: 0; max-width: min(920px, 100%); }
+.pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
+.pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
 .pa .pasection > .sect { margin: 0 0 12px; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
 .pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
+.pa .pasent { white-space: pre-wrap; }
 .pa .paanswer:not(.md) { white-space: pre-wrap; }
 .pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer table { table-layout: fixed; display: table; }
@@ -45,7 +39,10 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
 .pa .paout { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
-.pa .srow.answered .paq { font-weight: 600; }
+.pa .srow.unread .paq { font-weight: 700; }
+.pa .pa-read { display: block; width: 100%; min-width: 0; border: 0; padding: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
+.pa .smain { min-width: 0; }
+.pa .pa-read:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
 .pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .pa .paanswer p { margin: 0 0 10px; max-width: 72ch; overflow-wrap: anywhere; }
 .pa .paanswer p:last-child { margin-bottom: 0; }
@@ -60,15 +57,40 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa details.paanon { margin-top: 28px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.pa details.paanon > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
-.pa details.paanon > summary::-webkit-details-marker { display: none; }
-.pa details.paanon > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
-.pa details.paanon[open] > summary::before { content: '\\25BE'; }
-.pa details.paanon > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.pa .paanon-title { margin: 0; font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
-.pa .paanon-sum { color: var(--t3); font-size: var(--fs-body); }
-.pa .paanon-body { padding: 0 0 16px; }
+.pa .paasks { --ladder-columns: 24px 164px minmax(0, 1fr) 210px; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; width: 100%; max-width: 920px; margin: 0 0 24px; }
+.pa .padestination { grid-column: 1 / -1; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; align-items: start; min-width: 0; padding: 16px 0; border-bottom: 1px solid var(--line); position: relative; }
+.pa .padestination:last-child { border-bottom: 0; }
+.pa .padestination > * { min-width: 0; }
+.pa .padestination .sect, .pa .padestination .pnote { margin: 0; }
+.pa .paname { grid-column: 2; }
+.pa .pastatus { display: none; align-items: center; gap: 6px; margin-top: 6px; color: var(--t3); font-size: var(--fs-body); }
+.pa [data-pa-state="ready"] [data-pa-status="ready"], .pa [data-pa-state="not_set_up"] [data-pa-status="not_set_up"], .pa [data-pa-state="not_allowed"] [data-pa-status="not_allowed"], .pa [data-pa-state="busy"] [data-pa-status="busy"] { display: flex; }
+.pa .pastatus .dot.ok { background: var(--good); }
+.pa .pastatus .dot.run { background: var(--run-fill); }
+.pa .pastatus .dot.pause { background: var(--warn-fill); }
+.pa .pawhat { grid-column: 3; }
+.pa .patag, .pa .paknows { color: var(--t3); font-size: var(--fs-body); }
+.pa .padestination .patag, .pa .padestination .paknows { margin-top: 4px; }
+.pa .padestination .paaction { grid-column: 4; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.pa .padestination .btn { white-space: normal; text-align: center; }
+.pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); overflow-wrap: anywhere; }
+.pa .panode { grid-column: 1; width: 12px; height: 12px; margin: 5px 0 0 6px; border-radius: 50%; background: var(--t3); position: relative; }
+.pa #computer .panode { background: var(--t1); }
+.pa .parail { position: absolute; left: 11px; width: 2px; background: var(--line); top: 0; bottom: -1px; }
+.pa #computer .parail { top: 27px; }
+.pa #venice .parail { bottom: auto; height: 27px; }
+.pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
+.pa .pazone b { color: var(--t2); font-weight: 600; }
+.pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
+@media (max-width: 640px) {
+  .pa .paasks { grid-template-columns: minmax(0, 1fr); }
+  .pa .padestination { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px 0; }
+  .pa .panode, .pa .parail { display: none; }
+  .pa .paname, .pa .pawhat, .pa .padestination .paaction { grid-column: 1; }
+  .pa .pazone { padding-left: 0; }
+}
+
 `;
 
 export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions): string {
@@ -80,8 +102,7 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     meta: '',
     body: renderPrivateAnswersBody(options),
     styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS],
-    // No shared controller and no poll: the page carries its own small
-    // script, and the answer appears in place.
+    // The local inbox carries its own small controller and visible-page poll.
   });
 }
 
@@ -112,19 +133,42 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
   } else if (options?.privateAnswers?.available !== true) {
     parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
-    parts.push(renderAsk());
+    parts.push(renderDestinations(options, true));
     parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date()));
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
-  parts.push(renderAnonymous(options, csrfToken));
+  if (!localSession || options?.privateAnswers?.available !== true) parts.push(renderDestinations(options, false));
   return `<div class="privacy pa" data-private-answers>${parts.join('')}</div>${script}`;
 }
 
-function renderAsk(): string {
-  return `<section class="pasection" aria-labelledby="ask-heading"><h3 class="sect" id="ask-heading">${escapeHtml(W.askLabel)}</h3><form class="paask" data-pa-ask>`
-    + `<textarea aria-labelledby="ask-heading" id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"></textarea>`
-    + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(W.ask)}</button></div>`
-    + `<div class="paout" data-pa-out aria-live="polite"></div></form></section>`;
+function renderDestinations(options: DashboardPageOptions | undefined, enabled: boolean): string {
+  const models = dashboardLocalPageHref('keys', readToken(options?.basePath));
+  const states: AskDestinationStates = options?.privateAnswers?.destinations ?? { computer: 'not_set_up', venice: 'not_set_up' };
+  const zk = options?.outsideHelp;
+  const zkState = zk && summaryOf(zk).state;
+  const destinations = [
+    { id: 'computer', name: W.computerName, tag: W.computerTag, leaves: W.computerLeaves, knows: W.computerKnows, ask: W.askComputer, setup: W.setUpComputer, state: states.computer, reason: states.computerReason ?? W.noModel, href: models, action: 'ask' },
+    { id: 'anonymous', name: W.zkapiName, tag: W.zkapiTag, leaves: W.zkapiLeaves, knows: W.zkapiKnows, ask: W.askZkapi, setup: zkState === 'off' ? W.turnOnInModels : zkState === 'needs_acceptance' ? W.goToModels : W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState === 'off' ? W.zkapiOff : zkState === 'needs_acceptance' ? W.zkapiPaused : !zkState || zkState === 'route_not_configured' ? W.zkapiNotSetUp : OH.row[zkState], href: models + '#anonymous', action: 'ask_anonymous' },
+    { id: 'venice', name: W.veniceName, tag: W.veniceTag, leaves: W.veniceLeaves, knows: W.veniceKnows, ask: W.askVenice, setup: W.setUpVenice, state: states.venice, reason: W.veniceNotSetUp, href: models + '#venice-setup', action: 'ask_venice' },
+  ];
+  return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml(W.askLabel)}</label>`
+    + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"${enabled ? '' : ' disabled'}></textarea>`
+    + `<p class="pachooser" id="pa-chooser">${escapeHtml(W.chooserLabel)}</p><div class="paasks" role="group" aria-labelledby="pa-chooser"><div class="pazone"><b>${escapeHtml(W.stays)}</b></div>${destinations.map(d => {
+      const actions = {
+        ready: `<button type="submit" class="btn primary" data-pa-destination="${d.id}" data-pa-action="${d.action}">${escapeHtml(d.ask)}</button><span class="pareason" role="status"></span>`,
+        not_set_up: `<a class="btn" href="${escapeHtml(d.href)}">${escapeHtml(d.setup)}</a><span class="pareason" role="status">${escapeHtml(d.reason)}</span>`,
+        not_allowed: `<a class="btn" href="${escapeHtml(models + '#private-routing')}">${escapeHtml(W.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml(W.veniceNotAllowed)}</span>`,
+        busy: `<button type="button" class="btn" disabled>${escapeHtml(W.answering)}</button><span class="pareason" role="status">${escapeHtml(W.destinationBusy)}</span>`,
+      };
+      const state = d.state as keyof typeof actions;
+      const action = enabled ? actions[state] : `<a class="btn" href="${escapeHtml(models)}">${escapeHtml(W.openControls)}</a><span class="pareason">${escapeHtml(W.locked)}</span>`;
+      const notReadyLabel = d.id === 'computer' ? d.reason === W.downloading ? W.downloadingStatus : W.notSetUpStatus
+        : d.id === 'anonymous' && zkState === 'off' ? W.offStatus : d.id === 'anonymous' && zkState === 'needs_acceptance' ? W.pausedStatus : W.notConnectedStatus;
+      const notReadyDot = notReadyLabel === W.downloadingStatus ? 'run' : notReadyLabel === W.pausedStatus ? 'pause' : 'hollow';
+      const statuses = [['ready', W.readyStatus, 'ok'], ['not_set_up', notReadyLabel, notReadyDot], ['not_allowed', W.offStatus, 'hollow'], ['busy', W.answering, 'run']]
+        .map(([key, label, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml(label!)}</span>`).join('');
+      return (d.id === 'anonymous' ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml(W.leaves)}</b><span>${escapeHtml(W.order)}</span></div>` : '') + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml(d.name)}</h3><p class="pnote patag">${escapeHtml(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml(d.leaves)}</p><p class="pnote paknows">${escapeHtml(d.knows)}</p></div><div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
+    }).join('')}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
 }
 
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
@@ -133,52 +177,24 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(W.unavailable)}</p>`);
     return parts.join('') + '</section>';
   }
-  if (waiting.questions.length === 0) {
-    parts.push(`<p class="pnote" data-pa-none>${escapeHtml(W.noneWaiting)}</p>`);
-  } else {
-    parts.push(`<p class="pnote">${escapeHtml(W.waitingIntro)}</p>`);
-    const rows = waiting.questions.map((question) => {
-      const asked = Date.parse(question.askedAt);
-      const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
-      const from = [question.from, when, question.unchecked ? W.unchecked : ''].filter((part) => part !== '').join(' · ');
-      return `<li class="srow nodot" data-pa-question="${escapeHtml(question.id)}">`
-        + `<div class="smain"><div class="paq">${escapeHtml(question.question)}</div><div class="pafrom">${escapeHtml(from)}</div></div>`
-        + `<div class="sact"><button type="button" class="btn primary" data-pa-answer>${escapeHtml(W.answer)}</button>`
-        + `<button type="button" class="btn" data-pa-dismiss>${escapeHtml(W.dismiss)}</button></div>`
-        + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
-    });
-    parts.push(`<ul class="srows palist">${rows.join('')}</ul>`);
-    if (waiting.questions.length > 1) {
-      parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-dismiss-all>${escapeHtml(W.dismissAll)}</button></div>`);
-    }
-  }
-  if (waiting.olderRemoved) parts.push(`<p class="pnote hint" data-pa-older-removed>${escapeHtml(W.olderRemoved)}</p>`);
+  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? ' hidden' : ''}>${escapeHtml(W.noneWaiting)}</p>`);
+  parts.push(`<p class="pnote">${escapeHtml(W.waitingIntro)}</p>`);
+  const rows = [...waiting.questions].sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt)).map((question) => {
+    const asked = Date.parse(question.askedAt);
+    const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
+    const state = question.state ?? (question.unchecked ? 'unchecked' : 'answering');
+    const status = state === 'changed' ? W.changed : state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
+    const from = [question.path === 'venice' ? W.veniceName : question.path === 'anonymous' ? W.anonymousPath : W.privatePath, question.from, when, status].filter(Boolean).join(' · ');
+    return `<li class="srow nodot${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
+      + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button></div>`
+      + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(W.delete)}</button></div>`
+      + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+  });
+  parts.push(`<ul class="srows palist" data-pa-list>${rows.join('')}</ul>`);
+  parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? '' : ' hidden'}>${escapeHtml(W.deleteAll)}</button></div>`);
+  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? '' : ' hidden'}>${escapeHtml(W.olderRemoved)}</p>`);
+  parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join('') + '</section>';
-}
-
-/** Anonymous answers (zkAPI): outside help, collapsed beneath, never fed by waiting questions. */
-function renderAnonymous(options: DashboardPageOptions | undefined, csrfToken: string | undefined): string {
-  const status = options?.outsideHelp;
-  let body: string;
-  let sum: string = W.anonymousSum;
-  if (csrfToken === undefined) {
-    body = `<div class="outside"><p class="pnote">${escapeHtml(OH.intro)}</p></div>`;
-  } else if (!status) {
-    body = `<div class="outside" data-outside-unavailable><p class="pnote">${escapeHtml(OH.unavailable)}</p></div>`;
-  } else {
-    // "Outside help · off · not set up": the card's own row words, without its name.
-    const row: string = OH.row[summaryOf(status).state];
-    sum = `${W.anonymousSum} · ${row.replace(/^[^:]*:\s*/, '')}`;
-    body = renderOutsideHelpCard(status, {
-      csrfToken,
-      localSession: options?.outsideHelpLocalSession === true,
-      untitled: true,
-      ...(options?.basePath === undefined ? {} : { basePath: options.basePath }),
-    });
-  }
-  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>`
-    + `<summary><h3 class="paanon-title">${escapeHtml(W.anonymousTitle)}</h3><span class="paanon-sum">${escapeHtml(sum)}</span></summary>`
-    + `<div class="paanon-body">${body}</div></details>`;
 }
 
 /**
@@ -196,6 +212,12 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     copy: {
       answering: W.answering,
       sources: W.sources,
+      sentItems: W.sentItems,
+      venicePath: W.veniceName,
+      destinationBusy: W.destinationBusy,
+      sent: W.sent,
+      privatePath: W.privatePath,
+      anonymousPath: W.anonymousPath,
       open: W.open,
       leftOut: W.leftOut,
       unanswered: W.unanswered,
@@ -205,8 +227,13 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       changed: W.changed,
       failed: W.failed,
       unreachable: W.unreachable,
-      dismissed: W.dismissed,
-      dismissAllConfirm: W.dismissAllConfirm,
+      delete: W.delete,
+      deleteAllConfirm: W.deleteAllConfirm,
+      deleted: W.deleted,
+      retrying: W.retrying,
+      queued: W.queued,
+      checkUnavailable: W.checkUnavailable,
+      unchecked: W.unchecked,
     },
   };
   return `window.olympusMarkdown=(${chatgptMarkdownRender.toString()});
@@ -217,7 +244,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
   function openAnonymous() {
     if (window.location.hash !== '#' + config.fragment) return;
     var section = document.getElementById(config.fragment);
-    if (section) { section.open = true; if (section.scrollIntoView) section.scrollIntoView({ block: 'start' }); }
+    if (section) { if (section.scrollIntoView) section.scrollIntoView({ block: 'start' }); }
   }
   openAnonymous();
   window.addEventListener('hashchange', openAnonymous);
@@ -288,11 +315,19 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (!outcome.ok) { button.textContent = errorText(outcome); button.disabled = true; }
     });
   }
+  function renderSent(parent, result) {
+    if (!Array.isArray(result.sent_items)) return;
+    parent.appendChild(el('div', 'palabel', config.copy.sentItems));
+    var sentList = el('ul', 'pasrc');
+    result.sent_items.forEach(function (item) { sentList.appendChild(el('li', '', [item.title, item.source, item.date].filter(Boolean).join(' · '))); });
+    parent.appendChild(sentList);
+  }
   // Shared Markdown builds text-only DOM nodes; no model HTML is interpreted.
   function render(out, result, question) {
     var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
+    if (status === 'withdrawn') { renderSent(card, result); card.appendChild(el('p', 'pamsg', result.reason)); return; }
     if (status === 'answered') {
       var box = el('div', 'paanswer answer');
       var markdown = window.olympusMarkdown;
@@ -303,7 +338,9 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         box.textContent = String(result.answer || '');
       }
       card.appendChild(box);
+      if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
+      renderSent(meta, result);
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
         meta.appendChild(el('div', 'palabel', config.copy.sources));
@@ -311,15 +348,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         citations.forEach(function (citation) {
           var item = el('li');
           var label = [citation.title, citation.source, citation.date].filter(function (part) { return typeof part === 'string' && part !== ''; }).join(' · ');
-          if (typeof citation.url === 'string' && /^https:\\/\\//.test(citation.url)) {
-            var link = el('a', '', label || citation.url);
-            link.href = citation.url;
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer';
-            item.appendChild(link);
-          } else {
-            item.appendChild(document.createTextNode(label));
-          }
+          item.appendChild(document.createTextNode(label));
           if (typeof citation.open === 'string') {
             var button = el('button', 'paopen', config.copy.open);
             button.type = 'button';
@@ -336,6 +365,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
+    } else if (status === 'answering' || status === 'retrying' || status === 'unchecked' || status === 'queued' || status === 'check_unavailable') {
+      card.appendChild(el('p', 'pamsg', status === 'check_unavailable' ? config.copy.checkUnavailable : status === 'queued' ? config.copy.queued : status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
@@ -348,66 +379,161 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
-  var ask = root.querySelector('form[data-pa-ask]');
-  if (ask) {
+  root.querySelectorAll('form[data-pa-ask]').forEach(function (ask) {
     ask.addEventListener('submit', async function (event) {
       event.preventDefault();
       var field = ask.querySelector('textarea[name="question"]');
       var out = ask.querySelector('[data-pa-out]');
-      var button = ask.querySelector('button[type="submit"]');
+      var button = event.submitter || ask.querySelector('button[type="submit"]');
+      if (!button || button.disabled || !button.getAttribute('data-pa-action')) return;
+      var reason = button.parentElement.querySelector('.pareason');
       var question = field ? String(field.value || '').trim() : '';
       if (!question || !out) return;
-      if (button) button.disabled = true;
+      if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+      if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: 'ask', question: question });
-      if (button) button.disabled = false;
+      var outcome = await send({ action: button.getAttribute('data-pa-action'), question: question });
+      if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
+      if (reason) reason.textContent = '';
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
       render(out, outcome.result, question);
+      await poll();
     });
+  });
+  var selected = null;
+  var readVersion = 0;
+  var seen = {};
+  var list = root.querySelector('[data-pa-list]');
+  function rows() { return Array.from(root.querySelectorAll('[data-pa-question]')); }
+  function findRow(id) { return rows().find(function (row) { return row.getAttribute('data-pa-question') === id; }); }
+  function missing() {
+    var note = root.querySelector('[data-pa-missing]');
+    if (note) { note.hidden = false; note.textContent = config.copy.deleted; }
   }
-  root.querySelectorAll('[data-pa-question]').forEach(function (row) {
+  async function read(row, quiet) {
     var id = row.getAttribute('data-pa-question');
+    selected = id;
+    var version = ++readVersion;
     var question = row.querySelector('.paq').textContent;
     var out = row.querySelector('[data-pa-out]');
-    var actions = row.querySelector('.sact');
-    var answer = row.querySelector('[data-pa-answer]');
-    var dismiss = row.querySelector('[data-pa-dismiss]');
-    function busy(on) {
-      if (answer) answer.disabled = on;
-      if (dismiss) dismiss.disabled = on;
-    }
-    if (answer) answer.addEventListener('click', async function () {
-      busy(true);
+    if (!quiet) {
+      rows().forEach(function (other) { if (other !== row) other.querySelector('[data-pa-out]').textContent = ''; });
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: 'answer', id: id });
-      if (!outcome.ok) {
-        message(out, errorText(outcome), true, question);
-        if (outcome.status === 410 && actions) actions.remove(); else busy(false);
-        return;
-      }
-      render(out, outcome.result, question);
-      if (outcome.result.status === 'answered') row.classList.add('answered');
-      // The answer is on screen: only now may the question be cleared.
-      if (typeof outcome.result.ack === 'string') {
-        var seen = await send({ action: 'seen', ack: outcome.result.ack });
-        if (seen.ok && seen.result.status === 'cleared' && actions) { actions.remove(); return; }
-      }
-      busy(false);
-    });
-    if (dismiss) dismiss.addEventListener('click', async function () {
-      busy(true);
-      var outcome = await send({ action: 'dismiss', id: id });
-      if (!outcome.ok) { message(out, errorText(outcome), true, question); busy(false); return; }
+    }
+    var outcome = await send({ action: 'read', id: id });
+    if (version !== readVersion || selected !== id || !row.isConnected) return;
+    if (!outcome.ok) {
+      message(out, outcome.status === 410 || outcome.status === 404 ? config.copy.deleted : errorText(outcome), true, question);
+      return;
+    }
+    render(out, outcome.result, question);
+    var generation = outcome.result.generation;
+    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found' || outcome.result.status === 'withdrawn') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
+      var ack = await send({ action: 'seen', id: id, generation: generation });
+      if (ack.ok) { seen[id] = generation; row.classList.remove('unread'); }
+    }
+  }
+  function bind(row) {
+    row.querySelector('[data-pa-read]').addEventListener('click', function () { read(row, false); });
+    row.querySelector('[data-pa-delete]').addEventListener('click', async function () {
+      var button = this;
+      button.disabled = true;
+      var id = row.getAttribute('data-pa-question');
+      var outcome = await send({ action: 'delete', id: id });
+      button.disabled = false;
+      if (!outcome.ok) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      if (selected === id) { selected = null; ++readVersion; }
       row.remove();
+      empty();
     });
-  });
-  var all = root.querySelector('[data-pa-dismiss-all]');
+  }
+  function empty() {
+    var count = rows().length;
+    var none = root.querySelector('[data-pa-none]');
+    var all = root.querySelector('[data-pa-delete-all]');
+    if (none) none.hidden = count !== 0;
+    if (all) all.hidden = count === 0;
+  }
+  rows().forEach(bind);
+  var all = root.querySelector('[data-pa-delete-all]');
   if (all) all.addEventListener('click', async function () {
-    if (!window.confirm(config.copy.dismissAllConfirm)) return;
+    if (!window.confirm(config.copy.deleteAllConfirm)) return;
     all.disabled = true;
-    var outcome = await send({ action: 'dismiss_all' });
-    if (outcome.ok) { window.location.reload(); return; }
+    var outcome = await send({ action: 'delete_all' });
     all.disabled = false;
+    if (outcome.ok) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
+    else {
+      var note = root.querySelector('[data-pa-missing]');
+      if (note) { note.hidden = false; note.textContent = errorText(outcome); }
+    }
   });
+  function openFragment() {
+    var id;
+    try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (_) { return; }
+    if (!id || id === config.fragment) return;
+    var row = findRow(id);
+    if (!row) { missing(); return; }
+    if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+    read(row, false);
+  }
+  openFragment();
+  window.addEventListener('hashchange', openFragment);
+  var relative = ${dashboardRelativeFromMs.toString()};
+  async function poll() {
+    if (document.hidden) return;
+    var outcome = await send({ action: 'list' });
+    if (!outcome.ok || !Array.isArray(outcome.result.questions) || !list) {
+      var openRow = selected && findRow(selected);
+      if (openRow) await read(openRow, true);
+      return;
+    }
+    if (outcome.result.destinations) root.querySelectorAll('[data-pa-card]').forEach(function (card) {
+      var key = card.getAttribute('data-pa-card');
+      var state = outcome.result.destinations[key];
+      if (!state || state === card.getAttribute('data-pa-state') || card.querySelector('[aria-busy="true"]')) return;
+      var template = card.querySelector('[data-pa-template="' + state + '"]');
+      if (!template) return;
+      var action = card.querySelector('.paaction');
+      action.textContent = ''; action.appendChild(template.content.cloneNode(true)); card.setAttribute('data-pa-state', state);
+    });
+    var questions = outcome.result.questions.slice().sort(function (a, b) { return Date.parse(b.askedAt) - Date.parse(a.askedAt); });
+    rows().forEach(function (row) {
+      if (!questions.some(function (q) { return q.id === row.getAttribute('data-pa-question'); })) {
+        if (selected === row.getAttribute('data-pa-question')) { selected = null; ++readVersion; missing(); }
+        row.remove();
+      }
+    });
+    questions.forEach(function (q) {
+      var row = findRow(q.id);
+      if (!row) {
+        row = el('li', 'srow nodot'); row.id = q.id; row.setAttribute('data-pa-question', q.id);
+        var main = el('div', 'smain'); var link = el('button', 'pa-read'); link.type = 'button'; link.setAttribute('data-pa-read', '');
+        link.appendChild(el('span', 'paq')); link.appendChild(el('span', 'pafrom')); main.appendChild(link); row.appendChild(main);
+        var actions = el('div', 'sact'); var remove = el('button', 'btn', config.copy.delete); remove.type = 'button'; remove.setAttribute('data-pa-delete', ''); actions.appendChild(remove); row.appendChild(actions);
+        var out = el('div', 'paout'); out.setAttribute('data-pa-out', ''); out.setAttribute('aria-live', 'polite'); row.appendChild(out); bind(row);
+      }
+      row.classList.toggle('unread', q.unread === true);
+      row.querySelector('.paq').textContent = q.question;
+      if (selected === q.id && q.state !== 'answered') {
+        message(row.querySelector('[data-pa-out]'), q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
+      }
+      var state = q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var date = new Date(q.askedAt);
+      row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'venice' ? config.copy.venicePath : q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : relative(Date.now() - date.getTime()), state].filter(Boolean).join(' · ');
+      row.querySelector('.pafrom').title = q.askedAt;
+      list.appendChild(row);
+    });
+    empty();
+    var older = root.querySelector('[data-pa-older-removed]');
+    if (older) older.hidden = !outcome.result.olderRemoved;
+    var current = selected && findRow(selected);
+    if (current) await read(current, true);
+  }
+  // A selected answer is rechecked through read eligibility on each visible poll.
+  function schedule() {
+    if (typeof window.setTimeout !== 'function') return;
+    window.setTimeout(async function () { await poll(); schedule(); }, 5000);
+  }
+  schedule();
 })();`;
 }

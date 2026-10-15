@@ -1,3 +1,5 @@
+import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
+import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
@@ -58,6 +60,7 @@ import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,
   checkPrivateEvidenceItems,
+  guardSourceAnswerEvidence,
   probePrivateMatch,
   searchPrivateEvidence,
   searchReleasedEvidence,
@@ -383,7 +386,7 @@ import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-source
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
-import { createAnswerActivity, createLocalModelActivity, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -1456,7 +1459,7 @@ export function createAnalystForSovereigntyProfile(input: {
       resolveSecretRef: () => apiKey,
     }), { profile: 'source_answer', preflightTimeoutMs: 0 });
     return createAnalyst(input.localModelActivity
-      ? input.localModelActivity.track(localModelResourceKey(profile), model) : model,
+      ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model,
     { auditSuspiciousDrafts: true });
   }
   if (profile.provider === 'openclaw-infer') {
@@ -1975,6 +1978,7 @@ export async function main(): Promise<void> {
     onExpired: (openMs) => console.warn(`Olympus answer activity: an answer still open after ${Math.round(openMs / 60_000)} min stopped holding background work.`),
   });
   // Set once the sniffer runs: its backlog, for the status surface.
+  let classificationBusy = () => false;
   let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(
@@ -3361,7 +3365,7 @@ export async function main(): Promise<void> {
         process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
-      ));
+      ), { serialize: false });
       const builtInAnalystModel = answerBuiltInModel;
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
         localModelActivity,
@@ -3387,6 +3391,7 @@ export async function main(): Promise<void> {
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       return createAnalystSourceIndexAnswerHandler({
+        inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
         releaseCheck: createReleaseTierCheck(
           () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
@@ -3468,12 +3473,12 @@ export async function main(): Promise<void> {
     : undefined;
   const sourceAnswer = analystSourceAnswer
     ? {
-        async answer(request: Parameters<typeof analystSourceAnswer.answer>[0]) {
+        async answer(request: Parameters<typeof analystSourceAnswer.answer>[0], local?: Parameters<typeof analystSourceAnswer.answer>[1]) {
           // The sniffer shares the private pool: an answer takes it at once.
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return answerActivity.run(() => analystSourceAnswer.answer(request), kind);
+          return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
         },
       }
     : undefined;
@@ -4484,8 +4489,10 @@ export async function main(): Promise<void> {
       () => secureDerivativeDefault ?? 'allow',
     ),
     // Bound late: the consult block below sets askAnonymouslyNow.
-    consultAsk: ({ caller, ...input }, signal) => (askAnonymouslyNow
-      ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal })
+    consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
+      ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
+        store: waitingQuestionStore, connectionId: anonymousInboxConnectionId(caller), isActive: connectionActive, ask: askAnonymouslyNow,
+      })
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
@@ -4556,6 +4563,7 @@ export async function main(): Promise<void> {
             ...(sourceAnswerLanes
               ? {
                   privateAnswers: {
+                    destinations: () => localPrivateAnswers?.destinations() ?? { computer: 'not_set_up', venice: 'not_set_up' },
                     waiting: () => localPrivateAnswers?.waiting(),
                     waitingCount: () => localPrivateAnswers?.waitingCount() ?? 0,
                     handle: (body, session) => (localPrivateAnswers
@@ -4683,6 +4691,7 @@ export async function main(): Promise<void> {
   // re-check pass.
   const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
   const connectionActive = (connectionId: string): boolean => {
+    if (connectionId.startsWith('@local:')) return true;
     const connections = remoteConnections();
     if (!connections) throw new Error('remote connection store unavailable');
     return connections.list().some((connection) => connection.id === connectionId && connection.revokedAt === null);
@@ -4851,6 +4860,16 @@ export async function main(): Promise<void> {
   // "Ask anonymously" (the ask_anonymously agent tool: the only way a
   // question goes to zkAPI), wired inside the consult block below.
   let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
+  const localAnonymousAsk = (input: import('../../core/consult-ask.ts').ConsultAskInput) => {
+    const read = readConsultSettings();
+    return askWithAnonymousInbox({
+      ...input,
+      level: consultAskLevelFromSettings(read.state === 'valid' ? read.settings.level : DEFAULT_CONSULT_SETTINGS.level),
+    }, {
+      store: waitingQuestionStore, connectionId: '@local:You', local: true, isActive: connectionActive,
+      ask: request => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: 'transport_unavailable', message: PRIVATE_ANSWERS_COPY.anonymousNotSetUp }),
+    });
+  };
   // The zkAPI route's daily limit (a demo grant's private questions need one set), wired inside the consult block below.
   let zkapiDailyLimitNow: (() => import('../../core/consult-transport-zkapi.ts').ZkapiDailyLimitState) | undefined;
   // The last time the ChatGPT model was missing from the live zkAPI listing (for the card); cleared by a reply.
@@ -4865,10 +4884,23 @@ export async function main(): Promise<void> {
     // The panel's seen ack clears the waiting question it answered (same
     // id, generation and connection; a re-asked question survives).
     acknowledge: (ref) => {
-      waitingQuestionStore()?.acknowledge(ref);
+      const store = waitingQuestionStore();
+      if (!store) return false;
+      store.acknowledge(ref);
+      const remaining = store.get(ref.id);
+      // Missing/advanced means the old generation has no debt. A newer
+      // duplicate is never deleted by an older panel acknowledgment.
+      return !remaining || remaining.generation !== ref.generation || remaining.connectionId !== ref.connectionId;
     },
     ...(openCitedFile ? { openFile: openCitedFile } : {}),
   });
+  // The same ledgers and the same derivative posture the answer handler
+  // uses, read when a remote agent collects an answer: an item the answer
+  // read that was reclassified since it was written is caught there.
+  const remoteReleaseCheck = createReleaseTierCheck(
+    () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+    () => secureDerivativeDefault ?? 'allow',
+  );
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
   // retrieval through the same scoped adapters with only the built-in
@@ -4876,6 +4908,7 @@ export async function main(): Promise<void> {
   // cloud route, and never zkAPI.
   if (sourceAnswerLanes) {
     const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('./local-private-answers.ts');
+    const { privateVeniceMembers, createVeniceInboxAnswer } = await import('./venice-inbox-answer.ts');
     const { DASHBOARD_SUPPORTED_SOURCES } = await import('../source-dashboard.ts');
     // "Left out: Gmail": a corpus named by the dashboard card it belongs to.
     const sourceName = (corpusId: string): string | undefined => {
@@ -4884,6 +4917,7 @@ export async function main(): Promise<void> {
       return DASHBOARD_SUPPORTED_SOURCES.find((source) => source.corpus_source_ids.includes(sourceId))?.label;
     };
     const local = createLocalAnswerPath({
+      releaseCheck: remoteReleaseCheck,
       lanes: sourceAnswerLanes,
       model: answerBuiltInModel,
       available: () => workerBuiltInModel?.available() ?? false,
@@ -4897,14 +4931,61 @@ export async function main(): Promise<void> {
       },
       sourceName,
     });
+    const destinations = (): import('./venice-inbox-answer.ts').AskDestinationStates => {
+      let venice: import('./venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
+      try {
+        const members = privateVeniceMembers(loadSourceWorkerSovereignty(olympusConfig, process.env));
+        const bootMembers = privateVeniceMembers(sovereigntyEngine);
+        if (members.length) {
+          venice = members.length === bootMembers.length && members.every(member => bootMembers.some(boot => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === 'ready') && sourceAnswer ? 'ready' : 'not_set_up';
+        } else {
+          // A saved key does not grant permission for Private: policy stays explicit.
+          const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+          venice = safeModelCredential({ provider: 'venice', trust: 'encrypted_cloud', model: 'unused', secretRef: 'store:venice.api_key' }, storedEnv) ? 'not_allowed' : 'not_set_up';
+        }
+      } catch { venice = 'not_allowed'; }
+      const modelState = answerBuiltInModel?.status().state;
+      return { computer: workerBuiltInModel?.available() ? 'ready' : 'not_set_up', venice, ...(['downloading', 'verifying', 'loading'].includes(modelState ?? '') ? { computerReason: PRIVATE_ANSWERS_COPY.downloading } : {}) };
+    };
+    const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer({
+      state: () => destinations().venice, handler: sourceAnswer, sourceName,
+      corpusIds: () => sourceAnswerLanes!({ question: 'scope', retrieval_mode: 'keyword' }).registry.list().filter(corpus => corpus.trustDomain === 'internal' || corpus.trustDomain === 'secure_local').map(corpus => corpus.corpusId),
+      eligible: local.eligible,
+    }) : undefined;
     localPrivateAnswers = createLocalPrivateAnswers({
+      destinations, ...(veniceAnswer ? { veniceAnswer } : {}),
+      localConnectionId: '@local:You',
+      anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.
       answer: (input) => answerActivity.run(() => local.answer(input)),
+      backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background')),
+      interactiveBusy: () => answerActivity.interactiveInFlight > 0,
+      backgroundBusy: () => classificationBusy(),
+      panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
+      isActive: connectionActive,
       store: waitingQuestionStore,
-      connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
-      ...(openCitedFile ? { openFile: openCitedFile } : {}),
+      ...(openCitedFile ? {
+        openFile: openCitedFile,
+        openUrl: async (url: string, eligible: () => Promise<boolean>) => {
+          if (!(await eligible())) throw new Error('open refused');
+          await new Promise<void>((resolve, reject) => execFile('/usr/bin/open', [url], { timeout: 10_000 }, error => error ? reject(error) : resolve()));
+        },
+      } : {}),
     });
+    localPrivateAnswers.start();
+  } else {
+    const { createLocalPrivateAnswers } = await import('./local-private-answers.ts');
+    localPrivateAnswers = createLocalPrivateAnswers({
+      destinations: () => ({ computer: 'not_set_up', venice: 'not_set_up' }),
+      store: waitingQuestionStore, isActive: connectionActive,
+      connectionName: (id) => localInboxLabel(id) ?? remoteConnections()?.list().find(c => c.id === id)?.displayName,
+      answer: async () => ({ status: 'no_model' }),
+      eligible: async items => items.map(() => false),
+      anonymousAsk: localAnonymousAsk,
+    });
+    localPrivateAnswers.start();
   }
   // The private question panel's jobs (chatgpt/private-question-jobs.ts):
   // the sealed question runs the same ask lane as the ask_anonymously tool,
@@ -4912,14 +4993,14 @@ export async function main(): Promise<void> {
   const privateQuestions = new PrivateQuestionJobs({
     installId: () => remotePublicUrls()?.installId,
     ask: (input) => (askAnonymouslyNow
-      ? askAnonymouslyNow({
+      ? askWithAnonymousInbox({
         question: input.question,
         level: input.level,
         ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
         callerProvider: 'openai',
         signal: input.signal,
         stillAuthorized: input.stillAuthorized,
-      })
+      }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: '@local:ChatGPT', ask: askAnonymouslyNow })
       : Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' })),
     // The panel's default choice: the dashboard's saved level and Standard preparation (consult.json, read at every open).
     choice: () => {
@@ -5053,13 +5134,6 @@ export async function main(): Promise<void> {
       };
     }
   }
-  // The same ledgers and the same derivative posture the answer handler
-  // uses, read when a remote agent collects an answer: an item the answer
-  // read that was reclassified since it was written is caught there.
-  const remoteReleaseCheck = createReleaseTierCheck(
-    () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
-    () => secureDerivativeDefault ?? 'allow',
-  );
   // The Private part of a remote agent's answer (core/remote-private-part.ts):
   // when the answer left Private out, a metadata-only local probe over the
   // same selectors decides whether the question waits on this computer.
@@ -5513,7 +5587,10 @@ export async function main(): Promise<void> {
     ? new TierSnifferService({
         installed: installedTierClassification,
         lane: snifferLane,
-        model: snifferModel,
+        model: snifferResource ? {
+          ...snifferModel,
+          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request)),
+        } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
         ...(snifferRuntime.source === 'built_in'
@@ -5548,6 +5625,7 @@ export async function main(): Promise<void> {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
   }
+  classificationBusy = () => tierSniffer?.hasPriority ?? false;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
 
@@ -5575,6 +5653,7 @@ export async function main(): Promise<void> {
     // The re-check timer, any pass or settle in flight, then the store.
     clearInterval(uncheckedRetry);
     remotePrivateParts.close();
+    localPrivateAnswers?.close();
     waitingStoreClosed = true;
     waitingStore?.close();
     waitingStore = undefined;

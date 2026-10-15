@@ -37,8 +37,59 @@ import {
   snapshotSourceAnswerTrace,
 } from '../src/workers/source-index/answer-latency-trace.ts';
 import { validateSecureVeniceAnalystProfileAtConstruction } from '../src/workers/email-source/server.ts';
+import { createVeniceInboxAnswer, privateVeniceMembers, type AskDestinationState } from '../src/workers/email-source/venice-inbox-answer.ts';
+import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 
 const SECURE_CORPUS = 'secure_local.test.pool';
+
+test('owner Venice choice grants no permission beyond the existing Private pool', () => {
+  for (const preset of ['no-sensitive', 'local-only'] as const) {
+    expect(privateVeniceMembers(createSovereigntyEngine(loadSovereigntyPreset(preset)))).toHaveLength(0);
+  }
+  for (const preset of ['local-first', 'private-cloud-only'] as const) {
+    expect(privateVeniceMembers(createSovereigntyEngine(loadSovereigntyPreset(preset))).map(member => member.id)).toEqual(['venice-private']);
+  }
+});
+
+for (const scenario of ['allowed', 'not_allowed', 'secret_before_dispatch', 'secret_content', 'policy_changed', 'local_fallback'] as const) {
+  test(`owner Venice question uses the shared guarded route: ${scenario}`, async () => {
+    let state: AskDestinationState = scenario === 'not_allowed' ? 'not_allowed' : 'ready';
+    let sent = 0;
+    let releaseChecks = 0;
+    const local = successfulLocalAnalyst();
+    const venice: Analyst = { async analyze(pack) {
+      sent++;
+      expect(releaseChecks).toBeGreaterThan(0);
+      expect(JSON.stringify(pack)).not.toContain('SYNTHETIC_SECRET_NEVER_SENT');
+      return { answer: 'A synthetic Venice answer.', citations: [{ provenance: pack.candidates[0]!.provenance, claim: 'synthetic' }], unanswered: [] };
+    } };
+    const baseLanes = secureLanes();
+    const lanes = { ...baseLanes, contentProviders: { ...baseLanes.contentProviders } };
+    if (scenario === 'secret_content') lanes.contentProviders[SECURE_CORPUS] = {
+      async fetchLocalContent() { return { sensitivity: buildSourceSensitivity({ trustTier: 'S5', trustDomain: 'secure_local' }), chunks: ['SYNTHETIC_SECRET_NEVER_SENT'] }; },
+    };
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst: local, lanes: () => lanes,
+      inferenceGuard: async () => { if (scenario === 'policy_changed') state = 'not_allowed'; },
+      releaseCheck: {
+        inputs: inputs => { releaseChecks++; return inputs.map(() => ({ tier: scenario === 'secret_before_dispatch' ? 'secret' : 'private', gone: false })); },
+        secureDerivativeDefault: () => 'allow',
+      },
+      sovereigntyAnalystRoute: () => secureRoute([routeStep('approved-venice', scenario === 'local_fallback' ? 'local' : 'venice', 'kimi-k3', scenario === 'local_fallback' ? local : venice)]),
+    });
+    const answer = createVeniceInboxAnswer({ state: () => state, handler, corpusIds: () => [SECURE_CORPUS], eligible: async items => items.map(() => true) });
+    let result;
+    try { result = await answer({ question: 'Summarize the synthetic evidence.' }); } catch { /* A terminal refusal is also acceptable. */ }
+    if (scenario === 'allowed') {
+      expect(sent).toBe(1);
+      expect(result).toMatchObject({ status: 'answered', answer: 'A synthetic Venice answer.', sentItems: [{ source: 'test' }] });
+      expect(result?.status === 'answered' && JSON.stringify(result.read)).not.toContain('secure test source text');
+    } else {
+      expect(sent).toBe(0);
+      expect(result?.status).not.toBe('answered');
+    }
+  });
+}
 
 describe('secure analyst pool', () => {
   test('health/latency selection is independent of config list position', () => {
