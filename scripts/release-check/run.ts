@@ -59,6 +59,8 @@ export interface RunOptions {
   candidateDir: string;
   candidateLabel: string;
   candidateSha?: string;
+  /** The commit the harness and installer bundle were exported from; the report records it and compares it with the candidate's. */
+  harnessCommit?: string;
   outDir: string;
   config: RunConfigFile;
   /** The leak self-test: this tier's marker is also stored in an ordinary Personal item, so it reaches agents; the run must fail. */
@@ -646,6 +648,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     finishedAt: nowIso(),
     machines: [machine],
     errors: run.errors,
+    ...(options.harnessCommit ? { harnessCommit: options.harnessCommit } : {}),
     ...(options.mistier ? { selfTest: `the ${options.mistier} marker was deliberately stored in an ordinary Personal item; this run is expected to FAIL on the leak checks` } : {}),
   });
   // The report must itself be clean; a hit fails the run without copying the marker.
@@ -668,7 +671,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
 // ---------------------------------------------------------------------------
 // CLI
 
-function parseCli(argv: readonly string[]): RunOptions {
+export function parseCli(argv: readonly string[]): RunOptions {
   const get = (name: string): string | undefined => {
     const at = argv.indexOf(name);
     return at === -1 ? undefined : argv[at + 1];
@@ -678,7 +681,7 @@ function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -686,11 +689,18 @@ function parseCli(argv: readonly string[]): RunOptions {
   const mistier = get('--mistier');
   if (mistier !== undefined && mistier !== 'private' && mistier !== 'secrets') throw new Error('--mistier is private or secrets');
   const runId = get('--run-id') ?? newRunId();
+  const harnessCommit = get('--harness-commit');
+  if (harnessCommit !== undefined) {
+    if (!/^[0-9a-f]{40}$/.test(harnessCommit)) throw new Error('--harness-commit is a full 40-character commit');
+    // Refused before anything starts: a harness from another commit cannot qualify the candidate.
+    if (get('--sha') !== undefined && get('--sha') !== harnessCommit) throw new Error(`--harness-commit ${harnessCommit} is not the candidate's --sha ${get('--sha')}`);
+  }
   return {
     runId,
     candidateDir: resolve(candidate),
     candidateLabel: get('--label') ?? 'candidate',
     ...(get('--sha') ? { candidateSha: get('--sha')! } : {}),
+    ...(harnessCommit ? { harnessCommit } : {}),
     outDir: resolve(out, runId),
     config,
     ...(mistier ? { mistier } : {}),

@@ -75,12 +75,30 @@ export interface ReleaseReportInput {
   errors: string[];
   /** Set when the run was a deliberate self-test; the verdict then carries the expectation. */
   selfTest?: string;
+  /** The commit this harness and the installer bundle were exported from. Absent for an unpinned development run. */
+  harnessCommit?: string;
+}
+
+/** How the commit of the harness relates to the commit of the candidate that was tested. */
+export type HarnessRelation = 'same-commit' | 'different-commit' | 'candidate-commit-not-recorded' | 'unpinned';
+
+export interface HarnessRecord {
+  commit?: string;
+  candidateCommit?: string;
+  relation: HarnessRelation;
 }
 
 export interface ReleaseReport extends ReleaseReportInput {
   schema: 'olympus.release-check.report.v1';
   verdict: 'pass' | 'fail';
   counts: Record<CheckStatus, number>;
+  harness: HarnessRecord;
+}
+
+export function harnessRecord(harnessCommit: string | undefined, candidateCommit: string | undefined): HarnessRecord {
+  if (!harnessCommit) return { relation: 'unpinned', ...(candidateCommit ? { candidateCommit } : {}) };
+  if (!candidateCommit) return { commit: harnessCommit, relation: 'candidate-commit-not-recorded' };
+  return { commit: harnessCommit, candidateCommit, relation: harnessCommit === candidateCommit ? 'same-commit' : 'different-commit' };
 }
 
 function allChecks(machine: MachineReport): CheckResult[] {
@@ -109,8 +127,14 @@ export function buildReport(input: ReleaseReportInput): ReleaseReport {
       if (!errors.includes(problem)) errors.push(problem);
     }
   }
+  const harness = harnessRecord(input.harnessCommit, input.candidate.sha);
+  if (harness.relation === 'different-commit') {
+    // A harness from another commit than the candidate says nothing reliable about the candidate.
+    const problem = `the harness was exported from ${harness.commit}, not the candidate's commit ${harness.candidateCommit}, so this run does not qualify that candidate`;
+    if (!errors.includes(problem)) errors.push(problem);
+  }
   const failed = counts.fail > 0 || errors.length > 0 || input.machines.length === 0;
-  return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', counts };
+  return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', counts, harness };
 }
 
 const STATUS_LABEL: Record<CheckStatus, string> = { pass: 'PASS', fail: 'FAIL', warn: 'WARN', skip: 'SKIP' };
@@ -199,6 +223,17 @@ figcaption{font-size:.8rem;color:var(--muted)}
 .errors{border:1px solid var(--fail);padding:8px 14px;border-radius:6px}
 `;
 
+const HARNESS_TEXT: Record<HarnessRelation, string> = {
+  'same-commit': 'the same commit as the candidate',
+  'different-commit': 'NOT the candidate\'s commit',
+  'candidate-commit-not-recorded': 'the candidate\'s own commit is not recorded (a local artifact), so the two are not confirmed to match',
+  unpinned: 'unpinned: this run used whatever source was on disk (a development run, not release evidence)',
+};
+
+function harnessLine(harness: HarnessRecord): string {
+  return `Harness ${harness.commit ? `commit ${escapeHtml(harness.commit)} · ` : ''}${escapeHtml(HARNESS_TEXT[harness.relation])}`;
+}
+
 /** One static page; no scripts, no external requests. */
 export function renderHtml(report: ReleaseReport): string {
   const totals = (['pass', 'fail', 'warn', 'skip'] as const).map((s) => `${report.counts[s]} ${s}`).join(' · ');
@@ -208,6 +243,7 @@ export function renderHtml(report: ReleaseReport): string {
     + `<h1>Olympus release check</h1>`
     + `<p><span class="verdict ${report.verdict}">${report.verdict.toUpperCase()}</span> ${escapeHtml(totals)}</p>`
     + `<p class="muted">Candidate ${escapeHtml(report.candidate.label)}${report.candidate.sha ? ` (${escapeHtml(report.candidate.sha)})` : ''} · run ${escapeHtml(report.runId)} · ${escapeHtml(report.startedAt)} to ${escapeHtml(report.finishedAt)}</p>`
+    + `<p class="muted">${harnessLine(report.harness)}</p>`
     + (report.selfTest ? `<p class="muted">Self-test: ${escapeHtml(report.selfTest)}</p>` : '')
     + errors
     + report.machines.map(machineSection).join('')
