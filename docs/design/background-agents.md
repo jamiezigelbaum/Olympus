@@ -112,7 +112,10 @@ checked again once the probe has answered. A `match` that was recorded adds
 `private_note` to the search result, the same sentence and Open link as a source
 answer, for the agent to pass on as written. `no_match`, `unknown`, a refused
 record, a connection revoked at any point and a demo sign-in grant tell the
-agent nothing about Private; a demo grant records nothing. ChatGPT's
+agent nothing about Private; a demo grant records nothing. A search the agent
+cancels or hangs up on records nothing either: the wait ends at once and a
+verdict that arrives later is ignored, so no row is written, no automatic
+answer is spent and no Inbox slot is taken. ChatGPT's
 `olympus_search` is unchanged. `unknown` records an unchecked row and re-probes
 locally every ten minutes; a later match schedules the same answer path.
 Delivered Private summaries and `no_match` record nothing. Stored selectors

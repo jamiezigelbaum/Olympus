@@ -201,6 +201,8 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
           // A demo sign-in grant is a shared password: its searches never write to the owner's Inbox.
           ...(!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {}),
           ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
+          // The agent hanging up cancels its search, Private part included.
+          signal: request.signal,
         })
         : undefined));
     // No sessionIdGenerator: stateless mode.

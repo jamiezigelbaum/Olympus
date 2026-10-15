@@ -153316,8 +153316,11 @@ function remoteSearchExtension(options, authorized, request = {}) {
       return [REMOTE_SEARCH_TOOL, ...listed.filter((tool) => !hidden.has(tool.name))];
     },
     call: async (call, next, signal) => {
-      if (call.params.name === REMOTE_SEARCH_TOOL.name)
-        return await runSearch(call.params.arguments ?? {}, options, authorized, request, signal);
+      if (call.params.name === REMOTE_SEARCH_TOOL.name) {
+        const signals = [signal, request.signal].filter((one) => one !== undefined);
+        const cancel = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+        return await runSearch(call.params.arguments ?? {}, options, authorized, request, cancel);
+      }
       if (answerHidden() && call.params.name === "source_answer")
         return errorResult(remoteSurfaceErrorOutput("unknown_operation"));
       return await next();
@@ -153340,7 +153343,7 @@ async function runSearch(args, options, authorized, context2, signal) {
       return invalidParams("limit");
     limit = args.limit;
   }
-  const privateCall = context2.privatePart?.start(REMOTE_SEARCH_TOOL.name, { question });
+  const privateCall = context2.privatePart?.start(REMOTE_SEARCH_TOOL.name, { question }, signal ? { signal } : undefined);
   const manifests = createReleaseManifestSink();
   let raw;
   try {
@@ -153509,7 +153512,8 @@ function createRemoteMcpHandler(options) {
     const demo = options.demoGrant?.(verification.connection) === true;
     const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
       ...!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {},
-      ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
+      ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+      signal: request.signal
     }) : undefined));
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -156297,6 +156301,17 @@ __export(exports_remote_private_part, {
   remotePrivateOutcome: () => remotePrivateOutcome,
   createRemotePrivateParts: () => createRemotePrivateParts
 });
+function untilCancelled(pending, signal) {
+  if (!signal)
+    return pending;
+  if (signal.aborted)
+    return Promise.resolve(undefined);
+  return new Promise((resolve15, reject) => {
+    const onAbort = () => resolve15(undefined);
+    signal.addEventListener("abort", onAbort, { once: true });
+    pending.then(resolve15, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
 function asRecord19(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
 }
@@ -156414,25 +156429,29 @@ function createRemotePrivateParts(options) {
     }
     return verdict === "match" && recorded;
   };
-  const startSearch = (connectionId, args) => {
+  const startSearch = (connectionId, args, signal) => {
     const ticket = ticketFor(connectionId);
     const question = typeof args.question === "string" ? args.question.trim() : "";
     const selectors = normalizeWaitingSelectors({});
     let answerId;
     const verdict = (async () => {
-      if (closed || !ticket || !question || !selectors)
+      if (closed || signal?.aborted || !ticket || !question || !selectors)
         return;
       if (!activeNow(ticket.connectionId))
         return;
       return probe({ ...selectors, question });
-    })();
+    })().catch(() => {
+      return;
+    });
     return {
       get answerId() {
         return answerId;
       },
       async settle() {
         try {
-          const found = await verdict;
+          const found = await untilCancelled(verdict, signal);
+          if (signal?.aborted)
+            return false;
           if (found === undefined || found === "no_match" || closed || !ticket || !selectors)
             return false;
           if (!activeNow(ticket.connectionId))
@@ -156538,7 +156557,7 @@ function createRemotePrivateParts(options) {
       return {
         start(operation, args, context2) {
           if (operation === "olympus_search")
-            return startSearch(connectionId, args);
+            return startSearch(connectionId, args, context2?.signal);
           if (operation === "source_answer") {
             const ticket = ticketFor(connectionId);
             let answerId;

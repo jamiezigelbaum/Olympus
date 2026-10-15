@@ -19,7 +19,8 @@
  * link to that answer) for the agent to pass on as written. No match, a
  * probe that could not tell, or a refused record tells the agent nothing about
  * Private. Nothing Private is in the note: the verdict goes only to the local
- * record and that one sentence.
+ * record and that one sentence. A search the agent cancels or hangs up on
+ * records nothing.
  *
  * Two checks run after the search and before anything leaves: the search
  * itself rereads every listed item's tier (an item moved to Private or
@@ -59,6 +60,13 @@ export interface RemoteSearchRequestContext {
    * are read again right before the result leaves.
    */
   releaseCheck?: ReleaseCheck;
+  /**
+   * The HTTP request's own signal: it aborts when the agent hangs up. The
+   * stateless MCP transport cannot deliver a cancel notification to the call it
+   * names, so this is how a cancel reaches a search in production. Joined with
+   * the MCP call's signal.
+   */
+  signal?: AbortSignal;
 }
 
 const MAX_QUESTION_CHARS = 2_000;
@@ -109,7 +117,11 @@ export function remoteSearchExtension(
       return [REMOTE_SEARCH_TOOL, ...listed.filter((tool) => !hidden.has(tool.name))];
     },
     call: async (call, next, signal) => {
-      if (call.params.name === REMOTE_SEARCH_TOOL.name) return await runSearch(call.params.arguments ?? {}, options, authorized, request, signal);
+      if (call.params.name === REMOTE_SEARCH_TOOL.name) {
+        const signals = [signal, request.signal].filter((one): one is AbortSignal => one !== undefined);
+        const cancel = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+        return await runSearch(call.params.arguments ?? {}, options, authorized, request, cancel);
+      }
       if (answerHidden() && call.params.name === 'source_answer') return errorResult(remoteSurfaceErrorOutput('unknown_operation'));
       return await next();
     },
@@ -137,8 +149,9 @@ async function runSearch(
     if (typeof args.limit !== 'number' || !Number.isInteger(args.limit) || args.limit < 1 || args.limit > MAX_LIMIT) return invalidParams('limit');
     limit = args.limit;
   }
-  // The Private part's ticket is read and its probe started now, beside the search.
-  const privateCall = context.privatePart?.start(REMOTE_SEARCH_TOOL.name, { question });
+  // The Private part's ticket is read and its probe started now, beside the search. It is given the
+  // request's signal: a search the agent cancels records nothing, wherever the cancel lands.
+  const privateCall = context.privatePart?.start(REMOTE_SEARCH_TOOL.name, { question }, signal ? { signal } : undefined);
   const manifests = createReleaseManifestSink();
   let raw: unknown;
   try {

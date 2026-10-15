@@ -11,6 +11,7 @@
 // invariants of core/remote-private-part.ts's header.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { getEventListeners } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,7 +35,8 @@ import {
   withRemoteMcpRoute,
   type RemoteMcpHandlerOptions,
 } from '../src/workers/remote-mcp.ts';
-import { REMOTE_SEARCH_TOOL } from '../src/workers/remote-search.ts';
+import { REMOTE_SEARCH_TOOL, remoteSearchExtension } from '../src/workers/remote-search.ts';
+import type { McpServerExtension } from '../src/mcp/server.ts';
 
 const WORKER_TOKEN = 'worker-bearer-token-for-remote-search-inbox-0123456789';
 const QUESTION = 'When does the lease end?';
@@ -57,6 +59,8 @@ let verdict: Verdict;
 let probeHeld: Promise<void> | undefined;
 let searchHeld: Promise<void> | undefined;
 let searchStarted: (() => void) | undefined;
+/** Set: the search's retrieval rejects with it, after the probe has been asked. */
+let searchFails: Error | undefined;
 /** The tier the one Personal input has now (the search's own manifest names it). */
 let inputTier: 'public_or_personal' | 'private';
 let searches: Array<{ question: string; limit?: number }>;
@@ -99,6 +103,7 @@ function serve(options: Partial<RemoteMcpHandlerOptions> = {}, parts = partsFor(
         events.push('search-start');
         searchStarted?.();
         if (searchHeld) await searchHeld;
+        if (searchFails) throw searchFails;
         events.push('search-end');
         // As searchReleasedEvidence does: the one Personal item it released is named in a manifest.
         recordReleaseManifest({
@@ -146,6 +151,7 @@ beforeEach(() => {
   probeHeld = undefined;
   searchHeld = undefined;
   searchStarted = undefined;
+  searchFails = undefined;
   inputTier = 'public_or_personal';
   searches = [];
   server = undefined;
@@ -318,7 +324,7 @@ describe('a standard install: olympus_search records a Private match for the Inb
     }
   });
 
-  test('a search that fails records nothing', async () => {
+  test('a search with an invalid question probes and records nothing', async () => {
     serve();
     const { token } = connections.create('Claude');
     const client = await sdkClient(token);
@@ -330,6 +336,50 @@ describe('a standard install: olympus_search records a Private match for the Inb
     } finally {
       await client.close();
     }
+  });
+
+  test('a search whose retrieval fails after the probe was asked records nothing, even when the probe then says match', async () => {
+    let release!: () => void;
+    probeHeld = new Promise<void>((resolve) => { release = resolve; });
+    searchFails = new Error('the index could not be read');
+    serve();
+    const { token } = connections.create('Claude');
+    const client = await sdkClient(token);
+    try {
+      const failed = await search(client);
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).not.toContain('private_note');
+      // The probe was asked as the call began, and it is still deciding.
+      expect(probes).toHaveLength(1);
+      release();
+      await Bun.sleep(50);
+      expect(waiting.list().questions).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('over the wire: an agent that hangs up while the probe is deciding leaves no row', async () => {
+    let release!: () => void;
+    probeHeld = new Promise<void>((resolve) => { release = resolve; });
+    serve();
+    const { token } = connections.create('Claude');
+    const hangUp = new AbortController();
+    const pending = fetch(`${base}/mcp`, {
+      method: 'POST',
+      signal: hangUp.signal,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'olympus_search', arguments: { question: QUESTION } } }),
+    }).catch((error: unknown) => error);
+    for (let tries = 0; tries < 200 && !events.includes('search-end'); tries += 1) await Bun.sleep(5);
+    expect(events).toEqual(['probe-start', 'search-start', 'search-end']);
+    hangUp.abort();
+    await pending;
+    // Let the hang-up reach the server, then let the probe say match.
+    await Bun.sleep(100);
+    release();
+    await Bun.sleep(100);
+    expect(waiting.list().questions).toEqual([]);
   });
 
   test('asking again does not make a second row, and the link is the same', async () => {
@@ -500,6 +550,156 @@ describe('the Private part for the search, on its own', () => {
     // Recorded, but no sentence is promised: settle is what the search reads.
     expect(await unknown.settle(undefined, undefined)).toBe(false);
     expect(unit.list().questions.map((row) => [row.connectionId, row.state]).sort()).toEqual([['conn-a', 'waiting'], ['conn-b', 'unchecked']]);
+  });
+});
+
+describe('a search the agent cancels records nothing', () => {
+  const CALL = { params: { name: 'olympus_search', arguments: { question: QUESTION } } };
+  const notTheSearch = async (): Promise<never> => { throw new Error('the search is answered by the extension'); };
+  let controller: AbortController;
+  let connectionId: string;
+  let parts: ReturnType<typeof partsFor>;
+  let extension: McpServerExtension;
+  /** Runs inside retrieval, just before it returns. */
+  let onRetrieved: (() => void) | undefined;
+
+  beforeEach(() => {
+    controller = new AbortController();
+    onRetrieved = undefined;
+    parts = partsFor(2_000);
+    connectionId = connections.create('Claude').connection.id;
+    extension = remoteSearchExtension(
+      {
+        // Retrieval finishes on its own and does not look at the signal, as a search already past its reads would.
+        evidenceSearch: async (input) => {
+          searches.push(input);
+          events.push('search-end');
+          onRetrieved?.();
+          return { evidence: [], withheld: 0, coverage: { searched_corpora: 1 } };
+        },
+        answerModelAvailable: () => false,
+      },
+      () => (isActive(connectionId) ? 'active' : 'revoked'),
+      { privatePart: parts.forConnection(connectionId) },
+    );
+  });
+  afterEach(() => { parts.close(); });
+
+  /** The computer's answerer over the same store, counting every question it is asked. */
+  function answerer(asked: string[]) {
+    return createLocalPrivateAnswers({
+      store: () => waiting,
+      isActive,
+      connectionName: () => 'Claude',
+      eligible: async (items) => items.map(() => true),
+      answer: async (input) => {
+        asked.push(input.question);
+        return { status: 'answered', answer: 'An answer.', citations: [], unanswered: [], leftOut: [], read: [] };
+      },
+    });
+  }
+
+  test('control: the same call, not cancelled, records one row and carries the note', async () => {
+    const result = await extension.call(CALL, notTheSearch, controller.signal);
+    expect((result.structuredContent as { private_note?: string }).private_note).toMatch(NOTE_WITH_LINK);
+    expect(waiting.list().questions).toEqual([expect.objectContaining({ connectionId, surface: 'remote', state: 'waiting', question: QUESTION })]);
+  });
+
+  test('cancelled after retrieval and before the probe answers: it stops waiting, then no row, no automatic answer and no budget used', async () => {
+    let release!: () => void;
+    probeHeld = new Promise<void>((resolve) => { release = resolve; });
+    const started = Date.now();
+    const pending = extension.call(CALL, notTheSearch, controller.signal);
+    for (let tries = 0; tries < 200 && !events.includes('search-end'); tries += 1) await Bun.sleep(5);
+    // Retrieval is done; the probe has been asked and has not answered.
+    expect(events).toEqual(['probe-start', 'search-end']);
+    controller.abort();
+    // The call ends on the cancel, well before the probe's own two seconds, with nothing about Private.
+    const result = await pending;
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(JSON.stringify(result)).not.toContain('private_note');
+    expect(JSON.stringify(result)).not.toContain('on your computer');
+    // The late verdict arrives and is ignored.
+    release();
+    await Bun.sleep(50);
+    expect(events).toEqual(['probe-start', 'search-end', 'probe-end']);
+    expect(waiting.list().questions).toEqual([]);
+
+    // The computer has nothing to answer.
+    const asked: string[] = [];
+    const inbox = answerer(asked);
+    try {
+      await inbox.tick();
+      expect(asked).toEqual([]);
+      // And the connection's five automatic answers an hour are all still there: five other questions are all answered.
+      const others = ['one', 'two', 'three', 'four', 'five'].map((word) => `Another question about ${word}?`);
+      for (const question of others) {
+        expect(waiting.record(waiting.ticket(connectionId), { question, surface: 'remote', state: 'waiting', selectors: { retrieval_mode: 'hybrid' } })).toBeDefined();
+      }
+      await inbox.tick();
+      expect([...asked].sort()).toEqual([...others].sort());
+    } finally {
+      inbox.close();
+    }
+  });
+
+  test('cancelled just as retrieval ends, with the probe already saying match: nothing is recorded', async () => {
+    onRetrieved = () => controller.abort();
+    const result = await extension.call(CALL, notTheSearch, controller.signal);
+    expect(controller.signal.aborted).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('private_note');
+    await Bun.sleep(30);
+    expect(waiting.list().questions).toEqual([]);
+  });
+
+  test('cancelled before the call begins: nothing is even probed or recorded', async () => {
+    controller.abort();
+    const result = await extension.call(CALL, notTheSearch, controller.signal);
+    expect(JSON.stringify(result)).not.toContain('private_note');
+    expect(probes).toEqual([]);
+    expect(waiting.list().questions).toEqual([]);
+  });
+
+  test('a cancel that lands after the verdict but before the record step writes nothing', async () => {
+    // A signal whose cancel arrives with no event of its own: the flag turns on as the probe hands back its verdict.
+    let cancelled = false;
+    const signal = { get aborted() { return cancelled; }, addEventListener: () => undefined, removeEventListener: () => undefined } as unknown as AbortSignal;
+    const hook = createRemotePrivateParts({
+      probe: async () => { cancelled = true; return 'match'; },
+      store: () => waiting,
+      isActive,
+      probeTimeoutMs: 1_000,
+    });
+    try {
+      const call = hook.forConnection(connectionId).start('olympus_search', { question: QUESTION }, { signal })!;
+      expect(await call.settle(undefined, undefined)).toBe(false);
+      expect(call.answerId).toBeUndefined();
+      expect(waiting.list().questions).toEqual([]);
+    } finally {
+      hook.close();
+    }
+  });
+
+  test('no abort listener outlives the wait, whether the search is cancelled or not', async () => {
+    const done = new AbortController();
+    const finished = parts.forConnection(connectionId).start('olympus_search', { question: QUESTION }, { signal: done.signal })!;
+    expect(await finished.settle(undefined, undefined)).toBe(true);
+    await Bun.sleep(0);
+    expect(getEventListeners(done.signal, 'abort')).toHaveLength(0);
+
+    let release!: () => void;
+    probeHeld = new Promise<void>((resolve) => { release = resolve; });
+    const cancelled = new AbortController();
+    const waited = parts.forConnection(connectionId).start('olympus_search', { question: 'Another question?' }, { signal: cancelled.signal })!;
+    const settling = waited.settle(undefined, undefined);
+    await Bun.sleep(0);
+    expect(getEventListeners(cancelled.signal, 'abort')).toHaveLength(1);
+    cancelled.abort();
+    expect(await settling).toBe(false);
+    release();
+    await Bun.sleep(30);
+    expect(getEventListeners(cancelled.signal, 'abort')).toHaveLength(0);
+    expect(waiting.list().questions.map((row) => row.question)).toEqual([QUESTION]);
   });
 });
 
