@@ -2,7 +2,7 @@
 
 ## 1.0.1 - unreleased
 
-- On Linux, signing out ends the owner session, saving settings keeps your Olympus window working, and Olympus opens in one window without a flash.
+- On Linux, signing out ends the owner session, saving settings keeps your Olympus window working, Olympus opens in one window without a flash, computers without IPv6 keep their dashboard, Confirm continues the original page automatically, and browser confirmation opens are capped at six per hour.
 - Connecting an agent no longer shows an expired approval after it worked.
 - Private search finds items when not every word matches, keeping readable content ahead of title-only matches and never reporting a match from one shared common word.
 - Progress finishes when names-only copies have content elsewhere; items settled without readable content appear under problems with a way to find them.

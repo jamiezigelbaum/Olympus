@@ -4,6 +4,7 @@
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, openSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { validateWorkerSocket, type WorkerTransportOptions } from './worker-transport.ts';
 import { openLinuxOwnerTicketFile } from './linux-desktop-opener.ts';
 import { readBoundedRequestText } from '../workers/remote-request-body.ts';
@@ -111,17 +112,41 @@ function metaPolicy(policy: string): string {
 }
 function attribute(value: string): string { return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;'); }
 
+const BROWSER_OPEN_LIMIT_MESSAGE = 'Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.';
+const BROWSER_OPEN_FAILED_MESSAGE = 'Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.';
+
 function confirmation(): Response {
   return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
 (async function(){
- const message=document.getElementById('message');
- document.getElementById('confirm').onclick=async function(){
-  try{const r=await fetch('/owner-open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:location.pathname+location.search+location.hash})});
-  message.textContent=r.ok?'A private ticket was opened in your desktop browser. Return to it to continue.':'Unable to open the private ticket. Wait a moment and retry, or use the owner SSH socket forward.';}catch{message.textContent='Owner confirmation unavailable. Use the owner SSH socket forward.';}
+ const message=document.getElementById('message'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, opening=false, waiting=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;confirm.disabled=opening;};
+ async function resume(){
+  if(resuming||!localStorage.getItem(key))return;
+  resuming=true;
+  try{const r=await fetch(location.pathname+location.search);if(!r.ok&&r.status!==503){resuming=false;return;}
+   const html=await r.text();stopWaiting();document.open();document.write(html);document.close();
+  }catch{resuming=false;}
+ }
+ function onStorage(event){if(event.key===key)void resume();}
+ confirm.onclick=async function(){
+  if(opening||waiting)return;
+  opening=true;confirm.disabled=true;
+  try{const r=await fetch('/owner-open',{method:'POST'});
+   if(!r.ok){message.textContent=r.status===429?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};return;}
+   // A refused replacement must leave the current wait intact. Only a
+   // successful open replaces its ticket and starts a fresh 60-second wait.
+   stopWaiting();waiting=true;confirm.disabled=true;
+   message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
+   // Check storage after subscribing too: the opener may already have proved.
+   addEventListener('storage',onStorage);
+   poll=setInterval(resume,1000);
+   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},${TICKET_MS});
+   await resume();
+  }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
+  finally{opening=false;confirm.disabled=waiting;}
  };
- if(!localStorage.getItem(${JSON.stringify(STORAGE)}))return;
- try{const r=await fetch(location.pathname+location.search);if(!r.ok&&r.status!==503)return;
- const html=await r.text();document.open();document.write(html);document.close();}catch{}
+ await resume();
 })();</script>`);
 }
 // The private file is the first view of the SAME Olympus window, not a
@@ -183,6 +208,7 @@ export class LinuxOwnerBridge {
   private tickets = new Map<'control' | 'browser', Ticket>();
   private sessions: Session[] = [];
   private lastOpen = { control: -Infinity, browser: -Infinity };
+  private browserOpens: number[] = [];
   private closed = false;
   private readonly now: () => number;
   constructor(private readonly options: LinuxOwnerBridgeOptions) {
@@ -206,6 +232,11 @@ export class LinuxOwnerBridge {
   async openTicket(target: string, lane: 'control' | 'browser' = 'control'): Promise<void> {
     if (!safeTarget(target) || !this.live()) throw new Error('Desktop owner confirmation is unavailable.');
     if (this.now() - this.lastOpen[lane] < 10_000) throw new Error('Wait ten seconds before opening another owner ticket.');
+    if (lane === 'browser') {
+      this.browserOpens = this.browserOpens.filter(time => time > this.now() - 60 * 60 * 1000);
+      if (this.browserOpens.length >= 6) throw new Error('Wait before opening another owner ticket.');
+      this.browserOpens.push(this.now());
+    }
     this.lastOpen[lane] = this.now();
     if (validateWorkerSocket(this.options.transport) !== this.options.socketPath) throw new Error('Owner socket changed.');
     const previous = this.tickets.get(lane);
@@ -304,7 +335,14 @@ export class LinuxOwnerBridge {
         // Its limiter and pending ticket cannot replace or starve a CLI ticket.
         await this.openTicket('/dashboard', 'browser');
         return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
-      } catch { return refusal(429); }
+      } catch {
+        const response = page(`<p>${BROWSER_OPEN_LIMIT_MESSAGE}</p>`, 429);
+        response.headers.set('X-Olympus-Owner-Refused', '1');
+        const retryAt = Math.max(this.lastOpen.browser + 10_000,
+          this.browserOpens.length >= 6 ? this.browserOpens[0]! + 60 * 60 * 1000 : 0);
+        response.headers.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
+        return response;
+      }
     }
     // Private control endpoint is NEVER forwarded from TCP, even by an owner.
     if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith('/owner-')) return refusal();
@@ -373,9 +411,19 @@ export class LinuxOwnerBridge {
 }
 
 export type DesktopBridgeStatus = { state: 'listening' | 'restarting' | 'headless' | 'port_in_use' | 'unavailable'; origin?: string; remedy?: string; listener_owner?: 'engine-host' | 'worker'; ipv6?: 'listening' | 'unavailable' };
+/** Kernel addresses decide presence. Ephemeral-port exhaustion, permissions
+ * and resource failures can make bind(::1, 0) fail while ::1 remains usable. */
+function ipv6LoopbackPresent(): boolean {
+  return Object.values(networkInterfaces()).some(addresses =>
+    addresses?.some(address => address.internal && address.address === '::1'));
+}
 /** One epoch per active desktop. Rotation also occurs after logout/relogin,
  * not merely after process restart. No reusePort or hostname fallback. */
-export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { platform?: string; listenerOwner?: 'engine-host' | 'worker'; listen?: (bridge: LinuxOwnerBridge) => { stop(closeActiveConnections?: boolean): unknown } }) {
+export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { ipv6Present?: () => boolean; platform?: string; listenerOwner?: 'engine-host' | 'worker'; listen?: (bridge: LinuxOwnerBridge) => { stop(closeActiveConnections?: boolean): unknown } }) {
+  const ipv6Present = () => {
+    try { return (options.ipv6Present ?? ipv6LoopbackPresent)(); }
+    catch { return true; } // Uncertain kernel state requires custody of both families.
+  };
   let bridge: LinuxOwnerBridge | undefined;
   let listener: { stop(closeActiveConnections?: boolean): unknown; ipv6?: 'listening' | 'unavailable' } | undefined;
   let status: DesktopBridgeStatus = { state: 'headless' };
@@ -388,7 +436,15 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
   const refresh = () => {
     if (closed) return;
     if ((options.platform ?? process.platform) !== 'linux' || !options.ready()) { stop(); status = { state: 'headless' }; return; }
-    if (bridge) return;
+    let ipv6Available: boolean | undefined;
+    if (bridge) {
+      if (listener?.ipv6 !== 'unavailable') return;
+      ipv6Available = ipv6Present();
+      if (!ipv6Available) return;
+      // IPv6 appeared: revoke the IPv4 epoch before trying to hold BOTH
+      // families. A squatter must never coexist with a live old origin.
+      stop();
+    }
     const candidate = new LinuxOwnerBridge(options);
     try {
       if (options.listen) listener = options.listen(candidate);
@@ -398,15 +454,10 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
           candidate.close(); // revoke before EITHER family can be released
           for (const server of servers) void server.stop(true);
         };
-        let ipv6: 'listening' | 'unavailable' = 'listening';
+        const ipv6 = (ipv6Available ?? ipv6Present()) ? 'listening' : 'unavailable';
         try {
-          for (const hostname of ['127.0.0.1', '::1']) {
-            try {
-              servers.push(Bun.serve({ hostname, port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) }));
-            } catch (error) {
-              if (hostname !== '::1' || !['EADDRNOTAVAIL', 'EAFNOSUPPORT'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-              ipv6 = 'unavailable';
-            }
+          for (const hostname of ipv6 === 'listening' ? ['127.0.0.1', '::1'] : ['127.0.0.1']) {
+            servers.push(Bun.serve({ hostname, port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) }));
           }
         } catch (error) { release(); throw error; }
         listener = { stop: release, ipv6 };
