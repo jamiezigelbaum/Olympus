@@ -602,8 +602,16 @@ only the same live, unexpired, unreplaced claim can retry; its file is not
 recreated and its 60-second expiry is never extended. Success permanently
 spends it before publishing the session. CLI/control-socket and browser confirmation each have a ten-second limiter
 and one pending ticket; browser requests cannot replace the CLI's pending file
-or consume its limiter. Unauthenticated `POST /owner-open` ignores the posted
-target and opens only `/dashboard`. At most sixteen 12-hour owner sessions are held.
+or consume its limiter. The browser lane also permits at most six opens in a
+rolling hour per listener epoch; excess requests receive 429 with the existing
+refusal wording. CLI opens have no hourly cap. Unauthenticated `POST /owner-open`
+ignores the posted target and opens only `/dashboard`. Confirm tells the owner:
+“Approve in the Olympus window that just opened. This page continues by itself.”
+The original tab watches this origin's storage event and polls once a second
+for proof, then fetches its own unchanged path/query and replaces the document.
+Waiting is bounded by the ticket's 60-second lifetime. A different browser
+profile cannot resume it; timeout says “Open this page again from the Olympus window.”
+At most sixteen 12-hour owner sessions are held.
 
 An HttpOnly, SameSite=Lax, host-only cookie is bound to this bridge instance.
 **Cookies alone are insufficient:** cookies cross ports, so every content
@@ -638,9 +646,17 @@ observer detects logout or server-mode enable it closes the listener and
 revokes proofs; requests immediately refuse the unavailable snapshot. Relogin creates a new
 origin. The bridge binds `127.0.0.1` and `[::1]` at the configured port as one
 listener lifecycle. A collision on either family releases both and reports
-`port_in_use`; no partial listener is published. Only IPv6 `EADDRNOTAVAIL` or
-`EAFNOSUPPORT` permits IPv4 alone, explicitly reported as
-`desktop_bridge.ipv6=unavailable`. Release of either socket revokes the epoch
+`port_in_use`; no partial listener is published. Before taking the configured
+port, a real Bun bind to `::1` on port 0, immediately closed, probes IPv6
+availability. Bun reports unavailable addresses as `EADDRINUSE` too, so error
+codes cannot decide availability. A failed probe permits IPv4 alone, explicitly
+reported as `desktop_bridge.ipv6=unavailable`; a successful probe makes ANY
+configured-port IPv6 bind failure fatal to both families. While IPv6 is
+unavailable every refresh re-probes. If IPv6 appears, the manager revokes the
+old epoch's sessions and tickets before releasing IPv4 and trying both families
+with a fresh origin. An IPv6 squatter then leaves both families unheld and
+status `port_in_use`, never a live IPv4-only origin beside the squatter.
+Release of either socket revokes the epoch
 and releases both; a subsequent bind gets a new origin. A port collision leaves
 the owner socket running, opens no replacement
 listener and reports `desktop_bridge.state=port_in_use` plus its remedy through
@@ -1216,7 +1232,18 @@ Expect `desktop_bridge.state` to be `listening`. The command opens a private
 file and then a fresh random `.localhost` origin in Chromium (Omarchy's default)
 or Firefox. The URL printed by the command contains no ticket. Confirm the
 private dashboard loads; connect one client with its original OAuth query,
-then choose Connect on the consent page. Confirm a fresh browser tab can
+then choose Connect on the consent page. In a fresh browser profile with no
+owner proof, visit an agent's authorize URL, click Confirm, and open the private
+ticket in that same profile. The ticket window must show the dashboard and the
+original tab must show the real consent page by itself, without a reload, with
+its query and fragment intact. Approve consent and verify the original state
+and PKCE exchange. Repeat with storage events suppressed to check the poll
+fallback. Prove a ticket in a different profile: the original page must remain
+unproven and after 60 seconds say “Open this page again from the Olympus window.”
+Space six browser Confirm opens at least ten seconds apart within an hour;
+the seventh must return 429 and open nothing. A CLI dashboard open must still
+work and its pending ticket must survive browser attempts. Confirm a fresh
+browser tab can
 reuse the owner session. From a second ordinary account, fixed-entry requests
 may redirect, but dashboard reads and consent must refuse without both proofs.
 Verify copied/previous-instance cookies and forged browser headers do not help.
@@ -1238,8 +1265,14 @@ remains after the bounded reconciliation interval. Log back in and verify a
 new origin. Explicit server mode must likewise remove the listener. Hold the
 port on `[::1]` with another ordinary account while IPv4 is free, and repeat
 with IPv4 occupied. Confirm doctor/status report `port_in_use` and the other
-family is released too. On a host without IPv6, confirm status explicitly
-reports `ipv6=unavailable`. After SIGKILL of the host, inspect `ss -ltnp` and
+family is released too. Record `cat /proc/sys/net/ipv6/conf/lo/disable_ipv6`
+and `ip -6 addr show lo`. On a host without IPv6 loopback, verify the dashboard
+works over IPv4 and status explicitly reports `ipv6=unavailable`. Restore IPv6
+loopback: within the refresh interval the origin must rotate, old sessions and
+pending tickets must refuse, and both families must be held. Repeat with a
+benign IPv6 squatter present as IPv6 returns: expect `port_in_use` and IPv4
+released; free the squatter and verify the next refresh takes both families.
+After SIGKILL of the host, inspect `ss -ltnp` and
 verify neither socket is left held by an orphan.
 
 In headful Chromium and Firefox, confirm native `.localhost` resolution on

@@ -7763,14 +7763,31 @@ function attribute(value) {
 function confirmation() {
   return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
 (async function(){
- const message=document.getElementById('message');
+ const message=document.getElementById('message'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);};
+ async function resume(){
+  if(resuming||!localStorage.getItem(key))return;
+  resuming=true;
+  try{const r=await fetch(location.pathname+location.search);if(!r.ok&&r.status!==503){resuming=false;return;}
+   const html=await r.text();stopWaiting();document.open();document.write(html);document.close();
+  }catch{resuming=false;}
+ }
+ function onStorage(event){if(event.key===key)void resume();}
  document.getElementById('confirm').onclick=async function(){
-  try{const r=await fetch('/owner-open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:location.pathname+location.search+location.hash})});
-  message.textContent=r.ok?'A private ticket was opened in your desktop browser. Return to it to continue.':'Unable to open the private ticket. Wait a moment and retry, or use the owner SSH socket forward.';}catch{message.textContent='Owner confirmation unavailable. Use the owner SSH socket forward.';}
+  stopWaiting();
+  const deadline=Date.now()+${TICKET_MS};
+  try{const r=await fetch('/owner-open',{method:'POST'});
+   if(!r.ok){stopWaiting();message.textContent='Unable to open the private ticket. Wait a moment and retry, or use the owner SSH socket forward.';return;}
+   message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
+   // Check storage after subscribing too: the opener may already have proved.
+   addEventListener('storage',onStorage);
+   poll=setInterval(resume,1000);
+   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},Math.max(0,deadline-Date.now()));
+   await resume();
+  }catch{stopWaiting();message.textContent='Owner confirmation unavailable. Use the owner SSH socket forward.';}
  };
- if(!localStorage.getItem(${JSON.stringify(STORAGE)}))return;
- try{const r=await fetch(location.pathname+location.search);if(!r.ok&&r.status!==503)return;
- const html=await r.text();document.open();document.write(html);document.close();}catch{}
+ await resume();
 })();</script>`);
 }
 function openingView() {
@@ -7811,6 +7828,7 @@ class LinuxOwnerBridge {
   tickets = new Map;
   sessions = [];
   lastOpen = { control: -Infinity, browser: -Infinity };
+  browserOpens = [];
   closed = false;
   now;
   constructor(options) {
@@ -7845,6 +7863,12 @@ class LinuxOwnerBridge {
       throw new Error("Desktop owner confirmation is unavailable.");
     if (this.now() - this.lastOpen[lane] < 1e4)
       throw new Error("Wait ten seconds before opening another owner ticket.");
+    if (lane === "browser") {
+      this.browserOpens = this.browserOpens.filter((time) => time > this.now() - 60 * 60 * 1000);
+      if (this.browserOpens.length >= 6)
+        throw new Error("Wait before opening another owner ticket.");
+      this.browserOpens.push(this.now());
+    }
     this.lastOpen[lane] = this.now();
     if (validateWorkerSocket(this.options.transport) !== this.options.socketPath)
       throw new Error("Owner socket changed.");
@@ -8063,6 +8087,15 @@ class LinuxOwnerBridge {
     return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
   }
 }
+function probeIpv6Loopback() {
+  try {
+    const probe = Bun.serve({ hostname: "::1", port: 0, fetch: () => refusal() });
+    probe.stop(true);
+    return true;
+  } catch {
+    return false;
+  }
+}
 function manageLinuxOwnerBridge(options) {
   let bridge;
   let listener;
@@ -8082,8 +8115,15 @@ function manageLinuxOwnerBridge(options) {
       status = { state: "headless" };
       return;
     }
-    if (bridge)
-      return;
+    let ipv6Available;
+    if (bridge) {
+      if (listener?.ipv6 !== "unavailable")
+        return;
+      ipv6Available = (options.probeIpv6 ?? probeIpv6Loopback)();
+      if (!ipv6Available)
+        return;
+      stop();
+    }
     const candidate = new LinuxOwnerBridge(options);
     try {
       if (options.listen)
@@ -8095,16 +8135,10 @@ function manageLinuxOwnerBridge(options) {
           for (const server of servers)
             server.stop(true);
         };
-        let ipv6 = "listening";
+        const ipv6 = ipv6Available ?? (options.probeIpv6 ?? probeIpv6Loopback)() ? "listening" : "unavailable";
         try {
-          for (const hostname of ["127.0.0.1", "::1"]) {
-            try {
-              servers.push(Bun.serve({ hostname, port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) }));
-            } catch (error) {
-              if (hostname !== "::1" || !["EADDRNOTAVAIL", "EAFNOSUPPORT"].includes(error.code ?? ""))
-                throw error;
-              ipv6 = "unavailable";
-            }
+          for (const hostname of ipv6 === "listening" ? ["127.0.0.1", "::1"] : ["127.0.0.1"]) {
+            servers.push(Bun.serve({ hostname, port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) }));
           }
         } catch (error) {
           release();

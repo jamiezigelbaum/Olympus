@@ -389,30 +389,103 @@ test('IPv6 collision refuses the whole listener; release and rebind rotate both 
 });
 
 
-test('only absent IPv6 permits IPv4 alone, and status says IPv6 is unavailable', async () => {
+test('real Bun distinguishes ephemeral IPv6 availability from a configured-port collision', async () => {
   const f = fixture();
   const serve = Bun.serve.bind(Bun);
   const reserve = serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
   const port = reserve.port!; await reserve.stop(true);
-  for (const code of ['EADDRNOTAVAIL', 'EAFNOSUPPORT', 'EACCES']) {
-    const mock = spyOn(Bun, 'serve').mockImplementation(((options: any) => {
-      if (options.hostname === '::1') throw Object.assign(new Error('IPv6 refused'), { code });
-      return serve(options);
-    }) as typeof Bun.serve);
-    let manager: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+  const calls: { hostname: string | undefined; port: number | string | undefined }[] = [];
+  // Exercise the DEFAULT probe with a real unassigned IPv6 address. No
+  // invented error code: Bun itself supplies the same misleading EADDRINUSE.
+  const mock = spyOn(Bun, 'serve').mockImplementation(((options: Parameters<typeof Bun.serve>[0]) => {
+    calls.push({ hostname: options.hostname, port: options.port });
+    return serve({ ...options, ...(options.hostname === '::1' ? { hostname: '::2' } : {}) } as Parameters<typeof Bun.serve>[0]);
+  }) as typeof Bun.serve);
+  let manager: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+  try {
+    manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux' });
+    expect(manager.status().state).toBe('listening');
+    expect(manager.status().ipv6).toBe('unavailable');
+    expect(calls.some(c => c.hostname === '::1' && c.port === 0)).toBe(true);
+    expect(calls.some(c => c.hostname === '::1' && c.port === port)).toBe(false);
+    expect((await fetch(`http://127.0.0.1:${port}/`, { redirect: 'manual' })).status).toBe(303);
+    console.log(`Bun ${Bun.version}: real ::2 port-0 bind fails; default probe selects IPv4 alone`);
+  } finally { manager?.close(); mock.mockRestore(); }
+});
+
+for (const collision of [false, true]) {
+  test(`IPv6 appearing revokes the IPv4 epoch and takes both families (squatter=${collision})`, async () => {
+    const f = fixture();
+    const reserve = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+    const port = reserve.port!; await reserve.stop(true);
+    let ipv6 = false, probes = 0;
+    const manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux', probeIpv6: () => { probes++; return ipv6; } });
+    cleanup.push(() => manager.close());
+    const status = manager.status();
+    expect(status.state).toBe('listening'); expect(status.ipv6).toBe('unavailable');
+    const oldOrigin = status.origin!;
+    manager.refresh(); expect(probes).toBeGreaterThan(1);
+    expect(manager.status().origin).toBe(oldOrigin);
+    await manager.open('/dashboard');
+    const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+    const call = (origin: string, path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${port}${path}`, {
+      ...init, redirect: 'manual', headers: { Host: new URL(origin).host, ...Object.fromEntries(new Headers(init.headers)) },
+    });
+    const response = await call(oldOrigin, '/owner-proof', { method: 'POST', headers: { Origin: oldOrigin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+    expect(response.status).toBe(200);
+    const cookie = response.headers.get('set-cookie')!.split(';')[0]!;
+    const { proof } = await response.json() as { proof: string };
+    const headers = { Cookie: cookie, 'X-Olympus-Owner-Proof': proof };
+    expect(await (await call(oldOrigin, '/dashboard.json', { headers })).text()).toBe('private dashboard');
+    f.advance(10_001); await manager.open('/dashboard');
+    const pendingFile = f.opened();
+    const pendingTicket = readFileSync(pendingFile, 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+    const squatter = collision ? Bun.serve({ hostname: '::1', port, fetch: () => new Response('squatter') }) : undefined;
     try {
-      manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux' });
-      const status = manager.status();
-      if (code === 'EACCES') expect(status.state).toBe('unavailable');
-      else {
-        expect(status.state).toBe('listening');
-        expect(status.ipv6).toBe('unavailable');
-        expect(() => serve({ hostname: '127.0.0.1', port, fetch: () => new Response() })).toThrow();
+      ipv6 = true; manager.refresh();
+      expect(existsSync(pendingFile)).toBe(false);
+      if (squatter) {
+        expect(manager.status().state).toBe('port_in_use');
+        const v4 = Bun.serve({ hostname: '127.0.0.1', port, fetch: () => new Response() });
+        await v4.stop(true); await squatter.stop(true);
+        manager.refresh();
       }
-    } finally { manager?.close(); mock.mockRestore(); }
-    const probe = serve({ hostname: '127.0.0.1', port, fetch: () => new Response() });
-    await probe.stop(true);
+      const current = manager.status();
+      expect(current.state).toBe('listening'); expect(current.ipv6).toBe('listening');
+      expect(current.origin).not.toBe(oldOrigin);
+      expect((await call(oldOrigin, '/dashboard.json', { headers })).status).toBe(421);
+      expect((await call(current.origin!, '/dashboard.json', { headers })).status).toBe(403);
+      expect((await call(current.origin!, '/owner-proof', { method: 'POST', headers: { Origin: current.origin!, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket: pendingTicket }) })).status).toBe(403);
+      for (const hostname of ['127.0.0.1', '::1']) expect(() => Bun.serve({ hostname, port, fetch: () => new Response() })).toThrow();
+    } finally { await squatter?.stop(true); }
+  });
+}
+
+test('browser opens have a rolling six-per-hour cap independent of CLI tickets and limits', async () => {
+  const f = fixture();
+  await f.bridge.openTicket('/connect/authorize?state=owner');
+  const cliFile = f.opened();
+  for (let i = 0; i < 6; i++) {
+    expect((await f.bridge.handle(f.post('/owner-open', { target: '/connect/authorize?state=attacker' }))).status).toBe(204);
+    expect(existsSync(cliFile)).toBe(true);
+    const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+    const redeemed = await f.bridge.handle(f.post('/owner-proof', { ticket }));
+    expect(redeemed.status).toBe(200);
+    expect((await redeemed.json() as { target: string }).target).toBe('/dashboard');
+    f.advance(10_000);
   }
+  const refused = await f.bridge.handle(f.post('/owner-open', {}));
+  expect(refused.status).toBe(429);
+  expect(await refused.text()).toContain('This Olympus window is out of date');
+  await expect(f.bridge.openTicket('/connect/authorize?state=still-owner')).resolves.toBeUndefined();
+  f.advance(3_539_999); // one millisecond before the first open ages out
+  expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(429);
+  f.advance(1);
+  expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(204);
+  // Only the oldest opening has expired, so the rolling window is full again.
+  f.advance(10_000);
+  expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(204);
+  expect((await f.bridge.handle(f.request('/dashboard.json'))).status).toBe(403);
 });
 
 test('a claimed ticket retries a restarted socket without concurrent redemption or expiry extension', async () => {
