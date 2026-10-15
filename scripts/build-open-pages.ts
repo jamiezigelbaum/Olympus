@@ -37,13 +37,13 @@ function handStep(target: OpenTarget): string | undefined {
     switch (target.section) {
       case 'connect': return 'Under <strong>Sources</strong>, choose <strong>Connect</strong> next to the source.';
       case 'reconnect': return 'Under <strong>Sources</strong>, choose <strong>Reconnect</strong> next to the source.';
-      case 'answers': return 'Open <strong>Models</strong> and check the answer model.';
-      case 'search': return 'Open <strong>Models</strong> and check the search model.';
-      case 'models': return 'Open <strong>Models</strong>.';
+      case 'answers': return 'Under <strong>On this computer</strong>, open <strong>Keys</strong> and check the answer model under <strong>Models</strong>.';
+      case 'search': return 'Under <strong>On this computer</strong>, open <strong>Keys</strong> and check the search model under <strong>Models</strong>.';
+      case 'models': return 'Under <strong>On this computer</strong>, open <strong>Keys</strong>. <strong>Models</strong> is at the top; <strong>Anonymous answers</strong> is further down.';
     }
   }
   if (target.kind === 'private_answers') {
-    return 'Under <strong>On this computer</strong>, open <strong>Private answers</strong>.';
+    return 'Under <strong>On this computer</strong>, open <strong>Inbox</strong> (<strong>Private answers</strong> in Olympus before 1.1.0).';
   }
   if (target.kind === 'unreadable') {
     return `Under <strong>Sources</strong>, open <strong>See why</strong> under <strong>${OPEN_UNREADABLE_SOURCES[target.source].label}</strong>. It lists every file that can't be read, and each one opens.`;

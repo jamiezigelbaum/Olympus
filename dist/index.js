@@ -5616,10 +5616,11 @@ var init_openclaw_executable = () => {};
 
 // src/core/source-index/keyword-context.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-var context, disabled, requestContext;
+var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
   context = new AsyncLocalStorage2;
   disabled = new AsyncLocalStorage2;
+  cachedOnly = new AsyncLocalStorage2;
   requestContext = new AsyncLocalStorage2;
 });
 // src/workers/source-index/answer-latency-trace.ts
@@ -17352,6 +17353,7 @@ var init_analyst_answer = __esm(() => {
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
+  init_keyword_context();
   init_router();
   init_source_model_policy();
   init_sovereignty();

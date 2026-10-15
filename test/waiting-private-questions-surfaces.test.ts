@@ -410,6 +410,7 @@ describe('remote: probe states and records', () => {
       },
       store: () => store,
       probeTimeoutMs: 20,
+      retryProbeTimeoutMs: 20,
     });
     await remote.forConnection('conn-a').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED);
     await remote.forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED);

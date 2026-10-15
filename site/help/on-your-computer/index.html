@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fix it on your computer - Olympus help</title>
-  <meta name="description" content="What is only in Olympus on your computer (Private answers and anonymous answers, Keys, Agents, Build a connector), how to open it, and how to fix what Olympus asks you to fix there.">
+  <meta name="description" content="What is only in Olympus on your computer (the Inbox, Keys with anonymous answers, Agents, Build a connector), how to open it, and how to fix what Olympus asks you to fix there.">
   <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
   <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
@@ -32,8 +32,8 @@
       <h2 id="only-here">What is only on your computer</h2>
       <p>These live only in Olympus on your computer, under <strong>On this computer</strong>. No AI app can show them or change them.</p>
       <ul>
-        <li><strong>Private answers</strong>: questions your agents asked that need your private things, waiting for you to answer them on this computer, and the <strong>Anonymous answers</strong> switch. <a href="/open/private/">Open Private answers</a>.</li>
-        <li><strong>Keys</strong>: your Venice, Readwise and X keys.</li>
+        <li><strong>Inbox</strong>: the answers to questions your agents asked that need your private things, and to the questions you ask yourself in <strong>Ask a question</strong>, kept on this computer. <a href="/open/private/">Open Inbox</a>.</li>
+        <li><strong>Keys</strong>: your Venice, Readwise and X keys, and the <strong>Anonymous answers</strong> switch.</li>
         <li><strong>Agents</strong>: remote access, and the agents connected to Olympus, each with <strong>Revoke</strong>.</li>
         <li><strong>Build a connector</strong>: for a source Olympus does not have yet.</li>
       </ul>
@@ -70,13 +70,14 @@
       <h2 id="reconnect">Reconnect a source</h2>
       <p>When X bookmarks or Readwise stop syncing because their sign-in or token expired, <a href="#open-olympus">open Olympus on your computer</a>, find the source under <strong>Sources</strong> and reconnect it (for Readwise, paste a new token). Gmail, Google Drive and Dropbox reconnect the same way. In ChatGPT, Dropbox also reconnects with <strong>Reconnect</strong> in the Olympus dashboard; for Gmail and Google Drive, <strong>Reconnect</strong> there gives you a link to open on your computer.</p>
 
-      <h2 id="private">Answer private questions, or turn on anonymous answers</h2>
-      <p>Both are on the <strong>Private answers</strong> page on your computer: <a href="/open/private/">open Private answers</a>, or <a href="#open-olympus">open Olympus on your computer</a> and choose <strong>Open</strong> next to <strong>Private answers</strong> under <strong>On this computer</strong>. Not under <strong>Models</strong>: that is only for changing models.</p>
+      <h2 id="private">Read your private answers, or turn on anonymous answers</h2>
+      <p>Private answers are in the <strong>Inbox</strong> on your computer: <a href="/open/private/">open Inbox</a>, or <a href="#open-olympus">open Olympus on your computer</a> and choose <strong>Open</strong> next to <strong>Inbox</strong> under <strong>On this computer</strong>. Anonymous answers are on <strong>Keys</strong>, under <strong>On this computer</strong>.</p>
       <ul>
-        <li><strong>Waiting questions.</strong> When ChatGPT asks something only your private things can answer, or another agent's private answer could not be given, the question waits here, and <strong>Needs you</strong> on your computer says so. Choose <strong>Answer</strong> to answer it on this computer with the model built into Olympus, or <strong>Dismiss</strong>. You can also ask your own question in <strong>Ask privately</strong>. Nothing on this page leaves your computer.</li>
-        <li><strong>Anonymous answers</strong> are under <strong>Anonymous answers</strong> on the same page. They work on a Mac and on Omarchy (x64), and are off until you turn them on there; your agent can then send a question anonymously, through zkAPI and Tor, using your own zkAPI account.</li>
+        <li><strong>Private answers.</strong> When an AI app other than ChatGPT asks something only your private things can answer, and Olympus does not hand it an answer, Olympus records the question, answers it on this computer with the model built into Olympus, and tells the app the answer is in Olympus, with a link that opens it on this computer. ChatGPT shows private answers in its own private answer panel; Olympus answers a ChatGPT question in the Inbox only if the panel does not collect it in time. <strong>Needs you</strong> on your computer counts the answers you have not read. Answers stay until you choose <strong>Delete</strong> or <strong>Delete all</strong> or revoke the app that asked, and when the Inbox is full the oldest answers go first; a question nobody has answered is removed after seven days. Olympus gives no AI app a way to read the Inbox, and an app gets only the link. The Inbox is a file your computer account can open, though, so an app you let read your files or run programs, such as a coding agent, could open it like your other files.</li>
+        <li><strong>Ask a question.</strong> On the same page, choose which model answers. The <strong>Local model</strong> sends nothing off your computer. A <strong>Venice model</strong> receives the passages of your files it needs, and is available only if your privacy settings allow Private items to go to Venice; a Venice key alone does not allow it. A <strong>zkAPI model</strong> receives only your prepared question, and what you ask can still identify you. Every answer lands in the Inbox, with what was sent to Venice or zkAPI.</li>
+        <li><strong>Anonymous answers</strong> are under <strong>Anonymous answers</strong> on <strong>Keys</strong>. They work on a Mac and on Omarchy (x64), and are off until you turn them on there; your agent can then send a question anonymously, through zkAPI and Tor, using your own zkAPI account.</li>
       </ul>
-      <p>In Olympus versions before 1.0.0 there is no Private answers page: <strong>Anonymous answers</strong> has its own row under <strong>On this computer</strong>.</p>
+      <p>In Olympus versions before 1.1.0 this page was called <strong>Private answers</strong>: it listed waiting questions to answer with <strong>Answer</strong> or <strong>Dismiss</strong>, and <strong>Anonymous answers</strong> sat on the same page. In versions before 1.0.0 there is no such page: <strong>Anonymous answers</strong> has its own row under <strong>On this computer</strong>.</p>
 
       <h2 id="answers">Answers have stopped working</h2>
       <p>This means the answer model you set up on your computer cannot be reached. <a href="#open-olympus">Open Olympus on your computer</a> and look under <strong>Models</strong>:</p>
@@ -90,7 +91,7 @@
       <p>Your computer uses a custom search (embedding) model that cannot be reached. Make sure the model server it names under <strong>Models</strong> is running on your computer, then choose <strong>Check again</strong>. Changing the search model means indexing everything again, so Olympus only does that on your computer, when you ask.</p>
 
       <h2 id="models">Change models</h2>
-      <p>Models are set up on your computer, never in your AI app: <a href="/open/fix/models/">open Models on your computer</a>, or <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. Their keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. The built-in models need no setup. Anonymous answers are not here: they are on <a href="#private">Private answers</a>.</p>
+      <p>Models are set up on your computer, never in your AI app: <a href="/open/fix/models/">open Keys on your computer</a>, or <a href="#open-olympus">open Olympus on your computer</a> and choose <strong>Open</strong> next to <strong>Keys</strong> under <strong>On this computer</strong>. <strong>Models</strong> is at the top of that page, with the model keys; the built-in models need no setup. <strong>Anonymous answers</strong> is further down the same page (see <a href="#private">Read your private answers, or turn on anonymous answers</a>).</p>
 
       <h2>Still stuck?</h2>
       <p><a href="/support/">Contact support</a> and include the output of <code>olympus engine status</code>. Check it first: it contains file paths on your computer, but no message content.</p>

@@ -40,6 +40,12 @@ export interface SourceIndexSearchContext {
    * metadata_search_unsupported (never searched the ordinary way).
    */
   metadataOnly?: boolean;
+  /**
+   * With metadataOnly: match on the words alone. A corpus does not run its
+   * meaning (vector) lane, so no question is embedded; whatever matched is
+   * part of what the full metadata match returns.
+   */
+  lexicalOnly?: boolean;
 }
 
 export interface SourceIndexSearchRequest {

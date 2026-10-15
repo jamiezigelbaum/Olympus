@@ -15415,10 +15415,11 @@ function keywordAlternatives(query) {
 function withKeywordAlternatives(query, alternatives, run) {
   return context.run({ query, alternatives }, run);
 }
-var context, disabled, requestContext;
+var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
   context = new AsyncLocalStorage;
   disabled = new AsyncLocalStorage;
+  cachedOnly = new AsyncLocalStorage;
   requestContext = new AsyncLocalStorage;
 });
 
@@ -29662,6 +29663,7 @@ var init_analyst_answer = __esm(() => {
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
+  init_keyword_context();
   init_router();
   init_source_model_policy();
   init_sovereignty();
