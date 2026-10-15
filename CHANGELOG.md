@@ -1,10 +1,9 @@
 # Changelog
 
-## 1.1.0 - unreleased
+## 1.1.0 - 2026-10-15
 
-- One question, three places it can go: this computer, Venice, zkAPI; answers arrive in the inbox.
-
-- Questions agents send that need your Private items are answered on your computer automatically; the agent links you to the answer in Olympus.
+- Questions agents send that need your Private items are answered on your computer automatically; the agent links you to the answer in Olympus, and answers wait in the new inbox.
+- Ask a question in Olympus and choose which model answers: the local model on your computer, a zkAPI model that can read the question but can't tell who sent it, or a Venice model. Every answer lands in the inbox on your computer.
 
 ## 1.0.1 - 2026-10-15
 
