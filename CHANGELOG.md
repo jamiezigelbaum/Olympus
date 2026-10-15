@@ -6,6 +6,8 @@
 
 - Questions agents send that need your Private items are answered on your computer automatically; the agent links you to the answer in Olympus.
 
+- The check that tells an agent your Private items match its question no longer waits on the local model, so a new question on a busy or CPU-only computer still gets the link to your Inbox; the later re-check of a question it could not check yet is allowed to wait for the model.
+
 ## 1.0.1 - 2026-10-15
 
 - On Linux, signing out ends the owner session, saving settings keeps your Olympus window working, Olympus opens in one window without a flash, computers without IPv6 keep their dashboard, Confirm continues the original page automatically, and browser confirmation opens are capped at six per hour.

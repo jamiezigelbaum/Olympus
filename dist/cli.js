@@ -23978,6 +23978,12 @@ function withKeywordExpansionDisabled(run) {
 function keywordExpansionDisabled() {
   return disabled.getStore() === true;
 }
+function withCachedKeywordExpansion(state, run) {
+  return cachedOnly.run(state, run);
+}
+function cachedKeywordExpansion() {
+  return cachedOnly.getStore();
+}
 function withKeywordRequestScope(run) {
   return requestContext.getStore() ? run() : requestContext.run(new Map, run);
 }
@@ -24004,10 +24010,11 @@ function keywordAlternatives(query) {
 function withKeywordAlternatives(query, alternatives, run) {
   return context.run({ query, alternatives }, run);
 }
-var context, disabled, requestContext;
+var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
   context = new AsyncLocalStorage;
   disabled = new AsyncLocalStorage;
+  cachedOnly = new AsyncLocalStorage;
   requestContext = new AsyncLocalStorage;
 });
 
@@ -26293,11 +26300,11 @@ async function expandSourceIndexKeywords(query, profile, owner) {
   const pinned = requestKeywordAlternatives(owner, query);
   if (pinned)
     return pinned;
-  const alternatives = await expandCachedSourceIndexKeywords(query, profile);
+  const alternatives = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
-async function expandCachedSourceIndexKeywords(query, profile) {
+async function expandCachedSourceIndexKeywords(query, profile, cachedOnly2) {
   const builtIn = registeredBuiltInPrivateModel();
   if (!query.trim() || query.length > 8000)
     return EMPTY2;
@@ -26332,10 +26339,20 @@ async function expandCachedSourceIndexKeywords(query, profile) {
   }
   const key2 = JSON.stringify([query, languages]);
   const existing = cache.get(key2);
+  if (cachedOnly2) {
+    if (existing && existing.expires > Date.now() && existing.value)
+      return existing.value;
+    cachedOnly2.missing = true;
+    return fallback;
+  }
   if (existing && existing.expires > Date.now())
     return existing.pending;
   const pending = translate();
-  cache.set(key2, { pending, expires: Date.now() + 5 * 60000 });
+  const entry = { pending, expires: Date.now() + 5 * 60000 };
+  cache.set(key2, entry);
+  pending.then((value) => {
+    entry.value = value;
+  }, () => {});
   if (cache.size > 128)
     cache.delete(cache.keys().next().value);
   return pending;
@@ -26386,9 +26403,9 @@ Target languages: ` + languages.map((code) => code + " = " + new Intl.DisplayNam
       }
       return parseKeywordExpansion(JSON.stringify(merged), sources, languages);
     } catch {
-      const entry = cache.get(key2);
-      if (entry)
-        entry.expires = Date.now() + 30000;
+      const failed = cache.get(key2);
+      if (failed)
+        failed.expires = Date.now() + 30000;
       return fallback;
     }
   }
@@ -29741,11 +29758,12 @@ function createConnectorStoreCorpusAdapter(options) {
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.hasEmbeddings(embeddingProvider.modelId);
     const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const keywordLane = relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions), options.localKeywordFallback, ftsOptions);
     const rows = [...keywordLane.rows];
     let semanticOnly = 0;
     let incomplete = false;
-    if (hybrid) {
+    if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
         const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false });
@@ -47769,7 +47787,7 @@ async function probePrivateMatch(input) {
         return "match";
       return unchecked2 ? "unknown" : "no_match";
     }
-    const routed = await routeSourceIndexSearch({
+    const search = (context2) => routeSourceIndexSearch({
       registry: lanes.registry,
       adapters: lanes.adapters,
       request: {
@@ -47779,6 +47797,7 @@ async function probePrivateMatch(input) {
           allowedTrustDomains: ["secure_local"],
           allowCloudQueries: false,
           metadataOnly: true,
+          ...context2,
           ...corpusIds ? { allowedCorpusIds: corpusIds } : {}
         },
         ...corpusIds ? { corpusIds } : {}
@@ -47786,8 +47805,18 @@ async function probePrivateMatch(input) {
       ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {},
       laneTimeoutMs: input.timeoutMs
     });
-    if (routed.hits.some((hit) => hit.trustDomain === "secure_local"))
+    const matched = (result) => result.hits.some((hit) => hit.trustDomain === "secure_local");
+    const translation = { missing: false };
+    if (request.retrieval_mode === "hybrid" && matched(await withCachedKeywordExpansion(translation, () => search({ lexicalOnly: true }))))
       return "match";
+    let routed = await withCachedKeywordExpansion(translation, () => search({}));
+    if (matched(routed))
+      return "match";
+    if (translation.missing) {
+      routed = await search({});
+      if (matched(routed))
+        return "match";
+    }
     const unchecked = (routed.incompleteCorpora?.length ?? 0) > 0 || routed.skippedCorpora.some((skip) => skip.trustDomain === "secure_local" && (skip.reason === "lane_timeout" || skip.reason === "metadata_search_unsupported" || skip.reason === "no_adapter" && !excluded.has(skip.corpusId)));
     return unchecked ? "unknown" : "no_match";
   };
@@ -47907,6 +47936,7 @@ var init_analyst_answer = __esm(() => {
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
+  init_keyword_context();
   init_router();
   init_source_model_policy();
   init_sovereignty();
@@ -156344,6 +156374,7 @@ function remotePrivateOutcome(raw, released) {
 function createRemotePrivateParts(options) {
   const now = options.now ?? Date.now;
   const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS2;
+  const retryProbeTimeoutMs = options.retryProbeTimeoutMs ?? DEFAULT_RETRY_PROBE_TIMEOUT_MS;
   const handoffTtlMs = options.handoffTtlMs ?? DEFAULT_HANDOFF_TTL_MS;
   const handoffs = new Map;
   let closed = false;
@@ -156377,13 +156408,13 @@ function createRemotePrivateParts(options) {
       return false;
     }
   };
-  const probe = async (request) => {
+  const probe = async (request, timeoutMs) => {
     let timer;
     try {
       return await Promise.race([
-        options.probe(request, probeTimeoutMs),
+        options.probe(request, timeoutMs),
         new Promise((resolve15) => {
-          timer = setTimeout(() => resolve15("unknown"), probeTimeoutMs);
+          timer = setTimeout(() => resolve15("unknown"), timeoutMs);
           timer.unref?.();
         })
       ]);
@@ -156406,7 +156437,7 @@ function createRemotePrivateParts(options) {
         return false;
       if (!activeNow(ticket.connectionId))
         return false;
-      const verdict = await probe({ ...selectors, question });
+      const verdict = await probe({ ...selectors, question }, probeTimeoutMs);
       if (verdict === "no_match" || closed)
         return false;
       return recordVerdict(ticket, question, selectors, verdict, recordedId);
@@ -156441,7 +156472,7 @@ function createRemotePrivateParts(options) {
         return;
       if (!activeNow(ticket.connectionId))
         return;
-      return probe({ ...selectors, question });
+      return probe({ ...selectors, question }, probeTimeoutMs);
     })().catch(() => {
       return;
     });
@@ -156533,7 +156564,15 @@ function createRemotePrivateParts(options) {
           continue;
         }
       }
-      const verdict = await probe({ ...record5.selectors, question: record5.question });
+      let ownerBusy = false;
+      try {
+        ownerBusy = options.interactiveBusy?.() === true;
+      } catch {}
+      if (ownerBusy) {
+        counts.still += 1;
+        continue;
+      }
+      const verdict = await probe({ ...record5.selectors, question: record5.question }, retryProbeTimeoutMs);
       if (closed)
         break;
       if (verdict === "unknown") {
@@ -156624,7 +156663,7 @@ function createRemotePrivateParts(options) {
     }
   };
 }
-var POLICY_REASON = "no_private_analyst_route", BULK_REASON = "bulk_secure_local_release_requires_approval", UNAVAILABLE_REASON = "private_analyst_unavailable", PROBED, DEFAULT_PROBE_TIMEOUT_MS2 = 2000, DEFAULT_HANDOFF_TTL_MS, MAX_HANDOFFS = 200;
+var POLICY_REASON = "no_private_analyst_route", BULK_REASON = "bulk_secure_local_release_requires_approval", UNAVAILABLE_REASON = "private_analyst_unavailable", PROBED, DEFAULT_PROBE_TIMEOUT_MS2 = 2000, DEFAULT_RETRY_PROBE_TIMEOUT_MS = 20000, DEFAULT_HANDOFF_TTL_MS, MAX_HANDOFFS = 200;
 var init_remote_private_part = __esm(() => {
   init_remote_result();
   init_waiting_private_questions();
@@ -161530,7 +161569,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const remotePrivateParts = createRemotePrivateParts2({
     probe: (request, timeoutMs) => sourceAnswerLanes ? probePrivateMatch({ lanes: sourceAnswerLanes, request, timeoutMs }) : Promise.resolve("unknown"),
     store: waitingQuestionStore,
-    isActive: connectionActive
+    isActive: connectionActive,
+    interactiveBusy: () => answerActivity.interactiveInFlight > 0
   });
   const uncheckedRetry = setInterval(() => {
     remotePrivateParts.retryUnchecked().catch(() => {

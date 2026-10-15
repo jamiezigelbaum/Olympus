@@ -5,9 +5,11 @@ import equivalents from './keyword-equivalents.json';
 import { registeredBuiltInPrivateModel } from '../../workers/classification/built-in-sniffer.ts';
 import type { AnalystModel } from '../analyst.ts';
 import { sourceIndexFtsTermGroups, sourceIndexQueryLanguage } from './fts.ts';
-import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternatives, keywordExpansionDisabled, type KeywordExpansionMap } from './keyword-context.ts';
+import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternatives, keywordExpansionDisabled, cachedKeywordExpansion, type CachedKeywordExpansion, type KeywordExpansionMap } from './keyword-context.ts';
 
-const caches = new WeakMap<AnalystModel, Map<string, {pending: Promise<KeywordExpansionMap>; expires: number}>>();
+// `value` is set once the translation has finished, so a caller that must not wait can use it.
+interface CachedExpansion { pending: Promise<KeywordExpansionMap>; expires: number; value?: KeywordExpansionMap }
+const caches = new WeakMap<AnalystModel, Map<string, CachedExpansion>>();
 const EMPTY: KeywordExpansionMap = new Map();
 const MAX_LANGUAGES = 6;
 const MAX_TERMS_PER_LANGUAGE = 8;
@@ -22,12 +24,12 @@ export async function expandSourceIndexKeywords(query: string, profile: readonly
   if (keywordExpansionDisabled()) return EMPTY;
   const pinned = requestKeywordAlternatives(owner, query);
   if (pinned) return pinned;
-  const alternatives = await expandCachedSourceIndexKeywords(query, profile);
+  const alternatives = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
 
-async function expandCachedSourceIndexKeywords(query: string, profile: readonly string[] | (() => readonly string[])): Promise<KeywordExpansionMap> {
+async function expandCachedSourceIndexKeywords(query: string, profile: readonly string[] | (() => readonly string[]), cachedOnly?: CachedKeywordExpansion): Promise<KeywordExpansionMap> {
   const builtIn = registeredBuiltInPrivateModel();
   if (!query.trim() || query.length > 8000) return EMPTY;
   const sources = sourceIndexFtsTermGroups(query).map(group => group[0]!).filter(term => !/\p{N}/u.test(term));
@@ -55,9 +57,17 @@ async function expandCachedSourceIndexKeywords(query: string, profile: readonly 
   if (!cache) { cache = new Map(); caches.set(builtIn.model, cache); }
   const key = JSON.stringify([query, languages]);
   const existing = cache.get(key);
+  if (cachedOnly) {
+    // The caller cannot wait on the model: a finished translation, else the static equivalents alone.
+    if (existing && existing.expires > Date.now() && existing.value) return existing.value;
+    cachedOnly.missing = true;
+    return fallback;
+  }
   if (existing && existing.expires > Date.now()) return existing.pending;
   const pending = translate();
-  cache.set(key, {pending, expires: Date.now() + 5 * 60_000});
+  const entry: CachedExpansion = {pending, expires: Date.now() + 5 * 60_000};
+  cache.set(key, entry);
+  pending.then(value => { entry.value = value; }, () => {});
   if (cache.size > 128) cache.delete(cache.keys().next().value!);
   return pending;
 
@@ -93,8 +103,8 @@ async function expandCachedSourceIndexKeywords(query: string, profile: readonly 
       return parseKeywordExpansion(JSON.stringify(merged),sources,languages);
     } catch {
       // Keep failure for this request and its hydration; retry on a later request.
-      const entry = cache!.get(key);
-      if (entry) entry.expires = Date.now() + 30_000;
+      const failed = cache!.get(key);
+      if (failed) failed.expires = Date.now() + 30_000;
       return fallback;
     }
   }

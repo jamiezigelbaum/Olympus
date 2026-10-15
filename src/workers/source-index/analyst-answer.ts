@@ -58,6 +58,7 @@ import { answerReleaseWithheldReason, recordReleaseManifest, type ReleaseCheck, 
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
+import { withCachedKeywordExpansion, type CachedKeywordExpansion } from '../../core/source-index/keyword-context.ts';
 import {
   routeSourceIndexSearch,
   type SourceIndexCorpusSearchAdapter,
@@ -2999,7 +3000,7 @@ export async function probePrivateMatch(input: {
       if (hits.length > 0 && gate(hits).length > 0) return 'match';
       return unchecked ? 'unknown' : 'no_match';
     }
-    const routed = await routeSourceIndexSearch({
+    const search = (context: { lexicalOnly?: boolean }) => routeSourceIndexSearch({
       registry: lanes.registry,
       adapters: lanes.adapters,
       request: {
@@ -3009,6 +3010,7 @@ export async function probePrivateMatch(input: {
           allowedTrustDomains: ['secure_local'],
           allowCloudQueries: false,
           metadataOnly: true,
+          ...context,
           ...(corpusIds ? { allowedCorpusIds: corpusIds } : {}),
         },
         ...(corpusIds ? { corpusIds } : {}),
@@ -3016,7 +3018,25 @@ export async function probePrivateMatch(input: {
       ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
       laneTimeoutMs: input.timeoutMs,
     });
-    if (routed.hits.some((hit) => hit.trustDomain === 'secure_local')) return 'match';
+    const matched = (result: Awaited<ReturnType<typeof search>>) => result.hits.some((hit) => hit.trustDomain === 'secure_local');
+    // A match is the one verdict a first, cheaper stage can give, so the stages
+    // go from the cheapest, and none waits on the local model. The model is
+    // busy with the sniffer or an answer, or slow on a CPU-only computer, and
+    // this probe has a few seconds: a question's keyword translation (the model
+    // asked once per new wording, keyword-expansion.ts) is used only when it is
+    // already finished.
+    // 1. The words alone: no question is embedded.
+    // 2. The words and the meaning, as the answer searches.
+    // 3. Only when the model's translation could still change the answer: the
+    //    full match, which waits for it as long as the bound allows.
+    const translation: CachedKeywordExpansion = { missing: false };
+    if (request.retrieval_mode === 'hybrid' && matched(await withCachedKeywordExpansion(translation, () => search({ lexicalOnly: true })))) return 'match';
+    let routed = await withCachedKeywordExpansion(translation, () => search({}));
+    if (matched(routed)) return 'match';
+    if (translation.missing) {
+      routed = await search({});
+      if (matched(routed)) return 'match';
+    }
     // A Private corpus in scope that was not searched, or searched with a lane
     // that should have run and did not, is not a "no".
     const unchecked = (routed.incompleteCorpora?.length ?? 0) > 0

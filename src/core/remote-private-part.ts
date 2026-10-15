@@ -118,6 +118,12 @@ const PROBED: ReadonlySet<RemotePrivateOutcome> = new Set([
   'route_unavailable',
 ]);
 const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
+/**
+ * A re-check of a "couldn't check yet" record has no search waiting on it, so
+ * it may wait on the local model's keyword translation (a new wording needs
+ * one, and a CPU-only computer takes several seconds to make it).
+ */
+const DEFAULT_RETRY_PROBE_TIMEOUT_MS = 20_000;
 
 // A handed-off job's lifetime (core/source-answer-jobs.ts SOURCE_ANSWER_JOB_DEADLINE_MS plus its TTL).
 const DEFAULT_HANDOFF_TTL_MS = 35 * 60_000;
@@ -185,6 +191,13 @@ export interface RemotePrivatePartsOptions {
    */
   isActive?: (connectionId: string) => boolean;
   probeTimeoutMs?: number;
+  /** The bound of a re-check (retryUnchecked), far longer than a search's: nobody is waiting. */
+  retryProbeTimeoutMs?: number;
+  /**
+   * True while the owner's own work is in flight. A re-check pass starts no
+   * probe then, so background checking never competes with it.
+   */
+  interactiveBusy?: () => boolean;
   handoffTtlMs?: number;
   now?: () => number;
 }
@@ -195,7 +208,8 @@ export interface RemotePrivateParts {
   /**
    * One re-check pass: reconciles the store against the connection store,
    * then re-probes every "couldn't check yet" record of an active connection
-   * once; `unknown` leaves it for the next pass. One pass at a time.
+   * once, with the longer retry bound; `unknown` leaves it for the next pass.
+   * One pass at a time; it yields to the owner's own work (interactiveBusy).
    */
   retryUnchecked(): Promise<{ matched: number; cleared: number; still: number }>;
   /** Stops a pass in flight and any settle still waiting; nothing is probed or recorded after. */
@@ -216,6 +230,7 @@ interface Handoff {
 export function createRemotePrivateParts(options: RemotePrivatePartsOptions): RemotePrivateParts {
   const now = options.now ?? Date.now;
   const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  const retryProbeTimeoutMs = options.retryProbeTimeoutMs ?? DEFAULT_RETRY_PROBE_TIMEOUT_MS;
   const handoffTtlMs = options.handoffTtlMs ?? DEFAULT_HANDOFF_TTL_MS;
   const handoffs = new Map<string, Handoff>();
   let closed = false;
@@ -250,13 +265,13 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     }
   };
 
-  const probe = async (request: Record<string, unknown>): Promise<PrivateMatchVerdict> => {
+  const probe = async (request: Record<string, unknown>, timeoutMs: number): Promise<PrivateMatchVerdict> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        options.probe(request, probeTimeoutMs),
+        options.probe(request, timeoutMs),
         new Promise<PrivateMatchVerdict>((resolve) => {
-          timer = setTimeout(() => resolve('unknown'), probeTimeoutMs);
+          timer = setTimeout(() => resolve('unknown'), timeoutMs);
           timer.unref?.();
         }),
       ]);
@@ -284,7 +299,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       const selectors = normalizeWaitingSelectors(args);
       if (!question || !selectors) return false;
       if (!activeNow(ticket.connectionId)) return false;
-      const verdict = await probe({ ...selectors, question });
+      const verdict = await probe({ ...selectors, question }, probeTimeoutMs);
       if (verdict === 'no_match' || closed) return false;
       return recordVerdict(ticket, question, selectors, verdict, recordedId);
     } catch {
@@ -338,7 +353,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     const verdict: Promise<PrivateMatchVerdict | undefined> = (async () => {
       if (closed || signal?.aborted || !ticket || !question || !selectors) return undefined;
       if (!activeNow(ticket.connectionId)) return undefined;
-      return probe({ ...selectors, question });
+      return probe({ ...selectors, question }, probeTimeoutMs);
     })().catch(() => undefined);
     return {
       get answerId() { return answerId; },
@@ -436,7 +451,19 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
           continue;
         }
       }
-      const verdict = await probe({ ...record.selectors, question: record.question });
+      // Background checking never competes with the owner's own work: the
+      // record stays for the next pass.
+      let ownerBusy = false;
+      try {
+        ownerBusy = options.interactiveBusy?.() === true;
+      } catch {
+        // Unreadable: check anyway.
+      }
+      if (ownerBusy) {
+        counts.still += 1;
+        continue;
+      }
+      const verdict = await probe({ ...record.selectors, question: record.question }, retryProbeTimeoutMs);
       if (closed) break;
       if (verdict === 'unknown') {
         counts.still += 1;
