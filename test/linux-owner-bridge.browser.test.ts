@@ -128,7 +128,7 @@ for (const kind of ['chromium', 'firefox']) {
           const originalUrl = consent.url();
           let documentRequests = 0; consent.on('request', (request: { resourceType(): string }) => { if (request.resourceType() === 'document') documentRequests++; });
           // Refused opens show an actionable terminal remedy and permit retry.
-          await consent.route('**/owner-open', (route: { fulfill(value: object): Promise<void> }) => route.fulfill({ status: 429, headers: { 'Retry-After': '3600' } }));
+          await consent.route('**/owner-open', (route: { fulfill(value: object): Promise<void> }) => route.fulfill({ status: 429, headers: { 'Retry-After': '3600', 'X-Olympus-Owner-Limit': 'hourly' } }));
           await consent.locator('#confirm').click();
           await consent.waitForFunction(() => document.getElementById('message')?.textContent?.includes('Too many windows were opened from the browser.'));
           expect(await consent.locator('#message').textContent()).toContain('Run olympus dashboard in a terminal on this computer.');

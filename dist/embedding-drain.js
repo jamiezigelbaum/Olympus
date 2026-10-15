@@ -38756,6 +38756,7 @@ function attribute(value) {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 }
 var BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.";
+var OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit";
 var BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.";
 var BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.";
 
@@ -38784,7 +38785,7 @@ function confirmation() {
   if(opening||waiting)return;
   opening=true;confirm.disabled=true;
   try{const r=await fetch('/owner-open',{method:'POST'});
-   if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:Number(r.headers.get('Retry-After'))>10?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
+   if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:r.headers.get(${JSON.stringify(OWNER_LIMIT_HEADER)})==='hourly'?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
    // A refused replacement must leave the current wait intact. Only a
    // successful open replaces its ticket and starts a fresh 60-second wait.
    stopWaiting();waiting=true;confirm.disabled=true;
@@ -38874,13 +38875,28 @@ class LinuxOwnerBridge {
       throw new Error("Desktop owner confirmation is unavailable.");
     if (this.now() - this.lastOpen[lane] < 1e4)
       throw new OwnerOpenLimited("Wait ten seconds before opening another owner ticket.", false);
+    const openedAt = this.now(), previousOpen = this.lastOpen[lane];
     if (lane === "browser") {
-      this.browserOpens = this.browserOpens.filter((time) => time > this.now() - 60 * 60 * 1000);
+      this.browserOpens = this.browserOpens.filter((time) => time > openedAt - 60 * 60 * 1000);
       if (this.browserOpens.length >= 6)
         throw new OwnerOpenLimited("Wait before opening another owner ticket.", true);
-      this.browserOpens.push(this.now());
+      this.browserOpens.push(openedAt);
     }
-    this.lastOpen[lane] = this.now();
+    this.lastOpen[lane] = openedAt;
+    try {
+      await this.launchTicket(target, lane);
+    } catch (error) {
+      if (this.lastOpen[lane] === openedAt)
+        this.lastOpen[lane] = previousOpen;
+      if (lane === "browser") {
+        const index = this.browserOpens.lastIndexOf(openedAt);
+        if (index >= 0)
+          this.browserOpens.splice(index, 1);
+      }
+      throw error;
+    }
+  }
+  async launchTicket(target, lane) {
     if (validateWorkerSocket(this.options.transport) !== this.options.socketPath)
       throw new Error("Owner socket changed.");
     const previous = this.tickets.get(lane);
@@ -39018,6 +39034,7 @@ class LinuxOwnerBridge {
         }
         const response2 = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
         response2.headers.set("X-Olympus-Owner-Refused", "1");
+        response2.headers.set(OWNER_LIMIT_HEADER, error.hourly ? "hourly" : "recent");
         const retryAt = Math.max(this.lastOpen.browser + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
         response2.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
         return response2;
