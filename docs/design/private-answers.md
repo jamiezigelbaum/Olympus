@@ -25,7 +25,7 @@ decides what happens when that answer is missing something:
   (`SecureAnalystPoolE2EEGateError`) until local key handling exists.
 - **Anonymous · zkAPI.** A short question goes to a top model, paid through
   zkAPI over Tor with a fresh key per request. The provider reads the
-  question but cannot tell who asked.
+  question but isn't told who asked.
 
 | | Keep it on this Mac | Sealed cloud · Venice | Anonymous · zkAPI |
 |---|---|---|---|
@@ -45,7 +45,7 @@ Two levels:
 - **Standard (recommended)** (`unnamed`, the default everywhere, including a
   settings file with no `level`). "Your question goes out as you choose:
   exactly as written, lightly cleaned, or by your own instruction. The
-  provider can read it but can't tell who sent it."
+  provider can read it but isn't told who sent it."
 - **Strict** (`general`). "Your model rewrites it into general questions
   first (Vitalik Buterin's approach)." The writer's general questions under
   Vitalik's rules, with the full gate for the built-in writer and the thin

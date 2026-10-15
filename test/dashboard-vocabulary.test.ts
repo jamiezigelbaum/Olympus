@@ -1140,7 +1140,7 @@ test('Private answers uses the owner-selected Models vocabulary and Inbox except
   expect([copy.computerName, copy.zkapiName, copy.veniceName]).toEqual(['Local model', 'zkAPI model', 'Venice model']);
   expect([copy.computerTag, copy.zkapiTag, copy.veniceTag]).toEqual(['On this computer', 'In the cloud, paid anonymously', 'In Venice’s cloud']);
   expect([copy.computerLeaves, copy.computerKnows]).toEqual(['The most private. Nothing leaves, but the model is smaller.', 'It searches your files.']);
-  expect([copy.zkapiLeaves, copy.zkapiKnows]).toEqual(['A top model that can’t see your files. It can read your question but can’t tell who sent it.', 'Takes 1 to 3 minutes.']);
+  expect([copy.zkapiLeaves, copy.zkapiKnows]).toEqual(['A top model that can’t see your files. It reads your question but isn’t told who’s asking. What you ask can still identify you.', 'Takes 1 to 3 minutes.']);
   expect([copy.veniceLeaves, copy.veniceKnows]).toEqual(['A strong model that reads the passages it needs from your files. Venice knows it’s you.', 'Venice says it doesn’t keep them.']);
   expect([copy.askComputer, copy.askZkapi, copy.askVenice]).toEqual(['Ask the local model', 'Ask a model through zkAPI', 'Ask a Venice model']);
   expect([copy.waitingTitle, copy.waitingIntro, copy.noneWaiting]).toEqual(['Inbox', 'Answers from every model, kept on this computer.', 'Your private inbox is empty.']);

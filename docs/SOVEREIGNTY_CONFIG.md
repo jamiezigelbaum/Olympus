@@ -543,7 +543,7 @@ loopback address there forwards to the cloud.
     "torSocksPort": 19050,
     "fundingDate": "2026-10-01",
     "depositUsd": 20,
-    "acknowledgements": { "version": 7, "accepted": ["only_when_asked", "provider_reads", "cost", "fees", "expiry", "new_service"] }
+    "acknowledgements": { "version": 8, "accepted": ["only_when_asked", "provider_reads", "cost", "fees", "expiry", "new_service"] }
   }
 }
 ```
@@ -579,7 +579,7 @@ earlier acknowledgement must be given again, and nothing is sent until it is):
 - A question goes out only when you ask your agent to use Olympus zkAPI.
   Nothing is sent on its own, and you can turn anonymous answers off at any
   time.
-- The AI provider reads each question but cannot tell who sent it. At
+- The AI provider reads each question but isn’t told who sent it. At
   Standard, a question goes out the way you choose; at Strict, your model
   removes identifying details first. An unusual situation could still hint at
   who you are.

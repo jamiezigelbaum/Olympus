@@ -68,13 +68,16 @@ export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
  * (2026-10-10, owner decision): `automatic` became `only_when_asked`, since
  * the automatic escalation was retired (PR #225) and a question now goes out
  * only when the owner asks through their agent; the same day the card's
- * on/off switch began to gate the agent tools (askAnonymously).
+ * on/off switch began to gate the agent tools (askAnonymously). Version 8
+ * (2026-10-15, owner-approved wording after the legal pass): `provider_reads`
+ * says the provider isn't told who sent a question, rather than that it
+ * cannot tell, since what is asked can still identify the sender.
  *
  * `expiry` says the estimated date is shown on this page when Olympus knows
  * it (from the confirmed funding date; otherwise unknown or past). Olympus
  * sends no reminder of its own, so the statement does not promise one.
  */
-export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 7;
+export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 8;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
     id: 'only_when_asked',
@@ -82,7 +85,7 @@ export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   },
   {
     id: 'provider_reads',
-    statement: 'The AI provider reads each question but cannot tell who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are.',
+    statement: 'The AI provider reads each question but isn’t told who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are.',
   },
   {
     id: 'cost',
