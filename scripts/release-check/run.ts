@@ -99,7 +99,8 @@ export interface RunOptions {
 }
 
 const ENGINE_PORT = 8010;
-const BUN_LOCATE = 'BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun 2>/dev/null | tail -1); [ -n "$BUN" ] || { echo "no bun runtime on the machine" >&2; exit 90; }';
+// The runtime the installer put on the machine: its own location on macOS, the engine's generation folder on Linux.
+const BUN_LOCATE = 'BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun "$HOME/Library/Application Support/Olympus/runtime/bun" 2>/dev/null | tail -1); [ -n "$BUN" ] || { echo "no bun runtime on the machine" >&2; exit 90; }';
 
 const nowIso = (): string => new Date().toISOString();
 

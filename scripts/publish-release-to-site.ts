@@ -8,6 +8,7 @@
  *   bun scripts/publish-release-to-site.ts --pin-bun bun-darwin-aarch64.zip
  *   bun scripts/publish-release-to-site.ts --linux --artifact release-artifacts/olympus-<version>.tgz
  *   bun scripts/publish-release-to-site.ts --linux --check
+ *   bun scripts/publish-release-to-site.ts --mac-local --artifact <olympus-<version>.tgz> --output <new dir>
  *
  * Builds the release tarball with scripts/release-artifact.ts (or takes the
  * one `--artifact` names), copies it to
@@ -512,7 +513,39 @@ export function prepareLinuxLocalBundle(input: { root: string; artifact: string;
   return { ...pins, directory: input.output };
 }
 
+/**
+ * The Mac installer exactly as the site serves it (the template with the candidate's pins), the
+ * candidate's tarball and the uninstaller, in a fresh folder, without touching site/. The release
+ * check serves the two files from a stand-in for the site inside a throwaway machine and runs the
+ * published command there, so the installer itself is never edited for a test.
+ */
+export function prepareMacLocalBundle(input: { root: string; artifact: string; output: string }): ReleasePins & { directory: string } {
+  const version = sourceVersion(input.root);
+  const packaged = tarballPackage(input.artifact);
+  if (packaged.name !== 'olympus' || packaged.version !== version) throw new Error('Local tarball identity does not match the source package version.');
+  const pins = { version, ...fileDigest(input.artifact) };
+  const script = renderInstallScript(readFileSync(join(input.root, INSTALL_TEMPLATE), 'utf8'), pins);
+  // Refuse an existing output rather than accidentally mixing two candidates.
+  mkdirSync(input.output, { mode: 0o700 });
+  const name = `olympus-${version}.tgz`;
+  copyFileSync(input.artifact, join(input.output, name), constants.COPYFILE_EXCL);
+  writeFileSync(join(input.output, 'install.sh'), script, { mode: 0o644, flag: 'wx' });
+  copyFileSync(join(input.root, SERVED_UNINSTALL_SCRIPT), join(input.output, 'uninstall.sh'), constants.COPYFILE_EXCL);
+  writeFileSync(join(input.output, 'SHA256SUMS'), `${pins.sha256}  ${name}\n`, { flag: 'wx' });
+  writeFileSync(join(input.output, 'README.txt'),
+    `Local macOS candidate for the release check; not published.\n`
+    + `install.sh is site/install.sh for this tarball, ${name} is what it downloads (checked against its pins).\n`, { flag: 'wx' });
+  return { ...pins, directory: input.output };
+}
+
 function main(args: string[]): void {
+  if (args[0] === '--mac-local' && args[1] === '--artifact' && args[2]
+    && args[3] === '--output' && args[4] && args.length === 5) {
+    const result = prepareMacLocalBundle({ root: ROOT, artifact: resolve(args[2]), output: resolve(args[4]) });
+    console.log(`Local macOS release-check bundle: ${result.directory}`);
+    console.log(`SHA-256 ${result.sha256}; ${result.bytes} bytes. Not published.`);
+    return;
+  }
   if (args[0] === '--linux-local' && args[1] === '--artifact' && args[2]
     && args[3] === '--output' && args[4] && args.length === 5) {
     const result = prepareLinuxLocalBundle({ root: ROOT, artifact: resolve(args[2]), output: resolve(args[4]) });
@@ -568,7 +601,7 @@ function main(args: string[]): void {
   let artifact: string | undefined;
   if (args[0] === '--artifact' && args[1] && args.length === 2) artifact = resolve(args[1]);
   else if (args.length > 0) {
-    console.error('Usage: bun scripts/publish-release-to-site.ts [--artifact <olympus-<version>.tgz> | --check | --pin-bun <bun-darwin-aarch64.zip> | --linux --artifact <olympus-<version>.tgz> | --linux --check]');
+    console.error('Usage: bun scripts/publish-release-to-site.ts [--artifact <olympus-<version>.tgz> | --check | --pin-bun <bun-darwin-aarch64.zip> | --linux --artifact <olympus-<version>.tgz> | --linux --check | --mac-local --artifact <olympus-<version>.tgz> --output <new dir>]');
     process.exit(2);
   }
   if (!artifact) {
