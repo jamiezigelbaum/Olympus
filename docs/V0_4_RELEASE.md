@@ -115,6 +115,7 @@ waits for a calendar slot.
 | 5d | Listing text (long description, capabilities) moved from the kit into `plugin.json`; the panel's CORS origins confirmed against a live panel; the 5 positive and 3 negative test cases pass on the demo engine from a fresh ChatGPT account, desktop and mobile. | A session | 5b |
 | 5e | Demo video, recorded last from the tested build. | Owner | 5a-5d done |
 | 6 | **Claude and Grok through the relay.** Engine and relay pins, the standard 401 on tokenless `/mcp`, offline answers per credential surface. Then: fresh critical review, relay deploy, an engine release, and a live test on a Mac with real accounts (Claude web on the Mac and then its phone app, Grok on grok.com, plus a ChatGPT developer-mode and plugin regression). | A session; the owner provides the Claude and Grok accounts | Critical review; relay deploy authorized (given 2026-10-12) |
+| 7 | **Grok Bot and Cursor marketplace listing** under OCU Inc., per the [packet](../grok-bot-plugin/SUBMISSION.md) (owner decision 2026-10-15, Decisions): the reviewer demo engine on `olympus-grokbot-review` seeded with `demo-data/` and its tiers confirmed; an end-to-end receipt through the Grok Bot or Cursor demo sign-in; the privacy policy naming Cursor and Anysphere; the legal pass on the final description and testing instructions. Publisher terms accepted 2026-10-15. | A session prepares it; the owner submits | The packet's pre-submission checklist (§5) complete |
 
 ### Deferred to after 1.0
 
@@ -167,8 +168,8 @@ testers have exercised the normal product journey without custom engineering.
 - **2026-10-15 — Grok Bot and Cursor marketplace listing.** Owner decision:
   list Olympus in the Grok Bot and Cursor marketplace (Anysphere's form,
   https://x.ai/bot/marketplace/submit-a-plugin), which signs in with Cursor's
-  pinned client. Jamie accepted Cursor's Marketplace Publisher Terms for Open
-  Coordination Unlimited, Inc., including the indemnity, on 2026-10-15; he
+  pinned client. The owner accepted Cursor's Marketplace Publisher Terms for Open
+  Coordination Unlimited, Inc., including the indemnity, on 2026-10-15, and
   clicks submit himself. Sequence: the Grok Bot or Cursor demo sign-in with a
   read-only demo grant (PR #416); a reviewer demo engine of its own on the
   Hetzner server `olympus-grokbot-review`, never `olympus-demo`, which stays
