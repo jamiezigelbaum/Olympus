@@ -32,7 +32,7 @@ import {
   type SuiteQuestion,
 } from './fixture.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN } from './readwise-fake.ts';
-import { redactMarkers, type LeakMarker } from './leak.ts';
+import { redactDeep, redactMarkers, type LeakMarker } from './leak.ts';
 import { CommandDriver, type Machine } from './machine.ts';
 import {
   buildReport, renderHtml, scanReport,
@@ -662,10 +662,13 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   writeFileSync(join(options.outDir, 'logs', 'run.log'), `${run.logLines.join('\n')}\n`);
   machine.logs.push({ label: 'run.log', path: 'logs/run.log' });
   report = buildReport({ ...report, machines: [machine] });
-  writeFileSync(join(options.outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
-  writeFileSync(join(options.outDir, 'report.html'), renderHtml(report));
+  // A hit above has already failed the run. What is written never holds the raw text, whichever path
+  // (a driver's stderr in an error, a check detail) carried it into the report.
+  const written = redactDeep(report, run.markers);
+  writeFileSync(join(options.outDir, 'report.json'), `${JSON.stringify(written, null, 2)}\n`);
+  writeFileSync(join(options.outDir, 'report.html'), renderHtml(written));
   rmSync(workDir, { recursive: true, force: true });
-  return report;
+  return written;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ import {
   leakyFixture,
   tierRules,
 } from '../scripts/release-check/fixture.ts';
-import { countExact, describeLeaks, findLeaks, redactMarkers, type LeakMarker } from '../scripts/release-check/leak.ts';
+import { countExact, describeLeaks, findLeaks, redactDeep, redactMarkers, type LeakMarker } from '../scripts/release-check/leak.ts';
 
 const markers: LeakMarker[] = [
   { id: 'private-marker', text: 'PRIVMARK-example-0001', tier: 'private' },
@@ -59,6 +59,19 @@ describe('release-check leak matcher', () => {
     const redacted = redactMarkers('a PRIVMARK-example-0001 b SECRETMARK-example-0002 c', markers);
     expect(redacted).toBe('a [redacted:private-marker] b [redacted:secret-marker] c');
     expect(findLeaks([{ label: 'r', text: redacted }], markers)).toEqual([]);
+  });
+});
+
+describe('release-check deep redaction', () => {
+  test('every string in a nested structure is redacted, keys included, and other values are untouched', () => {
+    const value = { errors: ['x PRIVMARK-example-0001 y'], machines: [{ checks: [{ detail: 'SECRETMARK-example-0002', ms: 12, ok: true, none: null }] }], 'PRIVMARK-example-0001': 'k' };
+    const out = redactDeep(value, markers);
+    expect(JSON.stringify(out)).not.toMatch(/PRIVMARK|SECRETMARK/);
+    expect(out.errors[0]).toBe('x [redacted:private-marker] y');
+    expect(out.machines[0]!.checks[0]).toEqual({ detail: '[redacted:secret-marker]', ms: 12, ok: true, none: null });
+    expect(out['[redacted:private-marker]' as keyof typeof out]).toBe('k');
+    // The input is not changed.
+    expect(value.errors[0]).toContain('PRIVMARK-example-0001');
   });
 });
 
