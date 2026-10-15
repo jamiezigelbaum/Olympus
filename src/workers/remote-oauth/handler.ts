@@ -77,7 +77,7 @@ import {
 import { isClientIdMetadataUrl, pinnedClient, type PinnedHost } from './pinned-clients.ts';
 import { readBoundedRequestText } from '../remote-request-body.ts';
 import { renderConsentErrorPage, renderConsentSuccessPage, renderConsentPage, renderDemoSignInPage, renderLoopbackConsentPage } from './consent-page.ts';
-import { demoGrantDisplayName, demoSignInLimiter, verifyDemoSignIn, type DemoConsentSettings } from './demo-consent.ts';
+import { DEMO_CLIENT_HOSTS, demoGrantDisplayName, demoSignInLimiter, verifyDemoSignIn, type DemoConsentSettings } from './demo-consent.ts';
 import { isAcceptableRedirectUri, isLoopbackRedirectUri, redirectHost, redirectUriMatches } from './redirect-uris.ts';
 
 export const REMOTE_OAUTH_PATHS = {
@@ -317,9 +317,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (!redirectUri) return errorPage(400, 'The request did not say where to return (redirect_uri).');
     const client = resolveClient(clientId, u);
     if (typeof client === 'string') return errorPage(400, client);
-    // The demo serves ChatGPT's pinned clients only: its read-only limit is
-    // enforced on the ChatGPT surface, which no other client gets.
-    if (demo && client.host !== 'chatgpt') return errorPage(400, 'The demo connects ChatGPT only.');
+    // The demo serves the clients whose surface enforces its read-only limit:
+    // ChatGPT's surface, and the remote surface's demo tools (remote-mcp.ts).
+    if (demo && (client.host === undefined || !DEMO_CLIENT_HOSTS.includes(client.host))) return errorPage(400, 'The demo connects ChatGPT, Grok Bot and Cursor only.');
     // Until the redirect URI is known to belong to the client, errors stay on
     // this page: redirecting them would make Olympus an open redirector.
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {
@@ -388,6 +388,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       requestId,
       csrf: entry.csrf,
       clientName: entry.client.clientName,
+      clientId: entry.client.clientId,
       redirectHost: redirectHost(entry.redirectUri),
       redirectOrigin: new URL(entry.redirectUri).origin,
       ...(error ? { error } : {}),

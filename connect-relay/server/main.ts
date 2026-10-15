@@ -8,6 +8,8 @@
  *   RELAY_ENGINE_PORT     the engine worker's loopback port for the authorize bridge (default 8010)
  *   RELAY_INSTALL_URL     where "Install Olympus" leads (authorize bridge, not-connected dashboard)
  *   RELAY_DEMO_INSTALL_ID the demo install reviewers sign in to (unset: no demo)
+ *   RELAY_DEMO_CLIENT_INSTALLS  `<client_id>=<install id>` pairs, space separated:
+ *                         a demo install for one app's reviewers (relay.ts demoInstallsByClient)
  *   RELAY_OPENAI_APPS_CHALLENGE / RELAY_OPENAI_APPS_CHALLENGE_FILE
  *                         OpenAI's domain verification token (unset: 404)
  *   RELAY_CIMD_OFF_FILE   while this file exists the OAuth metadata leaves out
@@ -58,6 +60,17 @@ function appsChallenge(): string | undefined {
   }
 }
 
+/** `<client_id>=<install id>` pairs, space separated (a client_id URL holds no space). */
+function demoClientInstalls(value: string): Record<string, string> {
+  const pairs: Record<string, string> = {};
+  for (const pair of value.trim().split(/\s+/)) {
+    const at = pair.lastIndexOf('=');
+    if (at <= 0) throw new Error('RELAY_DEMO_CLIENT_INSTALLS takes <client_id>=<install id> pairs');
+    pairs[pair.slice(0, at)] = pair.slice(at + 1);
+  }
+  return pairs;
+}
+
 /** CIMD is advertised unless the operator's switch file exists (checked per request). */
 function advertiseCimd(): boolean {
   const file = process.env.RELAY_CIMD_OFF_FILE;
@@ -78,6 +91,7 @@ relay = await startRelay({
   enginePort: port('RELAY_ENGINE_PORT', 8010),
   ...(process.env.RELAY_INSTALL_URL ? { installUrl: process.env.RELAY_INSTALL_URL } : {}),
   ...(process.env.RELAY_DEMO_INSTALL_ID ? { demoInstallId: process.env.RELAY_DEMO_INSTALL_ID } : {}),
+  ...(process.env.RELAY_DEMO_CLIENT_INSTALLS ? { demoInstallsByClient: demoClientInstalls(process.env.RELAY_DEMO_CLIENT_INSTALLS) } : {}),
   appsChallenge,
   advertiseCimd,
   limits: { acceptLegacyAuth: legacyAuth() },
