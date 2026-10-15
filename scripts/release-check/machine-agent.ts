@@ -793,6 +793,7 @@ async function snapshotState(): Promise<never> {
     relayConnected: remote?.relay?.connected ?? null,
     policy: readPolicy(),
     configFiles: existsSync(p.configDir) ? readdirSync(p.configDir).sort() : [],
+    dataFiles: existsSync(p.dataDir) ? readdirSync(p.dataDir).filter((name) => !/-(wal|shm|journal)$/.test(name)).sort() : [],
     workerEnvKeys: workerEnv,
     tierRuleIds: ((rules?.rules ?? []) as Array<{ id: string }>).map((rule) => rule.id).sort(),
     connections: ((connections?.connections ?? []) as Array<{ id: string }>).map((connection) => connection.id).sort(),
