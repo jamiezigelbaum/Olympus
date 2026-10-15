@@ -532,6 +532,28 @@ describe('demo sign-in', () => {
     expect((await fetch(`${relay.url}/connect/demo/authorize?client_id=${encodeURIComponent('https://chatgpt.com/oauth/client.json')}`)).status).toBe(404);
     expect((await fetch(`${relay.url}/connect/demo/authorize`, { method: 'POST', body: 'a=b' })).status).toBe(404);
     expect(cursorDemo.requests).toHaveLength(0);
+    // The bridge offers the demo only to the app that has one.
+    const bridgeFor = async (clientId: string) => await (await fetch(`${relay.url}/connect/authorize?${new URLSearchParams({ client_id: clientId, state: 's' })}`)).text();
+    expect(await bridgeFor(CURSOR)).toContain('Reviewing Olympus? Sign in to the demo');
+    expect(await bridgeFor('https://chatgpt.com/oauth/client.json')).not.toContain('Reviewing Olympus?');
+    expect(await (await fetch(`${relay.url}/connect/authorize?state=s`)).text()).not.toContain('Reviewing Olympus?');
+  });
+
+  test('offline, a per-app demo install\'s credentials keep the demo grant\'s narrow list', async () => {
+    const identity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), { demoInstallsByClient: { 'https://cursor.com/oauth/mcp-client.json': identity.installId } });
+    const worker = fakeWorker('cursor-demo', { surface: 'remote' });
+    cleanups.push(worker.stop);
+    const demo = await connectInstall(relay, worker, identity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    const token = mintCredential('access', identity.installId);
+    await mcpPost(relay, token, rpc('tools/list'));
+    await demo.client.stop();
+    await until(() => relay.onlineInstalls().length === 0);
+    const list = await (await mcpPost(relay, token, rpc('tools/list'))).json();
+    expect(list.result.tools.map((tool: { name: string }) => tool.name).sort()).toEqual(
+      generatedRemoteSurface.tools.map((tool) => tool.name).filter((name) => ['olympus_search', 'source_index_status'].includes(name)).sort(),
+    );
+    expect(list.result.tools.map((tool: { name: string }) => tool.name)).not.toContain('ask_anonymously');
   });
 
   test('per-app demo settings must name client metadata URLs and install ids', async () => {

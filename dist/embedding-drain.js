@@ -16481,8 +16481,9 @@ var init_keyword_expansion = __esm(() => {
 });
 
 // connect-relay/shared/directory-tools.ts
-var DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
+var DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
 var init_directory_tools = __esm(() => {
+  DEMO_GRANT_REMOTE_TOOLS = Object.freeze(["olympus_search", "source_index_status"]);
   DIRECTORY_TOOL_NAMES = Object.freeze([
     "olympus_dashboard",
     "olympus_search",

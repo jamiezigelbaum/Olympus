@@ -276,6 +276,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     if (!/^https:\/\/[^\s]+$/.test(clientId)) throw new Error('demoInstallsByClient keys must be client metadata URLs');
     if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('demoInstallsByClient values must be install ids');
   }
+  const perAppDemoInstalls = new Set(demoInstallsByClient.values());
   /** The demo install a sign-in for this client_id goes to, or undefined (no demo). */
   const demoInstallFor = (clientId: string | null): string | undefined =>
     (clientId !== null ? demoInstallsByClient.get(clientId) : undefined) ?? config.demoInstallId;
@@ -659,6 +660,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         // Which tools this credential gets, as its engine confirmed; the
         // directory endpoint serves ChatGPT only.
         credentialSurface: surface === 'directory' ? 'chatgpt' : offlineSurface(installId, key, digest),
+        // A per-app demo's credentials keep the demo grant's narrow list.
+        demoInstall: perAppDemoInstalls.has(installId),
       }),
       unknown: refuse,
     });
@@ -1044,7 +1047,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           return metadataResponse(authorizationServerMetadata(origin, { advertiseCimd: config.advertiseCimd?.() ?? true }));
         case OAUTH_PATHS.authorize:
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
-          return authorizeBridge(url, bridge);
+          // The demo button only where this app has a demo to sign in to.
+          return authorizeBridge(url, { ...bridge, demo: demoInstallFor(url.searchParams.get('client_id')) !== undefined });
         case SIGNIN_BRIDGE_PATH:
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
           return signinBridge(url, bridge);

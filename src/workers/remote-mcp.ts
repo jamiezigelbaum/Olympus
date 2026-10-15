@@ -51,14 +51,14 @@ import { createOlympusMcpServer, type McpServerExtension } from '../mcp/server.t
 import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
 import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts';
 import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search.ts';
-import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
+import { DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 import { remoteErrorOutput, remoteRetryAfterSeconds, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialInstallId } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
-/** The read-only tools a demo grant gets on the remote surface. */
-export const DEMO_GRANT_REMOTE_TOOLS: readonly string[] = Object.freeze(['olympus_search', 'source_index_status']);
+/** The read-only tools a demo grant gets on the remote surface (shared with the relay's offline answers). */
+export { DEMO_GRANT_REMOTE_TOOLS };
 /** The ChatGPT plugin directory's endpoint. */
 export const REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
