@@ -464,9 +464,13 @@ Rules:
   the tombstone row stays so a later sync cannot resurrect it. The side
   stores that held its names or an excerpt keep none either: its queued
   sniffer questions are deleted and its extraction jobs' captured names
-  cleared, at once, even while the engine is not running. A copy a move leaves behind is superseded: kept,
-  never searched, served, counted or exported; cloud vectors of an item raised
-  to Private are kept that way, hidden, until the owner approves a purge.
+  cleared, at once, even while the engine is not running. A copy a move leaves behind is superseded: never
+  searched, served, counted or exported. When an item is raised to Private,
+  Olympus removes the lower copy's text, search vectors and text history once
+  the Private copy holds the content, leaving only the item's names and
+  similar details while they are Personal. Copies that 1.0.0 left behind are
+  removed the same way after an update. What an AI app already received
+  cannot be recalled.
   Everything stored before P1b stays exactly where it is until the
   owner-approved migration.
 - Per-tier stores for Dropbox, Readwise, X and WhatsApp (phase P1c).

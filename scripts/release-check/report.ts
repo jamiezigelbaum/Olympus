@@ -5,6 +5,7 @@
  * in; the leak scan runs over the finished report text before it is written.
  */
 import { findLeaks, type LeakFinding, type LeakMarker } from './leak.ts';
+import type { Difference } from './upgrade.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -49,6 +50,35 @@ export interface ReportFile {
   theme?: 'light' | 'dark';
 }
 
+/** One stage of an upgrade run on the same machine: what was checked while the earlier release was installed. */
+export interface PhaseReport {
+  id: string;
+  label: string;
+  /** Version and build the installed engine reported during this phase, when known. */
+  version?: string;
+  build?: string;
+  timings: Record<string, number>;
+  checks: CheckResult[];
+  agents: AgentReport[];
+  screenshots: ReportFile[];
+  logs: ReportFile[];
+}
+
+/**
+ * Present only when the run installed an earlier release and updated it the way a user does. The machine's own
+ * `checks`, `agents`, `screenshots` and `logs` are then the stage AFTER the update; this holds the stage before it
+ * and the update itself.
+ */
+export interface UpgradeReport {
+  /** The stage before the update: the earlier release installed fresh, set up, loaded with the test life, asked the suite. */
+  from: PhaseReport;
+  /** The update and its comparisons (version, privacy migration, data and settings kept). */
+  step: { label: string; checks: CheckResult[]; differences: Difference[] };
+  /** Label of the stage after the update, which the machine's own fields hold. */
+  afterLabel: string;
+  afterVersion?: string;
+}
+
 export interface MachineReport {
   id: string;
   label: string;
@@ -63,6 +93,7 @@ export interface MachineReport {
   agents: AgentReport[];
   screenshots: ReportFile[];
   logs: ReportFile[];
+  upgrade?: UpgradeReport;
 }
 
 export interface ReleaseReportInput {
@@ -91,6 +122,8 @@ export interface HarnessRecord {
 export interface ReleaseReport extends ReleaseReportInput {
   schema: 'olympus.release-check.report.v1';
   verdict: 'pass' | 'fail';
+  /** Per stage, for an upgrade run: before, the update, after. Empty for a plain run's single stage is still listed. */
+  phases: PhaseVerdict[];
   counts: Record<CheckStatus, number>;
   harness: HarnessRecord;
 }
@@ -102,7 +135,28 @@ export function harnessRecord(harnessCommit: string | undefined, candidateCommit
 }
 
 function allChecks(machine: MachineReport): CheckResult[] {
-  return [...machine.checks, ...machine.agents.flatMap((agent) => agent.checks)];
+  return [
+    ...(machine.upgrade ? [...machine.upgrade.from.checks, ...machine.upgrade.from.agents.flatMap((agent) => agent.checks), ...machine.upgrade.step.checks] : []),
+    ...machine.checks,
+    ...machine.agents.flatMap((agent) => agent.checks),
+  ];
+}
+
+export interface PhaseVerdict { id: string; label: string; verdict: 'pass' | 'fail' }
+
+/** A stage that recorded nothing but the report's own scan never ran, and a stage that never ran cannot pass. */
+const verdictOf = (checks: readonly CheckResult[]): 'pass' | 'fail' => (!checks.some((check) => check.id !== 'scan.report') || checks.some((check) => check.status === 'fail') ? 'fail' : 'pass');
+
+/** A verdict per stage of an upgrade run (before, the update, after); a plain run has one stage. */
+export function phaseVerdicts(machine: MachineReport): PhaseVerdict[] {
+  const after = { id: machine.upgrade ? 'after' : 'install', label: machine.upgrade?.afterLabel ?? machine.label, verdict: verdictOf([...machine.checks, ...machine.agents.flatMap((agent) => agent.checks)]) };
+  if (!machine.upgrade) return [after];
+  const { from, step } = machine.upgrade;
+  return [
+    { id: from.id, label: from.label, verdict: verdictOf([...from.checks, ...from.agents.flatMap((agent) => agent.checks)]) },
+    { id: 'upgrade', label: step.label, verdict: verdictOf(step.checks) },
+    after,
+  ];
 }
 
 /** An agent counts as having asked a question only if it ran and produced checks. */
@@ -121,6 +175,10 @@ export function buildReport(input: ReleaseReportInput): ReleaseReport {
   }
   const errors = [...input.errors];
   for (const machine of input.machines) {
+    if (machine.upgrade && !machine.upgrade.from.agents.some(askedAQuestion)) {
+      const problem = `${machine.label}: no agent asked a question before the upgrade (${machine.upgrade.from.agents.length === 0 ? 'none was configured' : 'every agent was skipped'}), so the baseline proves nothing about answers`;
+      if (!errors.includes(problem)) errors.push(problem);
+    }
     if (!machine.agents.some(askedAQuestion)) {
       const problem = `${machine.label}: no agent asked a question (${machine.agents.length === 0 ? 'none was configured' : 'every agent was skipped'}), so the run proves nothing about answers`;
       // A report is rebuilt from an earlier report; the same problem is recorded once.
@@ -134,7 +192,8 @@ export function buildReport(input: ReleaseReportInput): ReleaseReport {
     if (!errors.includes(problem)) errors.push(problem);
   }
   const failed = counts.fail > 0 || errors.length > 0 || input.machines.length === 0;
-  return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', counts, harness };
+  const phases = input.machines.flatMap((machine) => phaseVerdicts(machine));
+  return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', phases, counts, harness };
 }
 
 const STATUS_LABEL: Record<CheckStatus, string> = { pass: 'PASS', fail: 'FAIL', warn: 'WARN', skip: 'SKIP' };
@@ -191,15 +250,68 @@ function agentSection(agent: AgentReport): string {
   return `<section class="agent">${header}${usage}${checkTable(agent.checks)}</section>`;
 }
 
+function badge(verdict: 'pass' | 'fail'): string {
+  return `<span class="badge ${verdict}">${STATUS_LABEL[verdict]}</span>`;
+}
+
+function timingsLine(timings: Record<string, number>): string {
+  const text = Object.entries(timings).map(([phase, ms]) => `${escapeHtml(phase)} ${seconds(ms)}`).join(' · ');
+  return `<p class="muted">${text || 'No timings recorded.'}</p>`;
+}
+
+function differencesTable(rows: readonly Difference[]): string {
+  if (rows.length === 0) return '<p class="muted">Nothing differs between the two stages.</p>';
+  return `<table><thead><tr><th>What</th><th>Before the upgrade</th><th>After the upgrade</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHtml(row.what)}</td><td>${escapeHtml(row.before)}</td><td>${escapeHtml(row.after)}</td></tr>`).join('')}</tbody></table>`;
+}
+
+/** Calls and tokens per agent across both stages of an upgrade run, so the cost of the leg is one line each. */
+function usageTotals(machine: MachineReport): string {
+  const totals = new Map<string, { label: string; invocations: number; modelCalls: number; toolCalls: number; input: number; output: number }>();
+  for (const agent of [...(machine.upgrade?.from.agents ?? []), ...machine.agents]) {
+    if (!agent.usage) continue;
+    const row = totals.get(agent.id) ?? { label: agent.label, invocations: 0, modelCalls: 0, toolCalls: 0, input: 0, output: 0 };
+    row.invocations += agent.usage.invocations;
+    row.modelCalls += agent.usage.modelCalls;
+    row.toolCalls += agent.usage.toolCalls;
+    row.input += agent.usage.inputTokens;
+    row.output += agent.usage.outputTokens;
+    totals.set(agent.id, row);
+  }
+  if (totals.size === 0) return '';
+  return `<p class="muted">Agent usage, both stages together: ${[...totals.values()].map((row) => `${escapeHtml(row.label)}: ${row.invocations} invocation(s), ${row.modelCalls} model call(s), ${row.toolCalls} tool call(s), ${row.input} in / ${row.output} out tokens`).join(' · ')}</p>`;
+}
+
 function machineSection(machine: MachineReport): string {
-  const timings = Object.entries(machine.timings).map(([phase, ms]) => `${escapeHtml(phase)} ${seconds(ms)}`).join(' · ');
-  return `<section class="machine"><h2>${escapeHtml(machine.label)}</h2>`
-    + `<p class="muted">${escapeHtml(machine.os)} · driver ${escapeHtml(machine.driver)}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`
-    + `<p class="muted">${timings || 'No timings recorded.'}</p>`
+  const head = `<section class="machine"><h2>${escapeHtml(machine.label)}</h2>`
+    + `<p class="muted">${escapeHtml(machine.os)} · driver ${escapeHtml(machine.driver)}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`;
+  const verdicts = phaseVerdicts(machine);
+  if (!machine.upgrade) {
+    return head
+      + timingsLine(machine.timings)
+      + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
+      + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
+      + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
+      + `<h3>Logs</h3>${fileLinks(machine.logs)}</section>`;
+  }
+  const { from, step } = machine.upgrade;
+  return head
+    + `<p>${verdicts.map((phase, index) => `${index + 1}. ${escapeHtml(phase.id === 'upgrade' ? 'The upgrade' : phase.id === 'after' ? 'After the upgrade' : 'Before the upgrade')} ${badge(phase.verdict)}`).join(' &nbsp; ')}</p>`
+    + usageTotals(machine)
+    + `<h2>1. Before the upgrade: ${escapeHtml(from.label)} ${badge(verdicts[0]!.verdict)}</h2>`
+    + `<p class="muted">${from.version ? `version ${escapeHtml(from.version)}` : ''}${from.build ? ` · build ${escapeHtml(from.build)}` : ''}</p>`
+    + timingsLine(from.timings)
+    + `<h3>Machine checks</h3>${checkTable(from.checks)}`
+    + `<h3>Agents</h3>${from.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
+    + `<h2>2. The upgrade: ${escapeHtml(step.label)} ${badge(verdicts[1]!.verdict)}</h2>`
+    + checkTable(step.checks)
+    + `<h3>What differs across the upgrade</h3>${differencesTable(step.differences)}`
+    + `<h2>3. After the upgrade: ${escapeHtml(machine.upgrade.afterLabel)} ${badge(verdicts[2]!.verdict)}</h2>`
+    + `<p class="muted">${machine.upgrade.afterVersion ? `version ${escapeHtml(machine.upgrade.afterVersion)}` : ''}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`
+    + timingsLine(machine.timings)
     + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
     + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
     + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
-    + `<h3>Logs</h3>${fileLinks(machine.logs)}</section>`;
+    + `<h3>Logs</h3>${fileLinks(from.logs)}${fileLinks(machine.logs)}</section>`;
 }
 
 const STYLE = `

@@ -5350,8 +5350,9 @@ var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
 // connect-relay/shared/directory-tools.ts
-var DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
+var DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
 var init_directory_tools = __esm(() => {
+  DEMO_GRANT_REMOTE_TOOLS = Object.freeze(["olympus_search", "source_index_status"]);
   DIRECTORY_TOOL_NAMES = Object.freeze([
     "olympus_dashboard",
     "olympus_search",
@@ -5886,7 +5887,8 @@ function loadSovereigntyEngine(options = {}) {
         return false;
       }
     };
-    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);
@@ -22983,6 +22985,7 @@ var NATIVE_CAPTURE_OWNER_ENV_NAMES = {
   telegram: "OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER",
   whatsapp: "OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER"
 };
+var WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR";
 function createNativeWorkerService(options) {
   let readyChild;
   let proofGeneration = 0;
@@ -23027,6 +23030,7 @@ function createNativeWorkerService(options) {
         settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else
         delete settings.env[OWNER_BRIDGE_HOST_ENV];
+      settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? "engine" : "gateway";
       const probe = settings.readinessProbe;
       return {
         ...settings,

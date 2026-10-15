@@ -49,7 +49,7 @@ The preset prerequisites are:
 | `local-first` — Local models with Venice fallback | A funded Venice API key; a local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. |
 | `local-only` — Local models | A local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. No Venice account is needed. |
 | `private-cloud-only` — Venice | A funded Venice API key for Private answers; no local server required. |
-| `no-sensitive` — Private meaning search on this computer | Nothing. Private items are stored and searched by meaning on this computer with the built-in embedding model. Their text and search vectors stay here. Ask privately and the sealed ChatGPT panel can use them; agent answers still say Private sources were not searched. |
+| `no-sensitive` — Private meaning search on this computer | Nothing. Private items are stored and searched by meaning on this computer with the built-in embedding model, and their search vectors are kept here. Ask privately and the sealed ChatGPT panel can use them; agent answers still say Private sources were not searched. |
 
 Every preset makes content searchable with the built-in embedding model: a
 small model (Google's EmbeddingGemma 2) that runs on this computer, downloads
@@ -78,8 +78,8 @@ Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
 to obtain the designated package from GitHub. It retrieves the SHA-256 and
 byte count automatically from the release asset metadata; there is no separate
 receipt to request. For a manual download, open the
-[release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.0)
-and choose `olympus-1.0.0.tgz` under Assets, not a source-code archive. Compare
+[release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.1)
+and choose `olympus-1.0.1.tgz` under Assets, not a source-code archive. Compare
 its SHA-256 and byte count with the pin in the linked download procedure and
 record the release tag, asset ID, digest, and size with your install results.
 Stop if the download is
@@ -87,8 +87,8 @@ unavailable or either value differs. Do not build a replacement or substitute
 a Git checkout.
 
 ```bash
-shasum -a 256 /absolute/path/to/olympus-1.0.0.tgz
-wc -c < /absolute/path/to/olympus-1.0.0.tgz
+shasum -a 256 /absolute/path/to/olympus-1.0.1.tgz
+wc -c < /absolute/path/to/olympus-1.0.1.tgz
 ```
 
 Check for an existing installation with `openclaw plugins inspect olympus
@@ -97,7 +97,7 @@ If Olympus is already installed or has saved state, follow that guide's
 existing-install procedure before continuing. On a clean machine:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.1.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there only overwrites an existing plugin — re-run with no flags
 openclaw plugins enable olympus
@@ -230,8 +230,9 @@ search meanwhile. To record a no, run `olympus tier classifier decline`;
 approve; if `status` reports any other refusal, the policy names a model the
 classifier may not use, and it stays off.
 
-On `no-sensitive`, setup and doctor still list the Private corpora as configured
-and empty, with `secure_local` routed `"mode": "disabled"`. That is the honest
+On `no-sensitive`, setup and doctor still show `secure_local` routed
+`"mode": "disabled"` with an empty pool: Private items are searched by meaning
+on this computer, but no Private agent answer lane exists. That is the honest
 gap the preset promises, not a misconfiguration.
 
 For a no-write preview of the same setup surface:
@@ -328,7 +329,7 @@ olympus worker install      # idempotent; also the repair for an interrupted ins
 olympus worker start
 olympus worker stop
 olympus worker restart
-olympus worker upgrade --artifact /absolute/path/to/olympus-1.0.0.tgz
+olympus worker upgrade --artifact /absolute/path/to/olympus-1.0.1.tgz
 olympus worker uninstall
 ```
 

@@ -8,7 +8,7 @@
 
 *A private second brain on your own computer, for ChatGPT, Claude, Grok and any AI app that speaks MCP. On a Mac, and on [Omarchy](https://omarchy.org) Linux. Free and open source.*
 
-[![version](https://img.shields.io/badge/version-1.0.0-534AB7)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.1-534AB7)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-0F6E56)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-3400%2B%20passing-1D9E75)](CONTRIBUTING.md)
 [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai)
@@ -369,7 +369,7 @@ fork:
 | **Local models and private cloud** (`local-first`) | frontier cloud | approved secure pool with explicit local → [Venice](https://venice.ai) Private order |
 | **Local models only** (`local-only`) | frontier cloud | your own local models only |
 | **Private cloud only** (`private-cloud-only`) | frontier cloud | [Venice](https://venice.ai) Private model (`kimi-k3`) |
-| **Private meaning search on this computer** (`no-sensitive`) | frontier cloud | **stored and searched by meaning on this computer**: Private text and search vectors stay here; no Private agent answer lane |
+| **Private meaning search on this computer** (`no-sensitive`) | frontier cloud | **stored and searched by meaning on this computer**: its search vectors come from the built-in model and are kept here; no Private agent answer lane |
 
 “Private cloud only” describes **Private-data handling**: Venice answers
 Private questions. Search indexing for every tier uses EmbeddingGemma 2,
@@ -432,7 +432,7 @@ starting with the automatic download and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.1.tgz --force --accept-capabilities
 # On OpenClaw 2026.7.1, omit both flags for a clean install.
 # On newer hosts, --force also overwrites an existing plugin: check first.
 openclaw plugins enable olympus

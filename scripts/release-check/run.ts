@@ -20,6 +20,12 @@
  *     "relay": "https://<relay host>",               optional; the ChatGPT-protocol pass uses it
  *     "settleTimeoutS": 900 }                        optional
  *
+ * Upgrade leg (`--upgrade-from <bundle dir>`): the machine is provisioned with the
+ * EARLIER release's bundle, set up and asked the suite, then the driver's `upgrade`
+ * verb runs the candidate's public installer over it, the way a user updates.
+ * The report then shows both stages and what the update kept and migrated
+ * (upgrade.ts). Nothing else reaches the install between the two stages.
+ *
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
@@ -36,8 +42,12 @@ import { redactDeep, redactMarkers, type LeakMarker } from './leak.ts';
 import { CommandDriver, type Machine } from './machine.ts';
 import {
   buildReport, renderHtml, scanReport,
-  type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type ReleaseReport, type ReportFile,
+  type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type PhaseReport, type ReleaseReport, type ReportFile,
 } from './report.ts';
+import {
+  describeDifferences, evaluateCounts, evaluateUpgrade, versionFromTarballName,
+  type DashboardCounts, type Difference, type StateSnapshot,
+} from './upgrade.ts';
 import { evaluateArtifactScan, evaluateObservation, evaluateSmokeVerdict, type QuestionObservation } from './suite.ts';
 import { AgentApiError, readAgentKey, runXaiAgent, type AgentSpec, type ToolBridge, type ToolDefinition } from './agents.ts';
 import { codexLoginAvailable, looksLikeClaudeSetupToken, runClaudeCode, runCodex } from './cli-agents.ts';
@@ -54,6 +64,11 @@ export interface RunConfigFile {
   settleTimeoutS?: number;
 }
 
+export type UpgradeSelftest = 'lose-tier-rules' | 'revert-policy';
+export const UPGRADE_SELFTESTS: readonly UpgradeSelftest[] = ['lose-tier-rules', 'revert-policy'];
+/** The check each self-test must fail on. */
+export const UPGRADE_SELFTEST_FAILS: Record<UpgradeSelftest, string> = { 'lose-tier-rules': 'upgrade.tier-rules-kept', 'revert-policy': 'upgrade.privacy-migration' };
+
 export interface RunOptions {
   runId: string;
   candidateDir: string;
@@ -65,6 +80,13 @@ export interface RunOptions {
   config: RunConfigFile;
   /** The leak self-test: this tier's marker is also stored in an ordinary Personal item, so it reaches agents; the run must fail. */
   mistier?: 'private' | 'secrets';
+  /**
+   * The earlier release's installer bundle (same shape as `candidateDir`). Set, the machine gets this release first and
+   * the candidate is installed over it as an update; unset, the candidate is installed fresh.
+   */
+  upgradeFromDir?: string;
+  /** Upgrade self-tests: make a fault happen so the run must fail. `lose-tier-rules` is data lost across the update; `revert-policy` is a privacy migration that did not apply. */
+  upgradeSelftest?: UpgradeSelftest;
   /** Throw after the machine exists, to prove teardown on failure. */
   failAfterProvision?: boolean;
   /** Debugging only: leave the machine running. The run is reported as failed so it can never pass for release evidence. */
@@ -102,19 +124,53 @@ function sh(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/** One stage of a run: a plain run has one; an upgrade run has three (before, the update itself, after). */
+interface Stage {
+  id: string;
+  label: string;
+  version?: string;
+  build?: string;
+  timings: Record<string, number>;
+  checks: CheckResult[];
+  agents: AgentReport[];
+  screenshots: ReportFile[];
+  logs: ReportFile[];
+}
+
+const newStage = (id: string, label: string): Stage => ({ id, label, timings: {}, checks: [], agents: [], screenshots: [], logs: [] });
+
 class Run {
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
   readonly errors: string[] = [];
-  readonly timings: Record<string, number> = {};
-  readonly checks: CheckResult[] = [];
-  readonly agents: AgentReport[] = [];
-  readonly screenshots: ReportFile[] = [];
-  readonly logs: ReportFile[] = [];
+  readonly stages = new Map<string, Stage>();
+  /** What the update changed, for the report. */
+  differences: Difference[] = [];
+  stage: Stage;
   machine?: Machine;
-  build?: string;
 
-  constructor(readonly options: RunOptions, readonly driver: CommandDriver) {}
+  constructor(readonly options: RunOptions, readonly driver: CommandDriver) {
+    this.stage = this.addStage('install', 'Olympus installed fresh');
+  }
+
+  addStage(id: string, label: string): Stage {
+    const stage = newStage(id, label);
+    this.stages.set(id, stage);
+    return stage;
+  }
+
+  /** Later checks, timings and files belong to this stage. */
+  use(id: string): void {
+    this.stage = this.stages.get(id)!;
+  }
+
+  get timings(): Record<string, number> { return this.stage.timings; }
+  get checks(): CheckResult[] { return this.stage.checks; }
+  get agents(): AgentReport[] { return this.stage.agents; }
+  get screenshots(): ReportFile[] { return this.stage.screenshots; }
+  get logs(): ReportFile[] { return this.stage.logs; }
+  get build(): string | undefined { return this.stage.build; }
+  set build(value: string | undefined) { if (value !== undefined) this.stage.build = value; else delete this.stage.build; }
 
   log(line: string): void {
     const stamped = `${nowIso()} ${redactMarkers(line, this.markers)}`;
@@ -136,6 +192,13 @@ class Run {
   add(check: CheckResult): void {
     this.checks.push(check);
     this.log(`check ${check.status.toUpperCase()} ${check.id}${check.detail ? ` - ${check.detail}` : ''}`);
+  }
+
+  /** A check that belongs to another stage than the one running (the update's comparisons are made once the new install has settled). */
+  addTo(id: string, check: CheckResult): void {
+    const keep = this.stage;
+    this.use(id);
+    try { this.add(check); } finally { this.stage = keep; }
   }
 
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<{ result: Record<string, any> | undefined; stdout: string; stderr: string; code: number; ms: number }> {
@@ -205,6 +268,7 @@ function agentConfig(options: RunOptions): AgentConfig {
     fakeToken: FAKE_READWISE_TOKEN,
     expectedItems: FIXTURE_ITEMS.length,
     expectedSecrets: secrets,
+    expectedPrivate: FIXTURE_ITEMS.filter((item) => item.tier === 'private').length,
     relay: options.config.relay ?? '',
     privateFacts,
     enginePort: ENGINE_PORT,
@@ -216,7 +280,32 @@ function expectedTierCounts(): { personal: number; private: number; secrets: num
   return { personal: count('personal'), private: count('private'), secrets: count('secrets') };
 }
 
-async function setupMachine(run: Run, workDir: string, bundlePath: string): Promise<boolean> {
+/** Waits for ingest to settle on the machine and checks that every item landed in its intended tier. */
+async function settleIngest(run: Run): Promise<{ settled: boolean; snap?: Record<string, number | string> }> {
+  const timeoutS = run.options.config.settleTimeoutS ?? 900;
+  const settled = await run.phase('ingest', () => run.agent('settle', `--timeout-s ${timeoutS}`, (timeoutS + 60) * 1000));
+  const snap = settled.result?.snapshot as Record<string, number | string> | null | undefined;
+  run.add({
+    id: 'ingest.settled',
+    title: 'Ingest settled: indexed, classified and embedded',
+    status: settled.result?.settled === true ? 'pass' : 'fail',
+    detail: snap ? `seen ${snap.seen}, indexed ${snap.indexed}, embedded ${snap.embedded}, waited ${Math.round(Number(settled.result?.waitedMs) / 1000)} s` : 'no dashboard snapshot',
+    ms: Number(settled.result?.waitedMs ?? settled.ms),
+  });
+  if (snap) {
+    const expected = expectedTierCounts();
+    const ok = Number(snap.personal) === expected.personal && Number(snap.privateItems) === expected.private && Number(snap.secretsLocated) === expected.secrets;
+    run.add({
+      id: 'ingest.tiers',
+      title: 'Each item landed in its intended tier',
+      status: ok ? 'pass' : 'fail',
+      detail: `Personal ${snap.personal}/${expected.personal}, Private ${snap.privateItems}/${expected.private}, Secrets refused ${snap.secretsLocated}/${expected.secrets}`,
+    });
+  }
+  return { settled: settled.result?.settled === true, ...(snap ? { snap } : {}) };
+}
+
+async function setupMachine(run: Run, workDir: string, bundlePath: string, installTitle = 'The candidate installed and the engine is running'): Promise<boolean> {
   const machine = run.machine!;
   const configPath = join(workDir, 'config.json');
   writeFileSync(configPath, JSON.stringify(agentConfig(run.options)));
@@ -226,9 +315,10 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string): Prom
 
   const build = await run.agent('engine-build', '', 60_000);
   if (typeof build.result?.build === 'string') run.build = build.result.build;
+  if (typeof build.result?.version === 'string') run.stage.version = build.result.version;
   run.add({
     id: 'install.engine',
-    title: 'The candidate installed and the engine is running',
+    title: installTitle,
     status: build.result?.ok === true && run.build ? 'pass' : 'fail',
     detail: run.build ? `build ${run.build}` : 'the engine did not report a build',
   });
@@ -255,27 +345,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string): Prom
   if (connect.result?.ok !== true) return false;
   await run.agent('sync', '', 60_000);
 
-  const timeoutS = run.options.config.settleTimeoutS ?? 900;
-  const settled = await run.phase('ingest', () => run.agent('settle', `--timeout-s ${timeoutS}`, (timeoutS + 60) * 1000));
-  const snap = settled.result?.snapshot as Record<string, number | string> | null | undefined;
-  run.add({
-    id: 'ingest.settled',
-    title: 'Ingest settled: indexed, classified and embedded',
-    status: settled.result?.settled === true ? 'pass' : 'fail',
-    detail: snap ? `seen ${snap.seen}, indexed ${snap.indexed}, embedded ${snap.embedded}, waited ${Math.round(Number(settled.result?.waitedMs) / 1000)} s` : 'no dashboard snapshot',
-    ms: Number(settled.result?.waitedMs ?? settled.ms),
-  });
-  if (snap) {
-    const expected = expectedTierCounts();
-    const ok = Number(snap.personal) === expected.personal && Number(snap.privateItems) === expected.private && Number(snap.secretsLocated) === expected.secrets;
-    run.add({
-      id: 'ingest.tiers',
-      title: 'Each item landed in its intended tier',
-      status: ok ? 'pass' : 'fail',
-      detail: `Personal ${snap.personal}/${expected.personal}, Private ${snap.privateItems}/${expected.private}, Secrets refused ${snap.secretsLocated}/${expected.secrets}`,
-    });
-  }
-  return settled.result?.settled === true;
+  return (await settleIngest(run)).settled;
 }
 
 /** Carries one raw MCP message to the engine on the machine, through the driver's exec channel. */
@@ -575,6 +645,114 @@ async function captureScreenshots(run: Run, outDir: string): Promise<void> {
   });
 }
 
+/** The agent suite against the engine: the connection, every model agent, then the ChatGPT-protocol pass. */
+async function runSuite(run: Run, workDir: string, judge: Judge | undefined, { mintToken }: { mintToken: boolean }): Promise<void> {
+  const bridge = machineToolBridge(run);
+  if (mintToken) {
+    const token = await run.agent('mcp-token', '', 60_000);
+    run.add({ id: 'mcp.connection', title: 'A connection token was created for the agent suite', status: token.result?.ok === true ? 'pass' : 'fail', detail: token.result?.ok === true ? 'created' : String(token.result?.detail ?? '') });
+    if (token.result?.ok !== true) return;
+  } else {
+    // The upgrade leg: the token an agent was given before the update, with no new approval.
+    const tools = await run.agent('mcp-tools', '', 60_000);
+    const names = ((tools.result?.tools ?? []) as Array<{ name: string }>).map((tool) => tool.name);
+    const ok = tools.result?.ok === true && names.includes('olympus_search');
+    run.add({
+      id: 'mcp.connection',
+      title: 'The connection token made before the update still lets an agent in',
+      status: ok ? 'pass' : 'fail',
+      detail: ok ? `${names.length} tool(s) listed with the earlier token` : String(tools.result?.detail ?? 'the earlier token was refused or the tools were not listed'),
+    });
+    if (!ok) return;
+  }
+  await runModelAgents(run, bridge, judge);
+  await runProtocolAgent(run, workDir);
+}
+
+const tarballVersion = (dir: string): string | undefined => {
+  const name = existsSync(dir) ? readdirSync(dir).find((entry) => /^olympus-.*\.tgz$/.test(entry)) : undefined;
+  return name ? versionFromTarballName(name) : undefined;
+};
+
+/** The snapshot of the install's state, or undefined (with the run's error recorded) when it cannot be read. */
+async function takeSnapshot(run: Run, what: string): Promise<StateSnapshot | undefined> {
+  const out = await run.agent('snapshot-state', '', 90_000);
+  if (out.result?.ok !== true || !out.result.state) {
+    run.errors.push(`the install's state could not be read ${what}: ${String(out.result?.detail ?? out.stderr.slice(-200))}`);
+    return undefined;
+  }
+  return out.result.state as StateSnapshot;
+}
+
+const countsOf = (snap: Record<string, number | string> | undefined): DashboardCounts | null => (snap
+  ? { seen: Number(snap.seen), indexed: Number(snap.indexed), contentReady: Number(snap.contentReady), embedded: Number(snap.embedded), secretsLocated: Number(snap.secretsLocated), personal: Number(snap.personal), privateItems: Number(snap.privateItems) }
+  : null);
+
+/**
+ * The upgrade leg, on one machine: the earlier release is installed, set up and asked the suite; the owner changes a
+ * setting; the candidate's installer runs over it; then what the update kept and migrated is checked, the install
+ * settles WITHOUT another sync, and the suite, the dashboard and the leak scans run again.
+ */
+async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judge: Judge | undefined, deadline: number, expected: { from?: string | undefined; to?: string | undefined }): Promise<void> {
+  const options = run.options;
+  const machine = run.machine!;
+
+  run.use('before');
+  const ready = await setupMachine(run, workDir, bundlePath, `The earlier release${expected.from ? ` (${expected.from})` : ''} installed fresh and the engine is running`);
+  if (!ready) { run.errors.push('the earlier release did not reach a settled install, so the update was not attempted'); return; }
+  if (Date.now() >= deadline) { run.errors.push('the run exceeded its time budget before the earlier release\'s suite'); return; }
+  await runSuite(run, workDir, judge, { mintToken: true });
+
+  // One setting the owner changed, so "your other settings are kept" has something to keep.
+  const setting = await run.agent('set-policy-setting', '', 60_000);
+  run.add({
+    id: 'baseline.setting',
+    title: 'The owner changed one privacy setting before updating',
+    status: setting.result?.ok === true ? 'pass' : 'fail',
+    detail: setting.result?.ok === true ? `${String(setting.result.changed)} set to ${String(setting.result.value)}` : String(setting.result?.detail ?? setting.stderr.slice(-200)),
+  });
+  const before = await takeSnapshot(run, 'before the update');
+  if (!before) return;
+  if (before.version) run.stage.version = before.version;
+  if (options.upgradeSelftest === 'lose-tier-rules') {
+    const fault = await run.agent('upgrade-selftest', '--mode lose-tier-rules', 60_000);
+    if (fault.result?.ok !== true) { run.errors.push('the self-test fault could not be made (lose-tier-rules)'); return; }
+  }
+
+  run.use('upgrade');
+  run.stage.label = `${expected.from ?? 'the earlier release'} -> ${expected.to ?? 'the candidate'}, with the candidate's public Linux installer over the existing install`;
+  try {
+    await run.phase('upgrade', () => machine.upgrade(options.candidateDir));
+    run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'pass', detail: 'the same installer the update instructions give, with the candidate\'s tarball' });
+  } catch (error) {
+    run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  const back = await run.phase('engine-restart', () => run.agent('await-engine', '--timeout-s 300', 330_000));
+  run.add({ id: 'upgrade.engine-ready', title: 'The engine came back ready (models included) after the update', status: back.result?.ok === true ? 'pass' : 'fail', detail: back.result?.ok === true ? `ready after ${Math.round(Number(back.result.readyMs) / 1000)} s` : String(back.result?.detail ?? back.stderr.slice(-200)), ms: back.ms });
+  if (back.result?.ok !== true) return;
+  if (options.upgradeSelftest === 'revert-policy') {
+    const fault = await run.agent('upgrade-selftest', '--mode revert-policy', 60_000);
+    if (fault.result?.ok !== true) { run.errors.push('the self-test fault could not be made (revert-policy)'); return; }
+  }
+  const after = await takeSnapshot(run, 'after the update');
+  if (!after) return;
+  for (const check of evaluateUpgrade(before, after, { ...(expected.from ? { fromVersion: expected.from } : {}), ...(expected.to ? { toVersion: expected.to } : {}) })) run.add(check);
+  run.differences = describeDifferences(before, after);
+
+  run.use('after');
+  if (after.version) run.stage.version = after.version;
+  if (after.build) run.build = after.build;
+  // No sync here: the update must not need the data brought in again.
+  const settled = await settleIngest(run);
+  for (const check of evaluateCounts(before.dashboard, countsOf(settled.snap))) run.addTo('upgrade', check);
+  if (!settled.settled) return;
+  if (Date.now() >= deadline) { run.errors.push('the run exceeded its time budget before the suite after the update'); return; }
+  await runSuite(run, workDir, judge, { mintToken: false });
+  await captureScreenshots(run, options.outDir);
+  await collectEvidence(run, options.outDir);
+}
+
 export async function runReleaseCheck(options: RunOptions): Promise<ReleaseReport> {
   mkdirSync(join(options.outDir, 'logs'), { recursive: true });
   const workDir = join(tmpdir(), `release-check-${options.runId}`);
@@ -584,28 +762,37 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   const driver = new CommandDriver({ argv: options.config.driver, onLog: (line) => run?.log(`driver: ${line}`) });
   run = new Run(options, driver);
   const judge: Judge | undefined = options.config.judge ? commandJudge(options.config.judge) : undefined;
-  const deadline = Date.now() + (options.budgetMs ?? 90 * 60_000);
+  const upgrading = options.upgradeFromDir !== undefined;
+  const deadline = Date.now() + (options.budgetMs ?? (upgrading ? 150 : 90) * 60_000);
+  const versions = { from: upgrading ? tarballVersion(options.upgradeFromDir!) : undefined, to: upgrading ? tarballVersion(options.candidateDir) : undefined };
+  if (upgrading) {
+    run.stages.clear();
+    run.addStage('before', `${versions.from ? `Olympus ${versions.from}` : 'The earlier release'} installed fresh`);
+    run.addStage('upgrade', 'the update');
+    run.addStage('after', `${versions.to ? `Olympus ${versions.to}` : 'The candidate'} after the update`);
+    run.use('before');
+  }
   let machineInfo = { label: 'machine', os: 'linux', driver: 'driver' };
   try {
     const bundlePath = await bundleAgent(workDir);
-    run.machine = await run.phase('provision', () => driver.provision({ runId: options.runId, candidateDir: options.candidateDir, workdir: workDir, timeoutMs: 25 * 60_000 }));
+    run.machine = await run.phase('provision', () => driver.provision({ runId: options.runId, candidateDir: upgrading ? options.upgradeFromDir! : options.candidateDir, workdir: workDir, timeoutMs: 25 * 60_000 }));
     machineInfo = { label: run.machine.label, os: run.machine.os, driver: run.machine.driver };
-    run.add({ id: 'provision', title: 'A fresh machine was created and the candidate installed', status: 'pass', detail: `${run.machine.label}` });
+    run.add({ id: 'provision', title: upgrading ? 'A fresh machine was created and the earlier release installed' : 'A fresh machine was created and the candidate installed', status: 'pass', detail: `${run.machine.label}` });
     if (options.failAfterProvision) throw new Error('simulated failure after provision (teardown test)');
-    const ready = await setupMachine(run, workDir, bundlePath);
-    if (ready && Date.now() < deadline) {
-      const bridge = machineToolBridge(run);
-      const token = await run.agent('mcp-token', '', 60_000);
-      run.add({ id: 'mcp.connection', title: 'A connection token was created for the agent suite', status: token.result?.ok === true ? 'pass' : 'fail', detail: token.result?.ok === true ? 'created' : String(token.result?.detail ?? '') });
-      if (token.result?.ok === true) await runModelAgents(run, bridge, judge);
-      await runProtocolAgent(run, workDir);
-    } else if (ready) {
-      run.errors.push('the run exceeded its time budget before the agent suite');
+    if (upgrading) {
+      await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
+    } else {
+      const ready = await setupMachine(run, workDir, bundlePath);
+      if (ready && Date.now() < deadline) {
+        await runSuite(run, workDir, judge, { mintToken: true });
+      } else if (ready) {
+        run.errors.push('the run exceeded its time budget before the agent suite');
+      }
+      if (ready) {
+        await captureScreenshots(run, options.outDir);
+      }
+      await collectEvidence(run, options.outDir);
     }
-    if (ready) {
-      await captureScreenshots(run, options.outDir);
-    }
-    await collectEvidence(run, options.outDir);
   } catch (error) {
     run.errors.push(error instanceof Error ? error.message : String(error));
     run.log(`run error: ${run.errors[run.errors.length - 1]}`);
@@ -630,18 +817,37 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     run.timings.teardown = Date.now() - started;
   }
 
+  const last = run.stages.get(upgrading ? 'after' : 'install')!;
+  const toPhase = (stage: Stage): PhaseReport => ({
+    id: stage.id, label: stage.label,
+    ...(stage.version ? { version: stage.version } : {}), ...(stage.build ? { build: stage.build } : {}),
+    timings: stage.timings, checks: stage.checks, agents: stage.agents, screenshots: stage.screenshots, logs: stage.logs,
+  });
   const machine: MachineReport = {
     id: options.runId,
     label: machineInfo.label,
     os: machineInfo.os,
     driver: machineInfo.driver,
-    ...(run.build ? { build: run.build } : {}),
-    timings: run.timings,
-    checks: run.checks,
-    agents: run.agents,
-    screenshots: run.screenshots,
-    logs: run.logs,
+    ...(last.build ? { build: last.build } : {}),
+    timings: last.timings,
+    checks: last.checks,
+    agents: last.agents,
+    screenshots: last.screenshots,
+    logs: last.logs,
+    ...(upgrading ? {
+      upgrade: {
+        from: toPhase(run.stages.get('before')!),
+        step: { label: run.stages.get('upgrade')!.label, checks: run.stages.get('upgrade')!.checks, differences: run.differences },
+        afterLabel: last.label,
+        ...(last.version ? { afterVersion: last.version } : {}),
+      },
+    } : {}),
   };
+  const selfTest = options.mistier
+    ? `the ${options.mistier} marker was deliberately stored in an ordinary Personal item; this run is expected to FAIL on the leak checks`
+    : options.upgradeSelftest
+      ? `a fault was deliberately made during the upgrade (${options.upgradeSelftest}); this run is expected to FAIL on ${UPGRADE_SELFTEST_FAILS[options.upgradeSelftest]}`
+      : undefined;
   let report = buildReport({
     runId: options.runId,
     candidate: { label: options.candidateLabel, ...(options.candidateSha ? { sha: options.candidateSha } : {}) },
@@ -650,7 +856,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     machines: [machine],
     errors: run.errors,
     ...(options.harnessCommit ? { harnessCommit: options.harnessCommit } : {}),
-    ...(options.mistier ? { selfTest: `the ${options.mistier} marker was deliberately stored in an ordinary Personal item; this run is expected to FAIL on the leak checks` } : {}),
+    ...(selfTest ? { selfTest } : {}),
   });
   // The report must itself be clean; a hit fails the run without copying the marker.
   const reportLeaks = scanReport(report, run.markers);
@@ -685,13 +891,21 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
   const only = get('--agents');
   const mistier = get('--mistier');
   if (mistier !== undefined && mistier !== 'private' && mistier !== 'secrets') throw new Error('--mistier is private or secrets');
+  const upgradeFrom = get('--upgrade-from');
+  const upgradeSelftest = get('--upgrade-selftest');
+  if (upgradeFrom !== undefined && (upgradeFrom.startsWith('--') || !existsSync(resolve(upgradeFrom)))) throw new Error('--upgrade-from is the earlier release\'s installer bundle directory, which must exist');
+  if (upgradeSelftest !== undefined) {
+    if (upgradeFrom === undefined) throw new Error('--upgrade-selftest only goes with --upgrade-from');
+    if (!(UPGRADE_SELFTESTS as readonly string[]).includes(upgradeSelftest)) throw new Error(`--upgrade-selftest is one of ${UPGRADE_SELFTESTS.join(', ')}`);
+  }
+  if (upgradeFrom !== undefined && mistier !== undefined) throw new Error('--mistier and --upgrade-from are separate self-tests; use one');
   const runId = get('--run-id') ?? newRunId();
   const harnessCommit = get('--harness-commit');
   if (harnessCommit !== undefined) {
@@ -708,6 +922,8 @@ export function parseCli(argv: readonly string[]): RunOptions {
     outDir: resolve(out, runId),
     config,
     ...(mistier ? { mistier } : {}),
+    ...(upgradeFrom !== undefined ? { upgradeFromDir: resolve(upgradeFrom) } : {}),
+    ...(upgradeSelftest ? { upgradeSelftest: upgradeSelftest as UpgradeSelftest } : {}),
     ...(only ? { onlyAgents: only.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     failAfterProvision: has('--fail-after-provision'),
     keepMachine: has('--keep-machine'),

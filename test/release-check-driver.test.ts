@@ -26,6 +26,7 @@ case "$verb" in
     echo "{\\"machine\\":\\"fake-$run_id\\",\\"label\\":\\"Fake machine\\",\\"os\\":\\"linux\\",\\"driver\\":\\"fake\\"}" ;;
   exec) cat > /dev/null ;;
   put|get|reap) ;;
+  upgrade) if [ "\${FAKE_DRIVER_FAIL_UPGRADE:-}" = "1" ]; then echo "installer failed" >&2; exit 1; fi ;;
   destroy)
     if [ -n "\${FAKE_DRIVER_DESTROY_LEAK:-}" ]; then echo "CLEANUP FAILED: fake-machine may still exist (\$FAKE_DRIVER_DESTROY_LEAK)" >&2; exit 1; fi
     if [ "\${FAKE_DRIVER_FAIL_DESTROY:-}" = "1" ]; then echo "checking" >&2; echo "CLEANUP FAILED: fake-machine may still exist on host (listing failed). Remove it by hand: ssh host 'lxc delete fake-machine --force'" >&2; exit 1; fi ;;
@@ -96,6 +97,19 @@ describe('command driver', () => {
       'destroy --run-id run1',
       'reap --older-than-min 30',
     ]);
+  });
+
+  test('upgrade runs the driver verb against the handle with the newer bundle, and a failed installer is an error', async () => {
+    const driver = new CommandDriver({ argv: [driverPath] });
+    const machine = await driver.provision({ runId: 'run2', candidateDir: dir, workdir: dir, timeoutMs: 20_000 });
+    await machine.upgrade('/newer/bundle');
+    expect(driverLog().filter((line) => line.startsWith('upgrade'))).toEqual(['upgrade --machine fake-run2 --candidate /newer/bundle']);
+    process.env.FAKE_DRIVER_FAIL_UPGRADE = '1';
+    try {
+      await expect(machine.upgrade('/newer/bundle')).rejects.toThrow('driver upgrade failed (exit 1)');
+    } finally {
+      delete process.env.FAKE_DRIVER_FAIL_UPGRADE;
+    }
   });
 
   test('a failed provision is an error and a failed destroy is an error', async () => {

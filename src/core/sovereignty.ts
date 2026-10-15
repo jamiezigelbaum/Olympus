@@ -203,8 +203,12 @@ export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): Sov
     const isDefaultPath = (path: string) => {
       try { return resolve(path) === resolve(defaultSovereigntyConfigPath(env)); } catch { return false; }
     };
-    const standaloneDefault = !env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()
-      && (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
+    // Both the engine host and an OpenClaw gateway supervise workers (instance id), and a
+    // gateway can inherit the engine markers, so a supervised worker must also be told by
+    // its supervisor that it is the engine's (native-worker-service WORKER_SUPERVISOR_ENV).
+    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
+      && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === 'engine')
       && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {

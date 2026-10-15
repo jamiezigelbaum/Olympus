@@ -272,24 +272,24 @@ prompt. Do not ask them to supply a tarball, a checksum receipt, or GitHub
 credentials. Download the designated pilot through GitHub's public release
 API without authentication:
 
-`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.0`
+`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.1`
 
 The repository guide pins the designated candidate below. These are agent-only
 verification inputs, not a receipt to request from the operator:
 
-- SHA-256: `9cce0d4b20b57621e8d994fdb91cb37aee4bbdc5c62855ba9259b54f7bdddff6`
-- Byte count: `16094860`
+- SHA-256: `fbf0de73a0188a7cf818c0264bd4601432d81277c6656dbef2096457c7d4b43e`
+- Byte count: `16116466`
 
 1. Fetch that exact release as JSON over HTTPS. Require a successful HTTP
-   response, `tag_name` equal to `v1.0.0`, `prerelease` equal to `false`,
+   response, `tag_name` equal to `v1.0.1`, `prerelease` equal to `false`,
    and `draft` equal to `false`.
    Do not use `/releases/latest`: a later release is not automatically this
    guide's candidate.
-2. Select exactly one uploaded asset named `olympus-1.0.0.tgz` from `assets`.
+2. Select exactly one uploaded asset named `olympus-1.0.1.tgz` from `assets`.
    Require `state: "uploaded"`, a positive integer `id` and `size`, and a
    `digest` of the form `sha256:` followed by 64 hexadecimal characters.
    Its `browser_download_url` must be exactly
-   `https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.0/olympus-1.0.0.tgz`.
+   `https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.1/olympus-1.0.1.tgz`.
    Require the metadata's digest and size to match the pinned values above;
    a replacement upload under the same tag/name is not a qualified candidate.
    GitHub's generated source-code archives are not the plugin package.
@@ -321,8 +321,8 @@ read-only download after reporting it.
 For the local comparison in step 3, use the downloaded file's absolute path:
 
 ```bash
-shasum -a 256 /absolute/path/to/olympus-1.0.0.tgz
-wc -c < /absolute/path/to/olympus-1.0.0.tgz
+shasum -a 256 /absolute/path/to/olympus-1.0.1.tgz
+wc -c < /absolute/path/to/olympus-1.0.1.tgz
 ```
 
 The expected digest and size come from the repository pin and fetched release
@@ -330,7 +330,7 @@ metadata, never from the same local file you are checking. Reference command
 for the packaged guide's single install of those verified bytes:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.1.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there means only "overwrite an existing plugin" — re-run with no flags
 openclaw plugins enable olympus
@@ -689,7 +689,7 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >
 > 4. **Private meaning search on this computer** (`no-sensitive`) — Olympus
 >    stores Private items and finds them by meaning on this computer using
->    the built-in embedding model. Private text and search vectors stay here.
+>    the built-in embedding model, and keeps their search vectors here.
 >    Ask privately and the sealed ChatGPT panel can use them; no Private
 >    agent answer lane is set up. When a question touches health,
 >    finances, or legal matters, the answer says Private sources were not
@@ -751,10 +751,10 @@ not ask for.
 
 **Reading the summary: an honest gap looks like a leak until you know the
 shape.** On `no-sensitive` the summary and later `olympus doctor` output
-still show the Private corpora as configured with no search vectors in them, and the
-sovereignty policy shows `secure_local` with `"mode": "disabled"` and an
-empty pool. That is `no-sensitive` working: the tier exists so Olympus can
-say honestly that Private sources were not searched, and it is routed nowhere. Do not
+still show the sovereignty policy with `secure_local` at `"mode": "disabled"` and an
+empty pool. That is `no-sensitive` working: Private items are searched by
+meaning on this computer, but no agent answer lane exists, so Olympus can
+say honestly that Private sources were not searched for the agent, and it is routed nowhere. Do not
 report it to the operator as a problem, and do not try to "fix" it by
 adding a lane they did not choose.
 
