@@ -186,7 +186,27 @@ describe('native Olympus worker service', () => {
       OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER: 'true',
       OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'false',
       OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/opt/olympus/sovereignty.json',
+      OLYMPUS_WORKER_SUPERVISOR: 'gateway',
     });
+  });
+
+  test('only the engine host marks its worker as the engine\'s; worker.env cannot claim it', async () => {
+    for (const engineHosted of [false, true]) {
+      const fixture = fakeWorkerFixture();
+      appendFileSync(fixture.envFilePath, 'OLYMPUS_WORKER_SUPERVISOR=engine\nOLYMPUS_ENGINE_HOST=1\n');
+      const service = track(createNativeWorkerService({
+        initialPluginConfig: fixture.pluginConfig(true),
+        moduleUrl: import.meta.url,
+        startupTimeoutMs: 20_000,
+        readinessPollMs: 20,
+        stopGraceMs: 100,
+        workerEnvPath: fixture.envFilePath,
+        ...(engineHosted ? { engineHosted } : {}),
+      }));
+      await service.start({});
+      expect(JSON.parse(readFileSync(fixture.configEnvPath, 'utf8')).OLYMPUS_WORKER_SUPERVISOR).toBe(engineHosted ? 'engine' : 'gateway');
+      await service.stop();
+    }
   });
 
   test('hands the plugin remote section to the worker and drops an inherited one', async () => {
@@ -536,6 +556,7 @@ writeFileSync(process.env.FAKE_WORKER_CONFIG_ENV_PATH, JSON.stringify(Object.fro
     'OLYMPUS_SOVEREIGNTY_CONFIG_PATH',
     'OLYMPUS_CREDENTIAL_SYNTHETIC',
     'OLYMPUS_NATIVE_REMOTE_CONFIG_JSON',
+    'OLYMPUS_WORKER_SUPERVISOR',
   ].map((key) => [key, process.env[key]]),
 )));
 if (process.env.FAKE_WORKER_EXIT_BEFORE_SERVE === 'true') process.exit(23);
