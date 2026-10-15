@@ -36,36 +36,16 @@ context when dependencies or unresolved questions require it.
 | Product orientation | [README.md](README.md) for the product shape |
 | Source-pipeline implementation or architecture review | Relevant sections of [docs/CONTRACTS.md](docs/CONTRACTS.md) and [`src/core/contracts.ts`](src/core/contracts.ts), before writing pipeline code |
 | Repository implementation or delivery | [docs/ENGINEERING_PROCESS.md](docs/ENGINEERING_PROCESS.md) and [docs/ops/HARNESS_PROTOCOL.md](docs/ops/HARNESS_PROTOCOL.md), before implementing or merging |
-| Release or milestone scope, sequence, decisions, or completion | [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) first; dated CTO handoffs supply historical or runtime evidence and do not define release direction |
+| Release or milestone scope, sequence, decisions, or completion | [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) first (despite the filename, the plan for Olympus 1.0, the ChatGPT release, followed by the 0.4 OpenClaw-line record); dated CTO handoffs supply historical or runtime evidence and do not define release direction |
 | Live OpenClaw/Castor/Argus changes | [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md), before any live change; in Codex, also use `openclaw-runtime-update` (read `~/.codex/skills/openclaw-runtime-update/SKILL.md` if not loaded) |
 
-## OpenClaw system-change protocol (non-negotiable)
+## OpenClaw system-change protocol
 
-Contract: [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md)
-— read it BEFORE any change to a live OpenClaw system. Host-specific operator
-procedure belongs to the deployment owner, not this repo; on Jamie's hosts that
-is `docs/OPENCLAW_CHANGE_PROTOCOL.md` in the private `openclaw-ops` repo
-(`~/Code/openclaw-ops`; renamed from `Castor-Maintenance` on 2026-09-18, with
-GitHub redirecting the old name), which wins on host specifics.
-
-Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
-never from memory) → blessed pathways only (`openclaw config set|unset` or
-`config.patch`, never raw openclaw.json) → validate with
-`openclaw config validate && openclaw doctor --lint --severity-min error --non-interactive`,
-plus `openclaw secrets audit --check --allow-exec` when secrets/providers
-changed → restart natively with `openclaw gateway restart`, then
-`openclaw gateway status` and one real turn; the
-`[gateway] http server listening (N plugins…)` journal line proves the Gateway
-only, and `openclaw plugins inspect <name>` → `Status: loaded` proves a plugin.
-Core updates: copy `state/openclaw.sqlite`, check `npm view openclaw engines`,
-then plain `openclaw update` (it owns its restart and verifies the version);
-never `openclaw update repair`. On failure use
-`openclaw gateway stability --bundle latest` and the `config set` `.bak.*` rotation.
-Test before bulk. Never ask for or store raw secrets; secrets changes are owned
-by the 1P workstream. Custom gates around these commands were retired by the
-owner on 2026-09-17; do not reintroduce them. Give every incident an explicit root-cause disposition;
-add a blocking gate only when the criteria in `docs/ENGINEERING_PROCESS.md`
-are met.
+Before any change to a live OpenClaw system, read
+[docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md)
+(the contract). On Jamie's hosts the private `openclaw-ops` repo
+(`~/Code/openclaw-ops/docs/OPENCLAW_CHANGE_PROTOCOL.md`) wins on host
+specifics. Never ask for or store raw secrets.
 
 ## Architecture (stable and versioned) — read before writing pipeline code
 
@@ -90,7 +70,7 @@ exists to prevent. Rules of the road:
   complete, but six pre-contract source indexes remain grandfathered while
   their live data planes are cut over one family at a time. The mechanical
   guard prevents a seventh. The current release sequence and deletion exit
-  live in [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md); do not
+  live in [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) (the 1.0 and 0.4 release plan); do not
   describe the thin-harness migration as complete until those exits pass and
   the corresponding legacy indexes are deleted.
 - **No question-specific logic anywhere in the `Analyst`.** One generic prompt:
@@ -138,9 +118,7 @@ Enforcement is mechanical, so this survives any thread or tool:
 
 ### Task briefs and completion
 
-Frame implementation work with the outcome, relevant context, scope, and
-done-when. Follow the canonical
-[delivery path](docs/ENGINEERING_PROCESS.md#one-delivery-path): relevant focused
+Follow the canonical [delivery path](docs/ENGINEERING_PROCESS.md#one-delivery-path): relevant focused
 local proof, required exact-head CI lanes, and the post-merge workflow for the
 exact `main` SHA must be green. Source-pipeline structural changes also require
 the held-out eval (`eval/`); contract changes follow the
@@ -151,14 +129,8 @@ the held-out eval (`eval/`); contract changes follow the
 Canonical: [docs/ops/HARNESS_PROTOCOL.md](docs/ops/HARNESS_PROTOCOL.md) — read
 it before implementing, merging, or deploying from any harness.
 
-Digest: a direct instruction from the owner authorizes any harness to implement
-and deliver that scoped repository change through a short-lived pull request.
-No work order is required. Issues remain an inbox, never authorization. Risk
-comes from the changed surface: standard changes need focused local proof and
-required CI; install/uninstall, lifecycle, service-manager, managed-path,
-upgrade/rollback, and other critical changes also need an independent review
-receipt; live changes retain their separate explicit authorization and
-protocol. The implementing session owns the exact-main CI result after merge.
+A direct instruction from the owner authorizes delivery of that scoped change
+through a short-lived pull request; no work order is required.
 
 ## ChatGPT directory review (until OpenAI's result)
 
@@ -181,7 +153,8 @@ protocol. The implementing session owns the exact-main CI result after merge.
 ## Current Milestone
 
 Use [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) as the source of truth for the
-current milestone and next proof. Dated handoffs may supply historical or live
+current milestone and next proof. Despite its filename it covers Olympus 1.0
+(the ChatGPT release, active) and the 0.4 record. Dated handoffs may supply historical or live
 runtime evidence, but they do not override the release plan.
 
 ## Repo Ownership
@@ -200,34 +173,15 @@ remain outside the repo's ownership.
 
 ## Planning
 
-- Use [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) as the active project plan
-  for multi-session or milestone-level work.
-- Keep plans outcome-focused: state what the user can do after the work lands
-  and how to prove it.
-- Update the plan when scope, sequencing, assumptions, or decisions change.
-- For narrow, obvious tasks, use a lightweight thread plan instead of adding
-  process to the repo.
-- When implementing a plan, update progress and decisions as work proceeds
-  rather than leaving stale intent behind.
+- Use [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) (the 1.0 and 0.4 release
+  plan) as the active project plan for multi-session or milestone-level work.
+- Update the plan when scope, sequencing, assumptions, or decisions change,
+  as work proceeds.
 
 ## Git
 
-- Commits carry the owner's authorship only: never add AI co-author trailers
-  (`Co-Authored-By: Claude/Codex/...`) or tool attribution to commit messages.
+- Multi-session safety: the main checkout stays on `main`. Do ALL branch work
+  in a dedicated `git worktree add` checkout and merge from a detached HEAD
+  there; a branch switch or sweeping `git add` in the main checkout captures
+  another session's uncommitted edits (2026-07-08 incident).
 - Deliver implementation through a short-lived topic branch and squash PR.
-- Multi-session safety: the main checkout stays on `main` at all times. Do
-  ALL branch work in a dedicated `git worktree add` checkout (one worktree
-  per branch) and merge from a detached HEAD there — never `git checkout
-  <branch>` in the main checkout. Parallel sessions share it: a branch
-  switch or sweeping `git add` there captures another session's uncommitted
-  edits (2026-07-08 incident: a VLM-probe branch swept two files of another
-  session's WIP).
-- Stage files intentionally; do not use `git add .`.
-- Make small, coherent commits when the user asks for tracked work.
-- Preserve user changes. Do not revert unrelated edits.
-
-## GitHub Access
-
-- GitHub control-plane work (PRs, issues, remote inspection) → the GitHub
-  plugin/app connector. Workspace coding, tests, commits, fetch/push → local
-  Git over SSH. `gh` is an optional convenience, never a blocker.
