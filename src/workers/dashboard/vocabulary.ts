@@ -2347,7 +2347,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   computerKnows: "It searches your files.",
   veniceLeaves: "A strong model that reads the passages it needs from your files. Venice knows it’s you.",
   veniceKnows: "Venice says it doesn’t keep them.",
-  zkapiLeaves: "A top model that can’t see your files. It reads your question but isn’t told who’s asking.",
+  zkapiLeaves: "A top model that can’t see your files. It reads your question but isn’t told who’s asking. What you ask can still identify you.",
   zkapiKnows: "Takes 1 to 3 minutes.",
   askComputer: "Ask the local model",
   askVenice: "Ask a Venice model",

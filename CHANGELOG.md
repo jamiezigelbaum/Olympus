@@ -3,7 +3,7 @@
 ## 1.1.0 - 2026-10-15
 
 - Questions agents send that need your Private items are answered on your computer automatically; the agent links you to the answer in Olympus, and answers wait in the new inbox.
-- Ask a question in Olympus and choose which model answers: the local model on your computer, a zkAPI model that reads only your question and isn't told who's asking, or a Venice model. Every answer lands in the inbox on your computer.
+- Ask a question in Olympus and choose which model answers: the local model on your computer, a zkAPI model that reads only your question and isn't told who's asking (what you ask can still identify you), or a Venice model. Every answer lands in the inbox on your computer.
 
 ## 1.0.1 - 2026-10-15
 
