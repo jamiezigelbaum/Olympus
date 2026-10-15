@@ -260,6 +260,12 @@ export interface DemoSignInPageInput {
   requestId: string;
   csrf: string;
   clientName: string;
+  /**
+   * The app's client_id, repeated on the form's address so the relay sends the
+   * POST to the same demo install as the page (connect-relay/server/relay.ts
+   * demoInstallFor); the install itself reads only the form.
+   */
+  clientId: string;
   redirectHost: string;
   redirectOrigin: string;
   error?: string;
@@ -291,7 +297,7 @@ export function renderDemoSignInPage(input: DemoSignInPageInput): { body: string
 <div class="name">${name}</div>
 <p class="meta">After you sign in, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
-<form method="post" action="/connect/demo/authorize">
+<form method="post" action="${escapeHtml(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
 ${error}

@@ -47,16 +47,18 @@ import { isRelayedRequest } from '../core/remote-access.ts';
 import { isWellFormedOAuthAccessToken, remoteConnectionProvider } from '../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, remoteMcpResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
-import { createOlympusMcpServer } from '../mcp/server.ts';
+import { createOlympusMcpServer, type McpServerExtension } from '../mcp/server.ts';
 import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
 import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts';
 import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search.ts';
-import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
+import { DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 import { remoteErrorOutput, remoteRetryAfterSeconds, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialInstallId } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
+/** The read-only tools a demo grant gets on the remote surface (shared with the relay's offline answers). */
+export { DEMO_GRANT_REMOTE_TOOLS };
 /** The ChatGPT plugin directory's endpoint. */
 export const REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
@@ -96,6 +98,13 @@ export interface RemoteMcpHandlerOptions {
    * (workers/remote-search.ts). Absent: the operation list alone.
    */
   search?: RemoteSearchOptions;
+  /**
+   * Whether a connection is a demo sign-in grant (remote-oauth/demo-consent.ts
+   * isDemoGrant). One not served the ChatGPT surface gets only
+   * DEMO_GRANT_REMOTE_TOOLS here and on the OpenAPI paths: no spending
+   * (ask_anonymously, source_answer) for a reviewer holding a shared password.
+   */
+  demoGrant?: (connection: RemoteMcpConnection) => boolean;
   /** Builds the directory endpoint's server (default createChatGptDirectoryMcpServer; tests narrow its allowlist). */
   directoryServer?: typeof createChatGptDirectoryMcpServer;
 }
@@ -184,9 +193,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
-      : createOlympusMcpServer('remote', () => ctx, options.search
+      : createOlympusMcpServer('remote', () => ctx, demoGrantLimit(options.demoGrant?.(verification.connection) === true, options.search
         ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface))
-        : undefined);
+        : undefined));
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -200,6 +209,24 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       await server.close().catch(() => undefined);
     }
   }
+}
+
+/**
+ * A demo grant's remote surface: `inner`'s tools narrowed to
+ * DEMO_GRANT_REMOTE_TOOLS, and a call to any other answered as an unknown
+ * tool before it runs. Any other connection gets `inner` unchanged.
+ */
+function demoGrantLimit(demo: boolean, inner: McpServerExtension | undefined): McpServerExtension | undefined {
+  if (!demo) return inner;
+  return {
+    tools: (listed) => (inner ? inner.tools(listed) : listed).filter((tool) => DEMO_GRANT_REMOTE_TOOLS.includes(tool.name)),
+    call: async (request, next, signal) => {
+      if (!DEMO_GRANT_REMOTE_TOOLS.includes(request.params.name)) {
+        return { content: [{ type: 'text', text: JSON.stringify(remoteSurfaceErrorOutput('unknown_operation'), null, 2) }], isError: true };
+      }
+      return inner ? await inner.call(request, next, signal) : await next();
+    },
+  };
 }
 
 /**

@@ -3,11 +3,12 @@
 ## 1.0.1 - 2026-10-15
 
 - On Linux, signing out ends the owner session, saving settings keeps your Olympus window working, Olympus opens in one window without a flash, computers without IPv6 keep their dashboard, Confirm continues the original page automatically, and browser confirmation opens are capped at six per hour.
+- On Linux, fixed a way for another account on the same computer to intercept the one-time sign-in that opens the Olympus window. Olympus 1.0.0 had it.
 - Connecting an agent no longer shows an expired approval after it worked.
-- Private search finds items when not every word matches, keeping readable content ahead of title-only matches and never reporting a match from one shared common word.
+- Private search finds items when not every word matches, keeping readable content ahead of title-only matches. For longer questions, one shared common word is not enough to report a Private match to your AI app.
 - Progress finishes when names-only copies have content elsewhere; items settled without readable content appear under problems with a way to find them.
 - Private items can be found by meaning, on your computer only. Installs still on the 1.0.0 default privacy settings switch over automatically, keeping your other settings; privacy settings managed by OpenClaw stay as they are.
-- Fixed content and prepared answers remaining available after an item moves from Personal to Private.
+- Fixed content and prepared answers remaining available after an item moves from Personal to Private: the Personal copy's text and search vectors are removed, and an answer prepared from the item before the move is withheld. Copies 1.0.0 left behind are removed after you update, once the Private copy is confirmed to hold the content.
 
 ## 1.0.0 - 2026-10-14
 

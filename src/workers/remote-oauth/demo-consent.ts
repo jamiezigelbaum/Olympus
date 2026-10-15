@@ -3,8 +3,8 @@
  *
  * A directory reviewer has no Mac running Olympus, so the loopback-only
  * approval that protects every real install cannot work for them. A demo
- * install (synthetic sample data only) may instead approve ChatGPT with a
- * username and password over the relay, at `/connect/demo/authorize`. It is
+ * install (synthetic sample data only) may instead approve ChatGPT, or Grok
+ * Bot or Cursor (DEMO_CLIENT_HOSTS), with a username and password over the relay, at `/connect/demo/authorize`. It is
  * active only when ALL of these hold:
  *
  * - relay mode (the install has a relay id);
@@ -16,12 +16,11 @@
  * Wrong attempts are rate limited across all callers (relayed requests carry
  * no caller address; a right one gives its token back, so reviewers signing
  * in correctly never lock each other out), and five wrong passwords end an
- * approval page. A demo grant gets the read-only ChatGPT surface
- * (`isDemoGrant`).
+ * approval page. A demo grant gets read-only tools only (`isDemoGrant`).
  */
 import { timingSafeEqual } from 'node:crypto';
 import type { OlympusConfig } from '../../core/config.ts';
-import { pinnedClient } from './pinned-clients.ts';
+import { pinnedClient, type PinnedHost } from './pinned-clients.ts';
 
 export interface DemoConsentSettings {
   readonly username: string;
@@ -84,6 +83,14 @@ export function demoSignInLimiter(now: () => number): { take(): boolean; refund(
   };
 }
 
+/**
+ * The pinned clients a demo install signs in: ChatGPT (the plugin directory)
+ * and Grok Bot or Cursor (the Cursor marketplace). Each one's demo grant is
+ * read-only on the surface it gets: the ChatGPT surface's read-only tools,
+ * or the remote surface's DEMO_GRANT_REMOTE_TOOLS (workers/remote-mcp.ts).
+ */
+export const DEMO_CLIENT_HOSTS: readonly PinnedHost[] = Object.freeze(['chatgpt', 'cursor']);
+
 /** A demo grant's connection name: the pinned client's name, marked. */
 export function demoGrantDisplayName(clientName: string): string {
   return `${clientName} (demo sign-in)`;
@@ -96,5 +103,5 @@ export function demoGrantDisplayName(clientName: string): string {
  */
 export function isDemoGrant(connection: { clientId?: string | null; displayName: string }): boolean {
   const pinned = connection.clientId ? pinnedClient(connection.clientId) : undefined;
-  return pinned?.host === 'chatgpt' && connection.displayName === demoGrantDisplayName(pinned.clientName);
+  return pinned !== undefined && DEMO_CLIENT_HOSTS.includes(pinned.host) && connection.displayName === demoGrantDisplayName(pinned.clientName);
 }

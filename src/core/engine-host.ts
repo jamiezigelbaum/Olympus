@@ -94,7 +94,7 @@ export interface EngineHostHandle {
 
 export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>, ownerBridgeHostSocket?: string): NativeProcessServiceDefinition[] {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed, ...(ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}) });
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...(ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}) });
   return [
     backgroundNativeProcessService(worker),
     backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
