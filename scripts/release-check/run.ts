@@ -59,6 +59,7 @@ import { AgentApiError, readAgentKey, runXaiAgent, type AgentSpec, type ToolBrid
 import { codexLoginAvailable, looksLikeClaudeSetupToken, runClaudeCode, runCodex } from './cli-agents.ts';
 import { cachingRelay, startMcpProxy, type McpExchange, type Relay } from './mcp-proxy.ts';
 import { privateNoteKindIn } from './private-note.ts';
+import { SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS } from '../../src/core/source-answer-jobs.ts';
 import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
@@ -229,8 +230,16 @@ class Run {
   }
 }
 
+/**
+ * How long one call to source_answer or source_answer_result may take on the machine. The engine holds a source_answer open for its
+ * hand-off (at most SOURCE_ANSWER_HANDOFF_MAX_MS) before it answers "working", and a result call waits up to
+ * SOURCE_ANSWER_RESULT_WAIT_MAX_MS; the margin covers the machine's exec and the agent's start. Shorter, and a slow answer's "working"
+ * reply would never be seen, so a valid install would fail for a note it was about to give.
+ */
+export const ANSWER_TOOL_CALL_TIMEOUT_MS = Math.max(SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) + 120_000;
+
 /** Calls the engine's MCP tools on the machine, one `exec` per call. */
-function machineToolBridge(run: Run): ToolBridge & { tools(): Promise<ToolDefinition[]> } {
+function machineToolBridge(run: Run, callTimeoutMs = 180_000): ToolBridge & { tools(): Promise<ToolDefinition[]> } {
   return {
     async tools() {
       const out = await run.agent('mcp-tools');
@@ -242,7 +251,7 @@ function machineToolBridge(run: Run): ToolBridge & { tools(): Promise<ToolDefini
       const delimiter = `RC_${randomBytes(6).toString('hex')}`;
       const exec = await run.machine!.exec(
         `${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js mcp-call ${sh(name)} "$(cat <<'${delimiter}'\n${JSON.stringify(args)}\n${delimiter}\n)"\n`,
-        { timeoutMs: 180_000 },
+        { timeoutMs: callTimeoutMs },
       );
       const parsed = parseAgentLine(exec.stdout);
       return {
@@ -400,13 +409,35 @@ function skipped(run: Run, spec: AgentSpec, reason: string): void {
   run.log(`agent ${spec.id}: ${reason}`);
 }
 
-/** The tools the engine's MCP endpoint lists, read once per run. A standard install lists olympus_search and not source_answer. */
-async function offeredToolNames(run: Run): Promise<string[]> {
+/**
+ * The tools the engine's MCP endpoint lists, read once per stage. Undefined when the listing could not be read (a failed or timed-out
+ * call, a refusal, an empty or malformed list): never an empty list, which would read as an install that offers nothing and make every
+ * agent look correctly tool-less. A standard install lists olympus_search and not source_answer.
+ */
+async function offeredToolNames(run: Run): Promise<string[] | undefined> {
   const known = run.offeredTools.get(run.stage.id);
   if (known) return known;
-  const listed = await run.agent('mcp-tools', '', 60_000);
-  const names = ((listed.result?.tools ?? []) as Array<{ name?: string }>).map((tool) => String(tool.name ?? '')).filter(Boolean);
-  if (listed.result?.ok === true) run.offeredTools.set(run.stage.id, names);
+  let listed: Awaited<ReturnType<Run['agent']>>;
+  try { listed = await run.agent('mcp-tools', '', 60_000); } catch { return undefined; }
+  const tools: unknown = listed.result?.tools;
+  if (listed.result?.ok !== true || !Array.isArray(tools) || tools.length === 0) return undefined;
+  const names = tools.map((tool) => (tool as { name?: unknown } | null)?.name);
+  if (names.some((name) => typeof name !== 'string' || name === '')) return undefined;
+  run.offeredTools.set(run.stage.id, names as string[]);
+  return names as string[];
+}
+
+/** The tool list, or a failing check (once per stage) when it cannot be read: what agents and the link path are judged against is then unknown. */
+async function listedTools(run: Run): Promise<string[] | undefined> {
+  const names = await offeredToolNames(run);
+  if (names === undefined && !run.stage.checks.some((check) => check.id === 'mcp.tool-list')) {
+    run.add({
+      id: 'mcp.tool-list',
+      title: 'The engine\'s MCP endpoint listed its tools',
+      status: 'fail',
+      detail: 'the listing failed, timed out or came back empty or malformed, so which tools agents are offered, and whether the Private-answer link path exists, cannot be judged',
+    });
+  }
   return names;
 }
 
@@ -446,7 +477,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
   // The command-line agents reach the engine through one tunnel whose startup messages are fetched once (see cachingRelay).
   const tunnel = cachingRelay(machineRelay(run));
   // The earlier release in an update run predates the link; only the candidate's own stages judge one.
-  const linkExpected = specs.length > 0 && run.stage.id !== 'before' && (await offeredToolNames(run)).includes('source_answer');
+  const linkExpected = specs.length > 0 && run.stage.id !== 'before' && ((await listedTools(run))?.includes('source_answer') ?? false);
   let primed: Promise<boolean> | undefined;
   const cliRelay = async (): Promise<Relay> => {
     primed ??= tunnel.prime();
@@ -721,12 +752,14 @@ const INBOX_SHOTS = ['ask-page-1280.png', 'ask-page-390.png', 'inbox-entry-1280.
  */
 async function runInboxLeg(run: Run, outDir: string): Promise<void> {
   if (run.options.skipInbox) return;
-  const bridge = machineToolBridge(run);
+  // Judged against what this install offers: a listing that cannot be read fails the run, and the leg does not guess.
+  const offered = await listedTools(run);
+  if (offered === undefined) return;
+  const bridge = machineToolBridge(run, ANSWER_TOOL_CALL_TIMEOUT_MS);
   const question = privateQuestion();
   const selftest = run.options.inboxSelftest;
 
   const scripted: AgentReport = { id: 'scripted', label: 'Scripted agent over MCP (no model, nothing billed)', kind: 'model', scripted: true, ran: true, checks: [] };
-  const offered = await offeredToolNames(run);
   // Only an install with an answer model offers source_answer, the one tool that issues the Open link and records the question.
   const linkMode: 'issued' | 'not_offered' = offered.includes('source_answer') ? 'issued' : 'not_offered';
   const tool = linkMode === 'issued' ? 'source_answer' : 'olympus_search';

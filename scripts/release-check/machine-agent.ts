@@ -648,6 +648,15 @@ function findBrowser(): string | undefined {
   return undefined;
 }
 
+/**
+ * What keeps the browser from opening connections of its own. The rule "MAP * ~NOTFOUND" rewrites every host the browser is asked for,
+ * IP literals included, so the loopback addresses the dashboard is served on must be excluded by name or the page itself would not load.
+ */
+export const ISOLATED_BROWSER_FLAGS: readonly string[] = [
+  '--disable-background-networking', '--disable-sync', '--disable-component-update', '--disable-default-apps', '--no-pings', '--disable-domain-reliability',
+  '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]',
+];
+
 interface OpenedBrowser { cdp: Cdp; pid: number | undefined; close(): void }
 
 /** A headless browser on a throwaway profile, and a debugging connection to its one page. */
@@ -660,7 +669,7 @@ async function openBrowser(browser: string, profileName: string, debugPort: numb
     ...(process.platform === 'darwin' ? ['--use-mock-keychain', '--password-store=basic'] : []),
     // The Inbox check watches the machine's connections, so the browser must make none of its own: no background services, and no
     // name but this machine's can be resolved (the dashboard is an address, not a name).
-    ...(isolated ? ['--disable-background-networking', '--disable-sync', '--disable-component-update', '--disable-default-apps', '--no-pings', '--disable-domain-reliability', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost'] : []),
+    ...(isolated ? ISOLATED_BROWSER_FLAGS : []),
     `--user-data-dir=${profile}`, `--remote-debugging-port=${debugPort}`, '--remote-allow-origins=*', 'about:blank',
   ], { stdio: 'ignore' });
   try {

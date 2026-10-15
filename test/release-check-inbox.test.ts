@@ -19,6 +19,7 @@ import {
   freshEgress, isBrowserProcess, normalizeIp, outboundFromLsof, outboundFromProcNet, procAddress, requestsOutsideMachine,
 } from '../scripts/release-check/egress.ts';
 import { evaluateObservation, type QuestionObservation } from '../scripts/release-check/suite.ts';
+import { ISOLATED_BROWSER_FLAGS } from '../scripts/release-check/machine-agent.ts';
 
 const ID = 'AbCdEfGhIjKlMnOpQrStUv';
 const OTHER = 'ZyXwVuTsRqPoNmLkJiHgFe';
@@ -301,6 +302,15 @@ function procHex(bytes: number[]): string {
 }
 const ROW = (local: string, remote: string, state: string, inode: string): string => `   0: ${local} ${remote} ${state} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
 const HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+
+describe('the browser the Inbox check drives', () => {
+  test('every name is unresolvable except this machine\'s own addresses, which the dashboard is served on', () => {
+    const rule = ISOLATED_BROWSER_FLAGS.find((flag) => flag.startsWith('--host-resolver-rules='))!;
+    expect(rule).toContain('MAP * ~NOTFOUND');
+    for (const loopback of ['localhost', '127.0.0.1', '[::1]']) expect(rule).toContain(`EXCLUDE ${loopback}`);
+    expect(ISOLATED_BROWSER_FLAGS).toEqual(expect.arrayContaining(['--disable-background-networking', '--disable-sync']));
+  });
+});
 
 describe('the connection sampler\'s parsers', () => {
   test('addresses are read in the byte order /proc prints them, IPv4, IPv6 and IPv4-mapped', () => {

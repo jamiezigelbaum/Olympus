@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import { FIXTURE_ITEMS, PRIVATE_FACTS, PRIVATE_MARKER } from '../scripts/release-check/fixture.ts';
 import { REMOTE_PRIVATE_NOTE } from '../src/core/remote-result.ts';
 import { PRIVATE_MATCH_NOTE } from '../src/workers/chatgpt/response-builder.ts';
-import { INBOX_SELFTEST_FAILS, INBOX_SELFTESTS, newRunId, parseCli, runReleaseCheck, type RunConfigFile } from '../scripts/release-check/run.ts';
+import { SOURCE_ANSWER_HANDOFF_MAX_MS } from '../src/core/source-answer-jobs.ts';
+import { ANSWER_TOOL_CALL_TIMEOUT_MS, INBOX_SELFTEST_FAILS, INBOX_SELFTESTS, newRunId, parseCli, runReleaseCheck, type RunConfigFile } from '../scripts/release-check/run.ts';
 
 const ID = 'AbCdEfGhIjKlMnOpQrStUv';
 
@@ -34,6 +35,7 @@ if (verb === 'provision') {
   const script = await new Response(Bun.stdin.stream()).text();
   const sub = /agent\.js (\S+)/.exec(script)?.[1];
   appendFileSync(state + '/agent.log', (/agent\.js (.*)/.exec(script)?.[1] ?? '') + '\n');
+  appendFileSync(state + '/timeouts.log', (/agent\.js (.*)/.exec(script)?.[1] ?? '') + '|' + arg('--timeout-s') + '\n');
   const life = JSON.parse(readFileSync(state + '/life.json', 'utf8'));
   const counts = { seen: life.seen, indexed: life.stored, contentReady: life.stored, embedded: life.stored, secretsLocated: life.secrets, pending: 0, queueWaiting: 0, queueActive: 0, personal: life.personal, privateItems: life.privateItems };
   const mode = process.env.FAKE_INBOX_MODE ?? '';
@@ -43,6 +45,10 @@ if (verb === 'provision') {
   else if (sub === 'sync') say({ ok: true, status: 200 });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });
   else if (sub === 'mcp-token') say({ ok: true, connection: 'conn-1' });
+  else if (sub === 'mcp-tools' && mode === 'tools-fail') say({ ok: false, tools: [] });
+  else if (sub === 'mcp-tools' && mode === 'tools-malformed') say({ ok: true, tools: 'olympus_search' });
+  else if (sub === 'mcp-tools' && mode === 'tools-empty') say({ ok: true, tools: [] });
+  else if (sub === 'mcp-tools' && mode === 'tools-crash') { console.error('agent crashed'); process.exit(1); }
   else if (sub === 'mcp-tools') say({ ok: true, tools: [{ name: 'olympus_search', annotations: { readOnlyHint: true } }, { name: 'source_answer_result', annotations: { readOnlyHint: true } }, ...(process.env.FAKE_ANSWER_TOOL === '1' ? [{ name: 'source_answer', annotations: { readOnlyHint: true } }] : [])] });
   else if (sub === 'mcp-call') {
     const note = process.env.FAKE_NOTE ?? '';
@@ -303,6 +309,33 @@ describe('an install that offers source_answer', () => {
     expect(calls[1]).toContain("'source_answer_result'");
     expect(checkOf(report, 'private-medical.link')?.status).toBe('pass');
   }, 120_000);
+});
+
+describe('the tool listing and the answer tool\'s time', () => {
+  test('a call to source_answer is given longer than the engine\'s longest hand-off, so a slow answer\'s "working" reply is seen and collected', async () => {
+    expect(ANSWER_TOOL_CALL_TIMEOUT_MS).toBeGreaterThan(SOURCE_ANSWER_HANDOFF_MAX_MS + 60_000);
+    process.env.FAKE_WORKING = '1';
+    const report = await runReleaseCheck(options());
+    expect(failedIds(report)).toEqual([]);
+    const timeouts = readFileSync(join(dir, 'timeouts.log'), 'utf8').split('\n').filter(Boolean);
+    const timeoutOf = (tool: string): number => Number(timeouts.find((line) => line.startsWith(`mcp-call '${tool}'`))!.split('|')[1]) * 1000;
+    expect(timeoutOf('source_answer')).toBeGreaterThan(SOURCE_ANSWER_HANDOFF_MAX_MS);
+    expect(timeoutOf('source_answer_result')).toBeGreaterThan(SOURCE_ANSWER_HANDOFF_MAX_MS);
+  }, 120_000);
+
+  for (const mode of ['tools-fail', 'tools-malformed', 'tools-empty', 'tools-crash']) {
+    test(`a tool listing that is ${mode.slice(6)} fails the run on mcp.tool-list and is never taken for a standard install`, async () => {
+      process.env.FAKE_INBOX_MODE = mode;
+      const report = await runReleaseCheck(options());
+      expect(report.verdict).toBe('fail');
+      expect(failedIds(report)).toEqual(['mcp.tool-list']);
+      expect(checkOf(report, 'inbox.agent.link-path')).toBeUndefined();
+      // The leg did not guess: nothing was asked and the browser was not driven.
+      expect(agentLog().some((line) => line.startsWith('mcp-call'))).toBe(false);
+      expect(agentLog().some((line) => line.startsWith('inbox-check'))).toBe(false);
+      expect(driverLog().at(-1)).toContain('destroy');
+    }, 120_000);
+  }
 });
 
 describe('the Inbox self-test arguments', () => {
