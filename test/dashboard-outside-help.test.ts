@@ -527,7 +527,7 @@ describe('the Outside help page: states and copy', () => {
     const html = page(status());
     const text = visibleText(html);
     expect(text).toContain('What may zkAPI send?');
-    for (const line of ['Standard (recommended)', 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
+    for (const line of ['Standard (recommended)', 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but isn\'t told who sent it.',
       'Strict', 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).']) expect(text).toContain(line);
     expect(text).not.toContain('without names (recommended)');
     expect(html).toContain('<input type="radio" name="level" value="unnamed" checked>');

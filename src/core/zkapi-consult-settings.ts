@@ -82,7 +82,7 @@ export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   },
   {
     id: 'provider_reads',
-    statement: 'The AI provider reads each question but cannot tell who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are.',
+    statement: 'The AI provider reads each question but isn’t told who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are.',
   },
   {
     id: 'cost',

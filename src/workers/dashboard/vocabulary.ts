@@ -2347,7 +2347,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   computerKnows: "It searches your files.",
   veniceLeaves: "A strong model that reads the passages it needs from your files. Venice knows it’s you.",
   veniceKnows: "Venice says it doesn’t keep them.",
-  zkapiLeaves: "A top model that can’t see your files. It can read your question but can’t tell who sent it.",
+  zkapiLeaves: "A top model that can’t see your files. It reads your question but isn’t told who’s asking.",
   zkapiKnows: "Takes 1 to 3 minutes.",
   askComputer: "Ask the local model",
   askVenice: "Ask a Venice model",
@@ -2495,7 +2495,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     unnamed: {
       short: 'Standard',
       title: 'Standard (recommended)',
-      body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
+      body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but isn\'t told who sent it.',
     },
     general: {
       short: 'Strict',

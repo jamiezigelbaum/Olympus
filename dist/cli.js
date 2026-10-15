@@ -8618,7 +8618,7 @@ var init_zkapi_consult_settings = __esm(() => {
     },
     {
       id: "provider_reads",
-      statement: "The AI provider reads each question but cannot tell who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are."
+      statement: "The AI provider reads each question but isn’t told who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are."
     },
     {
       id: "cost",
@@ -72973,7 +72973,7 @@ var init_vocabulary = __esm(() => {
     computerKnows: "It searches your files.",
     veniceLeaves: "A strong model that reads the passages it needs from your files. Venice knows it’s you.",
     veniceKnows: "Venice says it doesn’t keep them.",
-    zkapiLeaves: "A top model that can’t see your files. It can read your question but can’t tell who sent it.",
+    zkapiLeaves: "A top model that can’t see your files. It reads your question but isn’t told who’s asking.",
     zkapiKnows: "Takes 1 to 3 minutes.",
     askComputer: "Ask the local model",
     askVenice: "Ask a Venice model",
@@ -73100,7 +73100,7 @@ var init_vocabulary = __esm(() => {
       unnamed: {
         short: "Standard",
         title: "Standard (recommended)",
-        body: "Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can't tell who sent it."
+        body: "Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but isn't told who sent it."
       },
       general: {
         short: "Strict",
