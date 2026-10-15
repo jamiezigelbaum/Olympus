@@ -20,6 +20,8 @@ import {
 } from '../scripts/release-check/egress.ts';
 import { evaluateObservation, type QuestionObservation } from '../scripts/release-check/suite.ts';
 import { ISOLATED_BROWSER_FLAGS } from '../scripts/release-check/machine-agent.ts';
+import { exchangesObservation } from '../scripts/release-check/run.ts';
+import type { McpExchange } from '../scripts/release-check/mcp-proxy.ts';
 
 const ID = 'AbCdEfGhIjKlMnOpQrStUv';
 const OTHER = 'ZyXwVuTsRqPoNmLkJiHgFe';
@@ -149,6 +151,30 @@ function good(): InboxObservation {
 }
 const ctx = { scriptedId: ID, agentLinks: [{ agent: 'xai', id: OTHER }] };
 const failing = (obs: InboxObservation, c = ctx): string[] => evaluateInbox(obs, c).filter((check) => check.status === 'fail').map((check) => check.id);
+
+describe('which agents are judged on the Open link', () => {
+  const call = (tool: string, output: unknown): McpExchange => ({ method: 'tools/call', tool, args: { question: privateQuestion.text }, status: 200, outputText: typeof output === 'string' ? output : JSON.stringify(output), isError: false });
+  const noLink = { kind: 'source_answer', status: 'answered', answer: 'a', citations: [], private_note: REMOTE_PRIVATE_NOTE };
+  const withLink = { ...noLink, private_note: productNote(ID) };
+  const judged = (exchanges: McpExchange[]) => evaluateObservation(exchangesObservation(privateQuestion, 'agent', '', exchanges, 1, undefined), markers);
+  const status = (checks: ReturnType<typeof evaluateObservation>, id: string): string | undefined => checks.find((c) => c.id === id)?.status;
+
+  test('an agent that only searched (the model agents are told to use olympus_search alone) is not failed for a link the search does not carry', () => {
+    const checks = judged([call('olympus_search', { evidence: [], note: 'Some items matching this question are marked Private in Olympus.' })]);
+    expect(checks.some((c) => c.id.includes('link'))).toBe(false);
+  });
+
+  test('an agent that called source_answer is judged: no link fails, a well-formed link passes, and collecting the answer with source_answer_result counts the same', () => {
+    expect(status(judged([call('source_answer', noLink)]), 'private-medical.link')).toBe('fail');
+    expect(status(judged([call('source_answer', withLink)]), 'private-medical.link')).toBe('pass');
+    expect(status(judged([call('source_answer', { status: 'working', job_id: 'j' }), call('source_answer_result', noLink)]), 'private-medical.link')).toBe('fail');
+    expect(status(judged([call('source_answer_result', withLink)]), 'private-medical.link')).toBe('pass');
+  });
+
+  test('a source_answer call that returned nothing usable still fails the link: no note is never read as a standard install', () => {
+    expect(status(judged([call('source_answer', { kind: 'source_answer', status: 'answered', answer: 'a', citations: [] })]), 'private-medical.link')).toBe('fail');
+  });
+});
 
 describe('the Inbox checks', () => {
   test('a clean visit passes every check, and each check is named for what it proves', () => {

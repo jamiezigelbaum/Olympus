@@ -442,11 +442,13 @@ async function listedTools(run: Run): Promise<string[] | undefined> {
 }
 
 /**
- * `linkExpected`: this install issues an Open link with a Private question's note (the tool that does, source_answer, is offered).
- * Without it the note cannot carry a link, and judging one would fail every agent for what the install does not do.
+ * What one agent saw for one question. The Open link is judged only for an agent that called the tool that issues it: source_answer (or
+ * source_answer_result, which collects its answer). The model agents are told to use olympus_search alone, whose Private note carries
+ * no link, so they are not failed for one; an agent that did call source_answer and got no link is.
  */
-function exchangesObservation(question: SuiteQuestion, agentId: string, finalText: string, exchanges: McpExchange[], ms: number, error: string | undefined, linkExpected = true): QuestionObservation {
+export function exchangesObservation(question: SuiteQuestion, agentId: string, finalText: string, exchanges: McpExchange[], ms: number, error: string | undefined): QuestionObservation {
   const toolCalls = exchanges.filter((e) => e.method === 'tools/call');
+  const linkIssued = toolCalls.some((call) => call.tool === 'source_answer' || call.tool === 'source_answer_result');
   return {
     question,
     visible: [
@@ -461,7 +463,7 @@ function exchangesObservation(question: SuiteQuestion, agentId: string, finalTex
     evidenceIds: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.id)),
     privateNote: toolCalls.some((c) => privateNoteKindIn(c.outputText, c.structured) !== null),
     // The note as the tool gave it, link included (a Private question only; any other question has none to judge).
-    ...(question.kind === 'private' && linkExpected ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),
+    ...(question.kind === 'private' && linkIssued ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),
     ms,
     ...(error ? { error } : toolCalls.length === 0 ? { error: 'the agent never called the search tool' } : {}),
   };
@@ -476,8 +478,6 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
   const specs = (run.options.config.agents ?? []).filter((spec) => spec.enabled !== false && (run.options.onlyAgents === undefined || run.options.onlyAgents.includes(spec.id)));
   // The command-line agents reach the engine through one tunnel whose startup messages are fetched once (see cachingRelay).
   const tunnel = cachingRelay(machineRelay(run));
-  // The earlier release in an update run predates the link; only the candidate's own stages judge one.
-  const linkExpected = specs.length > 0 && run.stage.id !== 'before' && ((await listedTools(run))?.includes('source_answer') ?? false);
   let primed: Promise<boolean> | undefined;
   const cliRelay = async (): Promise<Relay> => {
     primed ??= tunnel.prime();
@@ -510,7 +510,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
           usage.outputTokens += transcript.usage.outputTokens;
           usage.toolCalls += transcript.calls.length;
           const exchanges: McpExchange[] = transcript.calls.map((c) => ({ method: 'tools/call', tool: c.name, args: c.args, status: 200, outputText: c.output.text, structured: c.output.structured, isError: c.output.isError }));
-          return { observation: exchangesObservation(question, spec.id, transcript.finalText, exchanges, Date.now() - started, undefined, linkExpected), answer: transcript.finalText };
+          return { observation: exchangesObservation(question, spec.id, transcript.finalText, exchanges, Date.now() - started, undefined), answer: transcript.finalText };
         } catch (error) {
           usage.invocations += 1;
           if (error instanceof AgentApiError) {
@@ -519,7 +519,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
             usage.outputTokens += error.usage.outputTokens;
             usage.toolCalls += error.calls.length;
           }
-          return { observation: exchangesObservation(question, spec.id, '', [], Date.now() - started, error instanceof Error ? error.message : String(error), linkExpected), answer: '' };
+          return { observation: exchangesObservation(question, spec.id, '', [], Date.now() - started, error instanceof Error ? error.message : String(error)), answer: '' };
         }
       };
     } else if (spec.kind === 'claude-code') {
@@ -537,7 +537,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
           usage.inputTokens += result.usage.inputTokens;
           usage.outputTokens += result.usage.outputTokens;
           usage.toolCalls += proxy.exchanges.filter((e) => e.method === 'tools/call').length;
-          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error, linkExpected), answer: result.finalText };
+          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error), answer: result.finalText };
         } finally {
           proxy.stop();
         }
@@ -555,7 +555,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
           usage.inputTokens += result.usage.inputTokens;
           usage.outputTokens += result.usage.outputTokens;
           usage.toolCalls += proxy.exchanges.filter((e) => e.method === 'tools/call').length;
-          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error, linkExpected), answer: result.finalText };
+          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error), answer: result.finalText };
         } finally {
           proxy.stop();
         }
@@ -774,7 +774,7 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
     // The reply is the note passed on as written, which is what the tool tells an agent to do. The self-test adds a Private fact to it.
     const reply = `${note ?? ''}${selftest === 'plant-private-reply' ? ` Reference: ${PRIVATE_FACTS[0]}.` : ''}`;
     const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool, args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
-    const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined), linkMode === 'issued');
+    const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined));
     scripted.checks.push(...evaluateObservation(observation, run.markers));
     scriptedId = privateLinkIdsIn(observation.privateNoteText ?? '')[0];
   });
