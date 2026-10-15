@@ -170,7 +170,11 @@ export class CommandDriver {
   async destroy(target: { handle: string } | { runId: string }): Promise<void> {
     const selector = 'handle' in target ? ['--machine', target.handle] : ['--run-id', target.runId];
     const r = await run([...this.options.argv, 'destroy', ...selector], { timeoutMs: 180_000, onStderr: this.log });
-    if (r.code !== 0) throw new Error(`driver destroy failed (exit ${r.code})`);
+    if (r.code !== 0) {
+      // The driver's last line says which machine may be left and how to remove it by hand; the report carries it.
+      const last = r.stderr.split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).pop();
+      throw new Error(`driver destroy failed (exit ${r.code})${last ? `: ${last.slice(0, 400)}` : ''}`);
+    }
   }
 
   async reap(olderThanMin: number): Promise<void> {

@@ -13,7 +13,7 @@ import { PRIVATE_MARKER } from '../scripts/release-check/fixture.ts';
 let dir: string;
 let driverPath: string;
 let logPath: string;
-const saved = { log: process.env.FAKE_DRIVER_LOG, fail: process.env.FAKE_DRIVER_FAIL };
+const saved = { log: process.env.FAKE_DRIVER_LOG, fail: process.env.FAKE_DRIVER_FAIL, failDestroy: process.env.FAKE_DRIVER_FAIL_DESTROY };
 
 const FAKE_DRIVER = `#!/usr/bin/env bash
 verb="$1"; shift
@@ -26,7 +26,8 @@ case "$verb" in
     echo "{\\"machine\\":\\"fake-$run_id\\",\\"label\\":\\"Fake machine\\",\\"os\\":\\"linux\\",\\"driver\\":\\"fake\\"}" ;;
   exec) cat > /dev/null ;;
   put|get|reap) ;;
-  destroy) ;;
+  destroy)
+    if [ "\${FAKE_DRIVER_FAIL_DESTROY:-}" = "1" ]; then echo "checking" >&2; echo "CLEANUP FAILED: fake-machine may still exist on host (listing failed). Remove it by hand: ssh host 'lxc delete fake-machine --force'" >&2; exit 1; fi ;;
   *) exit 64 ;;
 esac
 `;
@@ -40,10 +41,11 @@ beforeEach(() => {
   writeFileSync(logPath, '');
   process.env.FAKE_DRIVER_LOG = logPath;
   delete process.env.FAKE_DRIVER_FAIL;
+  delete process.env.FAKE_DRIVER_FAIL_DESTROY;
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
-  for (const [key, value] of [['FAKE_DRIVER_LOG', saved.log], ['FAKE_DRIVER_FAIL', saved.fail]] as const) {
+  for (const [key, value] of [['FAKE_DRIVER_LOG', saved.log], ['FAKE_DRIVER_FAIL', saved.fail], ['FAKE_DRIVER_FAIL_DESTROY', saved.failDestroy]] as const) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 });
@@ -103,6 +105,17 @@ describe('command driver', () => {
   });
 });
 
+describe('a cleanup the driver could not confirm', () => {
+  test('the failure carries the driver\'s last line: the machine and the manual command', async () => {
+    process.env.FAKE_DRIVER_FAIL_DESTROY = '1';
+    const driver = new CommandDriver({ argv: [driverPath] });
+    const failure = await driver.destroy({ handle: 'fake-machine' }).then(() => undefined, (error: Error) => error.message);
+    expect(failure).toContain('driver destroy failed (exit 1): CLEANUP FAILED: fake-machine may still exist');
+    expect(failure).toContain("ssh host 'lxc delete fake-machine --force'");
+    expect(failure).not.toContain('checking');
+  });
+});
+
 describe('run helpers', () => {
   test('the agent line is the last JSON object on stdout', () => {
     expect(parseAgentLine('noise\n{"ok":true,"n":1}\nmore noise\n')).toEqual({ ok: true, n: 1 });
@@ -142,6 +155,18 @@ describe('teardown', () => {
     const report = await runReleaseCheck(opts);
     expect(report.verdict).toBe('fail');
     expect(driverLog().some((line) => line === `destroy --run-id ${opts.runId}`)).toBe(true);
+  }, 120_000);
+
+  test('a teardown the driver could not confirm fails the run, and the report names the machine and the manual command', async () => {
+    process.env.FAKE_DRIVER_FAIL_DESTROY = '1';
+    const opts = options({ failAfterProvision: true });
+    const report = await runReleaseCheck(opts);
+    expect(report.verdict).toBe('fail');
+    const text = report.errors.join(' ');
+    expect(text).toContain('teardown failed');
+    expect(text).toContain('CLEANUP FAILED: fake-machine may still exist');
+    expect(text).toContain("lxc delete fake-machine --force");
+    expect(readFileSync(join(opts.outDir, 'report.html'), 'utf8')).toContain('CLEANUP FAILED');
   }, 120_000);
 
   test('--keep-machine leaves the machine and fails the run so it cannot pass for release evidence', async () => {
