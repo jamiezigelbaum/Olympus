@@ -138,6 +138,9 @@ describe('public flip owner-identifier scan', () => {
       'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.1',
       'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.1/olympus-1.0.1.tgz',
       'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.1',
+      'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.1.0',
+      'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.1.0/olympus-1.1.0.tgz',
+      'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.1.0',
     ];
     for (const path of ['README.md', 'INSTALL_FOR_AGENTS.md', 'docs/QUICKSTART.md']) {
       const clean = fixtureTree({ [path]: urls.map((url) => `\`${url}\``).join('\n') });

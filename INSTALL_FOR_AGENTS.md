@@ -272,24 +272,24 @@ prompt. Do not ask them to supply a tarball, a checksum receipt, or GitHub
 credentials. Download the designated pilot through GitHub's public release
 API without authentication:
 
-`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.1`
+`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.1.0`
 
 The repository guide pins the designated candidate below. These are agent-only
 verification inputs, not a receipt to request from the operator:
 
-- SHA-256: `fbf0de73a0188a7cf818c0264bd4601432d81277c6656dbef2096457c7d4b43e`
-- Byte count: `16116466`
+- SHA-256: `b9ea7f219886dfd74a30bdbfadbc6a1c876795836a600325cf77ec80b9ac8372`
+- Byte count: `16134010`
 
 1. Fetch that exact release as JSON over HTTPS. Require a successful HTTP
-   response, `tag_name` equal to `v1.0.1`, `prerelease` equal to `false`,
+   response, `tag_name` equal to `v1.1.0`, `prerelease` equal to `false`,
    and `draft` equal to `false`.
    Do not use `/releases/latest`: a later release is not automatically this
    guide's candidate.
-2. Select exactly one uploaded asset named `olympus-1.0.1.tgz` from `assets`.
+2. Select exactly one uploaded asset named `olympus-1.1.0.tgz` from `assets`.
    Require `state: "uploaded"`, a positive integer `id` and `size`, and a
    `digest` of the form `sha256:` followed by 64 hexadecimal characters.
    Its `browser_download_url` must be exactly
-   `https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.1/olympus-1.0.1.tgz`.
+   `https://github.com/jamiezigelbaum/Olympus/releases/download/v1.1.0/olympus-1.1.0.tgz`.
    Require the metadata's digest and size to match the pinned values above;
    a replacement upload under the same tag/name is not a qualified candidate.
    GitHub's generated source-code archives are not the plugin package.
@@ -321,8 +321,8 @@ read-only download after reporting it.
 For the local comparison in step 3, use the downloaded file's absolute path:
 
 ```bash
-shasum -a 256 /absolute/path/to/olympus-1.0.1.tgz
-wc -c < /absolute/path/to/olympus-1.0.1.tgz
+shasum -a 256 /absolute/path/to/olympus-1.1.0.tgz
+wc -c < /absolute/path/to/olympus-1.1.0.tgz
 ```
 
 The expected digest and size come from the repository pin and fetched release
@@ -330,7 +330,7 @@ metadata, never from the same local file you are checking. Reference command
 for the packaged guide's single install of those verified bytes:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.1.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.1.0.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there means only "overwrite an existing plugin" — re-run with no flags
 openclaw plugins enable olympus
