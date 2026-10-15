@@ -445,6 +445,39 @@ Rules:
   the bulk release approval gate applies to every explicit `secure_local`
   request.
 
+- Private answers inbox (1.1.0). When a remote agent's `source_answer` is not
+  released an answer built from Private items (release approval required,
+  withheld, excluded by policy, or the private route unavailable) but Private
+  items match its question,
+  Olympus records the question on the computer and answers it there in the
+  background with the built-in private model only, never Venice. The agent is
+  told only "Your answer is in Olympus on your computer." with an
+  `olympus://open/private/<id>` link: `<id>` is a random 22-character locator,
+  not a capability, and carries no part of the question or answer. ChatGPT
+  is unchanged: its private answers stay sealed in the panel and are not kept
+  in the inbox (the inbox answers a ChatGPT question only if no live panel
+  claims it within a short grace window). The owner's own "Ask a question"
+  chooses the destination: the built-in model on the computer; a Venice model,
+  only when the sovereignty policy's `secure_local` pool lists an approved
+  Venice member (a stored key alone is not permission; the gate is checked
+  again at dispatch, keyword retrieval over `internal` and `secure_local`
+  corpora, and the titles, sources and dates of the items sent are recorded);
+  or zkAPI, where only the typed question, prepared at the chosen level by the
+  consult writer and passed through the consult gate, leaves. The inbox is a
+  local SQLite file (`waiting-private-questions.sqlite`, directory 0700, file
+  0600, `secure_delete`) holding each question, its answer, the citations'
+  title, source, date, link and local path, who asked, and, for zkAPI, the
+  exact text sent and the reply (except a question typed in ChatGPT's private
+  question panel). Unanswered questions expire after seven days. Answers stay
+  until the owner deletes them (Delete, Delete all), the source they drew on
+  is deleted, the agent's connection is revoked, or `olympus data delete
+  --all` runs; the oldest are removed past 50 answers or 1 MiB per agent, or
+  500 answers or 16 MiB in all, each answer being at most 128 KiB. Nothing
+  indexes the file; it is excluded from export, support bundles and telemetry
+  and served only through the local control route. An answer can repeat what
+  the Private items say, so the file holds Private-derived text on the
+  computer until the owner deletes it.
+
 - Per-tier stores (four-tier phase P1b; design
   [per-item-four-tier-classification.md](design/per-item-four-tier-classification.md)).
   Gmail, Google Drive and Telegram each keep one store per trust domain
