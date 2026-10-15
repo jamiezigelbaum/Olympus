@@ -75,8 +75,8 @@ describe('source skill runtime context', () => {
   test('the canonical OpenClaw change protocol stays the live-system contract', () => {
     // skills/update-openclaw-runtime was deleted on 2026-09-18: updating a live
     // OpenClaw deployment is the deployment owner's procedure, not a skill this
-    // repository ships. AGENTS.md and docs/ops/OPENCLAW_CHANGE_PROTOCOL.md are
-    // what still have to carry the contract for anyone working in this tree.
+    // repository ships. docs/ops/OPENCLAW_CHANGE_PROTOCOL.md carries the contract
+    // for anyone working in this tree; AGENTS.md only points to it.
     const resolver = readFileSync(join(ROOT, 'skills', 'RESOLVER.md'), 'utf8');
     const agents = readFileSync(join(ROOT, 'AGENTS.md'), 'utf8');
     const canonical = readFileSync(join(ROOT, 'docs', 'ops', 'OPENCLAW_CHANGE_PROTOCOL.md'), 'utf8');
@@ -93,8 +93,9 @@ describe('source skill runtime context', () => {
       'openclaw gateway stability --bundle latest',
       'config set` `.bak.*` rotation',
     ]) {
-      expect(agents).toContain(text);
+      expect(canonical.replace(/\s+/g, ' ')).toContain(text);
     }
+    expect(agents).toContain('docs/ops/OPENCLAW_CHANGE_PROTOCOL.md');
     expect(canonical).toContain('native OpenClaw processes only');
     expect(canonical).toContain('openclaw-ops');
     expect(canonical).not.toContain('openclaw-safe-restart');
