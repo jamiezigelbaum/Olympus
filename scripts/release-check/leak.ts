@@ -71,3 +71,13 @@ export function redactMarkers(text: string, markers: readonly LeakMarker[]): str
   }
   return out;
 }
+
+/** The same redaction over every string in a value (object keys included), so a structure can be written whole. */
+export function redactDeep<T>(value: T, markers: readonly LeakMarker[]): T {
+  if (typeof value === 'string') return redactMarkers(value, markers) as T;
+  if (Array.isArray(value)) return value.map((item) => redactDeep(item, markers)) as T;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [redactMarkers(key, markers), redactDeep(item, markers)])) as T;
+  }
+  return value;
+}

@@ -8,12 +8,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommandDriver, parseProvisionLine } from '../scripts/release-check/machine.ts';
 import { newRunId, parseAgentLine, runReleaseCheck, type RunConfigFile } from '../scripts/release-check/run.ts';
-import { PRIVATE_MARKER } from '../scripts/release-check/fixture.ts';
+import { PRIVATE_MARKER, SECRET_MARKER } from '../scripts/release-check/fixture.ts';
 
 let dir: string;
 let driverPath: string;
 let logPath: string;
-const saved = { log: process.env.FAKE_DRIVER_LOG, fail: process.env.FAKE_DRIVER_FAIL, failDestroy: process.env.FAKE_DRIVER_FAIL_DESTROY };
+const saved = { log: process.env.FAKE_DRIVER_LOG, fail: process.env.FAKE_DRIVER_FAIL, failDestroy: process.env.FAKE_DRIVER_FAIL_DESTROY, leak: process.env.FAKE_DRIVER_DESTROY_LEAK };
 
 const FAKE_DRIVER = `#!/usr/bin/env bash
 verb="$1"; shift
@@ -27,6 +27,7 @@ case "$verb" in
   exec) cat > /dev/null ;;
   put|get|reap) ;;
   destroy)
+    if [ -n "\${FAKE_DRIVER_DESTROY_LEAK:-}" ]; then echo "CLEANUP FAILED: fake-machine may still exist (\$FAKE_DRIVER_DESTROY_LEAK)" >&2; exit 1; fi
     if [ "\${FAKE_DRIVER_FAIL_DESTROY:-}" = "1" ]; then echo "checking" >&2; echo "CLEANUP FAILED: fake-machine may still exist on host (listing failed). Remove it by hand: ssh host 'lxc delete fake-machine --force'" >&2; exit 1; fi ;;
   *) exit 64 ;;
 esac
@@ -42,10 +43,11 @@ beforeEach(() => {
   process.env.FAKE_DRIVER_LOG = logPath;
   delete process.env.FAKE_DRIVER_FAIL;
   delete process.env.FAKE_DRIVER_FAIL_DESTROY;
+  delete process.env.FAKE_DRIVER_DESTROY_LEAK;
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
-  for (const [key, value] of [['FAKE_DRIVER_LOG', saved.log], ['FAKE_DRIVER_FAIL', saved.fail], ['FAKE_DRIVER_FAIL_DESTROY', saved.failDestroy]] as const) {
+  for (const [key, value] of [['FAKE_DRIVER_LOG', saved.log], ['FAKE_DRIVER_FAIL', saved.fail], ['FAKE_DRIVER_FAIL_DESTROY', saved.failDestroy], ['FAKE_DRIVER_DESTROY_LEAK', saved.leak]] as const) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 });
@@ -167,6 +169,28 @@ describe('teardown', () => {
     expect(text).toContain('CLEANUP FAILED: fake-machine may still exist');
     expect(text).toContain("lxc delete fake-machine --force");
     expect(readFileSync(join(opts.outDir, 'report.html'), 'utf8')).toContain('CLEANUP FAILED');
+  }, 120_000);
+
+  test('driver stderr that carries a Private and a Secret marker fails the run, and neither reaches report.json or report.html', async () => {
+    process.env.FAKE_DRIVER_DESTROY_LEAK = `${PRIVATE_MARKER} and ${SECRET_MARKER}`;
+    const opts = options({ failAfterProvision: true });
+    const report = await runReleaseCheck(opts);
+    expect(report.verdict).toBe('fail');
+    // The scan still fails the run on the hit...
+    const scan = report.machines[0]!.checks.find((c) => c.id === 'scan.report');
+    expect(scan?.status).toBe('fail');
+    expect(scan?.detail).toContain('private-marker');
+    expect(scan?.detail).toContain('secret-marker');
+    // ...and the written report holds the redaction, not the text, in every file it wrote.
+    for (const file of ['report.json', 'report.html', join('logs', 'run.log')]) {
+      const text = readFileSync(join(opts.outDir, file), 'utf8');
+      expect(text, file).not.toContain(PRIVATE_MARKER);
+      expect(text, file).not.toContain(SECRET_MARKER);
+    }
+    expect(readFileSync(join(opts.outDir, 'report.json'), 'utf8')).toContain('[redacted:private-marker]');
+    // The returned report is the written one.
+    expect(JSON.stringify(report)).not.toContain(PRIVATE_MARKER);
+    expect(JSON.stringify(report)).not.toContain(SECRET_MARKER);
   }, 120_000);
 
   test('--keep-machine leaves the machine and fails the run so it cannot pass for release evidence', async () => {
