@@ -1,4 +1,4 @@
-import { afterEach, expect, test, spyOn } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, statSync, existsSync, chmodSync, writeFileSync, symlinkSync } from 'node:fs';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -264,80 +264,49 @@ test('bridged pages keep every inline script the worker allowed, and the bootstr
   }
 });
 
-const statePath = (f: ReturnType<typeof fixture>) => join(f.root, 'olympus', 'owner-bridge-sessions.json');
-function restart(f: ReturnType<typeof fixture>) {
-  f.bridge.close();
-  const bridge = new LinuxOwnerBridge(f.options);
-  cleanup.push(() => bridge.close());
-  return bridge;
-}
+test('opening view stays in the launched window and owner redemption refuses absent presence and replay', async () => {
+  const f = fixture(); await f.bridge.openTicket('/dashboard');
+  const file = readFileSync(f.opened(), 'utf8');
+  const proofView = await (await f.bridge.handle(f.request('/owner-proof'))).text();
+  for (const html of [file, proofView]) {
+    expect(html).toContain('<h1>Olympus</h1>');
+    expect(html).toContain('role="status"');
+    expect(html).not.toMatch(/window\.(open|close)\(/);
+  }
+  const ticket = file.match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  f.ready(false);
+  const refused = await f.bridge.handle(f.post('/owner-proof', { ticket }));
+  expect(refused.status).toBe(503); expect(refused.headers.has('Set-Cookie')).toBe(false);
+  f.ready(true);
+  expect((await f.bridge.handle(f.post('/owner-proof', { ticket }))).status).toBe(200);
+  expect((await f.bridge.handle(f.post('/owner-proof', { ticket }))).status).toBe(403);
+});
 
-test('worker restart retains origin and hashed owner sessions, never tickets or raw secrets', async () => {
+test('a released listener can never restore an epoch, even from a legacy session file', async () => {
   const f = fixture(); const owner = await prove(f);
-  f.advance(10_001); await f.bridge.openTicket('/dashboard');
-  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
-  const text = readFileSync(statePath(f), 'utf8');
-  for (const value of [owner.cookie.split('=')[1]!, owner.proof, owner.ticket, ticket]) expect(text).not.toContain(value);
-  expect(text).not.toContain('ticket');
-  expect(statSync(statePath(f)).mode & 0o777).toBe(0o600);
-  const bridge = restart(f);
-  expect(bridge.origin).toBe(f.bridge.origin);
-  const headers = { Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof };
-  expect((await bridge.handle(f.request('/dashboard.json', { headers }))).status).toBe(200);
-  expect((await bridge.handle(f.request('/dashboard/control/save', { method: 'POST', headers: { ...headers, Origin: bridge.origin }, body: '{}' }))).status).toBe(200);
-  expect((await bridge.handle(f.post('/owner-proof', { ticket }))).status).toBe(403);
-  expect((await bridge.handle(f.request('/dashboard.json', { headers: { ...headers, 'X-Olympus-Owner-Proof': 'forged' } }))).status).toBe(403);
-});
-
-test('restart drops expired sessions without extending their lifetime; cap is fifteen', async () => {
-  const f = fixture(); const owners = [await prove(f)];
-  for (let i = 0; i < 15; i++) { f.advance(10_001); owners.push(await prove(f)); }
-  let bridge = restart(f);
-  expect(JSON.parse(readFileSync(statePath(f), 'utf8')).sessions).toHaveLength(15);
-  const read = (o: typeof owners[number]) => bridge.handle(f.request('/dashboard.json', { headers: { Cookie: o.cookie, 'X-Olympus-Owner-Proof': o.proof } }));
-  expect((await read(owners[0]!)).status).toBe(403);
-  expect((await read(owners.at(-1)!)).status).toBe(200);
-  bridge.close(); f.advance(12 * 60 * 60 * 1000);
-  bridge = new LinuxOwnerBridge(f.options); cleanup.push(() => bridge.close());
-  expect((await read(owners.at(-1)!)).status).toBe(403);
-  expect(JSON.parse(readFileSync(statePath(f), 'utf8')).sessions).toEqual([]);
-});
-
-for (const damage of ['malformed', 'digest', 'origin', '0644', 'symlink']) {
-  test(`restart rejects and deletes ${damage} session state, retaining today's refusal`, async () => {
-    const f = fixture(); const owner = await prove(f); f.bridge.close();
-    const path = statePath(f);
-    const state = JSON.parse(readFileSync(path, 'utf8'));
-    if (damage === 'malformed') writeFileSync(path, '{');
-    if (damage === 'digest') { state.sessions[0].cookieHash = 'forged'; writeFileSync(path, JSON.stringify(state)); }
-    if (damage === 'origin') { state.origin = 'http://evil.invalid:18010'; writeFileSync(path, JSON.stringify(state)); }
-    if (damage === '0644') chmodSync(path, 0o644);
-    if (damage === 'symlink') { rmSync(path); symlinkSync(join(f.root, 'foreign-target'), path); }
-    const bridge = new LinuxOwnerBridge(f.options); cleanup.push(() => bridge.close());
-    expect(existsSync(path)).toBe(false);
-    expect(bridge.origin).not.toBe(f.bridge.origin);
-    expect((await bridge.handle(f.request('/dashboard.json', { headers: { Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof } }))).status).toBe(421);
-    expect((await bridge.handle(new Request(bridge.origin + '/dashboard.json', { headers: { Host: new URL(bridge.origin).host, Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof } }))).status).toBe(403);
-  });
-}
-
-test('foreign-owned session state is deleted and cannot restore owner presence', async () => {
-  const f = fixture(); const owner = await prove(f); f.bridge.close();
-  // A synthetic persisted record makes this refusal test fail even on a
-  // bridge that has no persistence implementation yet.
-  writeFileSync(statePath(f), JSON.stringify({ version: 1, origin: f.bridge.origin, sessions: [{
+  f.bridge.close();
+  writeFileSync(join(f.root, 'olympus', 'owner-bridge-sessions.json'), JSON.stringify({ version: 1, origin: f.bridge.origin, sessions: [{
     cookieHash: new Bun.CryptoHasher('sha256').update(owner.cookie.split('=')[1]!).digest('hex'),
     proofHash: new Bun.CryptoHasher('sha256').update(owner.proof).digest('hex'), expires: 100_000 + 12 * 60 * 60 * 1000,
   }] }), { mode: 0o600 });
-  const fstat = fs.fstatSync;
-  const custody = spyOn(fs, 'fstatSync').mockImplementation(((...args: Parameters<typeof fs.fstatSync>) => new Proxy(fstat(...args), { get: (stat, key) => key === 'uid' ? process.getuid!() + 1 : Reflect.get(stat, key) })) as typeof fs.fstatSync);
-  let bridge!: LinuxOwnerBridge;
-  try { bridge = new LinuxOwnerBridge(f.options); } finally { custody.mockRestore(); }
-  cleanup.push(() => bridge.close());
-  expect(bridge.origin).not.toBe(f.bridge.origin); expect(existsSync(statePath(f))).toBe(false);
+  const next = new LinuxOwnerBridge(f.options); cleanup.push(() => next.close());
+  expect(next.origin).not.toBe(f.bridge.origin);
+  expect((await next.handle(new Request(next.origin + '/dashboard.json', { headers: {
+    Host: new URL(next.origin).host, Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof,
+  } }))).status).toBe(403);
 });
 
-test('Linux dashboard cookie and CSRF survive bridge and worker auth-wrapper restart end to end', async () => {
+test('in-memory owner sessions expire at twelve hours and cap at fifteen', async () => {
+  const f = fixture(); const owners = [await prove(f)];
+  for (let i = 0; i < 15; i++) { f.advance(10_001); owners.push(await prove(f)); }
+  const read = (o: typeof owners[number]) => f.bridge.handle(f.request('/dashboard.json', { headers: { Cookie: o.cookie, 'X-Olympus-Owner-Proof': o.proof } }));
+  expect((await read(owners[0]!)).status).toBe(403);
+  expect((await read(owners.at(-1)!)).status).toBe(200);
+  f.advance(12 * 60 * 60 * 1000);
+  expect((await read(owners.at(-1)!)).status).toBe(403);
+});
+
+test('Linux dashboard cookie and CSRF survive worker auth-wrapper reload behind a held listener', async () => {
   const f = fixture();
   const secretPath = join(f.root, 'dashboard-session.secret');
   const worker = () => withRequestPeer(withWorkerBearerAuth(async r => Response.json({ csrf: r.headers.get('X-Olympus-Control-Session-CSRF') }), {
@@ -359,17 +328,172 @@ test('Linux dashboard cookie and CSRF survive bridge and worker auth-wrapper res
   const headers = { Cookie: cookies, 'X-Olympus-Owner-Proof': proof };
   const before = await bridge.handle(request('/dashboard', { headers }));
   const csrf = (await before.json() as { csrf: string }).csrf; expect(csrf).toBeTruthy();
-  bridge.close(); handler = worker();
-  const next = new LinuxOwnerBridge(f.options); cleanup.push(() => next.close());
+  handler = worker();
+  const next = bridge;
   expect(next.origin).toBe(bridge.origin);
   const after = await next.handle(request('/dashboard', { headers }));
   expect(after.status).toBe(200); expect((await after.json() as { csrf: string }).csrf).toBe(csrf);
   expect((await next.handle(request('/dashboard/control/session/lock', { method: 'POST', headers: { ...headers, Origin: next.origin, 'X-Olympus-CSRF': csrf } }))).status).toBe(200);
 });
 
-test('starting headless after a worker restart revokes the previous desktop epoch', async () => {
-  const f = fixture(); await prove(f); const origin = f.bridge.origin; f.bridge.close(); f.ready(false);
-  const manager = manageLinuxOwnerBridge({ ...f.options, platform: 'linux', listen: () => ({ stop() {} }) }); cleanup.push(() => manager.close());
-  expect(existsSync(statePath(f))).toBe(false);
-  f.ready(true); manager.refresh(); expect(manager.status().origin).not.toBe(origin);
+test('listener challenge authenticates only the live ticket, including restart retries', async () => {
+  const f = fixture(); let workerReady = false;
+  const bridge = new LinuxOwnerBridge({ ...f.options, workerReady: () => workerReady });
+  cleanup.push(() => bridge.close());
+  await bridge.openTicket('/dashboard');
+  const html = readFileSync(f.opened(), 'utf8');
+  const ticket = html.match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const challenge = html.match(/owner-proof\?challenge=([A-Za-z0-9_-]{43})/)![1]!;
+  const get = (suffix: string) => bridge.handle(new Request(bridge.origin + suffix, { headers: { Host: new URL(bridge.origin).host } }));
+  const retry = await get('/owner-proof?challenge=' + challenge);
+  expect(retry.status).toBe(503);
+  expect(retry.headers.get('Access-Control-Allow-Origin')).toBe('*');
+  expect(retry.headers.get('Access-Control-Expose-Headers')).toBe('Retry-After');
+  expect(await retry.text()).not.toContain(ticket);
+  // Navigation must load the ticket redemption logic even during a restart.
+  const navigation = await get('/owner-proof');
+  expect(navigation.status).toBe(200);
+  expect(await navigation.text()).toContain('Olympus is restarting…');
+  workerReady = true;
+  const { createHmac } = await import('node:crypto');
+  const answer = createHmac('sha256', ticket).update(challenge).digest('base64url');
+  expect(await (await get('/owner-proof?challenge=' + challenge)).text()).toBe(answer);
+  expect((await get('/owner-proof?challenge=unknown')).status).toBe(403);
+  bridge.close();
+  expect((await get('/owner-proof?challenge=' + challenge)).status).toBe(503);
+});
+
+test('IPv6 collision refuses the whole listener; release and rebind rotate both families', async () => {
+  const f = fixture();
+  const reserve = Bun.serve({ hostname: '::1', port: 0, fetch: () => new Response('squatter') });
+  const port = reserve.port!;
+  const manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux' });
+  cleanup.push(() => manager.close());
+  try {
+    expect(manager.status().state).toBe('port_in_use');
+    // The successfully acquired IPv4 half must have been released too.
+    const v4 = Bun.serve({ hostname: '127.0.0.1', port, fetch: () => new Response() });
+    await v4.stop(true);
+  } finally { await reserve.stop(true); }
+  manager.refresh(); expect(manager.status().state).toBe('listening');
+  expect(manager.status().ipv6).toBe('listening');
+  const first = manager.status().origin;
+  for (const hostname of ['127.0.0.1', '::1']) expect(() => Bun.serve({ hostname, port, fetch: () => new Response() })).toThrow();
+  f.ready(false); manager.refresh();
+  for (const hostname of ['127.0.0.1', '::1']) {
+    const probe = Bun.serve({ hostname, port, fetch: () => new Response() });
+    await probe.stop(true);
+  }
+  f.ready(true); manager.refresh();
+  expect(manager.status().origin).not.toBe(first);
+});
+
+
+test('only absent IPv6 permits IPv4 alone, and status says IPv6 is unavailable', async () => {
+  const f = fixture();
+  const serve = Bun.serve.bind(Bun);
+  const reserve = serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+  const port = reserve.port!; await reserve.stop(true);
+  for (const code of ['EADDRNOTAVAIL', 'EAFNOSUPPORT', 'EACCES']) {
+    const mock = spyOn(Bun, 'serve').mockImplementation(((options: any) => {
+      if (options.hostname === '::1') throw Object.assign(new Error('IPv6 refused'), { code });
+      return serve(options);
+    }) as typeof Bun.serve);
+    let manager: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+    try {
+      manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux' });
+      const status = manager.status();
+      if (code === 'EACCES') expect(status.state).toBe('unavailable');
+      else {
+        expect(status.state).toBe('listening');
+        expect(status.ipv6).toBe('unavailable');
+        expect(() => serve({ hostname: '127.0.0.1', port, fetch: () => new Response() })).toThrow();
+      }
+    } finally { manager?.close(); mock.mockRestore(); }
+    const probe = serve({ hostname: '127.0.0.1', port, fetch: () => new Response() });
+    await probe.stop(true);
+  }
+});
+
+test('a claimed ticket retries a restarted socket without concurrent redemption or expiry extension', async () => {
+  const f = fixture(); let calls = 0, release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => {
+    if (++calls === 1) { await pending; throw new Error('Worker socket restarted'); }
+    return [];
+  } });
+  cleanup.push(() => bridge.close());
+  await bridge.openTicket('/dashboard');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const request = () => new Request(bridge.origin + '/owner-proof', { method: 'POST', headers: { Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+  const first = bridge.handle(request());
+  await Bun.sleep(1);
+  expect(existsSync(f.opened())).toBe(false);
+  const duplicate = await bridge.handle(request());
+  expect(duplicate.status).toBe(503); expect(duplicate.headers.get('Retry-After')).toBe('1');
+  expect(calls).toBe(1);
+  release();
+  const retry = await first;
+  expect(retry.status).toBe(503); expect(retry.headers.get('Retry-After')).toBe('1');
+  expect(retry.headers.has('Set-Cookie')).toBe(false);
+  expect((await bridge.handle(request())).status).toBe(200);
+  expect(calls).toBe(2);
+  expect((await bridge.handle(request())).status).toBe(403);
+  f.advance(10_001); await bridge.openTicket('/dashboard');
+  const expiring = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  f.advance(60_001);
+  expect((await bridge.handle(new Request(bridge.origin + '/owner-proof', { method: 'POST', headers: { Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket: expiring }) }))).status).toBe(403);
+});
+
+test('expiry, replacement, close and logout invalidate pending claims on either settlement outcome', async () => {
+  for (const invalidate of ['expiry', 'replacement', 'close', 'logout']) for (const outcome of ['success', 'failure']) {
+    const f = fixture(); let settle!: () => void;
+    const pending = new Promise<void>(resolve => { settle = resolve; });
+    const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => {
+      await pending; if (outcome === 'failure') throw new Error('Worker unavailable'); return [];
+    } });
+    cleanup.push(() => bridge.close());
+    await bridge.openTicket('/dashboard');
+    const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+    const request = () => new Request(bridge.origin + '/owner-proof', { method: 'POST', headers: { Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+    const response = bridge.handle(request()); await Bun.sleep(1);
+    if (invalidate === 'expiry') f.advance(60_001);
+    if (invalidate === 'replacement') { f.advance(10_001); await bridge.openTicket('/dashboard'); }
+    if (invalidate === 'close') bridge.close();
+    if (invalidate === 'logout') f.ready(false);
+    settle(); const refused = await response;
+    expect(refused.status).toBe(503); expect(refused.headers.has('Set-Cookie')).toBe(false);
+    expect(refused.headers.has('Retry-After')).toBe(false);
+    if (invalidate === 'logout') f.ready(true);
+    expect((await bridge.handle(request())).status).toBe(invalidate === 'close' ? 503 : 403);
+    if (invalidate === 'replacement') expect(existsSync(f.opened())).toBe(true);
+  }
+});
+
+test('a claim released at 59 seconds still expires at its original deadline', async () => {
+  const f = fixture(); let settle!: () => void;
+  const pending = new Promise<void>(resolve => { settle = resolve; });
+  const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => { await pending; throw new Error('Worker gone'); } });
+  cleanup.push(() => bridge.close());
+  await bridge.openTicket('/dashboard');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const request = () => new Request(bridge.origin + '/owner-proof', { method: 'POST', headers: { Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+  const response = bridge.handle(request()); await Bun.sleep(1);
+  f.advance(59_000); settle();
+  expect((await response).headers.get('Retry-After')).toBe('1');
+  f.advance(1_001);
+  expect((await bridge.handle(request())).status).toBe(403);
+});
+
+test('a worker session refusal permanently spends the claim instead of retrying as a restart', async () => {
+  const f = fixture(); let calls = 0;
+  const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => { calls++; return null; } });
+  cleanup.push(() => bridge.close());
+  await bridge.openTicket('/dashboard');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const request = () => new Request(bridge.origin + '/owner-proof', { method: 'POST', headers: { Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+  const response = await bridge.handle(request());
+  expect(response.status).toBe(403); expect(response.headers.has('Retry-After')).toBe(false);
+  expect(response.headers.has('Set-Cookie')).toBe(false);
+  expect((await bridge.handle(request())).status).toBe(403); expect(calls).toBe(1);
 });
