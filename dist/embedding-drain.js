@@ -31842,7 +31842,7 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      privateAnswers: { title: "Inbox", line: "Answers from all three, kept on this computer." },
+      privateAnswers: { title: "Inbox", line: "Answers from every model, kept on this computer." },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },

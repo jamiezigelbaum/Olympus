@@ -20,7 +20,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous';
 const POST_PATH = '/dashboard/private-answers';
 
 const PRIVATE_ANSWERS_CSS = `
-.pa { width: 100%; min-width: 0; max-width: min(1040px, 100%); }
+.pa { width: 100%; min-width: 0; max-width: min(920px, 100%); }
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
@@ -57,16 +57,38 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa .paasks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: 48px minmax(150px, auto) minmax(65px, auto) minmax(90px, auto); gap: 0 16px; margin: 16px 0 32px; }
-.pa .padestination { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: grid; grid-template-rows: 48px 150px 65px 90px; grid-row: span 4; }
+.pa .paasks { --ladder-columns: 24px 164px minmax(0, 1fr) 210px; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; width: 100%; max-width: 920px; margin: 0 0 24px; }
+.pa .padestination { grid-column: 1 / -1; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; align-items: start; min-width: 0; padding: 16px 0; border-bottom: 1px solid var(--line); position: relative; }
+.pa .padestination:last-child { border-bottom: 0; }
+.pa .padestination > * { min-width: 0; }
 .pa .padestination .sect, .pa .padestination .pnote { margin: 0; }
-.pa .padestination .paaction { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.pa .padestination .btn { white-space: normal; }
-.pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); }
-@supports (grid-template-rows: subgrid) { .pa .padestination { grid-template-rows: subgrid; } }
+.pa .paname { grid-column: 2; }
+.pa .pastatus { display: none; align-items: center; gap: 6px; margin-top: 6px; color: var(--t3); font-size: var(--fs-body); }
+.pa [data-pa-state="ready"] [data-pa-status="ready"], .pa [data-pa-state="not_set_up"] [data-pa-status="not_set_up"], .pa [data-pa-state="not_allowed"] [data-pa-status="not_allowed"], .pa [data-pa-state="busy"] [data-pa-status="busy"] { display: flex; }
+.pa .pastatus .dot.ok { background: var(--good); }
+.pa .pastatus .dot.run { background: var(--run-fill); }
+.pa .pastatus .dot.pause { background: var(--warn-fill); }
+.pa .pawhat { grid-column: 3; }
+.pa .patag, .pa .paknows { color: var(--t3); font-size: var(--fs-body); }
+.pa .padestination .patag, .pa .padestination .paknows { margin-top: 4px; }
+.pa .padestination .paaction { grid-column: 4; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.pa .padestination .btn { white-space: normal; text-align: center; }
+.pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); overflow-wrap: anywhere; }
+.pa .panode { grid-column: 1; width: 12px; height: 12px; margin: 5px 0 0 6px; border-radius: 50%; background: var(--t3); position: relative; }
+.pa #computer .panode { background: var(--t1); }
+.pa .parail { position: absolute; left: 11px; width: 2px; background: var(--line); top: 0; bottom: -1px; }
+.pa #computer .parail { top: 27px; }
+.pa #venice .parail { bottom: auto; height: 27px; }
+.pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
+.pa .pazone b { color: var(--t2); font-weight: 600; }
+.pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
 @media (max-width: 640px) {
-  .pa .paasks { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; gap: 12px; }
-  .pa .padestination { grid-row: auto; grid-template-rows: auto auto auto auto; gap: 10px; }
+  .pa .paasks { grid-template-columns: minmax(0, 1fr); }
+  .pa .padestination { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px 0; }
+  .pa .panode, .pa .parail { display: none; }
+  .pa .paname, .pa .pawhat, .pa .padestination .paaction { grid-column: 1; }
+  .pa .pazone { padding-left: 0; }
 }
 
 `;
@@ -125,13 +147,13 @@ function renderDestinations(options: DashboardPageOptions | undefined, enabled: 
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
   const destinations = [
-    { id: 'computer', name: W.computerName, leaves: W.computerLeaves, knows: W.computerKnows, ask: W.askComputer, setup: W.setUpComputer, state: states.computer, reason: states.computerReason ?? W.noModel, href: models, action: 'ask' },
-    { id: 'venice', name: W.veniceName, leaves: W.veniceLeaves, knows: W.veniceKnows, ask: W.askVenice, setup: W.setUpVenice, state: states.venice, reason: W.veniceNotSetUp, href: models + '#venice-setup', action: 'ask_venice' },
-    { id: 'anonymous', name: W.zkapiName, leaves: W.zkapiLeaves, knows: W.zkapiKnows, ask: W.askZkapi, setup: W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState ? OH.row[zkState] : W.zkapiNotSetUp, href: models + '#anonymous', action: 'ask_anonymous' },
+    { id: 'computer', name: W.computerName, tag: W.computerTag, leaves: W.computerLeaves, knows: W.computerKnows, ask: W.askComputer, setup: W.setUpComputer, state: states.computer, reason: states.computerReason ?? W.noModel, href: models, action: 'ask' },
+    { id: 'anonymous', name: W.zkapiName, tag: W.zkapiTag, leaves: W.zkapiLeaves, knows: W.zkapiKnows, ask: W.askZkapi, setup: zkState === 'off' ? W.turnOnInModels : zkState === 'needs_acceptance' ? W.goToModels : W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState === 'off' ? W.zkapiOff : zkState === 'needs_acceptance' ? W.zkapiPaused : !zkState || zkState === 'route_not_configured' ? W.zkapiNotSetUp : OH.row[zkState], href: models + '#anonymous', action: 'ask_anonymous' },
+    { id: 'venice', name: W.veniceName, tag: W.veniceTag, leaves: W.veniceLeaves, knows: W.veniceKnows, ask: W.askVenice, setup: W.setUpVenice, state: states.venice, reason: W.veniceNotSetUp, href: models + '#venice-setup', action: 'ask_venice' },
   ];
   return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml(W.askLabel)}</label>`
     + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"${enabled ? '' : ' disabled'}></textarea>`
-    + `<div class="paasks">${destinations.map(d => {
+    + `<p class="pachooser" id="pa-chooser">${escapeHtml(W.chooserLabel)}</p><div class="paasks" role="group" aria-labelledby="pa-chooser"><div class="pazone"><b>${escapeHtml(W.stays)}</b></div>${destinations.map(d => {
       const actions = {
         ready: `<button type="submit" class="btn primary" data-pa-destination="${d.id}" data-pa-action="${d.action}">${escapeHtml(d.ask)}</button><span class="pareason" role="status"></span>`,
         not_set_up: `<a class="btn" href="${escapeHtml(d.href)}">${escapeHtml(d.setup)}</a><span class="pareason" role="status">${escapeHtml(d.reason)}</span>`,
@@ -140,7 +162,12 @@ function renderDestinations(options: DashboardPageOptions | undefined, enabled: 
       };
       const state = d.state as keyof typeof actions;
       const action = enabled ? actions[state] : `<a class="btn" href="${escapeHtml(models)}">${escapeHtml(W.openControls)}</a><span class="pareason">${escapeHtml(W.locked)}</span>`;
-      return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><h3 class="sect">${escapeHtml(d.name)}</h3><p class="pnote paleaves">${escapeHtml(d.leaves)}</p><p class="pnote paknows">${escapeHtml(d.knows)}</p><div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
+      const notReadyLabel = d.id === 'computer' ? d.reason === W.downloading ? W.downloadingStatus : W.notSetUpStatus
+        : d.id === 'anonymous' && zkState === 'off' ? W.offStatus : d.id === 'anonymous' && zkState === 'needs_acceptance' ? W.pausedStatus : W.notConnectedStatus;
+      const notReadyDot = notReadyLabel === W.downloadingStatus ? 'run' : notReadyLabel === W.pausedStatus ? 'pause' : 'hollow';
+      const statuses = [['ready', W.readyStatus, 'ok'], ['not_set_up', notReadyLabel, notReadyDot], ['not_allowed', W.offStatus, 'hollow'], ['busy', W.answering, 'run']]
+        .map(([key, label, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml(label!)}</span>`).join('');
+      return (d.id === 'anonymous' ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml(W.leaves)}</b><span>${escapeHtml(W.order)}</span></div>` : '') + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml(d.name)}</h3><p class="pnote patag">${escapeHtml(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml(d.leaves)}</p><p class="pnote paknows">${escapeHtml(d.knows)}</p></div><div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
     }).join('')}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
 }
 

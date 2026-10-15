@@ -1058,7 +1058,7 @@ describe('the Private answers page', () => {
       citations: [{ title: 'Lease', source: 'Dropbox' }], left_out: ['Gmail'],
     } }));
     expect([...page.document.querySelectorAll('.pa h3')].map((node) => node.textContent)).toEqual([
-      'This computer', 'Venice', 'zkAPI', 'Inbox',
+      'Local model', 'zkAPI model', 'Venice model', 'Inbox',
     ]);
     const field = page.document.querySelector('textarea')!;
     (field as unknown as { value: string }).value = 'When do I renew?';
@@ -1133,7 +1133,7 @@ describe('the Private answers page', () => {
     (page.document.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
     await page.settle();
     const out = page.document.querySelector('[data-pa-question] [data-pa-out]')!;
-    expect(out.textContent).toContain('Items sent to Venice');
+    expect(out.textContent).toContain('What was sent to Venice');
     expect(out.textContent).toContain('<script>bad()</script>');
     expect(out.textContent).toContain('Sent to Venice, but no answer was kept. <img src=x>');
     expect(out.querySelector('img, script, .paanswer, .paopen')).toBeNull();

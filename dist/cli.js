@@ -72332,7 +72332,7 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      privateAnswers: { title: "Inbox", line: "Answers from all three, kept on this computer." },
+      privateAnswers: { title: "Inbox", line: "Answers from every model, kept on this computer." },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
@@ -72772,33 +72772,50 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_PRIVATE_ANSWERS_COPY = {
     crumb: "Inbox",
     title: "Ask a question",
-    intro: "Choose where your question goes. Answers arrive in the inbox.",
-    computerName: "This computer",
-    veniceName: "Venice",
-    zkapiName: "zkAPI",
-    computerLeaves: "The model built into Olympus. Nothing leaves this computer.",
-    computerKnows: "No one else.",
-    veniceLeaves: "A cloud model at Venice. Your question and the Private items it needs go to Venice, which says it doesn't keep them.",
-    veniceKnows: "Venice, through your account.",
-    zkapiLeaves: "A cloud model, paid anonymously. Olympus removes names from your question first.",
-    zkapiKnows: "No one: the payment can't be traced to you.",
-    askComputer: "Ask this computer",
-    askVenice: "Ask Venice",
-    askZkapi: "Ask through zkAPI",
-    setUpComputer: "Set up this computer",
-    setUpVenice: "Set up Venice",
+    intro: "Pick which model answers. Answers land in your inbox on this computer.",
+    chooserLabel: "Which model should answer?",
+    readyStatus: "Ready",
+    downloadingStatus: "Downloading",
+    notSetUpStatus: "Not set up",
+    notConnectedStatus: "Not connected",
+    offStatus: "Turned off",
+    pausedStatus: "Paused",
+    stays: "Stays on this computer",
+    leaves: "Leaves this computer",
+    order: "Least shared first",
+    computerTag: "On this computer",
+    zkapiTag: "In the cloud, paid anonymously",
+    veniceTag: "In Venice’s cloud",
+    zkapiOff: "Turned off. zkAPI is turned off.",
+    zkapiPaused: "Paused. Accept the updated statements to continue.",
+    turnOnInModels: "Turn on in Models",
+    afterAsk: "Sent. The answer will appear in your inbox.",
+    computerName: "Local model",
+    veniceName: "Venice model",
+    zkapiName: "zkAPI model",
+    computerLeaves: "The most private. Nothing leaves, but the model is smaller.",
+    computerKnows: "It searches your files.",
+    veniceLeaves: "A strong model that reads the passages it needs from your files. Venice knows it’s you.",
+    veniceKnows: "Venice says it doesn’t keep them.",
+    zkapiLeaves: "A top model that can’t see your files. It can read your question but can’t tell who sent it.",
+    zkapiKnows: "Takes 1 to 3 minutes.",
+    askComputer: "Ask the local model",
+    askVenice: "Ask a Venice model",
+    askZkapi: "Ask a model through zkAPI",
+    setUpComputer: "Go to Models",
+    setUpVenice: "Connect Venice",
     veniceKey: "Venice API key",
     connectVenice: "Connect Venice",
     veniceSetupHelp: "Connect your Venice account here, then check your privacy settings for Private answers.",
-    setUpZkapi: "Set up zkAPI",
-    veniceNotSetUp: "Venice is not set up. Connect it in Models.",
-    veniceNotAllowed: "Your privacy settings do not allow Venice to answer Private questions.",
+    setUpZkapi: "Connect zkAPI",
+    veniceNotSetUp: "Not connected. Connect Venice to use its models.",
+    veniceNotAllowed: "Turned off. Private questions can’t go to Venice until you allow it.",
     privacySetting: "Privacy settings for Private answers",
     privacySettingHelp: "Your sovereignty privacy preset controls whether Private items may go to Venice. The default keeps them on this computer. Ask your agent to show your current preset and, if you choose, change it with Olympus setup. Connecting a Venice key alone does not allow Private items to leave.",
-    changePrivacy: "Privacy settings",
-    zkapiNotSetUp: "zkAPI is not set up. Open its settings in Models.",
+    changePrivacy: "Allow in Models",
+    zkapiNotSetUp: "Not connected. Connect zkAPI and add money to use it.",
     destinationBusy: "This destination is answering. Please wait.",
-    sentItems: "Items sent to Venice",
+    sentItems: "What was sent to Venice",
     oneSource: "One source",
     emptyQuestion: "Type a question first.",
     privateIntro: "Answered by the built-in model on this computer. Nothing leaves.",
@@ -72812,15 +72829,15 @@ var init_vocabulary = __esm(() => {
     anonymousRateLimit: "Too many questions. Try again later. Nothing was sent.",
     anonymousFailed: "Olympus could not answer this question.",
     goToModels: "Go to Models",
-    privatePath: "This computer",
-    anonymousPath: "zkAPI",
-    sent: "What was sent outside",
+    privatePath: "Local model",
+    anonymousPath: "zkAPI model",
+    sent: "What was sent to zkAPI",
     askLabel: "Your question",
-    askPlaceholder: "Ask about your private things",
+    askPlaceholder: "Type your question",
     ask: "Ask",
     waitingTitle: "Inbox",
-    waitingIntro: "Answers from all three, kept on this computer.",
-    noneWaiting: "Your inbox is empty.",
+    waitingIntro: "Answers from every model, kept on this computer.",
+    noneWaiting: "Your private inbox is empty.",
     olderRemoved: "Older private answers were removed.",
     delete: "Delete",
     deleteAll: "Delete all",
@@ -72837,7 +72854,7 @@ var init_vocabulary = __esm(() => {
     unanswered: "Not found here: {parts}.",
     notFound: "Nothing on this computer answers this.",
     noModel: "The model built into Olympus is not set up yet.",
-    downloading: "The model built into Olympus is still downloading. Try again soon.",
+    downloading: "Downloading. The local model is still downloading.",
     changed: "Something it read changed. Ask again.",
     failed: "Olympus could not answer this. Try again.",
     unreachable: "Olympus is not responding. Try again in a moment.",
@@ -129082,11 +129099,11 @@ function renderDestinations(options, enabled) {
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
   const destinations = [
-    { id: "computer", name: DASHBOARD_PRIVATE_ANSWERS_COPY.computerName, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.computerLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.computerKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askComputer, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpComputer, state: states.computer, reason: states.computerReason ?? DASHBOARD_PRIVATE_ANSWERS_COPY.noModel, href: models, action: "ask" },
-    { id: "venice", name: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askVenice, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice, state: states.venice, reason: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp, href: models + "#venice-setup", action: "ask_venice" },
-    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiName, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askZkapi, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState ? DASHBOARD_OUTSIDE_HELP_COPY.row[zkState] : DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp, href: models + "#anonymous", action: "ask_anonymous" }
+    { id: "computer", name: DASHBOARD_PRIVATE_ANSWERS_COPY.computerName, tag: DASHBOARD_PRIVATE_ANSWERS_COPY.computerTag, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.computerLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.computerKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askComputer, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpComputer, state: states.computer, reason: states.computerReason ?? DASHBOARD_PRIVATE_ANSWERS_COPY.noModel, href: models, action: "ask" },
+    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiName, tag: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiTag, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askZkapi, setup: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.turnOnInModels : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels : DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiOff : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiPaused : !zkState || zkState === "route_not_configured" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp : DASHBOARD_OUTSIDE_HELP_COPY.row[zkState], href: models + "#anonymous", action: "ask_anonymous" },
+    { id: "venice", name: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName, tag: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceTag, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askVenice, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice, state: states.venice, reason: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp, href: models + "#venice-setup", action: "ask_venice" }
   ];
-  return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</label>` + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="paasks">${destinations.map((d) => {
+  return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</label>` + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<p class="pachooser" id="pa-chooser">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="group" aria-labelledby="pa-chooser"><div class="pazone"><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.stays)}</b></div>${destinations.map((d) => {
     const actions = {
       ready: `<button type="submit" class="btn primary" data-pa-destination="${d.id}" data-pa-action="${d.action}">${escapeHtml2(d.ask)}</button><span class="pareason" role="status"></span>`,
       not_set_up: `<a class="btn" href="${escapeHtml2(d.href)}">${escapeHtml2(d.setup)}</a><span class="pareason" role="status">${escapeHtml2(d.reason)}</span>`,
@@ -129095,7 +129112,10 @@ function renderDestinations(options, enabled) {
     };
     const state = d.state;
     const action = enabled ? actions[state] : `<a class="btn" href="${escapeHtml2(models)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a><span class="pareason">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)}</span>`;
-    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+    const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
+    const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
+    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, label, dot2]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot2}" aria-hidden="true"></span>${escapeHtml2(label)}</span>`).join("");
+    return (d.id === "anonymous" ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.leaves)}</b><span>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.order)}</span></div>` : "") + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote patag">${escapeHtml2(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p></div><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
   }).join("")}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
 }
 function renderWaiting(waiting, now) {
@@ -129456,7 +129476,7 @@ function privateAnswersClientScript(input) {
 })();`;
 }
 var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
-.pa { width: 100%; min-width: 0; max-width: min(1040px, 100%); }
+.pa { width: 100%; min-width: 0; max-width: min(920px, 100%); }
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
@@ -129493,16 +129513,38 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa .paasks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: 48px minmax(150px, auto) minmax(65px, auto) minmax(90px, auto); gap: 0 16px; margin: 16px 0 32px; }
-.pa .padestination { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: grid; grid-template-rows: 48px 150px 65px 90px; grid-row: span 4; }
+.pa .paasks { --ladder-columns: 24px 164px minmax(0, 1fr) 210px; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; width: 100%; max-width: 920px; margin: 0 0 24px; }
+.pa .padestination { grid-column: 1 / -1; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; align-items: start; min-width: 0; padding: 16px 0; border-bottom: 1px solid var(--line); position: relative; }
+.pa .padestination:last-child { border-bottom: 0; }
+.pa .padestination > * { min-width: 0; }
 .pa .padestination .sect, .pa .padestination .pnote { margin: 0; }
-.pa .padestination .paaction { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.pa .padestination .btn { white-space: normal; }
-.pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); }
-@supports (grid-template-rows: subgrid) { .pa .padestination { grid-template-rows: subgrid; } }
+.pa .paname { grid-column: 2; }
+.pa .pastatus { display: none; align-items: center; gap: 6px; margin-top: 6px; color: var(--t3); font-size: var(--fs-body); }
+.pa [data-pa-state="ready"] [data-pa-status="ready"], .pa [data-pa-state="not_set_up"] [data-pa-status="not_set_up"], .pa [data-pa-state="not_allowed"] [data-pa-status="not_allowed"], .pa [data-pa-state="busy"] [data-pa-status="busy"] { display: flex; }
+.pa .pastatus .dot.ok { background: var(--good); }
+.pa .pastatus .dot.run { background: var(--run-fill); }
+.pa .pastatus .dot.pause { background: var(--warn-fill); }
+.pa .pawhat { grid-column: 3; }
+.pa .patag, .pa .paknows { color: var(--t3); font-size: var(--fs-body); }
+.pa .padestination .patag, .pa .padestination .paknows { margin-top: 4px; }
+.pa .padestination .paaction { grid-column: 4; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.pa .padestination .btn { white-space: normal; text-align: center; }
+.pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); overflow-wrap: anywhere; }
+.pa .panode { grid-column: 1; width: 12px; height: 12px; margin: 5px 0 0 6px; border-radius: 50%; background: var(--t3); position: relative; }
+.pa #computer .panode { background: var(--t1); }
+.pa .parail { position: absolute; left: 11px; width: 2px; background: var(--line); top: 0; bottom: -1px; }
+.pa #computer .parail { top: 27px; }
+.pa #venice .parail { bottom: auto; height: 27px; }
+.pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
+.pa .pazone b { color: var(--t2); font-weight: 600; }
+.pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
 @media (max-width: 640px) {
-  .pa .paasks { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; gap: 12px; }
-  .pa .padestination { grid-row: auto; grid-template-rows: auto auto auto auto; gap: 10px; }
+  .pa .paasks { grid-template-columns: minmax(0, 1fr); }
+  .pa .padestination { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px 0; }
+  .pa .panode, .pa .parail { display: none; }
+  .pa .paname, .pa .pawhat, .pa .padestination .paaction { grid-column: 1; }
+  .pa .pazone { padding-left: 0; }
 }
 
 `;

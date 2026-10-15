@@ -273,7 +273,7 @@ same-provider exclusion can't be applied.
    newest first and unread in bold; click opens the full Markdown answer with
    a bold question, sources and left-out beneath. Only Delete and Delete all
    (one confirmation), no Answer or Dismiss. Deep links open and scroll the
-   named row. One question box offers This computer, Venice and zkAPI in aligned columns above Inbox (stacked on phones). Anonymous setup, balance, switch and writer checks live in Models on the Keys settings page. Light/dark and
+   named row. One question box offers the owner-selected privacy ladder: Local model, zkAPI model, then Venice model, above Inbox. A dashed “Leaves this computer” line marks the cloud boundary. At up to 920px wide, every row has its button in one column aligned with its name; rows stack in order on phones. The copy uses the approved Models names and “It searches your files.” Inbox says “Answers from every model, kept on this computer.” Anonymous setup, balance, switch and writer checks live in Models on the Keys settings page. Light/dark and
    390/1280-wide proof includes unread, opened list/bold and Answering… rows.
 3. **Agents page, Connect an agent:** ChatGPT, Grok, Muse, Other, each with
    its own short steps; the choice sets the provider (D).
