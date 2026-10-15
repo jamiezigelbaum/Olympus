@@ -43,7 +43,7 @@ function handStep(target: OpenTarget): string | undefined {
     }
   }
   if (target.kind === 'private_answers') {
-    return 'Under <strong>On this computer</strong>, open <strong>Private answers</strong>.';
+    return 'Under <strong>On this computer</strong>, open <strong>Inbox</strong> (<strong>Private answers</strong> in Olympus before 1.1.0).';
   }
   if (target.kind === 'unreadable') {
     return `Under <strong>Sources</strong>, open <strong>See why</strong> under <strong>${OPEN_UNREADABLE_SOURCES[target.source].label}</strong>. It lists every file that can't be read, and each one opens.`;
