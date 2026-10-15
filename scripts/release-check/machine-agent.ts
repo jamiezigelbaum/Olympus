@@ -706,11 +706,13 @@ function readItems(): { items: ItemRow[] | null; error?: string } {
       const itemsPath = join(dir, `${store}.sqlite`);
       if (!existsSync(itemsPath)) continue;
       const db = new Database(itemsPath, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000;');
       let ledger = new Map<string, { metadataTier: string | null; contentTier: string | null }>();
       try {
         const ledgerPath = join(dir, `${store}.tier-ledger.sqlite`);
         if (existsSync(ledgerPath)) {
           const ledgerDb = new Database(ledgerPath, { readonly: true });
+          ledgerDb.exec('PRAGMA busy_timeout = 10000;');
           try {
             ledger = new Map((ledgerDb.query('select provider_item_id as id, metadata_tier as m, content_tier as c from tier_items').all() as Array<{ id: string; m: string | null; c: string | null }>).map((r) => [r.id, { metadataTier: r.m, contentTier: r.c }]));
           } finally { ledgerDb.close(); }
