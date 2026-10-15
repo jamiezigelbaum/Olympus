@@ -95,6 +95,10 @@ function platform(): Platform {
     return {
       os: 'macos',
       olympusBin: join(home, '.local', 'bin', 'olympus'),
+      // The owner's policy directory (engine.json, sovereignty.json and its backups) and the data root, as the engine lays them out on macOS.
+      configDir: join(home, '.olympus'),
+      dataDir: join(home, '.local', 'share', 'openclaw', 'olympus'),
+      sovereigntyPath: join(home, '.olympus', 'sovereignty.json'),
       workerEnvPath: join(home, '.config', 'olympus', 'worker.env'),
       engineLogPaths: [join(logs, 'engine.log'), join(logs, 'engine.err'), join(logs, 'install.log')],
       workerFetch: (path, init = {}) => fetch(`${WORKER_ORIGIN}${path}`, init),
