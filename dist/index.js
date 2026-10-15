@@ -22592,12 +22592,14 @@ function metaPolicy(policy) {
 function attribute(value) {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 }
+var BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.";
+var BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.";
 function confirmation() {
   return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
 (async function(){
- const message=document.getElementById('message'), key=${JSON.stringify(STORAGE)};
- let resuming=false, poll, timeout;
- const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);};
+ const message=document.getElementById('message'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, opening=false, waiting=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;confirm.disabled=opening;};
  async function resume(){
   if(resuming||!localStorage.getItem(key))return;
   resuming=true;
@@ -22606,18 +22608,22 @@ function confirmation() {
   }catch{resuming=false;}
  }
  function onStorage(event){if(event.key===key)void resume();}
- document.getElementById('confirm').onclick=async function(){
-  stopWaiting();
-  const deadline=Date.now()+${TICKET_MS};
+ confirm.onclick=async function(){
+  if(opening||waiting)return;
+  opening=true;confirm.disabled=true;
   try{const r=await fetch('/owner-open',{method:'POST'});
-   if(!r.ok){stopWaiting();message.textContent='Unable to open the private ticket. Wait a moment and retry, or use the owner SSH socket forward.';return;}
+   if(!r.ok){message.textContent=r.status===429?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};return;}
+   // A refused replacement must leave the current wait intact. Only a
+   // successful open replaces its ticket and starts a fresh 60-second wait.
+   stopWaiting();waiting=true;confirm.disabled=true;
    message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
    // Check storage after subscribing too: the opener may already have proved.
    addEventListener('storage',onStorage);
    poll=setInterval(resume,1000);
-   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},Math.max(0,deadline-Date.now()));
+   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},${TICKET_MS});
    await resume();
-  }catch{stopWaiting();message.textContent='Owner confirmation unavailable. Use the owner SSH socket forward.';}
+  }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
+  finally{opening=false;confirm.disabled=waiting;}
  };
  await resume();
 })();</script>`);
@@ -22833,7 +22839,11 @@ class LinuxOwnerBridge {
         await this.openTicket("/dashboard", "browser");
         return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
       } catch {
-        return refusal(429);
+        const response2 = page(`<p>${BROWSER_OPEN_LIMIT_MESSAGE}</p>`, 429);
+        response2.headers.set("X-Olympus-Owner-Refused", "1");
+        const retryAt = Math.max(this.lastOpen.browser + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
+        response2.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
+        return response2;
       }
     }
     if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith("/owner-"))

@@ -127,9 +127,23 @@ for (const kind of ['chromium', 'firefox']) {
           expect(await consent.locator('h1').textContent()).toBe("Confirm it's you on this computer");
           const originalUrl = consent.url();
           let documentRequests = 0; consent.on('request', (request: { resourceType(): string }) => { if (request.resourceType() === 'document') documentRequests++; });
+          // Refused opens show an actionable terminal remedy and permit retry.
+          await consent.route('**/owner-open', (route: { fulfill(value: object): Promise<void> }) => route.fulfill({ status: 429, headers: { 'Retry-After': '3600' } }));
+          await consent.locator('#confirm').click();
+          await consent.waitForFunction(() => document.getElementById('message')?.textContent?.includes('Too many windows were opened from the browser.'));
+          expect(await consent.locator('#message').textContent()).toContain('Run olympus dashboard in a terminal on this computer.');
+          expect(await consent.locator('#confirm').isEnabled()).toBe(true);
+          await consent.unroute('**/owner-open');
           console.log(`${kind}: Confirm ${suppressStorageEvent ? 'poll' : 'event'} starts`);
           await consent.locator('#confirm').click();
           await consent.waitForFunction(() => document.getElementById('message')?.textContent === 'Approve in the Olympus window that just opened. This page continues by itself.');
+          expect(await consent.locator('#confirm').isDisabled()).toBe(true);
+          // D1 from the independent review: a repeat click must neither open
+          // another ticket nor strand the first ticket's storage-event wait.
+          await consent.locator('#confirm').click({ force: true });
+          // Also exercise a programmatic event that bypasses disabled controls.
+          await consent.locator('#confirm').dispatchEvent('click');
+          expect(await consent.locator('#message').textContent()).toContain('This page continues by itself.');
           // The opened ticket always goes to /dashboard; posted targets do
           // not supply the consent destination. Only the original tab has it.
           const ticketWindow = await unproven.newPage();
@@ -165,6 +179,7 @@ for (const kind of ['chromium', 'firefox']) {
         console.log(`${kind}: separate-profile ticket proved; checking timeout`);
         if (kind === 'chromium') await stranded.clock.fastForward(60_000);
         await stranded.waitForFunction(() => document.getElementById('message')?.textContent === 'Open this page again from the Olympus window.', undefined, { timeout: 65_000 });
+        expect(await stranded.locator('#confirm').isEnabled()).toBe(true);
         expect(await stranded.locator('h1').textContent()).toBe("Confirm it's you on this computer");
         expect(await stranded.evaluate(() => localStorage.getItem('olympus-desktop-owner-v1'))).toBeNull();
         await elsewhere.close();

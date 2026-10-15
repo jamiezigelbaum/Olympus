@@ -603,13 +603,17 @@ recreated and its 60-second expiry is never extended. Success permanently
 spends it before publishing the session. CLI/control-socket and browser confirmation each have a ten-second limiter
 and one pending ticket; browser requests cannot replace the CLI's pending file
 or consume its limiter. The browser lane also permits at most six opens in a
-rolling hour per listener epoch; excess requests receive 429 with the existing
-refusal wording. CLI opens have no hourly cap. Unauthenticated `POST /owner-open`
+rolling hour per listener epoch; excess requests receive 429 with `Retry-After`
+and tell the owner too many windows were opened from the browser and to run
+`olympus dashboard` in a terminal on this computer. CLI opens have no hourly cap. Unauthenticated `POST /owner-open`
 ignores the posted target and opens only `/dashboard`. Confirm tells the owner:
 “Approve in the Olympus window that just opened. This page continues by itself.”
 The original tab watches this origin's storage event and polls once a second
 for proof, then fetches its own unchanged path/query and replaces the document.
-Waiting is bounded by the ticket's 60-second lifetime. A different browser
+The Confirm button stays disabled while opening and waiting; repeat clicks
+leave the pending wait intact. Only a successful replacement open restarts the
+60-second wait; a 429 preserves the current wait. Waiting is bounded by the
+ticket's 60-second lifetime. A different browser
 profile cannot resume it; timeout says “Open this page again from the Olympus window.”
 At most sixteen 12-hour owner sessions are held.
 
@@ -646,13 +650,15 @@ observer detects logout or server-mode enable it closes the listener and
 revokes proofs; requests immediately refuse the unavailable snapshot. Relogin creates a new
 origin. The bridge binds `127.0.0.1` and `[::1]` at the configured port as one
 listener lifecycle. A collision on either family releases both and reports
-`port_in_use`; no partial listener is published. Before taking the configured
-port, a real Bun bind to `::1` on port 0, immediately closed, probes IPv6
-availability. Bun reports unavailable addresses as `EADDRINUSE` too, so error
-codes cannot decide availability. A failed probe permits IPv4 alone, explicitly
-reported as `desktop_bridge.ipv6=unavailable`; a successful probe makes ANY
-configured-port IPv6 bind failure fatal to both families. While IPv6 is
-unavailable every refresh re-probes. If IPv6 appears, the manager revokes the
+`port_in_use`; no partial listener is published. IPv6 loopback presence comes
+from kernel address state (`os.networkInterfaces()`): an internal interface
+carrying `::1` requires both families. Bind results never decide presence:
+ephemeral-port exhaustion can prevent `bind(::1, 0)` while `::1` still works.
+Any exception reading kernel state is treated as present, failing closed.
+Only an absent loopback address permits IPv4 alone, explicitly reported as
+`desktop_bridge.ipv6=unavailable`. When present, ANY configured-port IPv6
+bind failure is fatal to both families. While IPv6 is unavailable every refresh
+re-checks kernel state. If IPv6 appears, the manager revokes the
 old epoch's sessions and tickets before releasing IPv4 and trying both families
 with a fresh origin. An IPv6 squatter then leaves both families unheld and
 status `port_in_use`, never a live IPv4-only origin beside the squatter.
@@ -1266,7 +1272,17 @@ new origin. Explicit server mode must likewise remove the listener. Hold the
 port on `[::1]` with another ordinary account while IPv4 is free, and repeat
 with IPv4 occupied. Confirm doctor/status report `port_in_use` and the other
 family is released too. Record `cat /proc/sys/net/ipv6/conf/lo/disable_ipv6`
-and `ip -6 addr show lo`. On a host without IPv6 loopback, verify the dashboard
+and `ip -6 addr show lo`. With `::1` assigned, run the review's
+`python3 test/fixtures/review-407-exhaust.py <ready-file> connect` as a second ordinary account while
+the bridge starts: ephemeral-port exhaustion must never produce a live
+IPv4-only bridge. Both families must remain held (or both released on failure);
+a second account must not bind `[::1]:<port>` beside a live bridge or capture
+any ticket through a relay. With the script still running, set
+`OLYMPUS_TEST_PLAYWRIGHT` to an installed Playwright entry and
+`REVIEW407_EXHAUSTED=1`, then run
+`bun test test/linux-owner-bridge-exhaustion.browser.test.ts` for the relaying
+and non-relaying Chromium cases. Record the kernel address state and exhaustion
+result. On a host without IPv6 loopback, verify the dashboard
 works over IPv4 and status explicitly reports `ipv6=unavailable`. Restore IPv6
 loopback: within the refresh interval the origin must rotate, old sessions and
 pending tickets must refuse, and both families must be held. Repeat with a

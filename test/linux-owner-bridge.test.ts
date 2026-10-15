@@ -389,29 +389,45 @@ test('IPv6 collision refuses the whole listener; release and rebind rotate both 
 });
 
 
-test('real Bun distinguishes ephemeral IPv6 availability from a configured-port collision', async () => {
-  const f = fixture();
-  const serve = Bun.serve.bind(Bun);
-  const reserve = serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
-  const port = reserve.port!; await reserve.stop(true);
-  const calls: { hostname: string | undefined; port: number | string | undefined }[] = [];
-  // Exercise the DEFAULT probe with a real unassigned IPv6 address. No
-  // invented error code: Bun itself supplies the same misleading EADDRINUSE.
-  const mock = spyOn(Bun, 'serve').mockImplementation(((options: Parameters<typeof Bun.serve>[0]) => {
-    calls.push({ hostname: options.hostname, port: options.port });
-    return serve({ ...options, ...(options.hostname === '::1' ? { hostname: '::2' } : {}) } as Parameters<typeof Bun.serve>[0]);
-  }) as typeof Bun.serve);
-  let manager: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
-  try {
-    manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux' });
-    expect(manager.status().state).toBe('listening');
-    expect(manager.status().ipv6).toBe('unavailable');
-    expect(calls.some(c => c.hostname === '::1' && c.port === 0)).toBe(true);
-    expect(calls.some(c => c.hostname === '::1' && c.port === port)).toBe(false);
-    expect((await fetch(`http://127.0.0.1:${port}/`, { redirect: 'manual' })).status).toBe(303);
-    console.log(`Bun ${Bun.version}: real ::2 port-0 bind fails; default probe selects IPv4 alone`);
-  } finally { manager?.close(); mock.mockRestore(); }
-});
+// The review's ephemeral-port exhaustion repro: ::1 still exists when a
+// port-zero bind fails. Keep the routine regression bounded (no 28k sockets).
+for (const oracle of ['kernel', 'present', 'throws'] as const) {
+  for (const bindFails of [false, true]) {
+    test(`IPv6 exhaustion cannot publish IPv4 alone (oracle=${oracle}, bindFails=${bindFails})`, async () => {
+      const f = fixture();
+      const serve = Bun.serve.bind(Bun);
+      const reserve = serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+      const port = reserve.port!; await reserve.stop(true);
+      const mock = spyOn(Bun, 'serve').mockImplementation(((options: Parameters<typeof Bun.serve>[0]) => {
+        if (options.hostname === '::1' && (options.port === 0 || bindFails)) {
+          throw Object.assign(new Error('IPv6 bind refused under resource exhaustion'), { code: 'EADDRINUSE' });
+        }
+        return serve(options);
+      }) as typeof Bun.serve);
+      let manager: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+      try {
+        manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux',
+          ...(oracle === 'kernel' ? {} : { ipv6Present: () => {
+            if (oracle === 'throws') throw new Error('Kernel address enumeration failed');
+            return true;
+          } }),
+        });
+        if (bindFails) {
+          expect(manager.status().state).toBe('port_in_use');
+          await expect(manager.open('/dashboard')).rejects.toThrow();
+          expect(f.opened()).toBe('');
+          // Even a successful IPv4 bind must have been released.
+          const v4 = serve({ hostname: '127.0.0.1', port, fetch: () => new Response() });
+          await v4.stop(true);
+        } else {
+          expect(manager.status().state).toBe('listening');
+          expect(manager.status().ipv6).toBe('listening');
+          expect(() => serve({ hostname: '::1', port, fetch: () => new Response() })).toThrow();
+        }
+      } finally { manager?.close(); mock.mockRestore(); }
+    });
+  }
+}
 
 for (const collision of [false, true]) {
   test(`IPv6 appearing revokes the IPv4 epoch and takes both families (squatter=${collision})`, async () => {
@@ -419,7 +435,7 @@ for (const collision of [false, true]) {
     const reserve = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
     const port = reserve.port!; await reserve.stop(true);
     let ipv6 = false, probes = 0;
-    const manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux', probeIpv6: () => { probes++; return ipv6; } });
+    const manager = manageLinuxOwnerBridge({ ...f.options, port, platform: 'linux', ipv6Present: () => { probes++; return ipv6; } });
     cleanup.push(() => manager.close());
     const status = manager.status();
     expect(status.state).toBe('listening'); expect(status.ipv6).toBe('unavailable');
@@ -467,6 +483,10 @@ test('browser opens have a rolling six-per-hour cap independent of CLI tickets a
   const cliFile = f.opened();
   for (let i = 0; i < 6; i++) {
     expect((await f.bridge.handle(f.post('/owner-open', { target: '/connect/authorize?state=attacker' }))).status).toBe(204);
+    if (i === 0) {
+      const tooSoon = await f.bridge.handle(f.post('/owner-open', {}));
+      expect(tooSoon.status).toBe(429); expect(tooSoon.headers.get('Retry-After')).toBe('10');
+    }
     expect(existsSync(cliFile)).toBe(true);
     const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
     const redeemed = await f.bridge.handle(f.post('/owner-proof', { ticket }));
@@ -476,7 +496,8 @@ test('browser opens have a rolling six-per-hour cap independent of CLI tickets a
   }
   const refused = await f.bridge.handle(f.post('/owner-open', {}));
   expect(refused.status).toBe(429);
-  expect(await refused.text()).toContain('This Olympus window is out of date');
+  expect(Number(refused.headers.get('Retry-After'))).toBe(3540);
+  expect(await refused.text()).toContain('Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.');
   await expect(f.bridge.openTicket('/connect/authorize?state=still-owner')).resolves.toBeUndefined();
   f.advance(3_539_999); // one millisecond before the first open ages out
   expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(429);
