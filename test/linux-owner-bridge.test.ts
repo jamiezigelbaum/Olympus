@@ -486,6 +486,8 @@ test('browser opens have a rolling six-per-hour cap independent of CLI tickets a
     if (i === 0) {
       const tooSoon = await f.bridge.handle(f.post('/owner-open', {}));
       expect(tooSoon.status).toBe(429); expect(tooSoon.headers.get('Retry-After')).toBe('10');
+      expect(await tooSoon.text()).toContain('A window was just opened. Look for it, or try again in a few seconds.');
+      expect(tooSoon.headers.get('X-Olympus-Owner-Limit')).toBe('recent');
     }
     expect(existsSync(cliFile)).toBe(true);
     const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
@@ -497,16 +499,50 @@ test('browser opens have a rolling six-per-hour cap independent of CLI tickets a
   const refused = await f.bridge.handle(f.post('/owner-open', {}));
   expect(refused.status).toBe(429);
   expect(Number(refused.headers.get('Retry-After'))).toBe(3540);
+  expect(refused.headers.get('X-Olympus-Owner-Limit')).toBe('hourly');
   expect(await refused.text()).toContain('Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.');
   await expect(f.bridge.openTicket('/connect/authorize?state=still-owner')).resolves.toBeUndefined();
   f.advance(3_539_999); // one millisecond before the first open ages out
-  expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(429);
+  const nearlyExpired = await f.bridge.handle(f.post('/owner-open', {}));
+  expect(nearlyExpired.status).toBe(429);
+  // A short Retry-After from the hourly cap is still the hourly cap.
+  expect(Number(nearlyExpired.headers.get('Retry-After'))).toBeLessThanOrEqual(10);
+  expect(nearlyExpired.headers.get('X-Olympus-Owner-Limit')).toBe('hourly');
   f.advance(1);
   expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(204);
   // Only the oldest opening has expired, so the rolling window is full again.
   f.advance(10_000);
   expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(204);
   expect((await f.bridge.handle(f.request('/dashboard.json'))).status).toBe(403);
+});
+
+test('right after the sixth browser open, the refusal is the hourly cap, not the ten-second spacing', async () => {
+  const f = fixture();
+  for (let i = 0; i < 6; i++) {
+    if (i > 0) f.advance(10_000);
+    expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(204);
+  }
+  const refused = await f.bridge.handle(f.post('/owner-open', {}));
+  expect(refused.status).toBe(429);
+  expect(refused.headers.get('X-Olympus-Owner-Limit')).toBe('hourly');
+  expect(Number(refused.headers.get('Retry-After'))).toBeGreaterThan(10);
+  expect(await refused.text()).toContain('Too many windows were opened from the browser.');
+});
+
+test('a browser open whose window fails to launch is reported as a failure, not as the hourly limit', async () => {
+  const f = fixture();
+  const launch = f.options.openFile;
+  f.options.openFile = async () => { throw new Error('no desktop launcher'); };
+  const failed = await f.bridge.handle(f.post('/owner-open', {}));
+  expect(failed.status).toBe(503);
+  expect(failed.headers.get('Retry-After')).toBeNull();
+  const body = await failed.text();
+  expect(body).toContain('Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.');
+  expect(body).not.toContain('Too many windows');
+  // No window opened, so neither limiter counted it: six failures later, a working launcher still opens.
+  for (let i = 0; i < 6; i++) expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(503);
+  f.options.openFile = launch;
+  expect((await f.bridge.handle(f.post('/owner-open', {}))).status).toBe(204);
 });
 
 test('a claimed ticket retries a restarted socket without concurrent redemption or expiry extension', async () => {
