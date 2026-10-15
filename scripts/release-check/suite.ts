@@ -17,6 +17,7 @@ import type { LeakMarker } from './leak.ts';
 import { describeLeaks, findLeaks, redactMarkers } from './leak.ts';
 import type { CheckResult } from './report.ts';
 import type { SuiteQuestion } from './fixture.ts';
+import { noteChecks, privateLinkIdsIn } from './inbox.ts';
 
 export interface QuestionObservation {
   question: SuiteQuestion;
@@ -33,6 +34,11 @@ export interface QuestionObservation {
   evidenceIds?: string[];
   /** The product's fixed Private note reached the agent. */
   privateNote: boolean;
+  /**
+   * The note exactly as the tool returned it (null when it returned none). Set for a surface whose note carries the Open link
+   * (the default remote surface, the engine's MCP endpoint); left out for the ChatGPT panel, which has its own.
+   */
+  privateNoteText?: string | null;
   /** Surfaces with a private answer panel report whether the local answer states each Private fact. */
   localPrivate?: { present: boolean; factsStated: boolean[]; ms?: number; /** Why there was no answer, in the product's own words for the panel state. */ why?: string; /** Extra context for a passing answer, for example a cold start that needed more than one attempt. */ note?: string };
   ms: number;
@@ -113,6 +119,20 @@ export function evaluateObservation(obs: QuestionObservation, markers: readonly 
       obs.privateNote,
       obs.privateNote ? 'the product\'s fixed Private note was returned' : 'no Private note in the tool output',
     ));
+    if (obs.privateNoteText !== undefined) {
+      checks.push(...noteChecks(prefix, q.id, obs.privateNoteText, q.text, markers).checks);
+      const ids = privateLinkIdsIn(obs.privateNoteText ?? '');
+      if (ids.length === 1) {
+        // A model decides what to pass on: dropping the link is worth a line, not a failure of the product.
+        const relayed = obs.answerText.includes(ids[0]!);
+        checks.push({
+          id: `${prefix}.link-relayed`,
+          title: `${q.id}: the agent passed the Open link on to the person`,
+          status: relayed ? 'pass' : 'warn',
+          detail: relayed ? 'the reply carries the link' : 'the reply does not carry the link (the agent kept the sentence and dropped the link)',
+        });
+      }
+    }
     if (obs.localPrivate !== undefined) {
       const stated = obs.localPrivate.present && obs.localPrivate.factsStated.length > 0 && obs.localPrivate.factsStated.every(Boolean);
       checks.push(check(

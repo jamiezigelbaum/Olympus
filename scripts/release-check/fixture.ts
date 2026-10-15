@@ -180,6 +180,17 @@ export const SUITE_QUESTIONS: readonly SuiteQuestion[] = [
   },
 ];
 
+/**
+ * The question typed on the dashboard's Ask page and answered by the local model (the 1.1.0 inbox leg). It is worded differently from the
+ * suite's Private question, so the Inbox entry it creates can be told from the one an agent's question created. The local answer must
+ * state every Private fact and cite the Private item, by name.
+ */
+export const INBOX_ASK = {
+  text: 'What was my resting heart rate at the cardiology follow-up, and which medication was I prescribed? Use my Olympus records.',
+  facts: [...PRIVATE_FACTS] as string[],
+  citedTitle: 'Cardiology follow-up notes',
+} as const;
+
 /** The Readwise documents the fake API serves, in the shape both of its endpoints return. */
 export function fixtureDocuments(items: readonly FixtureItem[] = FIXTURE_ITEMS): FixtureDocument[] {
   return items.map((item) => item.document);
