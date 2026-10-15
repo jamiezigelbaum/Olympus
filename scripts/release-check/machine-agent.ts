@@ -648,16 +648,19 @@ function findBrowser(): string | undefined {
   return undefined;
 }
 
-interface OpenedBrowser { cdp: Cdp; close(): void }
+interface OpenedBrowser { cdp: Cdp; pid: number | undefined; close(): void }
 
 /** A headless browser on a throwaway profile, and a debugging connection to its one page. */
-async function openBrowser(browser: string, profileName: string, debugPort: number): Promise<OpenedBrowser> {
+async function openBrowser(browser: string, profileName: string, debugPort: number, isolated = false): Promise<OpenedBrowser> {
   const profile = join(WORKDIR, profileName);
   mkdirSync(profile, { recursive: true });
   const chrome = spawn(browser, [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
     // A throwaway profile must not ask the desktop session's keychain for a browser-storage key.
     ...(process.platform === 'darwin' ? ['--use-mock-keychain', '--password-store=basic'] : []),
+    // The Inbox check watches the machine's connections, so the browser must make none of its own: no background services, and no
+    // name but this machine's can be resolved (the dashboard is an address, not a name).
+    ...(isolated ? ['--disable-background-networking', '--disable-sync', '--disable-component-update', '--disable-default-apps', '--no-pings', '--disable-domain-reliability', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost'] : []),
     `--user-data-dir=${profile}`, `--remote-debugging-port=${debugPort}`, '--remote-allow-origins=*', 'about:blank',
   ], { stdio: 'ignore' });
   try {
@@ -671,7 +674,7 @@ async function openBrowser(browser: string, profileName: string, debugPort: numb
     }
     if (!wsUrl) throw new Error('the browser did not open a debugging page');
     const cdp = await cdpConnect(wsUrl);
-    return { cdp, close: () => { cdp.close(); chrome.kill('SIGKILL'); } };
+    return { cdp, pid: chrome.pid, close: () => { cdp.close(); chrome.kill('SIGKILL'); } };
   } catch (error) {
     chrome.kill('SIGKILL');
     throw error;
@@ -764,11 +767,44 @@ function ownerOfSocket(inode: string): string | undefined {
   return undefined;
 }
 
+/** Linux: the socket inodes held by a process and everything it started (the browser and its network service), read fresh. */
+function socketsOfTree(rootPid: number | undefined): Set<string> {
+  const held = new Set<string>();
+  if (rootPid === undefined || process.platform !== 'linux') return held;
+  try {
+    const parentOf = new Map<number, number>();
+    for (const name of readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+      try {
+        // /proc/<pid>/stat: "pid (comm) state ppid ..."; comm may hold spaces and parentheses, so read after the last ")".
+        const stat = readFileSync(`/proc/${name}/stat`, 'utf8');
+        const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        parentOf.set(Number(name), Number(after[1]));
+      } catch { /* gone meanwhile */ }
+    }
+    const tree = new Set<number>([rootPid]);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const [pid, parent] of parentOf) if (!tree.has(pid) && tree.has(parent)) { tree.add(pid); grew = true; }
+    }
+    for (const pid of tree) {
+      let fds: string[];
+      try { fds = readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+      for (const fd of fds) {
+        try {
+          const target = readlinkSync(`/proc/${pid}/fd/${fd}`);
+          if (target.startsWith('socket:[')) held.add(target.slice(8, -1));
+        } catch { /* closed meanwhile */ }
+      }
+    }
+  } catch { /* no /proc */ }
+  return held;
+}
+
 /**
  * Samples the machine's connections until stopped. What was connected at the start (the relay a connected agent uses, for one) is the
  * baseline; anything else that is not loopback, not the check's own browser and not an address of the relay is fresh egress.
  */
-function startEgressWatch(allowedIps: ReadonlySet<string>): { stop(): Omit<EgressView, 'pageRequests' | 'pageOutside'> } {
+function startEgressWatch(allowedIps: ReadonlySet<string>, browserPid: () => number | undefined): { stop(): Omit<EgressView, 'pageRequests' | 'pageOutside'> } {
   const intervalMs = process.platform === 'darwin' ? 500 : 150;
   const baseline = new Set(currentConnections().map((connection) => connection.remote));
   const seen: Connection[] = [];
@@ -781,7 +817,8 @@ function startEgressWatch(allowedIps: ReadonlySet<string>): { stop(): Omit<Egres
       const key = `${connection.remote}|${connection.inode ?? connection.pid ?? ''}`;
       if (attributed.has(key)) continue;
       attributed.add(key);
-      const comm = connection.comm ?? (connection.inode ? ownerOfSocket(connection.inode) : undefined);
+      // The browser's own sockets are found first, in its small process tree, before the connection can close; the whole-machine search is the fallback.
+      const comm = connection.comm ?? (connection.inode && socketsOfTree(browserPid()).has(connection.inode) ? 'chrome' : connection.inode ? ownerOfSocket(connection.inode) : undefined);
       seen.push({ ...connection, ...(comm ? { comm } : {}) });
     }
   }, intervalMs);
@@ -804,7 +841,7 @@ async function relayAddresses(relay: string): Promise<Set<string>> {
   return found;
 }
 
-async function inboxCheck(primary: string, otherIds: string[], waitS: number, outDir: string): Promise<void> {
+async function inboxCheck(primary: string, otherIds: string[], waitS: number, outDir: string, faultEntryId = false): Promise<void> {
   const config = readConfig();
   const inbox = config.inbox;
   if (!inbox) emit({ ok: false, detail: 'the machine was not given the inbox check settings' });
@@ -832,7 +869,8 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     observation.ownerPath.bearerStatus = (await session.call('POST', '/dashboard/private-answers', { action: 'list' })).status;
   } catch { /* the status stays unknown, which the check reports */ }
 
-  const watch = startEgressWatch(await relayAddresses(config.relay));
+  let browserPid: number | undefined;
+  const watch = startEgressWatch(await relayAddresses(config.relay), () => browserPid);
   const requests: string[] = [];
   let opened: OpenedBrowser | undefined;
   let stopBridge: () => void = () => undefined;
@@ -840,7 +878,8 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
   let failure: string | undefined;
   let egress: Omit<EgressView, 'pageRequests' | 'pageOutside'> | undefined;
   try {
-    opened = await openBrowser(browser!, 'chrome-profile-inbox', INBOX_DEBUG_PORT);
+    opened = await openBrowser(browser!, 'chrome-profile-inbox', INBOX_DEBUG_PORT, true);
+    browserPid = opened.pid;
     const cdp = opened.cdp;
     await cdp.send('Page.enable');
     await cdp.send('Network.enable');
@@ -969,33 +1008,38 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       if (id !== primary && !observation.entries.some((entry) => entry.id === id)) observation.entries.push(await viewEntry(id, { question: null, facts: [], citedTitle: '', waitUntil: null }));
     }
 
-    // 3. The link's own address, opened by the owner: the Inbox lands on that entry.
-    if (primary) {
-      const view = await openTarget(`private/${primary}`);
+    // The address an Open link names, opened by the owner: the Inbox lands on that entry and opens it.
+    const openByAddress = async (addressId: string, pageId: string, spec: { facts: string[]; citedTitle: string }, shotLabel: string): Promise<PageView> => {
+      const view = await openTarget(`private/${addressId}`);
       observation.ownerPath.unlocked = observation.ownerPath.unlocked && view.unlocked;
       let row: any = { found: false };
       const until = Date.now() + 90_000;
       for (;;) {
-        row = JSON.parse(String(await evalIn(rowView(primary))));
+        row = JSON.parse(String(await evalIn(rowView(pageId))));
         if (row.opened === true || Date.now() >= until) break;
         await sleep(2_000);
       }
       const now = await stateNow();
       const sources: string[] = Array.isArray(row.sources) ? row.sources : [];
-      observation.pages.push({
-        id: primary,
+      const page: PageView = {
+        id: pageId,
         landedOnInbox: now.page === true && now.ask === true && /private-answers/.test(String(now.where)),
         rowFound: row.found === true,
         opened: row.opened === true,
-        factsStated: factsIn(String(row.answer ?? ''), inbox.agent.facts),
+        factsStated: factsIn(String(row.answer ?? ''), spec.facts),
         citations: sources.length,
-        citesExpected: sourceNames(sources, inbox.agent.citedTitle),
-      });
+        citesExpected: sourceNames(sources, spec.citedTitle),
+      };
+      observation.pages.push(page);
       if (row.opened === true) {
-        await shoot('inbox-entry-1280.png', 'An opened Inbox entry, 1280 px wide (from the agent\'s link)', 1280);
-        await shoot('inbox-entry-390.png', 'An opened Inbox entry, 390 px wide (from the agent\'s link)', 390);
+        await shoot('inbox-entry-1280.png', `An opened Inbox entry, 1280 px wide (${shotLabel})`, 1280);
+        await shoot('inbox-entry-390.png', `An opened Inbox entry, 390 px wide (${shotLabel})`, 390);
       }
-    }
+      return page;
+    };
+
+    // 3. The link's own address, opened by the owner: the Inbox lands on that entry.
+    if (primary) await openByAddress(primary, primary, { facts: inbox.agent.facts, citedTitle: inbox.agent.citedTitle }, 'from the agent\'s link');
 
     // 4. Ask the local model: typed into the page and pressed, on a clean Ask page.
     const second = await openTarget('private');
@@ -1057,6 +1101,14 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     };
     if (secondReady.cards?.venice) observation.fixes.venice = await followFix('venice', 'venice-setup');
     if (secondReady.cards?.anonymous) observation.fixes.anonymous = await followFix('anonymous', 'anonymous');
+
+    // 6. No link from an agent (this install issues none): the entry the Ask page just made is opened by its address instead, so the
+    //    id-to-entry route is still exercised with a real id. The fault self-test changes the last character of the address.
+    if (!primary && ask.entry) {
+      const entryId = ask.entry.id;
+      const address = faultEntryId ? `${entryId.slice(0, -1)}${entryId.endsWith('A') ? 'B' : 'A'}` : entryId;
+      await openByAddress(address, entryId, { facts: inbox.ask.facts, citedTitle: inbox.ask.citedTitle }, 'from its own address');
+    }
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
   } finally {
@@ -1279,7 +1331,7 @@ async function main(): Promise<void> {
       process.exit(dash.status === 200 ? 0 : 1);
     }
     case 'screenshots': return await screenshots(flag('--out'));
-    case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'));
+    case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();

@@ -223,6 +223,50 @@ describe('the Inbox checks', () => {
     expect(noLink.find((c) => c.id === 'inbox.agent.entry')?.status).toBe('fail');
   });
 
+  describe('an install that offers agents no answer tool (a standard install: olympus_search, no source_answer)', () => {
+    const standard = { agentLinks: [], agentLink: 'not_offered' as const, agentTools: ['olympus_search', 'source_answer_result', 'source_index_status'] };
+    // No link came from an agent: the Ask page's own entry is opened by its address instead.
+    const standardGood = (): InboxObservation => {
+      const obs = good();
+      obs.entries = [];
+      obs.pages = [{ id: NEW, landedOnInbox: true, rowFound: true, opened: true, factsStated: FACTS, citations: 1, citesExpected: true }];
+      return obs;
+    };
+
+    test('the link path is a visible skip that names why and what it needs, and nothing fails', () => {
+      const checks = evaluateInbox(standardGood(), standard);
+      expect(checks.filter((c) => c.status === 'fail')).toEqual([]);
+      const skipped = checks.find((c) => c.id === 'inbox.agent.link-path')!;
+      expect(skipped.status).toBe('skip');
+      expect(skipped.detail).toContain('olympus_search, source_answer_result, source_index_status');
+      expect(skipped.detail).toContain('answer model');
+      expect(checks.some((c) => c.id === 'inbox.agent.entry')).toBe(false);
+      expect(checks.find((c) => c.id === 'inbox.link.opens-entry')?.status).toBe('pass');
+    });
+
+    test('an entry whose own address did not open it fails inbox.link.opens-entry, whether the page was not opened, the row was missing, or the answer was empty', () => {
+      const none = standardGood();
+      none.pages = [];
+      expect(failing(none, standard as never)).toEqual(['inbox.link.opens-entry']);
+      const missing = standardGood();
+      missing.pages[0]!.rowFound = false;
+      missing.pages[0]!.opened = false;
+      expect(failing(missing, standard as never)).toEqual(['inbox.link.opens-entry']);
+      const empty = standardGood();
+      empty.pages[0]!.factsStated = [false, false];
+      expect(failing(empty, standard as never)).toEqual(['inbox.link.opens-entry']);
+      const noEntry = standardGood();
+      noEntry.ask!.entry = null;
+      expect(failing(noEntry, standard as never)).toContain('inbox.link.opens-entry');
+    });
+
+    test('the same observation with a link expected is judged as before: the missing link is a failure, not a skip', () => {
+      const checks = evaluateInbox(standardGood(), { agentLinks: [] });
+      expect(checks.find((c) => c.id === 'inbox.agent.entry')?.status).toBe('fail');
+      expect(checks.some((c) => c.id === 'inbox.agent.link-path')).toBe(false);
+    });
+  });
+
   test('no check detail holds a Private fact, whatever the observation', () => {
     const obs = good();
     obs.ask!.message = '';

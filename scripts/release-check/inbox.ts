@@ -212,6 +212,14 @@ export interface InboxContext {
   scriptedId?: string | undefined;
   /** Link ids the model agents received. */
   agentLinks: ReadonlyArray<{ agent: string; id: string }>;
+  /**
+   * Whether this install offers an agent the tool that issues the link. `source_answer` is listed only where an answer model runs on
+   * the computer (workers/remote-search.ts); a standard install offers `olympus_search` alone, which carries no link and records
+   * nothing in the Inbox. Absent means the link was expected.
+   */
+  agentLink?: 'issued' | 'not_offered';
+  /** The tools the agent was offered, for the report's line when the link path is not available. */
+  agentTools?: readonly string[];
 }
 
 function check(id: string, title: string, ok: boolean, detail: string, ms?: number): CheckResult {
@@ -318,6 +326,25 @@ export function evaluateInbox(obs: InboxObservation, ctx: InboxContext): CheckRe
       page !== undefined && page.landedOnInbox && page.rowFound && page.opened && allTrue(page.factsStated) && page.citations > 0 && page.citesExpected,
       page === undefined ? 'the address was not opened'
         : `${page.landedOnInbox ? 'landed on the Inbox' : 'did not land on the Inbox'}; entry ${page.rowFound ? 'found' : 'not found'}${page.rowFound ? ` and ${page.opened ? 'opened' : 'not opened'}` : ''}; ${factsLine(page.factsStated)}; ${page.citations} source(s)`,
+    ));
+  } else if (ctx.agentLink === 'not_offered') {
+    // Not a pass and not a failure: the path does not exist on this install, and the report says so where a reader will look.
+    out.push({
+      id: 'inbox.agent.link-path',
+      title: 'An agent\'s Private question reaches the Inbox by the link it is given',
+      status: 'skip',
+      detail: `not exercised: this install runs no answer model, so agents are offered ${(ctx.agentTools ?? []).join(', ') || 'no tools'} and not source_answer, and only source_answer issues the Open link and records the question. Needs an install with an answer model (an OpenClaw-hosted analyst or a configured one)`,
+    });
+    // The same address, opened for a real entry (the one the Ask page just made): the id resolves to that entry in the Inbox page.
+    const askEntry = obs.ask?.entry ?? null;
+    const page = askEntry ? obs.pages.find((p) => p.id === askEntry.id) : undefined;
+    out.push(check(
+      'inbox.link.opens-entry',
+      'An entry\'s own address (the form an Open link takes) opens the Inbox on that entry, with its answer and sources',
+      page !== undefined && page.landedOnInbox && page.rowFound && page.opened && allTrue(page.factsStated) && page.citations > 0 && page.citesExpected,
+      askEntry === null ? 'no entry was made to open'
+        : page === undefined ? 'the address was not opened'
+          : `${page.landedOnInbox ? 'landed on the Inbox' : 'did not land on the Inbox'}; entry ${page.rowFound ? 'found' : 'not found'}${page.rowFound ? ` and ${page.opened ? 'opened' : 'not opened'}` : ''}; ${factsLine(page.factsStated)}; ${page.citations} source(s)`,
     ));
   } else {
     out.push(check('inbox.agent.entry', 'The agent\'s Private question is in the Inbox, under the id its link names', false, ctx.scriptedId ? 'the in-machine check was not given this id' : 'the scripted agent received no link, so there is no entry to find'));

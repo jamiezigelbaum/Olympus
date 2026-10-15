@@ -164,6 +164,10 @@ class Run {
   differences: Difference[] = [];
   /** The Open-link ids the model agents were given for the Private question: the Inbox leg checks each resolves. */
   readonly agentLinks: Array<{ agent: string; id: string }> = [];
+  /** The tools the engine's MCP endpoint offers (all of them, not only the read-only ones), read once per stage. */
+  readonly offeredTools = new Map<string, string[]>();
+  /** The check the wrong-link-id self-test failed on, which depends on whether this install issues agents a link. */
+  inboxSelftestFailsOn?: string;
   stage: Stage;
   machine?: Machine;
 
@@ -396,7 +400,21 @@ function skipped(run: Run, spec: AgentSpec, reason: string): void {
   run.log(`agent ${spec.id}: ${reason}`);
 }
 
-function exchangesObservation(question: SuiteQuestion, agentId: string, finalText: string, exchanges: McpExchange[], ms: number, error: string | undefined): QuestionObservation {
+/** The tools the engine's MCP endpoint lists, read once per run. A standard install lists olympus_search and not source_answer. */
+async function offeredToolNames(run: Run): Promise<string[]> {
+  const known = run.offeredTools.get(run.stage.id);
+  if (known) return known;
+  const listed = await run.agent('mcp-tools', '', 60_000);
+  const names = ((listed.result?.tools ?? []) as Array<{ name?: string }>).map((tool) => String(tool.name ?? '')).filter(Boolean);
+  if (listed.result?.ok === true) run.offeredTools.set(run.stage.id, names);
+  return names;
+}
+
+/**
+ * `linkExpected`: this install issues an Open link with a Private question's note (the tool that does, source_answer, is offered).
+ * Without it the note cannot carry a link, and judging one would fail every agent for what the install does not do.
+ */
+function exchangesObservation(question: SuiteQuestion, agentId: string, finalText: string, exchanges: McpExchange[], ms: number, error: string | undefined, linkExpected = true): QuestionObservation {
   const toolCalls = exchanges.filter((e) => e.method === 'tools/call');
   return {
     question,
@@ -412,7 +430,7 @@ function exchangesObservation(question: SuiteQuestion, agentId: string, finalTex
     evidenceIds: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.id)),
     privateNote: toolCalls.some((c) => privateNoteKindIn(c.outputText, c.structured) !== null),
     // The note as the tool gave it, link included (a Private question only; any other question has none to judge).
-    ...(question.kind === 'private' ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),
+    ...(question.kind === 'private' && linkExpected ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),
     ms,
     ...(error ? { error } : toolCalls.length === 0 ? { error: 'the agent never called the search tool' } : {}),
   };
@@ -427,6 +445,8 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
   const specs = (run.options.config.agents ?? []).filter((spec) => spec.enabled !== false && (run.options.onlyAgents === undefined || run.options.onlyAgents.includes(spec.id)));
   // The command-line agents reach the engine through one tunnel whose startup messages are fetched once (see cachingRelay).
   const tunnel = cachingRelay(machineRelay(run));
+  // The earlier release in an update run predates the link; only the candidate's own stages judge one.
+  const linkExpected = specs.length > 0 && run.stage.id !== 'before' && (await offeredToolNames(run)).includes('source_answer');
   let primed: Promise<boolean> | undefined;
   const cliRelay = async (): Promise<Relay> => {
     primed ??= tunnel.prime();
@@ -459,7 +479,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
           usage.outputTokens += transcript.usage.outputTokens;
           usage.toolCalls += transcript.calls.length;
           const exchanges: McpExchange[] = transcript.calls.map((c) => ({ method: 'tools/call', tool: c.name, args: c.args, status: 200, outputText: c.output.text, structured: c.output.structured, isError: c.output.isError }));
-          return { observation: exchangesObservation(question, spec.id, transcript.finalText, exchanges, Date.now() - started, undefined), answer: transcript.finalText };
+          return { observation: exchangesObservation(question, spec.id, transcript.finalText, exchanges, Date.now() - started, undefined, linkExpected), answer: transcript.finalText };
         } catch (error) {
           usage.invocations += 1;
           if (error instanceof AgentApiError) {
@@ -468,7 +488,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
             usage.outputTokens += error.usage.outputTokens;
             usage.toolCalls += error.calls.length;
           }
-          return { observation: exchangesObservation(question, spec.id, '', [], Date.now() - started, error instanceof Error ? error.message : String(error)), answer: '' };
+          return { observation: exchangesObservation(question, spec.id, '', [], Date.now() - started, error instanceof Error ? error.message : String(error), linkExpected), answer: '' };
         }
       };
     } else if (spec.kind === 'claude-code') {
@@ -486,7 +506,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
           usage.inputTokens += result.usage.inputTokens;
           usage.outputTokens += result.usage.outputTokens;
           usage.toolCalls += proxy.exchanges.filter((e) => e.method === 'tools/call').length;
-          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error), answer: result.finalText };
+          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error, linkExpected), answer: result.finalText };
         } finally {
           proxy.stop();
         }
@@ -504,7 +524,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
           usage.inputTokens += result.usage.inputTokens;
           usage.outputTokens += result.usage.outputTokens;
           usage.toolCalls += proxy.exchanges.filter((e) => e.method === 'tools/call').length;
-          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error), answer: result.finalText };
+          return { observation: exchangesObservation(question, spec.id, result.finalText, proxy.exchanges, Date.now() - started, result.error, linkExpected), answer: result.finalText };
         } finally {
           proxy.stop();
         }
@@ -674,6 +694,22 @@ async function captureScreenshots(run: Run, outDir: string): Promise<void> {
   });
 }
 
+/**
+ * Asks source_answer and, while it says the answer is still being prepared, collects it with source_answer_result as the tool tells an
+ * agent to (never asking again). Returns the last result: the answer, or the working reply when the wait ran out.
+ */
+async function askAndCollect(bridge: ReturnType<typeof machineToolBridge>, args: { question: string }): Promise<Awaited<ReturnType<ReturnType<typeof machineToolBridge>['call']>>> {
+  let call = await bridge.call('source_answer', args);
+  const until = Date.now() + 600_000;
+  for (;;) {
+    let reply: { status?: unknown; job_id?: unknown } | null = null;
+    try { reply = JSON.parse(call.text) as { status?: unknown; job_id?: unknown } | null; } catch { reply = null; }
+    if (reply?.status !== 'working' || typeof reply.job_id !== 'string' || Date.now() >= until) return call;
+    await new Promise((done) => setTimeout(done, Number(process.env.RELEASE_CHECK_ANSWER_POLL_MS ?? '10000')));
+    call = await bridge.call('source_answer_result', { job_id: reply.job_id });
+  }
+}
+
 /** Dashboard screenshots the Inbox leg must bring back, by file name. */
 const INBOX_SHOTS = ['ask-page-1280.png', 'ask-page-390.png', 'inbox-entry-1280.png', 'inbox-entry-390.png', 'ask-answered-1280.png'];
 
@@ -690,18 +726,22 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
   const selftest = run.options.inboxSelftest;
 
   const scripted: AgentReport = { id: 'scripted', label: 'Scripted agent over MCP (no model, nothing billed)', kind: 'model', scripted: true, ran: true, checks: [] };
+  const offered = await offeredToolNames(run);
+  // Only an install with an answer model offers source_answer, the one tool that issues the Open link and records the question.
+  const linkMode: 'issued' | 'not_offered' = offered.includes('source_answer') ? 'issued' : 'not_offered';
+  const tool = linkMode === 'issued' ? 'source_answer' : 'olympus_search';
   let scriptedId: string | undefined;
   await run.phase('agent-scripted', async () => {
     const started = Date.now();
     const args = { question: question.text };
     let call: Awaited<ReturnType<typeof bridge.call>> | undefined;
     let error: string | undefined;
-    try { call = await bridge.call('olympus_search', args); } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
+    try { call = linkMode === 'issued' ? await askAndCollect(bridge, args) : await bridge.call(tool, args); } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
     const note = call ? privateNoteIn(call.text, call.structured) : null;
     // The reply is the note passed on as written, which is what the tool tells an agent to do. The self-test adds a Private fact to it.
     const reply = `${note ?? ''}${selftest === 'plant-private-reply' ? ` Reference: ${PRIVATE_FACTS[0]}.` : ''}`;
-    const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool: 'olympus_search', args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
-    const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined));
+    const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool, args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
+    const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined), linkMode === 'issued');
     scripted.checks.push(...evaluateObservation(observation, run.markers));
     scriptedId = privateLinkIdsIn(observation.privateNoteText ?? '')[0];
   });
@@ -710,15 +750,18 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
 
   // The wrong-link self-test: the id handed to the browser is not the one the link named, so no entry can be found under it.
   const primary = selftest === 'wrong-link-id' && scriptedId ? `${scriptedId.slice(0, 21)}${scriptedId[21] === 'A' ? 'B' : 'A'}` : scriptedId;
+  // Without a link there is nothing to corrupt: the fault goes to the id of the Ask page's own entry, which the in-machine check opens by address.
+  const corruptAskEntry = selftest === 'wrong-link-id' && linkMode === 'not_offered';
+  run.inboxSelftestFailsOn = linkMode === 'issued' ? 'inbox.agent.entry' : 'inbox.link.opens-entry';
   const others = [...new Set(run.agentLinks.map((link) => link.id))];
   const remoteDir = '~/rc/inbox-shots';
-  const done = await run.phase('inbox', () => run.agent('inbox-check', `--primary ${sh(primary ?? '')} --ids ${sh(others.join(','))} --wait-s 600 --out ${remoteDir}`, 2_700_000));
+  const done = await run.phase('inbox', () => run.agent('inbox-check', `--primary ${sh(primary ?? '')} --ids ${sh(others.join(','))} --wait-s 600${corruptAskEntry ? ' --fault-entry-id' : ''} --out ${remoteDir}`, 2_700_000));
   const observation = done.result as InboxObservation | undefined;
   if (!observation || typeof observation.ok !== 'boolean') {
     run.add({ id: 'inbox.ran', title: 'The Ask page and the Inbox were driven in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
     return;
   }
-  for (const check of evaluateInbox(observation, { scriptedId: primary, agentLinks: run.agentLinks })) run.add(check);
+  for (const check of evaluateInbox(observation, { scriptedId: primary, agentLinks: run.agentLinks, agentLink: linkMode, agentTools: offered })) run.add(check);
 
   const localDir = join(outDir, 'screenshots');
   mkdirSync(localDir, { recursive: true });
@@ -945,7 +988,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     : options.upgradeSelftest
       ? `a fault was deliberately made during the upgrade (${options.upgradeSelftest}); this run is expected to FAIL on ${UPGRADE_SELFTEST_FAILS[options.upgradeSelftest]}`
       : options.inboxSelftest
-        ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
+        ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${run.inboxSelftestFailsOn && options.inboxSelftest === 'wrong-link-id' ? run.inboxSelftestFailsOn : INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
         : undefined;
   let report = buildReport({
     runId: options.runId,
