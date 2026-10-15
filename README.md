@@ -277,7 +277,8 @@ Olympus answers it on your computer; the agent is told only that the answer is
 in Olympus on your computer, with a link (`olympus://open/private/` and a
 random identifier) that opens it there. The answer waits in the dashboard's
 [Inbox](https://olympusplugin.ai/open/private/) (under **On this computer**),
-which no AI app can read, until you delete it, and **Needs you** counts the
+which Olympus gives no AI app a way to read, until you delete it or the Inbox
+removes the oldest answers when full, and **Needs you** counts the
 answers you have not read. More: [Connect other
 agents](#connect-other-agents).
 
@@ -301,7 +302,8 @@ yourself away. Both are off until you turn them on.
   you. Turn on **Anonymous answers** under **Keys** on your computer, then
   ask from your agent or from **Ask a question** in the dashboard's
   [Inbox](https://olympusplugin.ai/open/private/); each question as sent, and
-  its reply, stay in the Inbox on your computer until you delete them.
+  its reply, stay in the Inbox on your computer until you delete them or the
+  Inbox removes the oldest when full.
   Anonymous answers work on a Mac and on Omarchy (x64, Linux 6.7 or newer),
   once Olympus's network isolation checks pass.
 
@@ -674,7 +676,8 @@ route, the writer model, the zkAPI models for questions from ChatGPT and from
 Claude, the spend limit) lives on the dashboard's Anonymous answers card, under
 Keys. Questions are asked through an agent, `olympus ask`, or **Ask a
 question** in the dashboard's Inbox; each question as sent, and its reply, are
-kept in the Inbox on your computer until you delete them. See
+kept in the Inbox on your computer until you delete them or the Inbox removes
+the oldest when full. See
 [`docs/design/private-answers.md`](docs/design/private-answers.md).
 
 MCP clients cap how long one tool call may run, and an answer can take several
