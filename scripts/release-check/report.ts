@@ -35,6 +35,11 @@ export interface AgentReport {
   id: string;
   label: string;
   kind: 'protocol' | 'model';
+  /**
+   * The harness's own scripted agent (no model, nothing billed): it asks the product one question so a surface can be checked, but
+   * it does not count as an agent that asked the suite, so it cannot keep a run with every real agent skipped from failing.
+   */
+  scripted?: boolean;
   usage?: AgentUsage;
   /** `skipped` when the agent could not run at all (for example, its API key is missing). */
   ran: boolean;
@@ -159,9 +164,9 @@ export function phaseVerdicts(machine: MachineReport): PhaseVerdict[] {
   ];
 }
 
-/** An agent counts as having asked a question only if it ran and produced checks. */
+/** An agent counts as having asked a question only if it ran, was not the harness's own scripted one, and produced checks. */
 function askedAQuestion(agent: AgentReport): boolean {
-  return agent.ran && agent.checks.length > 0;
+  return agent.ran && agent.scripted !== true && agent.checks.length > 0;
 }
 
 /**

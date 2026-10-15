@@ -26,6 +26,12 @@
  * The report then shows both stages and what the update kept and migrated
  * (upgrade.ts). Nothing else reaches the install between the two stages.
  *
+ * Ask page and Inbox leg (1.1.0, on by default; `--skip-inbox` leaves it out for an earlier candidate): after the suite and the screenshots,
+ * a scripted agent asks the Private question over the engine's MCP endpoint, then the in-machine agent drives the dashboard in a
+ * headless browser the way its owner does (the opening link signs in, Unlock opens the controls) and checks that the link's id is an
+ * Inbox entry the local model answers, that the Ask page's local model answers a typed question with sources, that Venice and zkAPI
+ * (not set up) show the way to fix that and send nothing, and that nothing left the machine (inbox.ts, egress.ts).
+ *
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
@@ -34,7 +40,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
-  FIXTURE_ITEMS, SUITE_QUESTIONS, fixtureDocuments, forbiddenMarkers, leakyFixture, tierRules,
+  FIXTURE_ITEMS, INBOX_ASK, PRIVATE_FACTS, SUITE_QUESTIONS, fixtureDocuments, forbiddenMarkers, leakyFixture, tierRules,
   type SuiteQuestion,
 } from './fixture.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN } from './readwise-fake.ts';
@@ -53,6 +59,7 @@ import { AgentApiError, readAgentKey, runXaiAgent, type AgentSpec, type ToolBrid
 import { codexLoginAvailable, looksLikeClaudeSetupToken, runClaudeCode, runCodex } from './cli-agents.ts';
 import { cachingRelay, startMcpProxy, type McpExchange, type Relay } from './mcp-proxy.ts';
 import { privateNoteKindIn } from './private-note.ts';
+import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 
@@ -68,6 +75,11 @@ export type UpgradeSelftest = 'lose-tier-rules' | 'revert-policy';
 export const UPGRADE_SELFTESTS: readonly UpgradeSelftest[] = ['lose-tier-rules', 'revert-policy'];
 /** The check each self-test must fail on. */
 export const UPGRADE_SELFTEST_FAILS: Record<UpgradeSelftest, string> = { 'lose-tier-rules': 'upgrade.tier-rules-kept', 'revert-policy': 'upgrade.privacy-migration' };
+
+/** Inbox self-tests: a planted Private string in what an agent said, and a link whose id names no entry. Each must fail the run on the check named. */
+export type InboxSelftest = 'plant-private-reply' | 'wrong-link-id';
+export const INBOX_SELFTESTS: readonly InboxSelftest[] = ['plant-private-reply', 'wrong-link-id'];
+export const INBOX_SELFTEST_FAILS: Record<InboxSelftest, string> = { 'plant-private-reply': 'private-medical.no-leak', 'wrong-link-id': 'inbox.agent.entry' };
 
 export interface RunOptions {
   runId: string;
@@ -87,6 +99,10 @@ export interface RunOptions {
   upgradeFromDir?: string;
   /** Upgrade self-tests: make a fault happen so the run must fail. `lose-tier-rules` is data lost across the update; `revert-policy` is a privacy migration that did not apply. */
   upgradeSelftest?: UpgradeSelftest;
+  /** Inbox self-test: a fault is made in what the Inbox leg sees, so the run must fail on the check that guards it. */
+  inboxSelftest?: InboxSelftest;
+  /** Leave out the Ask page and Inbox leg (1.1.0). For a candidate earlier than 1.1.0, which has none. */
+  skipInbox?: boolean;
   /** Throw after the machine exists, to prove teardown on failure. */
   failAfterProvision?: boolean;
   /** Debugging only: leave the machine running. The run is reported as failed so it can never pass for release evidence. */
@@ -146,6 +162,8 @@ class Run {
   readonly stages = new Map<string, Stage>();
   /** What the update changed, for the report. */
   differences: Difference[] = [];
+  /** The Open-link ids the model agents were given for the Private question: the Inbox leg checks each resolves. */
+  readonly agentLinks: Array<{ agent: string; id: string }> = [];
   stage: Stage;
   machine?: Machine;
 
@@ -272,7 +290,15 @@ function agentConfig(options: RunOptions): AgentConfig {
     relay: options.config.relay ?? '',
     privateFacts,
     enginePort: ENGINE_PORT,
+    inbox: {
+      agent: { text: privateQuestion().text, facts: [...privateQuestion().privateFacts], citedTitle: INBOX_ASK.citedTitle },
+      ask: { text: INBOX_ASK.text, facts: [...INBOX_ASK.facts], citedTitle: INBOX_ASK.citedTitle },
+    },
   };
+}
+
+function privateQuestion(): SuiteQuestion {
+  return SUITE_QUESTIONS.find((question) => question.kind === 'private')!;
 }
 
 function expectedTierCounts(): { personal: number; private: number; secrets: number } {
@@ -385,6 +411,8 @@ function exchangesObservation(question: SuiteQuestion, agentId: string, finalTex
     evidenceTitles: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.title)),
     evidenceIds: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.id)),
     privateNote: toolCalls.some((c) => privateNoteKindIn(c.outputText, c.structured) !== null),
+    // The note as the tool gave it, link included (a Private question only; any other question has none to judge).
+    ...(question.kind === 'private' ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),
     ms,
     ...(error ? { error } : toolCalls.length === 0 ? { error: 'the agent never called the search tool' } : {}),
   };
@@ -487,6 +515,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
       for (const question of SUITE_QUESTIONS) {
         const { observation, answer } = await ask!(question);
         agent.checks.push(...evaluateObservation(observation, run.markers));
+        for (const id of privateLinkIdsIn(observation.privateNoteText ?? '')) run.agentLinks.push({ agent: spec.id, id });
         // The judge sees an answer only when nothing leaked into it.
         const leaked = agent.checks.some((c) => c.id === `${question.id}.no-leak` && c.status === 'fail');
         const judged = leaked ? undefined : await judgeAnswer(judge, question, answer);
@@ -645,6 +674,72 @@ async function captureScreenshots(run: Run, outDir: string): Promise<void> {
   });
 }
 
+/** Dashboard screenshots the Inbox leg must bring back, by file name. */
+const INBOX_SHOTS = ['ask-page-1280.png', 'ask-page-390.png', 'inbox-entry-1280.png', 'inbox-entry-390.png', 'ask-answered-1280.png'];
+
+/**
+ * The 1.1.0 surfaces, in the owner's browser on the machine: an agent's Private question reaches the Inbox by the link it was given
+ * and the local model answers it; the Ask page's "Ask the local model" answers a typed question and keeps it in the Inbox; Venice and
+ * zkAPI, not set up, show the way to fix that and send nothing. A scripted agent (no model, nothing billed) asks the Private question
+ * so the Inbox entry exists whichever model agents ran; the model agents' own links are checked to resolve too.
+ */
+async function runInboxLeg(run: Run, outDir: string): Promise<void> {
+  if (run.options.skipInbox) return;
+  const bridge = machineToolBridge(run);
+  const question = privateQuestion();
+  const selftest = run.options.inboxSelftest;
+
+  const scripted: AgentReport = { id: 'scripted', label: 'Scripted agent over MCP (no model, nothing billed)', kind: 'model', scripted: true, ran: true, checks: [] };
+  let scriptedId: string | undefined;
+  await run.phase('agent-scripted', async () => {
+    const started = Date.now();
+    const args = { question: question.text };
+    let call: Awaited<ReturnType<typeof bridge.call>> | undefined;
+    let error: string | undefined;
+    try { call = await bridge.call('olympus_search', args); } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
+    const note = call ? privateNoteIn(call.text, call.structured) : null;
+    // The reply is the note passed on as written, which is what the tool tells an agent to do. The self-test adds a Private fact to it.
+    const reply = `${note ?? ''}${selftest === 'plant-private-reply' ? ` Reference: ${PRIVATE_FACTS[0]}.` : ''}`;
+    const exchanges: McpExchange[] = call ? [{ method: 'tools/call', tool: 'olympus_search', args, status: 200, outputText: call.text, structured: call.structured, isError: call.isError }] : [];
+    const observation = exchangesObservation(question, 'scripted', reply, exchanges, Date.now() - started, error ?? (call?.isError ? 'the tool returned an error' : undefined));
+    scripted.checks.push(...evaluateObservation(observation, run.markers));
+    scriptedId = privateLinkIdsIn(observation.privateNoteText ?? '')[0];
+  });
+  for (const check of scripted.checks) run.log(`agent scripted ${check.status.toUpperCase()} ${check.id}${check.detail ? ` - ${check.detail}` : ''}`);
+  run.agents.push(scripted);
+
+  // The wrong-link self-test: the id handed to the browser is not the one the link named, so no entry can be found under it.
+  const primary = selftest === 'wrong-link-id' && scriptedId ? `${scriptedId.slice(0, 21)}${scriptedId[21] === 'A' ? 'B' : 'A'}` : scriptedId;
+  const others = [...new Set(run.agentLinks.map((link) => link.id))];
+  const remoteDir = '~/rc/inbox-shots';
+  const done = await run.phase('inbox', () => run.agent('inbox-check', `--primary ${sh(primary ?? '')} --ids ${sh(others.join(','))} --wait-s 600 --out ${remoteDir}`, 2_700_000));
+  const observation = done.result as InboxObservation | undefined;
+  if (!observation || typeof observation.ok !== 'boolean') {
+    run.add({ id: 'inbox.ran', title: 'The Ask page and the Inbox were driven in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
+    return;
+  }
+  for (const check of evaluateInbox(observation, { scriptedId: primary, agentLinks: run.agentLinks })) run.add(check);
+
+  const localDir = join(outDir, 'screenshots');
+  mkdirSync(localDir, { recursive: true });
+  const fetched: string[] = [];
+  for (const shot of observation.shots ?? []) {
+    const name = shot.file.split('/').pop()!;
+    try {
+      await run.machine!.get(`${remoteDir}/${name}`, join(localDir, name));
+      run.screenshots.push({ label: shot.label, path: `screenshots/${name}`, width: shot.width, theme: shot.theme });
+      if (shot.bytes > 4_000) fetched.push(name);
+    } catch { run.log(`could not fetch screenshot ${name}`); }
+  }
+  const missing = INBOX_SHOTS.filter((name) => !fetched.includes(name));
+  run.add({
+    id: 'inbox.screenshots',
+    title: 'The Ask page and an opened Inbox entry were captured for the report',
+    status: observation.ok && missing.length === 0 ? 'pass' : 'fail',
+    detail: missing.length === 0 ? `${fetched.length} screenshots (they show the synthetic test life's Private answer, as the owner's own browser does)` : `missing: ${missing.join(', ')}`,
+  });
+}
+
 /** The agent suite against the engine: the connection, every model agent, then the ChatGPT-protocol pass. */
 async function runSuite(run: Run, workDir: string, judge: Judge | undefined, { mintToken }: { mintToken: boolean }): Promise<void> {
   const bridge = machineToolBridge(run);
@@ -750,6 +845,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() >= deadline) { run.errors.push('the run exceeded its time budget before the suite after the update'); return; }
   await runSuite(run, workDir, judge, { mintToken: false });
   await captureScreenshots(run, options.outDir);
+  if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
   await collectEvidence(run, options.outDir);
 }
 
@@ -790,6 +886,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       }
       if (ready) {
         await captureScreenshots(run, options.outDir);
+        if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
       }
       await collectEvidence(run, options.outDir);
     }
@@ -847,7 +944,9 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     ? `the ${options.mistier} marker was deliberately stored in an ordinary Personal item; this run is expected to FAIL on the leak checks`
     : options.upgradeSelftest
       ? `a fault was deliberately made during the upgrade (${options.upgradeSelftest}); this run is expected to FAIL on ${UPGRADE_SELFTEST_FAILS[options.upgradeSelftest]}`
-      : undefined;
+      : options.inboxSelftest
+        ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
+        : undefined;
   let report = buildReport({
     runId: options.runId,
     candidate: { label: options.candidateLabel, ...(options.candidateSha ? { sha: options.candidateSha } : {}) },
@@ -891,7 +990,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -906,6 +1005,12 @@ export function parseCli(argv: readonly string[]): RunOptions {
     if (!(UPGRADE_SELFTESTS as readonly string[]).includes(upgradeSelftest)) throw new Error(`--upgrade-selftest is one of ${UPGRADE_SELFTESTS.join(', ')}`);
   }
   if (upgradeFrom !== undefined && mistier !== undefined) throw new Error('--mistier and --upgrade-from are separate self-tests; use one');
+  const inboxSelftest = get('--inbox-selftest');
+  if (inboxSelftest !== undefined) {
+    if (!(INBOX_SELFTESTS as readonly string[]).includes(inboxSelftest)) throw new Error(`--inbox-selftest is one of ${INBOX_SELFTESTS.join(', ')}`);
+    if (mistier !== undefined || upgradeSelftest !== undefined) throw new Error('--inbox-selftest is a separate self-test from --mistier and --upgrade-selftest; use one');
+    if (has('--skip-inbox')) throw new Error('--inbox-selftest needs the Inbox leg; drop --skip-inbox');
+  }
   const runId = get('--run-id') ?? newRunId();
   const harnessCommit = get('--harness-commit');
   if (harnessCommit !== undefined) {
@@ -924,6 +1029,8 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(mistier ? { mistier } : {}),
     ...(upgradeFrom !== undefined ? { upgradeFromDir: resolve(upgradeFrom) } : {}),
     ...(upgradeSelftest ? { upgradeSelftest: upgradeSelftest as UpgradeSelftest } : {}),
+    ...(inboxSelftest ? { inboxSelftest: inboxSelftest as InboxSelftest } : {}),
+    skipInbox: has('--skip-inbox'),
     ...(only ? { onlyAgents: only.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     failAfterProvision: has('--fail-after-provision'),
     keepMachine: has('--keep-machine'),
