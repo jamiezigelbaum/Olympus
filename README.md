@@ -267,15 +267,18 @@ directly. Guides: <https://olympusplugin.ai/install/>.
 
 They search what is Personal, with citations, like ChatGPT. They never get
 your Private items themselves or the Secrets Olympus recognizes. For Private
-items they get only an answer that the private model on your computer (or
+items they get at most an answer that the private model on your computer (or
 Venice, if you set it up) writes from them, checked for secrets, with each
 item's title, path, source and author. That answer can repeat what the items
 say. ChatGPT is stricter: it gets no answer from Private items
-at all, and shows one only in its private answer panel. When no Private answer
-can be given, the question waits in Olympus on your computer and **Needs you**
-says so: open the dashboard's
-[Private answers](https://olympusplugin.ai/open/private/) page (under **On
-this computer**) to answer it there. More: [Connect other
+at all, and shows one only in its private answer panel. When an agent is not
+given an answer, Olympus records the question and the model built into
+Olympus answers it on your computer; the agent is told only that the answer is
+in Olympus on your computer, with a link (`olympus://open/private/` and a
+random identifier) that opens it there. The answer waits in the dashboard's
+[Inbox](https://olympusplugin.ai/open/private/) (under **On this computer**),
+which no AI app can read, until you delete it, and **Needs you** counts the
+answers you have not read. More: [Connect other
 agents](#connect-other-agents).
 
 ## Stronger models, privately
@@ -285,7 +288,9 @@ yourself away. Both are off until you turn them on.
 
 - **[Venice](https://venice.ai)** runs private models that, under Venice's own
   terms, keep nothing you send. Add your Venice key under **Keys**, on your
-  computer.
+  computer. In **Ask a question**, a Venice model reads the passages of your
+  files it needs, and is available only if your privacy settings allow Private
+  items to go to Venice; a key alone does not allow it.
 - **zkAPI**, from OpenAnonymity and the Ethereum Foundation, hides who is
   asking. It pays anonymously and sends the question over Tor (on unless you
   turn it off; without Tor, your network address shows): no account, no card,
@@ -293,8 +298,10 @@ yourself away. Both are off until you turn them on.
   computer first rewrites the question into general questions; **Standard**,
   by default, takes out names, contact details and account numbers, or sends
   your words as written if you choose that. What you ask can still identify
-  you. Turn on **Anonymous answers** on the
-  dashboard's [Private answers](https://olympusplugin.ai/open/private/) page.
+  you. Turn on **Anonymous answers** under **Keys** on your computer, then
+  ask from your agent or from **Ask a question** in the dashboard's
+  [Inbox](https://olympusplugin.ai/open/private/); each question as sent, and
+  its reply, stay in the Inbox on your computer until you delete them.
   Anonymous answers work on a Mac and on Omarchy (x64, Linux 6.7 or newer),
   once Olympus's network isolation checks pass.
 
@@ -664,8 +671,10 @@ hosts the agent asking: a question from ChatGPT goes to Claude Sonnet by
 default, one from Claude Code or Claude Desktop to an OpenAI model, and a
 one-off `model` from the agent's own provider is refused. Setup (the zkAPI
 route, the writer model, the zkAPI models for questions from ChatGPT and from
-Claude, the spend limit) lives on the dashboard's Anonymous answers card, which
-is for setup only: questions are asked through an agent (or `olympus ask`); see
+Claude, the spend limit) lives on the dashboard's Anonymous answers card, under
+Keys. Questions are asked through an agent, `olympus ask`, or **Ask a
+question** in the dashboard's Inbox; each question as sent, and its reply, are
+kept in the Inbox on your computer until you delete them. See
 [`docs/design/private-answers.md`](docs/design/private-answers.md).
 
 MCP clients cap how long one tool call may run, and an answer can take several
