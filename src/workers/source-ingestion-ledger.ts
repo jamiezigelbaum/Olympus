@@ -17,10 +17,12 @@ import {
 import type { SourceSchedulerStatus } from './source-scheduler.ts';
 import { defaultSourceDashboardHistoryDbPath } from './source-dashboard.ts';
 import {
-  answerReadyEligibleFromCounts,
+  aggregateAnswerReadyEligibleItems,
   answerReadyEligibleItems,
+  corpusAnswerReadyEligibleItems,
   metadataOnlyByPolicyFromCounts,
   notReadByPolicyFromCounts,
+  type AnswerReadyPopulation,
 } from './dashboard/answer-ready-coverage.ts';
 import {
   createSourceIndexStatusHandler,
@@ -952,12 +954,17 @@ function applyCorpus(
       row.ingestion_health.metadata_only_by_policy_items =
         (row.ingestion_health.metadata_only_by_policy_items ?? 0) + metrics.metadataOnlyByPolicy;
     }
-    // Same rule, same reason: only a corpus that published its own denominator
-    // contributes one.
-    if (metrics.eligibleItems !== undefined) {
-      row.ingestion_health.answer_ready_eligible_items =
-        (row.ingestion_health.answer_ready_eligible_items ?? 0) + metrics.eligibleItems;
-    }
+    // The denominator is summed once, at finalize, over every corpus's own
+    // population (see `finalizeRow`): adding only the publishers' numbers here
+    // while `items` and the ready count come from all of them divided one
+    // population by another's.
+    const populations = corpusPopulations.get(row) ?? [];
+    populations.push({
+      indexedItems: metrics.items,
+      notReadByPolicyItems: metrics.notReadByPolicy,
+      eligibleItems: metrics.eligibleItems,
+    });
+    corpusPopulations.set(row, populations);
     row.failed += metrics.failed;
     row.stuck.queued += metrics.queued;
     row.stuck.active += metrics.active;
@@ -1050,8 +1057,8 @@ function corpusMetrics(counts: Record<string, number | undefined>): {
   const defined = definedCounts(counts);
   const notReadByPolicy = notReadByPolicyFromCounts(defined);
   const metadataOnlyByPolicy = metadataOnlyByPolicyFromCounts(defined);
-  const eligibleItems = answerReadyEligibleFromCounts(defined);
   const items = number(counts.indexed_items ?? counts.messages ?? counts.files ?? counts.items);
+  const eligibleItems = corpusAnswerReadyEligibleItems(defined, items);
   // Per-item readiness keys ONLY, and no chunk fallback behind them.
   //
   // There used to be a `corpusId.includes('dropbox.files')` branch here, and
@@ -1201,7 +1208,18 @@ function applyDropboxBreakdown(
   if (failed > 0) row.attention.push(`${failed} unreadable extraction job(s) need attention`);
 }
 
+/**
+ * Each corpus's population, kept beside the row while it is built. Held here
+ * rather than on the row so it never reaches the persisted or printed shape.
+ */
+const corpusPopulations = new WeakMap<object, AnswerReadyPopulation[]>();
+
 function finalizeRow(row: MutableLedgerRow, now: Date): SourceIngestionLedgerRow {
+  // The same per-corpus population the dashboard card divides by, summed by the
+  // same function. Absent when no corpus publishes one, in which case the
+  // denominator is `items` less the policy exits, as it always was.
+  const eligible = aggregateAnswerReadyEligibleItems(corpusPopulations.get(row) ?? []);
+  if (eligible !== undefined) row.ingestion_health.answer_ready_eligible_items = eligible;
   // The denominator is what this source is meant to READ, not everything it
   // stores: `items` still reports the raw indexed count next to it.
   const coverage = coveragePercent(

@@ -30430,8 +30430,9 @@ function rawItemFromGmailMessage(message2, account, options = {}) {
   const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
   const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
   const metadataOnly = options.metadataOnly === true;
-  const text2 = metadataOnly ? "" : extractMessageText(message2);
   const attachments = gmailAttachmentInventory(message2.payload);
+  const text2 = metadataOnly ? "" : extractMessageText(message2) || (attachments.lines.length > 0 ? attachments.lines.join(`
+`) : `Subject: ${subject}`);
   const fetchedAt = new Date().toISOString();
   return {
     identity: {
@@ -38360,7 +38361,7 @@ var init_tier_set3 = __esm(() => {
 });
 
 // src/workers/source-ingestion-ledger.ts
-var SAMPLE_RETENTION_MS2;
+var SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
   init_config();
   init_source_corpus_registry();
@@ -38378,6 +38379,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
+  corpusPopulations = new WeakMap;
 });
 
 // src/core/delphi.ts

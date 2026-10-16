@@ -1,4 +1,5 @@
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
+import { dashboardWorkingSummary } from '../src/workers/dashboard/vocabulary.ts';
 import { engineBriefFromViewModel } from '../src/core/engine-brief.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -5237,6 +5238,34 @@ describe('mail kept as names only by the approved window', () => {
     expect(view.sources.find(source => source.source_id === 'gmail.email')?.ingestion_health.label)
       .toBe('Older mail is kept as names only; no stuck work');
     expect(panel.sources.find(source => source.id === 'gmail.email')?.progress).toMatchObject({ stage: 'done', percent: 100, stalled: false });
+  });
+
+  // The census (`olympus ingestion status`, the doctor) and the card divide the
+  // same read count by the same owed population. They once did not: the census
+  // summed only the Private store's own denominator and showed 100% on the
+  // laptop while the card said 77.8%.
+  test('the ingestion census and the card agree on the laptop, before and after the older mail leaves', () => {
+    for (const [counts, expected] of [
+      [LAPTOP_INTERNAL, 77.8],
+      [{ ...LAPTOP_INTERNAL, qa_out_of_content_scope: 2 }, 100],
+      // One of the three in-window Personal messages still unread: 5 read of 7 owed.
+      [{ ...LAPTOP_INTERNAL, qa_out_of_content_scope: 2, items_with_text: 3 }, 71.4],
+    ] as const) {
+      const status = gmailCorpora({ ...counts }, LAPTOP_PRIVATE, completedAt);
+      const ledger = buildSourceIngestionLedgerSnapshot(status, { now: NOW });
+      const row = ledger.rows.find((entry) => entry.source_id === 'email')!;
+      const view = buildSourceDashboardViewModel({
+        sourceIndexStatus: status, sovereigntyEngine: fixtureSovereigntyEngine(), ingestionLedger: ledger,
+        connectedHandleRegistry: { version: 1, handles: [gmailHandle('gmail.personal')] },
+        history: new SqliteSourceDashboardHistory(':memory:'), now: NOW,
+      });
+      const card = view.sources.find((source) => source.source_id === 'gmail.email')!;
+      const cardPercent = dashboardWorkingSummary(card)!.read_percent;
+      expect(cardPercent).toBe(expected);
+      expect(row.coverage_percent).toBe(expected);
+      expect(card.ingestion_health.coverage_percent).toBe(expected);
+      expect(row.ingestion_health.answer_ready_eligible_items).toBe(card.coverage.answer_ready_eligible_items!);
+    }
   });
 
   test('mail the window does not cover is still owed: a read that is genuinely short still stalls', () => {

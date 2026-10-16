@@ -34,9 +34,10 @@ import {
   BLOCKED_BY_POLICY_COUNT_KEY,
   ITEMS_WITH_TEXT_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
-  answerReadyEligibleFromCounts,
+  aggregateAnswerReadyEligibleItems,
   answerReadyEligibleItems,
   answerReadyPercent,
+  corpusAnswerReadyEligibleItems,
   notReadByPolicyFromCounts,
 } from './dashboard/answer-ready-coverage.ts';
 // Words only. vocabulary.ts imports nothing from this module at runtime — its
@@ -3110,10 +3111,11 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
   // Once one corpus publishes its own denominator, include every sibling's
   // effective population too: a Personal names copy cannot erase the Private
   // content store from the source's total.
-  const eligibleItems = cards.some(card => card.coverage.answer_ready_eligible_items !== undefined)
-    ? cards.reduce((sum, card) => sum + answerReadyEligibleItems(card.coverage.indexed_items,
-      card.coverage.not_read_by_policy_items, card.coverage.answer_ready_eligible_items), 0)
-    : undefined;
+  const eligibleItems = aggregateAnswerReadyEligibleItems(cards.map((card) => ({
+    indexedItems: card.coverage.indexed_items,
+    notReadByPolicyItems: card.coverage.not_read_by_policy_items,
+    eligibleItems: card.coverage.answer_ready_eligible_items,
+  })));
   const unreadable = cards.reduce<number | undefined>((sum, card) => {
     const value = card.coverage.unreadable_items;
     return value === undefined ? sum : (sum ?? 0) + value;
@@ -4436,9 +4438,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const embeddedFiles = counts[ITEMS_EMBEDDED_COUNT_KEY];
   const needsReviewItems = sumCounts(counts, DASHBOARD_NEEDS_REVIEW_REASONS.map((reason) => reason.count_key));
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
-  const eligibleItems = answerReadyEligibleFromCounts(counts)
-    ?? (counts.content_elsewhere_items === undefined ? undefined
-      : Math.max(0, indexedItems - (notReadByPolicy ?? 0) - counts.content_elsewhere_items));
+  const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
     indexed_items: indexedItems,
