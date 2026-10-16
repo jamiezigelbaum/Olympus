@@ -38351,7 +38351,7 @@ var init_tier_set3 = __esm(() => {
 });
 
 // src/workers/source-ingestion-ledger.ts
-var SAMPLE_RETENTION_MS2;
+var SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
   init_config();
   init_source_corpus_registry();
@@ -38369,6 +38369,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
+  corpusPopulations = new WeakMap;
 });
 
 // src/core/delphi.ts

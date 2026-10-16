@@ -13344,12 +13344,26 @@ function notReadByPolicyFromCounts(counts) {
   }
   return total;
 }
+function corpusAnswerReadyEligibleItems(counts, indexedItems) {
+  const published = answerReadyEligibleFromCounts(counts);
+  if (published !== undefined)
+    return published;
+  const elsewhere = counts["content_elsewhere_items"];
+  if (typeof elsewhere !== "number" || !Number.isFinite(elsewhere))
+    return;
+  return Math.max(0, indexedItems - (notReadByPolicyFromCounts(counts) ?? 0) - Math.max(0, Math.trunc(elsewhere)));
+}
 function answerReadyEligibleItems(indexedItems, notReadByPolicyItems, publishedEligibleItems) {
   if (typeof publishedEligibleItems === "number" && Number.isFinite(publishedEligibleItems)) {
     return Math.max(0, Math.trunc(publishedEligibleItems));
   }
   const excluded = typeof notReadByPolicyItems === "number" && Number.isFinite(notReadByPolicyItems) ? Math.max(0, notReadByPolicyItems) : 0;
   return Math.max(0, indexedItems - excluded);
+}
+function aggregateAnswerReadyEligibleItems(corpora) {
+  if (!corpora.some((corpus) => corpus.eligibleItems !== undefined))
+    return;
+  return corpora.reduce((sum, corpus) => sum + answerReadyEligibleItems(corpus.indexedItems, corpus.notReadByPolicyItems, corpus.eligibleItems), 0);
 }
 var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
 var init_answer_ready_coverage = __esm(() => {
@@ -18391,9 +18405,13 @@ function applyCorpus(row, corpus, now, countsNestedInSuperset = false) {
     if (metrics.metadataOnlyByPolicy !== undefined) {
       row.ingestion_health.metadata_only_by_policy_items = (row.ingestion_health.metadata_only_by_policy_items ?? 0) + metrics.metadataOnlyByPolicy;
     }
-    if (metrics.eligibleItems !== undefined) {
-      row.ingestion_health.answer_ready_eligible_items = (row.ingestion_health.answer_ready_eligible_items ?? 0) + metrics.eligibleItems;
-    }
+    const populations = corpusPopulations.get(row) ?? [];
+    populations.push({
+      indexedItems: metrics.items,
+      notReadByPolicyItems: metrics.notReadByPolicy,
+      eligibleItems: metrics.eligibleItems
+    });
+    corpusPopulations.set(row, populations);
     row.failed += metrics.failed;
     row.stuck.queued += metrics.queued;
     row.stuck.active += metrics.active;
@@ -18447,8 +18465,8 @@ function corpusMetrics(counts) {
   const defined = definedCounts(counts);
   const notReadByPolicy = notReadByPolicyFromCounts(defined);
   const metadataOnlyByPolicy = metadataOnlyByPolicyFromCounts(defined);
-  const eligibleItems = answerReadyEligibleFromCounts(defined);
   const items = number(counts.indexed_items ?? counts.messages ?? counts.files ?? counts.items);
+  const eligibleItems = corpusAnswerReadyEligibleItems(defined, items);
   const contentIndexed = Math.min(items, number(counts.files_with_text ?? counts.items_with_text ?? counts.qa_pass));
   const failed = number(counts.extraction_jobs_failed_actionable ?? counts.extraction_jobs_failed);
   return {
@@ -18560,6 +18578,9 @@ function applyDropboxBreakdown(rows, breakdown, now) {
     row.attention.push(`${failed} unreadable extraction job(s) need attention`);
 }
 function finalizeRow(row, now) {
+  const eligible = aggregateAnswerReadyEligibleItems(corpusPopulations.get(row) ?? []);
+  if (eligible !== undefined)
+    row.ingestion_health.answer_ready_eligible_items = eligible;
   const coverage = coveragePercent(answerReadyEligibleItems(row.items, row.ingestion_health.not_read_by_policy_items, row.ingestion_health.answer_ready_eligible_items), row.content_indexed);
   row.coverage_percent = coverage;
   const stuckWork = stuckWorkHealth(row.failure_breakdown ?? [], row.ingestion_health.stuck_work, now);
@@ -18789,7 +18810,7 @@ function dedupe(values) {
 function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(value);
 }
-var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2;
+var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
   init_config();
   init_source_corpus_registry();
@@ -18851,6 +18872,7 @@ var init_source_ingestion_ledger = __esm(() => {
     }
   };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
+  corpusPopulations = new WeakMap;
 });
 
 // src/core/worker-transport.ts

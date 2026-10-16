@@ -570,6 +570,62 @@ describe('ledger corpus assignment', () => {
   });
 });
 
+// The Omarchy laptop, 2026-10-16. Gmail kept 11 rows: five read in the
+// Personal store, two whose text lives in the Private store, two names-only
+// rows from before the mail window and two read in the Private store. Only
+// the Private store publishes its own denominator, so summing just its 2 while
+// the 11 rows and 7 reads came from both told the census "7 ready of 2": a
+// clamp to 100% over two different populations, while the dashboard said 77.8%.
+describe('a source with several stores divides each store by its own population', () => {
+  const NOW = new Date('2026-07-28T12:00:00.000Z');
+  const personal = (counts: Record<string, number>) => ({
+    ...corpusFixture('internal.email', 'email', 'internal', 9, 5),
+    counts: { indexed_items: 9, tombstoned_items: 0, chunks: 5, items_with_text: 5, embedded_chunks: 0, sync_runs: 1, content_elsewhere_items: 2, ...counts },
+  });
+  const privateStore = {
+    ...corpusFixture('secure_local.email.private', 'email', 'secure_local', 2, 2),
+    counts: { indexed_items: 2, tombstoned_items: 0, chunks: 2, items_with_text: 2, embedded_chunks: 0, sync_runs: 1, qa_eligible_items: 2 },
+  };
+  const emailRow = (corpora: SourceIndexStatusResult['corpora']) =>
+    buildSourceIngestionLedgerSnapshot(statusWithCorpora(corpora), { now: NOW }).rows.find((row) => row.source_id === 'email')!;
+
+  test('before the window count: 7 read of 9 owed is 77.8%, not 7 of the Private store\'s 2', () => {
+    const email = emailRow([personal({}), privateStore]);
+    // 11 stored, 7 read. Owed: Personal 9 less the 2 whose text is elsewhere = 7,
+    // plus the Private store's own 2.
+    expect(email.items).toBe(11);
+    expect(email.content_indexed).toBe(7);
+    expect(email.ingestion_health.answer_ready_eligible_items).toBe(9);
+    expect(email.coverage_percent).toBe(77.8);
+    expect(email.ingestion_health.coverage_percent).toBe(77.8);
+  });
+
+  test('with the older mail taken out of the owed population, the same mailbox is 100%', () => {
+    const email = emailRow([personal({ qa_out_of_content_scope: 2 }), privateStore]);
+    // Owed: Personal 9 less 2 elsewhere less 2 older = 5, plus the Private 2.
+    expect(email.ingestion_health.answer_ready_eligible_items).toBe(7);
+    expect(email.coverage_percent).toBe(100);
+  });
+
+  test('a short read is not hidden by the clamp: 5 read of 7 owed is 71.4%', () => {
+    const email = emailRow([personal({ qa_out_of_content_scope: 2, items_with_text: 3 }), privateStore]);
+    // Read: 3 in the Personal store and 2 in the Private store. Owed: 5 + 2.
+    // The mixed-population sum read 5 of the Private store's 2 and clamped to 100.
+    expect(email.content_indexed).toBe(5);
+    expect(email.coverage_percent).toBe(71.4);
+  });
+
+  test('a store that publishes nothing and has nothing elsewhere keeps its ratio beside one that does', () => {
+    const email = emailRow([
+      { ...corpusFixture('internal.email', 'email', 'internal', 20, 10) },
+      privateStore,
+    ]);
+    // 20 owed in the Personal store with no vocabulary, 2 owed in the Private: 12 of 22.
+    expect(email.ingestion_health.answer_ready_eligible_items).toBe(22);
+    expect(email.coverage_percent).toBe(54.5);
+  });
+});
+
 // "Excluded by configuration" is an omission the owner CHOSE, and the whole
 // point of this section is that a chosen omission still has to be said out
 // loud — the same failure class as the unassigned corpora above, arrived at

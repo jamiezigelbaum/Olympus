@@ -132,6 +132,30 @@ export function notReadByPolicyFromCounts(counts: Record<string, number>): numbe
 }
 
 /**
+ * One corpus's own eligible denominator, from the counts it publishes.
+ *
+ * Its own `qa_eligible_items` when it publishes one. Otherwise, for a store
+ * that moved some rows' text to another store (`content_elsewhere_items`), the
+ * indexed rows less the policy exits less those moved rows: the text of a moved
+ * row is counted where it went, so counting the row here as well owes it twice.
+ * A corpus that says neither stays undefined and is divided as `indexed` less
+ * its policy exits, exactly as before.
+ *
+ * The dashboard card and the ingestion ledger both read it here, so the two
+ * percentages cannot give one corpus two denominators.
+ */
+export function corpusAnswerReadyEligibleItems(
+  counts: Record<string, number>,
+  indexedItems: number,
+): number | undefined {
+  const published = answerReadyEligibleFromCounts(counts);
+  if (published !== undefined) return published;
+  const elsewhere = counts['content_elsewhere_items'];
+  if (typeof elsewhere !== 'number' || !Number.isFinite(elsewhere)) return undefined;
+  return Math.max(0, indexedItems - (notReadByPolicyFromCounts(counts) ?? 0) - Math.max(0, Math.trunc(elsewhere)));
+}
+
+/**
  * Indexed items the system is actually meant to read. Never negative.
  *
  * `publishedEligibleItems` wins outright when the corpus reported one: it was
@@ -151,6 +175,38 @@ export function answerReadyEligibleItems(
     ? Math.max(0, notReadByPolicyItems)
     : 0;
   return Math.max(0, indexedItems - excluded);
+}
+
+/** What one corpus contributes to its source's denominator. */
+export interface AnswerReadyPopulation {
+  indexedItems: number;
+  notReadByPolicyItems?: number | undefined;
+  eligibleItems?: number | undefined;
+}
+
+/**
+ * The eligible denominator of a source across its corpora, or undefined when
+ * no corpus publishes one (the source is then divided as indexed less policy
+ * exits, as before).
+ *
+ * Once any corpus publishes its own, EVERY corpus contributes its effective
+ * population: a corpus that publishes nothing adds what it holds less its
+ * policy exits. Summing only the publishers' numbers while the items and the
+ * ready count come from all of them divides one population by another's, and
+ * a few ready items over a small published denominator clamp to 100%.
+ */
+export function aggregateAnswerReadyEligibleItems(
+  corpora: readonly AnswerReadyPopulation[],
+): number | undefined {
+  if (!corpora.some((corpus) => corpus.eligibleItems !== undefined)) return undefined;
+  return corpora.reduce(
+    (sum, corpus) => sum + answerReadyEligibleItems(
+      corpus.indexedItems,
+      corpus.notReadByPolicyItems,
+      corpus.eligibleItems,
+    ),
+    0,
+  );
 }
 
 /**

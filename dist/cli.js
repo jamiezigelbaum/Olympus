@@ -71754,12 +71754,26 @@ function notReadByPolicyFromCounts(counts) {
   }
   return total;
 }
+function corpusAnswerReadyEligibleItems(counts, indexedItems) {
+  const published = answerReadyEligibleFromCounts(counts);
+  if (published !== undefined)
+    return published;
+  const elsewhere = counts["content_elsewhere_items"];
+  if (typeof elsewhere !== "number" || !Number.isFinite(elsewhere))
+    return;
+  return Math.max(0, indexedItems - (notReadByPolicyFromCounts(counts) ?? 0) - Math.max(0, Math.trunc(elsewhere)));
+}
 function answerReadyEligibleItems(indexedItems, notReadByPolicyItems, publishedEligibleItems) {
   if (typeof publishedEligibleItems === "number" && Number.isFinite(publishedEligibleItems)) {
     return Math.max(0, Math.trunc(publishedEligibleItems));
   }
   const excluded = typeof notReadByPolicyItems === "number" && Number.isFinite(notReadByPolicyItems) ? Math.max(0, notReadByPolicyItems) : 0;
   return Math.max(0, indexedItems - excluded);
+}
+function aggregateAnswerReadyEligibleItems(corpora) {
+  if (!corpora.some((corpus) => corpus.eligibleItems !== undefined))
+    return;
+  return corpora.reduce((sum2, corpus) => sum2 + answerReadyEligibleItems(corpus.indexedItems, corpus.notReadByPolicyItems, corpus.eligibleItems), 0);
 }
 function answerReadyPercent(input) {
   if (input.indexedItems <= 0)
@@ -75095,7 +75109,11 @@ function aggregateCoverage(cards) {
     const value2 = card.coverage.not_read_by_policy_items;
     return value2 === undefined ? sum2 : (sum2 ?? 0) + value2;
   }, undefined);
-  const eligibleItems = cards.some((card) => card.coverage.answer_ready_eligible_items !== undefined) ? cards.reduce((sum2, card) => sum2 + answerReadyEligibleItems(card.coverage.indexed_items, card.coverage.not_read_by_policy_items, card.coverage.answer_ready_eligible_items), 0) : undefined;
+  const eligibleItems = aggregateAnswerReadyEligibleItems(cards.map((card) => ({
+    indexedItems: card.coverage.indexed_items,
+    notReadByPolicyItems: card.coverage.not_read_by_policy_items,
+    eligibleItems: card.coverage.answer_ready_eligible_items
+  })));
   const unreadable = cards.reduce((sum2, card) => {
     const value2 = card.coverage.unreadable_items;
     return value2 === undefined ? sum2 : (sum2 ?? 0) + value2;
@@ -75802,7 +75820,7 @@ function coverageFromCounts(counts) {
   const embeddedFiles = counts[ITEMS_EMBEDDED_COUNT_KEY];
   const needsReviewItems = sumCounts(counts, DASHBOARD_NEEDS_REVIEW_REASONS.map((reason) => reason.count_key));
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
-  const eligibleItems = answerReadyEligibleFromCounts(counts) ?? (counts.content_elsewhere_items === undefined ? undefined : Math.max(0, indexedItems - (notReadByPolicy ?? 0) - counts.content_elsewhere_items));
+  const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
     indexed_items: indexedItems,
@@ -76888,9 +76906,13 @@ function applyCorpus(row, corpus, now, countsNestedInSuperset = false) {
     if (metrics.metadataOnlyByPolicy !== undefined) {
       row.ingestion_health.metadata_only_by_policy_items = (row.ingestion_health.metadata_only_by_policy_items ?? 0) + metrics.metadataOnlyByPolicy;
     }
-    if (metrics.eligibleItems !== undefined) {
-      row.ingestion_health.answer_ready_eligible_items = (row.ingestion_health.answer_ready_eligible_items ?? 0) + metrics.eligibleItems;
-    }
+    const populations = corpusPopulations.get(row) ?? [];
+    populations.push({
+      indexedItems: metrics.items,
+      notReadByPolicyItems: metrics.notReadByPolicy,
+      eligibleItems: metrics.eligibleItems
+    });
+    corpusPopulations.set(row, populations);
     row.failed += metrics.failed;
     row.stuck.queued += metrics.queued;
     row.stuck.active += metrics.active;
@@ -76944,8 +76966,8 @@ function corpusMetrics(counts) {
   const defined = definedCounts(counts);
   const notReadByPolicy = notReadByPolicyFromCounts(defined);
   const metadataOnlyByPolicy = metadataOnlyByPolicyFromCounts(defined);
-  const eligibleItems = answerReadyEligibleFromCounts(defined);
   const items = number(counts.indexed_items ?? counts.messages ?? counts.files ?? counts.items);
+  const eligibleItems = corpusAnswerReadyEligibleItems(defined, items);
   const contentIndexed = Math.min(items, number(counts.files_with_text ?? counts.items_with_text ?? counts.qa_pass));
   const failed = number(counts.extraction_jobs_failed_actionable ?? counts.extraction_jobs_failed);
   return {
@@ -77057,6 +77079,9 @@ function applyDropboxBreakdown(rows, breakdown, now) {
     row.attention.push(`${failed} unreadable extraction job(s) need attention`);
 }
 function finalizeRow(row, now) {
+  const eligible = aggregateAnswerReadyEligibleItems(corpusPopulations.get(row) ?? []);
+  if (eligible !== undefined)
+    row.ingestion_health.answer_ready_eligible_items = eligible;
   const coverage = coveragePercent(answerReadyEligibleItems(row.items, row.ingestion_health.not_read_by_policy_items, row.ingestion_health.answer_ready_eligible_items), row.content_indexed);
   row.coverage_percent = coverage;
   const stuckWork = stuckWorkHealth(row.failure_breakdown ?? [], row.ingestion_health.stuck_work, now);
@@ -77448,7 +77473,7 @@ function freshnessLabel(row) {
     return `${row.freshness_hours}h`;
   return `${Math.round(row.freshness_hours / 24)}d`;
 }
-var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720;
+var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
   init_config();
   init_source_corpus_registry();
@@ -77510,6 +77535,7 @@ var init_source_ingestion_ledger = __esm(() => {
     }
   };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
+  corpusPopulations = new WeakMap;
 });
 
 // src/core/consult-gate.ts
