@@ -6,6 +6,7 @@ import {
   ITEMS_WITH_TEXT_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
   METADATA_ONLY_EXPECTED_COUNT_KEY,
+  OUT_OF_CONTENT_SCOPE_COUNT_KEY,
 } from '../dashboard/answer-ready-coverage.ts';
 import {
   assessSourceIndexRetrievalState,
@@ -587,6 +588,12 @@ function connectorStoreStatus(
             [METADATA_ONLY_EXPECTED_COUNT_KEY]:
               status.counts.scopeMetadataOnlyFiles + status.counts.policyDeferredItems,
           }),
+      // Material the scope's window keeps as names only (older mail): the
+      // policy exit every source shares, so it leaves the owed-reading
+      // population instead of showing as work that can never finish.
+      ...((status.counts.outsideContentWindowItems ?? 0) > 0
+        ? { [OUT_OF_CONTENT_SCOPE_COUNT_KEY]: status.counts.outsideContentWindowItems! }
+        : {}),
       // The per-item parity gauge the dashboard's embedding bar divides in
       // files: published only against a known serving model.
       ...(forModel === undefined ? {} : { [ITEMS_EMBEDDED_COUNT_KEY]: forModel.itemsEmbedded }),

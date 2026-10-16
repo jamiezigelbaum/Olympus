@@ -44,7 +44,7 @@ import {
 // is reachable from the builder without a cycle.
 import {
   DASHBOARD_MANY_UNREADABLE_LABEL,
-  DASHBOARD_NONE_READ_BY_POLICY,
+  dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
 // The phase model's own test for a finished pass, so the sample history and
 // the bars can never disagree about what "settled" means. Same no-cycle rule:
@@ -2542,7 +2542,7 @@ function sourceCardFromDefinition(
             // Same `operatorPaused` the connect control is suppressed by, so the
             // header, the control and the detail sentence read one pause.
             : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
-  const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
+  const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, definition.family, throughput);
   const lastRunBase = lastRunFromCorpora(corpora);
   const traversalComplete = metadataTraversalCompleteFromSchedulers(schedulers);
   const lastRun = lastRunBase
@@ -2998,6 +2998,7 @@ function dashboardIngestionHealth(
   row: SourceIngestionLedgerRow | undefined,
   coverage: DashboardSourceCard['coverage'],
   queue: DashboardSourceCard['queue_health'],
+  family: string,
   throughput?: ContentExtractionThroughputAssessment,
 ): DashboardSourceCard['ingestion_health'] {
   // Zero indexed items means nothing is known about coverage, not that
@@ -3021,6 +3022,7 @@ function dashboardIngestionHealth(
       covered,
       coveragePercent,
       answerReadyEligibleItems(coverage.indexed_items, notReadByPolicy, eligibleItems),
+      family,
     );
     const parts = [coverageText];
     parts.push(...(stuck > 0 ? [`${stuck} stuck`, 'drain state unknown'] : ['no stuck work']));
@@ -3038,6 +3040,7 @@ function dashboardIngestionHealth(
       row.items > 0,
       row.coverage_percent,
       answerReadyEligibleItems(row.items, notReadByPolicy, eligibleItems),
+      family,
     ),
     stuck > 0 ? `${stuck} stuck` : 'no stuck work',
   ];
@@ -3075,9 +3078,9 @@ function dashboardIngestionHealth(
  * "100% covered" over a corpus with no readable file reads as the opposite of
  * what happened.
  */
-function coverageSentence(covered: boolean, percent: number, eligibleItems: number): string {
+function coverageSentence(covered: boolean, percent: number, eligibleItems: number, family: string): string {
   if (!covered) return 'Nothing ingested yet';
-  if (eligibleItems <= 0) return capitalize(DASHBOARD_NONE_READ_BY_POLICY);
+  if (eligibleItems <= 0) return capitalize(dashboardNoneReadSentence(family));
   return `${percent}% covered`;
 }
 

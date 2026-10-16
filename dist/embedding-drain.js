@@ -25787,6 +25787,11 @@ var init_local_index = __esm(() => {
         ...jsonList(tier.hidden),
         ...jsonList(keptNamesOnlyPks)
       ];
+      const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key2, value]) => key2 === "contentNotBefore" || value === undefined));
+      const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
+      const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
+          AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
+      const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -25822,15 +25827,23 @@ var init_local_index = __esm(() => {
             ${fileScopeWhere}
         ) AS full_ingestion_files
     `).get(...itemParams, ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+      const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
+          SELECT COUNT(*) AS n FROM items i
+          WHERE i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${fileScopeWhere}
+            AND ${outsideWindowSql}
+        `).get(...fileScopeParams, ...outsideWindowParams).n : 0;
       let policyDeferredItems = 0;
-      if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
+      if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
         const rows = this.db.query(`
         SELECT i.locator_uri, i.title, i.mime_type
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
           ${fileScopeWhere}
-      `).all(...fileScopeParams);
+          ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ""}
+      `).all(...fileScopeParams, ...outsideWindowParams);
         for (const row of rows) {
           const decision = this.exclusions.evaluateItem({
             path: row.locator_uri,
@@ -25901,14 +25914,15 @@ var init_local_index = __esm(() => {
           itemsWithText: counts.items_with_text,
           ...counts.content_elsewhere_items > 0 ? { contentElsewhereItems: counts.content_elsewhere_items } : {},
           ...settledUnreadableItems > 0 ? { settledUnreadableItems } : {},
-          ...scope ? {
+          ...fileScoped ? {
             files: counts.files,
             folders: counts.folders,
             fullIngestionFiles: counts.full_ingestion_files,
             scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
-            contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems),
+            contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems),
             policyDeferredItems
-          } : {}
+          } : {},
+          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}
         },
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,
@@ -41047,6 +41061,9 @@ init_principal();
 // src/workers/email-source/source-answer-lanes.ts
 init_embeddings();
 init_connector_store();
+
+// src/workers/email-source/gmail-status-scope.ts
+init_google_connectors();
 
 // src/workers/email-source/server.ts
 init_tiered_store_set();

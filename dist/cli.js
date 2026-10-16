@@ -37251,6 +37251,11 @@ var init_local_index = __esm(() => {
         ...jsonList(tier.hidden),
         ...jsonList(keptNamesOnlyPks)
       ];
+      const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key2, value]) => key2 === "contentNotBefore" || value === undefined));
+      const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
+      const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
+          AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
+      const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -37286,15 +37291,23 @@ var init_local_index = __esm(() => {
             ${fileScopeWhere}
         ) AS full_ingestion_files
     `).get(...itemParams, ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+      const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
+          SELECT COUNT(*) AS n FROM items i
+          WHERE i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${fileScopeWhere}
+            AND ${outsideWindowSql}
+        `).get(...fileScopeParams, ...outsideWindowParams).n : 0;
       let policyDeferredItems = 0;
-      if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
+      if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
         const rows = this.db.query(`
         SELECT i.locator_uri, i.title, i.mime_type
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
           ${fileScopeWhere}
-      `).all(...fileScopeParams);
+          ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ""}
+      `).all(...fileScopeParams, ...outsideWindowParams);
         for (const row of rows) {
           const decision = this.exclusions.evaluateItem({
             path: row.locator_uri,
@@ -37365,14 +37378,15 @@ var init_local_index = __esm(() => {
           itemsWithText: counts.items_with_text,
           ...counts.content_elsewhere_items > 0 ? { contentElsewhereItems: counts.content_elsewhere_items } : {},
           ...settledUnreadableItems > 0 ? { settledUnreadableItems } : {},
-          ...scope ? {
+          ...fileScoped ? {
             files: counts.files,
             folders: counts.folders,
             fullIngestionFiles: counts.full_ingestion_files,
             scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
-            contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems),
+            contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems),
             policyDeferredItems
-          } : {}
+          } : {},
+          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}
         },
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,
@@ -71996,6 +72010,9 @@ function dashboardDuration(seconds) {
   const rest = hours % 24;
   return rest > 0 ? `${days}d ${rest}h` : `${days}d`;
 }
+function dashboardNoneReadSentence(family) {
+  return family === "email" ? DASHBOARD_NONE_READ_OLD_MAIL : DASHBOARD_NONE_READ_BY_POLICY;
+}
 function dashboardWorkingSummary(source) {
   const inScope = answerReadyEligibleItems(source.coverage.indexed_items, source.coverage.not_read_by_policy_items, source.coverage.answer_ready_eligible_items);
   if (inScope <= 0)
@@ -72135,7 +72152,7 @@ function workingLine(source) {
       parts.push(`${Math.round(summary.searchable_percent)}% searchable`);
     }
   } else if (source.coverage.indexed_items > 0) {
-    parts.push(DASHBOARD_NONE_READ_BY_POLICY);
+    parts.push(dashboardNoneReadSentence(source.family));
   }
   if (firstIngest)
     parts.push(firstIngest);
@@ -72194,7 +72211,7 @@ function degradedInput(degraded) {
 function unknownStatus(value2) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value2 };
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -73982,6 +73999,7 @@ function connectorStoreStatus(corpus, status, readinessCounts, extractionThrough
       ...status.counts.scopeMetadataOnlyFiles === undefined || status.counts.policyDeferredItems === undefined ? {} : {
         [METADATA_ONLY_EXPECTED_COUNT_KEY]: status.counts.scopeMetadataOnlyFiles + status.counts.policyDeferredItems
       },
+      ...(status.counts.outsideContentWindowItems ?? 0) > 0 ? { [OUT_OF_CONTENT_SCOPE_COUNT_KEY]: status.counts.outsideContentWindowItems } : {},
       ...forModel === undefined ? {} : { [ITEMS_EMBEDDED_COUNT_KEY]: forModel.itemsEmbedded },
       ...status.tier ? {
         pending_classification_items: status.tier.pendingClassificationItems,
@@ -74716,7 +74734,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const configured = connection.state === "connected" || connection.state === "waiting_for_first_sync" || connection.state === "syncing" || connection.state === "synced";
   const notConnected = !configured && connection.state !== "reauth_required";
   const answerReadiness = notConnected ? { state: "disconnected", label: "Connect this source" } : connection.state === "reauth_required" ? { state: "needs_attention", label: "Reauthenticate this source" } : connectedFolderSource && fileSourceScopeStatus === "scope_pending" ? { state: "empty", label: `Choose ${scopeKind} to start` } : connectedFolderSource && fileSourceScopeStatus === "approved" && !fileSourceScopeIngestionEnabled ? { state: "empty", label: "Ingestion is off for this source" } : embeddingLaneDisabled ? { state: "needs_attention", label: "Embedding lane needs attention" } : throughput?.state === "stalled" ? { state: "needs_attention", label: "Content extraction is stalled" } : definition.answer_capable_without_sync && configured ? { state: "ready", label: "Ready for questions" } : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
-  const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
+  const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, definition.family, throughput);
   const lastRunBase = lastRunFromCorpora(corpora);
   const traversalComplete = metadataTraversalCompleteFromSchedulers(schedulers);
   const lastRun = lastRunBase ? {
@@ -75010,7 +75028,7 @@ function corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId) {
 function ingestionRowForDefinition(definition, rows) {
   return rows.get(definition.ingestion_ledger_source_id);
 }
-function dashboardIngestionHealth(row, coverage, queue, throughput) {
+function dashboardIngestionHealth(row, coverage, queue, family, throughput) {
   const notReadByPolicy = row?.ingestion_health.not_read_by_policy_items ?? coverage.not_read_by_policy_items;
   const eligibleItems = row?.ingestion_health.answer_ready_eligible_items ?? coverage.answer_ready_eligible_items;
   if (!row) {
@@ -75022,7 +75040,7 @@ function dashboardIngestionHealth(row, coverage, queue, throughput) {
       ...eligibleItems !== undefined ? { eligibleItems } : {}
     });
     const stuck2 = queue.waiting + queue.needs_attention;
-    const coverageText = coverageSentence(covered, coveragePercent, answerReadyEligibleItems(coverage.indexed_items, notReadByPolicy, eligibleItems));
+    const coverageText = coverageSentence(covered, coveragePercent, answerReadyEligibleItems(coverage.indexed_items, notReadByPolicy, eligibleItems), family);
     const parts2 = [coverageText];
     parts2.push(...stuck2 > 0 ? [`${stuck2} stuck`, "drain state unknown"] : ["no stuck work"]);
     return {
@@ -75035,7 +75053,7 @@ function dashboardIngestionHealth(row, coverage, queue, throughput) {
   const stuck = row.ingestion_health.stuck_work.queued + row.ingestion_health.stuck_work.failed_retryable;
   const drain = row.ingestion_health.drain;
   const parts = [
-    coverageSentence(row.items > 0, row.coverage_percent, answerReadyEligibleItems(row.items, notReadByPolicy, eligibleItems)),
+    coverageSentence(row.items > 0, row.coverage_percent, answerReadyEligibleItems(row.items, notReadByPolicy, eligibleItems), family),
     stuck > 0 ? `${stuck} stuck` : "no stuck work"
   ];
   if (row.ingestion_health.stuck_work.oldest_age_hours !== undefined) {
@@ -75061,11 +75079,11 @@ function dashboardIngestionHealth(row, coverage, queue, throughput) {
     label: parts.join("; ")
   };
 }
-function coverageSentence(covered, percent, eligibleItems) {
+function coverageSentence(covered, percent, eligibleItems, family) {
   if (!covered)
     return "Nothing ingested yet";
   if (eligibleItems <= 0)
-    return capitalize(DASHBOARD_NONE_READ_BY_POLICY);
+    return capitalize(dashboardNoneReadSentence(family));
   return `${percent}% covered`;
 }
 function capitalize(value2) {
@@ -135910,6 +135928,41 @@ var init_source_answer_lanes = __esm(() => {
   init_connector_store();
 });
 
+// src/workers/email-source/gmail-status-scope.ts
+function contentWindow(contentAfter) {
+  return contentAfter ? { contentNotBefore: contentAfter } : {};
+}
+function gmailInternalStoreStatusScope(authority) {
+  const approval = authority?.mailSnapshot();
+  if (approval?.status !== "approved")
+    return;
+  const window2 = contentWindow(approval.mailScope?.contentAfter);
+  return window2.contentNotBefore ? window2 : undefined;
+}
+function gmailPrivateStoreStatusScope(input) {
+  const { authority, handle } = input;
+  const ref = authority?.mailPolicyRef();
+  if (!ref || !handle || !authority)
+    return { itemsAllowed: false, contentAllowed: false };
+  const approval = authority.assertCurrentMail(ref);
+  const accountScope = handle.accountRole?.trim() || "personal";
+  const itemFilters = {
+    provider: "gmail",
+    observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+  };
+  return {
+    accountScope,
+    scopeRevision: ref.revision,
+    itemFilters,
+    contentAllowed: true,
+    contentFilters: itemFilters,
+    ...contentWindow(approval.mailScope.contentAfter)
+  };
+}
+var init_gmail_status_scope = __esm(() => {
+  init_google_connectors();
+});
+
 // src/workers/connector-store/tier-visibility.ts
 function createTierVisibilityGate(scopes) {
   return (hits) => {
@@ -160057,7 +160110,6 @@ async function main() {
   };
   const connectorStoreStatusScope = (store) => {
     if (store === gmailSecureConnectorStore) {
-      const ref = fileSourceScopeAuthority?.mailPolicyRef();
       const handle = selectedSourceCredentialHandle({
         env: process.env,
         pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
@@ -160065,22 +160117,10 @@ async function main() {
         capability: "gmail.email.sync",
         handles: readActiveConnectedHandles(process.env)
       });
-      if (!ref || !handle || !fileSourceScopeAuthority)
-        return { itemsAllowed: false, contentAllowed: false };
-      const approval = fileSourceScopeAuthority.assertCurrentMail(ref);
-      const accountScope = handle.accountRole?.trim() || "personal";
-      const itemFilters = {
-        provider: "gmail",
-        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
-      };
-      return {
-        accountScope,
-        scopeRevision: ref.revision,
-        itemFilters,
-        contentAllowed: true,
-        contentFilters: itemFilters
-      };
+      return gmailPrivateStoreStatusScope({ authority: fileSourceScopeAuthority, handle });
     }
+    if (store === gmailInternalConnectorStore)
+      return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed)
       return { itemsAllowed: false, contentAllowed: false };
@@ -162601,6 +162641,7 @@ var init_server5 = __esm(async () => {
   init_connector_store();
   init_principal();
   init_source_answer_lanes();
+  init_gmail_status_scope();
   init_tiered_store_set();
   init_tier_set2();
   init_tier_set3();

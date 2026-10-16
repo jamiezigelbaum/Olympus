@@ -831,6 +831,18 @@ export function dashboardNotReadByPolicyPhrase(count: number): string {
 export const DASHBOARD_NONE_READ_BY_POLICY = 'none of these files are read by policy';
 
 /**
+ * The same fact for mail. Mail is never "not read by policy": what Olympus
+ * leaves unread is older than the window the owner chose when connecting, and
+ * it is kept as names only. Says so in those words, with no file or policy.
+ */
+export const DASHBOARD_NONE_READ_OLD_MAIL = 'older mail is kept as names only';
+
+/** What replaces the percentage when nothing in scope is read at all, in this family's words. */
+export function dashboardNoneReadSentence(family: string): string {
+  return family === 'email' ? DASHBOARD_NONE_READ_OLD_MAIL : DASHBOARD_NONE_READ_BY_POLICY;
+}
+
+/**
  * The one number the detail page leads with, and the counts underneath it.
  *
  * Owner ruling, 2026-08-24: THE metric is a single percentage — fully-working
@@ -1253,7 +1265,7 @@ function workingLine(source: DashboardSourceCard): string {
   } else if (source.coverage.indexed_items > 0) {
     // Nothing in scope at all. This states a fact and quotes no count, so it
     // survives the ruling above unchanged.
-    parts.push(DASHBOARD_NONE_READ_BY_POLICY);
+    parts.push(dashboardNoneReadSentence(source.family));
   }
   if (firstIngest) parts.push(firstIngest);
   if (!readyWhileUpdating && source.coverage.indexed_items > 0) parts.push(`${dashboardCount(source.coverage.indexed_items)} indexed`);
