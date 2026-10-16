@@ -9,6 +9,7 @@ import type {
   SourceConnectorListOptions,
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
+import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
 import {
   sourceInvocationProvenance,
   type SourceInvocationProvenance,
@@ -1110,9 +1111,10 @@ function rawItemFromGmailMessage(
       ...(message.internalDate ? { internalDate: message.internalDate } : {}),
       ...(message.historyId ? { historyId: message.historyId } : {}),
       ...(message.snippet && !metadataOnly ? { snippet: message.snippet } : {}),
-      // Marks mail read by name only under the approved window, so a later
-      // upgrade can find exactly these items.
-      ...(metadataOnly ? { mailScopeContent: 'metadata_only' } : {}),
+      // Marks mail kept by name only under the approved window. The shared
+      // tier path reads it: such an item has no content to judge, so its
+      // content layer settles at ingest instead of waiting for text.
+      ...(metadataOnly ? namesOnlyContentScopeMetadata() : {}),
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,

@@ -3,11 +3,34 @@
 // holds; they decide nothing. The tier decision is the shared classifier's.
 
 import type {
+  RawItem,
   SourceClassificationPrior,
   SourceClassificationSignals,
   SourceConversationKind,
 } from './contracts.ts';
 import type { SourceTrustDomain } from './source-index/types.ts';
+
+/**
+ * `RawItem.metadata` key a connector sets, to `CONTENT_SCOPE_NAMES_ONLY`, on an
+ * item it lists by name only because the OWNER's scope keeps its content
+ * unread (mail older than the approved window). It is a fact about the item,
+ * not a tier: the shared classifier then decides the names and settles the
+ * content layer as "no content" instead of waiting for text that never comes.
+ * The key lives in the item's metadata, not in `SourceClassificationSignals`,
+ * so the stable connector contract keeps its shape.
+ */
+export const CONTENT_SCOPE_METADATA_KEY = 'contentScope';
+export const CONTENT_SCOPE_NAMES_ONLY = 'names_only';
+
+/** The metadata a connector spreads into an item kept names-only by the owner's scope. */
+export function namesOnlyContentScopeMetadata(): { readonly contentScope: typeof CONTENT_SCOPE_NAMES_ONLY } {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY } as const;
+}
+
+/** Whether the connector listed this item names-only because the owner's scope keeps its content unread. */
+export function itemContentKeptNamesOnly(item: Pick<RawItem, 'metadata'>): boolean {
+  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
+}
 
 /** The first non-empty string among `keys` in a metadata record. */
 export function signalText(

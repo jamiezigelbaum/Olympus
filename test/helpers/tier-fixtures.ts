@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../../src/core/contracts.ts';
+import type { SourceExclusionMatcher } from '../../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../../src/workers/classification/secret-locations.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
@@ -162,6 +163,7 @@ export function openLegStore(
   domain: SourceTrustDomain,
   tierLedger?: TierLedger | null,
   family: 'file' | 'email' = 'file',
+  exclusions?: SourceExclusionMatcher,
 ): LocalConnectorStore {
   return new LocalConnectorStore({
     dbPath: paths[domain]!,
@@ -169,6 +171,7 @@ export function openLegStore(
     family,
     trustDomain: domain,
     ...(tierLedger !== undefined ? { tierLedger } : {}),
+    ...(exclusions ? { exclusions } : {}),
   });
 }
 
@@ -176,13 +179,16 @@ export function openLegStore(
  * The P1b set over (possibly pre-existing) store files: internal and secure
  * are the lane's legacy stores; public is created lazily.
  */
-export function openTierFixture(dir: string, options: { embed?: boolean; splitLayers?: boolean; family?: 'file' | 'email' } = {}): TierFixture {
+export function openTierFixture(
+  dir: string,
+  options: { embed?: boolean; splitLayers?: boolean; family?: 'file' | 'email'; exclusions?: SourceExclusionMatcher } = {},
+): TierFixture {
   const paths = storePaths(dir);
   const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
   const secrets = new SecretLocationsIndex({ dbPath: join(dir, 'secret-locations.sqlite') });
   const stores: Partial<Record<SourceTrustDomain, LocalConnectorStore>> = {
-    internal: openLegStore(paths, 'internal', ledger, options.family),
-    secure_local: openLegStore(paths, 'secure_local', ledger, options.family),
+    internal: openLegStore(paths, 'internal', ledger, options.family, options.exclusions),
+    secure_local: openLegStore(paths, 'secure_local', ledger, options.family, options.exclusions),
   };
   const cloud = cloudProvider();
   const local = localProvider();
@@ -197,7 +203,7 @@ export function openTierFixture(dir: string, options: { embed?: boolean; splitLa
         trustDomain: 'public_safe',
         corpusId: CORPORA.public_safe,
         open: () => {
-          const store = openLegStore(paths, 'public_safe', ledger, options.family);
+          const store = openLegStore(paths, 'public_safe', ledger, options.family, options.exclusions);
           stores.public_safe = store;
           return store;
         },

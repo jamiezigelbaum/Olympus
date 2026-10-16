@@ -37,6 +37,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { SourceScheduler } from '../src/workers/source-scheduler.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { itemContentKeptNamesOnly } from '../src/core/classification-signals.ts';
 
 // Provider I/O is injected; constructing a real secret store is outside this fixture.
 const OFFLINE_BROKER = { async issueSession() { throw new Error('Unexpected credential request in offline Gmail fixture'); } } as unknown as CredentialBroker;
@@ -323,7 +324,7 @@ describe('scoped Gmail traversal', () => {
     for (const item of metadataLeg.items) {
       expect(item.content).toEqual({ kind: 'metadata_only' });
       expect(item.metadata.snippet).toBeUndefined();
-      expect(item.metadata.mailScopeContent).toBe('metadata_only');
+      expect(itemContentKeptNamesOnly(item)).toBe(true);
       expect(item.metadata.subject).toBe(`Subject ${item.identity.providerItemId}`);
       expect(item.metadata.from).toBe('Alex <alex@example.com>');
       expect(JSON.stringify(item)).not.toContain('Body of');

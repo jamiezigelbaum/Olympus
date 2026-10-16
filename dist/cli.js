@@ -17109,6 +17109,12 @@ var init_remote_connections = __esm(() => {
 });
 
 // src/core/classification-signals.ts
+function namesOnlyContentScopeMetadata() {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
+}
+function itemContentKeptNamesOnly(item) {
+  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
+}
 function signalText(metadata, ...keys) {
   for (const key of keys) {
     const value = metadata[key];
@@ -17161,6 +17167,7 @@ function trustDomainPrior(trustDomain, basis) {
     basis: `${basis}:trust_domain:${trustDomain}`
   };
 }
+var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
 
 // src/workers/source-checkpoint.ts
 function isBoundedSourceCheckpoint(value) {
@@ -33137,7 +33144,7 @@ var init_local_index = __esm(() => {
         return count;
       })();
     }
-    recordTierDecision(connector, item, stored, tierClassification, run) {
+    recordTierDecision(connector, item, stored, tierClassification, run, namesOnly = false) {
       if (run.ledgerFailed)
         return;
       if (tierClassification?.unavailableReason) {
@@ -33149,7 +33156,7 @@ var init_local_index = __esm(() => {
         const ledger = this.tierLedger();
         if (!ledger)
           return;
-        const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger);
+        const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger, namesOnly ? { namesOnly: true } : {});
         ledger.recordDecision(item.identity, decision, {
           trustDomain: stored.trustDomain,
           trustTier: stored.trustTier
@@ -35234,7 +35241,7 @@ var init_local_index = __esm(() => {
             const routedLayer = route.kind === "store" ? route.layer : undefined;
             const sensitivity = route.kind === "store" ? route.sensitivity : legacySensitivity;
             if (route.kind === "legacy" && itemForStorage.metadata["deleted"] !== true) {
-              this.recordTierDecision(connector, itemForStorage, sensitivity, tierClassification, tierRun);
+              this.recordTierDecision(connector, itemForStorage, sensitivity, tierClassification, tierRun, metadataOnly || itemContentKeptNamesOnly(itemForStorage));
             }
             if (routedLayer === "metadata") {
               itemForStorage = { ...itemForStorage, content: { kind: "metadata_only" } };
@@ -35294,7 +35301,7 @@ var init_local_index = __esm(() => {
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
             if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!deferMetadataOnlyContent || itemForStorage.content.kind !== "metadata_only")) {
-              const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
+              const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun, itemContentKeptNamesOnly(fetched)), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
                 consecutiveContentFetchFailures += 1;
                 assertContentFetchFailureBudget(consecutiveContentFetchFailures);
               }, () => {
@@ -49748,7 +49755,7 @@ function rawItemFromGmailMessage(message2, account, options = {}) {
       ...message2.internalDate ? { internalDate: message2.internalDate } : {},
       ...message2.historyId ? { historyId: message2.historyId } : {},
       ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
-      ...metadataOnly ? { mailScopeContent: "metadata_only" } : {},
+      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
       labels: message2.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
