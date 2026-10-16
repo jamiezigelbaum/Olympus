@@ -305,7 +305,7 @@ describe('2. the sniffer yields to a private answer', () => {
     const panel = await generatePanelKeyPair();
     await jobs.claim(jobId, panel.publicKey);
     expect(await pass).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted', failedCalls: 0 } });
-    await Bun.sleep(10);
+    await until(() => log.length >= 3);
     expect(log).toEqual(['sniff:start', 'sniff:aborted', 'answer:start']);
     expect(activity.busy).toBe(true);
 
@@ -315,13 +315,18 @@ describe('2. the sniffer yields to a private answer', () => {
     expect(sniffCalls).toBe(callsBefore);
 
     finishAnswer();
-    await Bun.sleep(20);
-    expect((await jobs.claim(jobId, panel.publicKey)).body.status).toBe('ready');
+    await until(() => !activity.busy);
+    let status = (await jobs.claim(jobId, panel.publicKey)).body.status;
+    for (const end = Date.now() + 5_000; status === 'pending' && Date.now() < end;) {
+      await Bun.sleep(5);
+      status = (await jobs.claim(jobId, panel.publicKey)).body.status;
+    }
+    expect(status).toBe('ready');
     expect(activity.busy).toBe(false);
 
     // Once the answer is done the sniffer resumes.
     const resumed = service.runOnce();
-    await Bun.sleep(20);
+    await until(() => sniffCalls > callsBefore);
     expect(sniffCalls).toBeGreaterThan(callsBefore);
     service.preempt();
     await resumed;
