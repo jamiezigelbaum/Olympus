@@ -46,6 +46,7 @@ import type {
   LocalContentRequest,
 } from '../../core/evidence-pack.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { itemContentKeptNamesOnly } from '../../core/classification-signals.ts';
 import {
   isMediaCachePath,
   mediaCacheDir,
@@ -3961,6 +3962,12 @@ export class LocalConnectorStore {
     stored: SourceSensitivity,
     tierClassification: ConnectorStoreTierClassification | undefined,
     run: { gaps: string[]; ledgerFailed: boolean },
+    /**
+     * The owner's choice keeps this item's content unread (a names-only
+     * disposition, or the connector's own scope marker): its text never
+     * arrives, so the names are the whole decision and nothing waits for text.
+     */
+    namesOnly = false,
   ): void {
     if (run.ledgerFailed) return;
     if (tierClassification?.unavailableReason) {
@@ -3973,7 +3980,8 @@ export class LocalConnectorStore {
     try {
       const ledger = this.tierLedger();
       if (!ledger) return;
-      const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger);
+      const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger,
+        namesOnly ? { namesOnly: true } : {});
       ledger.recordDecision(item.identity, decision, {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier,
@@ -7207,7 +7215,10 @@ export class LocalConnectorStore {
           const routedLayer = route.kind === 'store' ? route.layer : undefined;
           const sensitivity = route.kind === 'store' ? route.sensitivity : legacySensitivity;
           if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true) {
-            this.recordTierDecision(connector, itemForStorage, sensitivity, tierClassification, tierRun);
+            this.recordTierDecision(
+              connector, itemForStorage, sensitivity, tierClassification, tierRun,
+              metadataOnly || itemContentKeptNamesOnly(itemForStorage),
+            );
           }
           if (routedLayer === 'metadata') {
             // The metadata tier's copy: names only. The body lives in the
@@ -7360,12 +7371,16 @@ export class LocalConnectorStore {
               (fetched) => routedLayer !== undefined
                 ? sensitivity
                 : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain),
+              // The fetch may hand back the same names-only item (the scope
+              // marker rides it): its decision must say so too, or the
+              // second write re-opens what the first settled.
               (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(
                 connector,
                 fetched,
                 fetchedSensitivity,
                 tierClassification,
                 tierRun,
+                itemContentKeptNamesOnly(fetched),
               ),
               itemForStorage,
               upsert.itemPk,

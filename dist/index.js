@@ -13974,6 +13974,12 @@ var init_credential_health = __esm(() => {
 // src/core/embedding-cost-estimates.ts
 var init_embedding_cost_estimates = () => {};
 
+// src/core/classification-signals.ts
+function namesOnlyContentScopeMetadata() {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
+}
+var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
+
 // src/core/invocation-provenance.ts
 function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -14708,7 +14714,7 @@ function rawItemFromGmailMessage(message, account, options = {}) {
       ...message.internalDate ? { internalDate: message.internalDate } : {},
       ...message.historyId ? { historyId: message.historyId } : {},
       ...message.snippet && !metadataOnly ? { snippet: message.snippet } : {},
-      ...metadataOnly ? { mailScopeContent: "metadata_only" } : {},
+      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
@@ -15456,6 +15462,7 @@ var init_corpus_adapter = __esm(() => {
   init_corpus();
   init_source_corpus_registry();
 });
+
 // src/core/source-index/keyword-languages.ts
 var profiles;
 var init_keyword_languages = __esm(() => {
