@@ -20,6 +20,7 @@ import {
   type GmailConnectorStoreSyncHandler,
 } from '../src/workers/google-connectors/index.ts';
 import type {
+  GmailConnectorScope,
   GmailListMessagesRequest,
   GmailMessage,
 } from '../src/workers/google-connectors/gmail.ts';
@@ -164,12 +165,13 @@ describe('Gmail connector-store lane', () => {
   });
 
   test('fetchItem is an in-run cache, not a second messages.get', async () => {
-    // A message with no headers, no snippet and no body lists as
-    // metadata_only, which is exactly when the spine calls fetchItem.
+    // Mail older than the approved window lists as metadata_only, which is
+    // exactly when the spine calls fetchItem. (A message with no headers, no
+    // snippet and no body inside the window reads as its subject line instead.)
     const client = fakeGmailClient([
       { id: 'msg-bare', threadId: 'thread-bare', historyId: '900001', internalDate: String(messageInternalDateMs(1)) },
     ]);
-    const lane = gmailLane({ client, maxMessages: 10 });
+    const lane = gmailLane({ client, maxMessages: 10, scope: { contentAfterMs: messageInternalDateMs(2) } });
 
     const outcome = await lane.handler.pull({ max_items: 10 });
 
@@ -512,6 +514,7 @@ function gmailLane(input: {
   budget?: GoogleDailyRequestBudget;
   sniffer?: TierSniffer;
   env?: Record<string, string | undefined>;
+  scope?: GmailConnectorScope;
   /** Inject a store to model divergence (a wiped or shared store). */
   stores?: { internalStore?: LocalConnectorStore; secureStore?: LocalConnectorStore };
 }): {
@@ -550,6 +553,7 @@ function gmailLane(input: {
       internalEmbeddingProvider: provider,
       secureEmbeddingProvider: provider,
       ...(input.budget ? { requestBudget: input.budget } : {}),
+      ...(input.scope ? { scope: input.scope } : {}),
       env: input.env ?? {},
     }),
   };

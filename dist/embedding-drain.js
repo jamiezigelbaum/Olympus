@@ -30420,8 +30420,9 @@ function rawItemFromGmailMessage(message2, account, options = {}) {
   const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
   const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
   const metadataOnly = options.metadataOnly === true;
-  const text2 = metadataOnly ? "" : extractMessageText(message2);
   const attachments = gmailAttachmentInventory(message2.payload);
+  const text2 = metadataOnly ? "" : extractMessageText(message2) || (attachments.lines.length > 0 ? attachments.lines.join(`
+`) : `Subject: ${subject}`);
   const fetchedAt = new Date().toISOString();
   return {
     identity: {

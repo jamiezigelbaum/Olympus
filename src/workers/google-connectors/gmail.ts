@@ -1085,8 +1085,15 @@ function rawItemFromGmailMessage(
   // only. No body and no snippet (the snippet is body text), so the item stays
   // findable by name and can be upgraded to full content later.
   const metadataOnly = options.metadataOnly === true;
-  const text = metadataOnly ? '' : extractMessageText(message);
   const attachments = gmailAttachmentInventory(message.payload);
+  // Mail inside the window is read as its envelope (Subject/From/To/Date), its
+  // snippet and its body, so an attachment-only message already has text. A
+  // message with none of those would be stored with no chunks and stay owed
+  // reading forever, though it has nothing more to read: it reads as its
+  // attachment names, else as the subject line the title already shows.
+  const text = metadataOnly
+    ? ''
+    : extractMessageText(message) || (attachments.lines.length > 0 ? attachments.lines.join('\n') : `Subject: ${subject}`);
   const fetchedAt = new Date().toISOString();
   return {
     identity: {
