@@ -1285,6 +1285,13 @@ export interface ConnectorStoreStatus {
     contentEligibleItems?: number;
     /** Full-ingestion files separately deferred by standing item policy. */
     policyDeferredItems?: number;
+    /**
+     * Live rows dated before the scope's `contentNotBefore` that hold no text,
+     * because that window keeps older material as names only on purpose. They
+     * were never going to be read, so they are not owed reading. Present only
+     * when positive.
+     */
+    outsideContentWindowItems?: number;
   };
   /**
    * Embedding parity PER MODEL: for each model that holds any vector here,
@@ -1307,6 +1314,13 @@ export interface ConnectorStoreStatusScope {
   itemFilters?: ConnectorStoreSearchFilters;
   contentAllowed?: boolean;
   contentFilters?: ConnectorStoreSearchFilters;
+  /**
+   * ISO instant: material authored before it is kept as names only on purpose
+   * (an approved time window), so a row that old with no text is not owed
+   * reading. A scope that carries only this narrows no population: items,
+   * files and the content ladder are counted exactly as with no scope at all.
+   */
+  contentNotBefore?: string;
 }
 
 export interface ConnectorStoreQualificationFingerprint {
@@ -10789,6 +10803,20 @@ export class LocalConnectorStore {
       ...jsonList(tier.hidden),
       ...jsonList(keptNamesOnlyPks),
     ];
+    // A scope that says only "older than this is names only" narrows no
+    // population, so it must not switch on the file-scope counts below: those
+    // belong to a store whose scope picks WHICH files to read.
+    const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined
+      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined));
+    // Rows dated before the window that hold no text. julianday reads any ISO
+    // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
+    // date a plain "not outside" instead of a NULL that NOT would swallow.
+    const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
+    const outsideWindowSql = Number.isFinite(contentNotBeforeMs)
+      ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
+          AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))`
+      : undefined;
+    const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -10845,15 +10873,27 @@ export class LocalConnectorStore {
       items_with_text: number;
       full_ingestion_files: number;
     };
+    // Of the files the scope reads in full, the ones the window keeps as names
+    // only. Counted before the policy pass so a row is never both.
+    const outsideContentWindowItems = outsideWindowSql
+      ? (this.db.query(`
+          SELECT COUNT(*) AS n FROM items i
+          WHERE i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${fileScopeWhere}
+            AND ${outsideWindowSql}
+        `).get(...fileScopeParams, ...outsideWindowParams) as { n: number }).n
+      : 0;
     let policyDeferredItems = 0;
-    if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
+    if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
       const rows = this.db.query(`
         SELECT i.locator_uri, i.title, i.mime_type
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
           ${fileScopeWhere}
-      `).all(...fileScopeParams) as Array<{
+          ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ''}
+      `).all(...fileScopeParams, ...outsideWindowParams) as Array<{
         locator_uri: string | null;
         title: string | null;
         mime_type: string | null;
@@ -10946,16 +10986,20 @@ export class LocalConnectorStore {
         itemsWithText: counts.items_with_text,
         ...(counts.content_elsewhere_items > 0 ? { contentElsewhereItems: counts.content_elsewhere_items } : {}),
         ...(settledUnreadableItems > 0 ? { settledUnreadableItems } : {}),
-        ...(scope
+        ...(fileScoped
           ? {
               files: counts.files,
               folders: counts.folders,
               fullIngestionFiles: counts.full_ingestion_files,
               scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
-              contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems),
+              contentEligibleItems: Math.max(
+                0,
+                counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems,
+              ),
               policyDeferredItems,
             }
           : {}),
+        ...(outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}),
       },
       embeddingByModel: byModel.map((row) => ({
         modelId: row.model_id,

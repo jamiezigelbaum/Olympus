@@ -506,6 +506,7 @@ describe('sub-line grammar', () => {
 
   test('a source the policy reads none of says so instead of claiming a ratio', () => {
     const source = card({
+      family: 'file',
       connection: { state: 'syncing', label: 'syncing' },
       coverage: {
         indexed_items: 500,
@@ -518,6 +519,24 @@ describe('sub-line grammar', () => {
       answer_readiness: { state: 'syncing', label: 'Syncing now' },
     });
     expect(dashboardSubLine(source)).toBe('none of these files are read by policy · 500 indexed');
+  });
+
+  test('a mailbox whose mail is all older than its window says so in mail words, not files and policy', () => {
+    // Every message predates the window the owner chose, so each is kept as
+    // names only and nothing is left to read.
+    const source = card({
+      connection: { state: 'syncing', label: 'syncing' },
+      coverage: {
+        indexed_items: 500,
+        content_ready_items: 0,
+        embedded_items: 0,
+        not_read_by_policy_items: 500,
+      },
+      ingestion_health: { coverage_percent: 100 },
+      queue_health: { label: 'Working now', waiting: 0, active: 1 },
+      answer_readiness: { state: 'syncing', label: 'Syncing now' },
+    });
+    expect(dashboardSubLine(source)).toBe('older mail is kept as names only · 500 indexed');
   });
 
   test('a source with no policy-deferred files says nothing about policy', () => {
@@ -887,6 +906,7 @@ function dropboxHandleRegistry(): ConnectedHandleRegistry {
 
 interface CardOverrides {
   source_id?: string;
+  family?: string;
   label?: string;
   provider?: string;
   configured?: boolean;
@@ -1017,7 +1037,7 @@ function card(overrides: CardOverrides = {}): DashboardSourceCard {
     source_id: overrides.source_id ?? 'gmail.email',
     label: overrides.label ?? 'Gmail',
     provider: overrides.provider ?? 'gmail',
-    family: 'email',
+    family: overrides.family ?? 'email',
     trust_domain: 'secure_local',
     configured: overrides.configured ?? true,
     freshness: freshnessOf(overrides.freshness),

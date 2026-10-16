@@ -1,4 +1,5 @@
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
+import { engineBriefFromViewModel } from '../src/core/engine-brief.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5129,4 +5130,124 @@ test('the dashboard aggregates every missing root even when another task failed 
   const panel = buildChatGptDashboardViewModel(view);
   expect(panel.sources.find(source => source.id === 'dropbox.files')!.progress?.stalledReason).toBe('scope_root_missing');
   expect(JSON.stringify(panel)).not.toContain('/Gone');
+});
+
+// Mail older than the approved window is stored as names only on purpose: it
+// can never be read, so it is not owed reading. Before the store published that
+// count, the card carried a remainder that could never finish and, an hour after
+// the last readable message, flipped to "stalled" for good (Omarchy laptop,
+// 2026-10-16: 7 of 9 forever, then "Gmail paused").
+describe('mail kept as names only by the approved window', () => {
+  const SETTLED = new Date('2026-10-13T19:32:34.000Z');
+  // Two and a half days after the last message was read: far past the one-hour
+  // quiet period after which an unfinished phase is called stalled.
+  const NOW = new Date('2026-10-16T07:10:00.000Z');
+
+  /** The Personal and Private Gmail corpora, as the status handler publishes them. */
+  function gmailCorpora(
+    internalCounts: { indexed_items: number } & Record<string, number>,
+    privateCounts: ({ indexed_items: number } & Record<string, number>) | undefined,
+    completedAt: string,
+  ): SourceIndexStatusResult {
+    const status = fixtureStatus();
+    const internal = status.corpora[0]!;
+    if (!internal.configured) throw new Error('fixture');
+    const embedded = internalCounts['items_with_text'] ?? 0;
+    internal.counts = { chunks: embedded, embedded_chunks: embedded, items_embedded: embedded, sync_runs: 1, tombstoned_items: 0, ...internalCounts };
+    internal.embedding_parity = { required: true, chunks: embedded, embedded_chunks: embedded, missing_chunks: 0, refresh_needed: false };
+    internal.last_refresh = { sync_run_id: 'window', status: 'completed', completed_at: completedAt, items_seen: 1, items_indexed: 1 };
+    status.corpora = privateCounts === undefined ? [internal] : [internal, { ...internal, corpus_id: 'secure_local.email.private', trust_domain: 'secure_local',
+      activation_mode: 'lexical_only', embedding_policy: 'disabled',
+      counts: { chunks: privateCounts['items_with_text'] ?? 0, embedded_chunks: 0, sync_runs: 1, tombstoned_items: 0, ...privateCounts },
+      embedding_parity: { required: false, chunks: privateCounts['items_with_text'] ?? 0, embedded_chunks: 0, missing_chunks: 0, refresh_needed: false } }];
+    return status;
+  }
+
+  /**
+   * Two passes that read the last message (the counter's last rise), then the
+   * view a long time later. `before` and `after` are what the dashboard sees at
+   * each of the two earlier moments; `now` is the view under test.
+   */
+  function viewAfterQuietDays(input: {
+    earlier: SourceIndexStatusResult;
+    settled: SourceIndexStatusResult;
+  }) {
+    const history = new SqliteSourceDashboardHistory(':memory:');
+    try {
+      const build = (status: SourceIndexStatusResult, now: Date) => buildSourceDashboardViewModel({
+        sourceIndexStatus: status, sovereigntyEngine: fixtureSovereigntyEngine(),
+        connectedHandleRegistry: { version: 1, handles: [gmailHandle('gmail.personal')] }, history, now,
+      });
+      build(input.earlier, new Date(SETTLED.getTime() - 30 * 60_000));
+      build(input.settled, SETTLED);
+      const view = build(input.settled, NOW);
+      const panel = buildChatGptDashboardViewModel(view, { now: NOW });
+      return { view, panel, brief: engineBriefFromViewModel(panel) };
+    } finally {
+      history.close();
+    }
+  }
+
+  // The Omarchy laptop: 11 rows stored. Two are names-only mail from before the
+  // window, two have their text in the Private store, five are read here, and the
+  // Private store holds those two read messages.
+  const LAPTOP_INTERNAL = { indexed_items: 9, items_with_text: 5, content_elsewhere_items: 2 };
+  const LAPTOP_PRIVATE = { indexed_items: 2, qa_eligible_items: 2, items_with_text: 2 };
+  const completedAt = NOW.toISOString();
+
+  test('without the count, the two old rows are a remainder that stalls (the defect this fixes)', () => {
+    const { panel, brief } = viewAfterQuietDays({
+      earlier: gmailCorpora({ ...LAPTOP_INTERNAL, items_with_text: 4 }, LAPTOP_PRIVATE, completedAt),
+      settled: gmailCorpora(LAPTOP_INTERNAL, LAPTOP_PRIVATE, completedAt),
+    });
+    expect(panel.sources.find(source => source.id === 'gmail.email')?.progress).toMatchObject({ done: 7, total: 9, stalled: true });
+    expect(brief.progress).toMatchObject({ itemsLeft: 2, stalled: true });
+  });
+
+  test('with the count, the laptop is done: not stalled, and the bar has nothing to say', () => {
+    const internal = { ...LAPTOP_INTERNAL, qa_out_of_content_scope: 2 };
+    const { panel, brief } = viewAfterQuietDays({
+      earlier: gmailCorpora({ ...internal, items_with_text: 4 }, LAPTOP_PRIVATE, completedAt),
+      settled: gmailCorpora(internal, LAPTOP_PRIVATE, completedAt),
+    });
+    const gmail = panel.sources.find(source => source.id === 'gmail.email')!;
+    expect(gmail.progress).toMatchObject({ stage: 'done', percent: 100, stalled: false });
+    expect(gmail.progress?.stall).toBeUndefined();
+    expect(panel.progress).toBeUndefined();
+    expect(brief.progress).toBeNull();
+  });
+
+  test('a mailbox far older than its window finishes too: 30,000 stored, 10,000 read, 20,000 kept as names only', () => {
+    const counts = { indexed_items: 30_000, items_with_text: 10_000, qa_out_of_content_scope: 20_000 };
+    const { panel, brief } = viewAfterQuietDays({
+      earlier: gmailCorpora({ ...counts, items_with_text: 9_000 }, undefined, completedAt),
+      settled: gmailCorpora(counts, undefined, completedAt),
+    });
+    expect(panel.sources.find(source => source.id === 'gmail.email')?.progress).toMatchObject({ stage: 'done', percent: 100, stalled: false });
+    expect(brief.progress).toBeNull();
+  });
+
+  test('a mailbox with nothing newer than its window says so in mail words and is done', () => {
+    // 30 messages stored, every one older than the window: nothing in scope.
+    const counts = { indexed_items: 30, items_with_text: 0, qa_out_of_content_scope: 30 };
+    const { view, panel } = viewAfterQuietDays({
+      earlier: gmailCorpora(counts, undefined, completedAt),
+      settled: gmailCorpora(counts, undefined, completedAt),
+    });
+    expect(view.sources.find(source => source.source_id === 'gmail.email')?.ingestion_health.label)
+      .toBe('Older mail is kept as names only; no stuck work');
+    expect(panel.sources.find(source => source.id === 'gmail.email')?.progress).toMatchObject({ stage: 'done', percent: 100, stalled: false });
+  });
+
+  test('mail the window does not cover is still owed: a read that is genuinely short still stalls', () => {
+    // 30,000 stored, 20,000 kept as names only, but only 9,000 of the 10,000 in
+    // the window are read. The exemption must not hide real unread mail.
+    const counts = { indexed_items: 30_000, items_with_text: 9_000, qa_out_of_content_scope: 20_000 };
+    const { panel, brief } = viewAfterQuietDays({
+      earlier: gmailCorpora({ ...counts, items_with_text: 8_000 }, undefined, completedAt),
+      settled: gmailCorpora(counts, undefined, completedAt),
+    });
+    expect(panel.sources.find(source => source.id === 'gmail.email')?.progress).toMatchObject({ done: 9_000, total: 10_000, stalled: true });
+    expect(brief.progress).toMatchObject({ itemsLeft: 1_000, stalled: true });
+  });
 });

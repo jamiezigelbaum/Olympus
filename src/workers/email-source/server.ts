@@ -237,6 +237,7 @@ import {
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import { createSourceAnswerLanes } from './source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
+import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
 import {
   onDemandTierStore,
   rehomeChatLaneOverrides,
@@ -3007,26 +3008,16 @@ export async function main(): Promise<void> {
   };
   const connectorStoreStatusScope = (store: LocalConnectorStore):
     ConnectorStoreStatusScope | undefined => {
-    // Private mail indexing counts the same approved observations the
-    // backfill may embed; retained mail outside that scope is not owed work.
+    // Mail older than the approved window is kept as names only on purpose,
+    // so neither Gmail store counts it as owed reading (gmail-status-scope.ts).
     if (store === gmailSecureConnectorStore) {
-      const ref = fileSourceScopeAuthority?.mailPolicyRef();
       const handle = selectedSourceCredentialHandle({
         env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
         provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
       });
-      if (!ref || !handle || !fileSourceScopeAuthority) return { itemsAllowed: false, contentAllowed: false };
-      const approval = fileSourceScopeAuthority.assertCurrentMail(ref);
-      const accountScope = handle.accountRole?.trim() || 'personal';
-      const itemFilters = {
-        provider: 'gmail',
-        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
-      };
-      return {
-        accountScope, scopeRevision: ref.revision, itemFilters, contentAllowed: true,
-        contentFilters: itemFilters,
-      };
+      return gmailPrivateStoreStatusScope({ authority: fileSourceScopeAuthority, handle });
     }
+    if (store === gmailInternalConnectorStore) return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed) return { itemsAllowed: false, contentAllowed: false };
     if (!readScope.filters && !readScope.contentFilters) return undefined;
