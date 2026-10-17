@@ -52,7 +52,8 @@ and get the remote tool set (`source_answer`, `source_answer_result`,
 private answer panel or `/openai/mcp`. Grok Bot is in 1.0 too (owner
 decision 2026-10-13) and needs no connector of its own: once Olympus is
 connected on grok.com, Grok Bot uses that connection.
-Grok Bot's own sign-in uses Cursor's pinned client, which the relay accepts;
+Grok Bot's own sign-in uses Cursor's pinned client (with each cloud return
+address Cursor publishes) or Grok's, both of which the relay accepts;
 the Grok Bot and Cursor marketplace listing (owner decision 2026-10-15,
 `grok-bot-plugin/SUBMISSION.md`) relies on it. Muse and the Grok API key path
 stay after 1.0.
@@ -187,10 +188,11 @@ testers have exercised the normal product journey without custom engineering.
   pinned client. The owner accepted Cursor's Marketplace Publisher Terms for Open
   Coordination Unlimited, Inc., including the indemnity, on 2026-10-15, and
   clicks submit himself. Sequence: the Grok Bot or Cursor demo sign-in with a
-  read-only demo grant (PR #416); a reviewer demo engine of its own on the
+  read-only demo grant (PR #416), extended to every return address Cursor's
+  and Grok's documents publish, loopback ones excepted (2026-10-17); a reviewer demo engine of its own on the
   Hetzner server `olympus-grokbot-review`, never `olympus-demo`, which stays
-  frozen for OpenAI's review; the relay's `RELAY_DEMO_CLIENT_INSTALLS` route
-  to it; the hosted logo; an end-to-end test through the demo sign-in; the
+  frozen for OpenAI's review; the relay's `RELAY_DEMO_CLIENT_INSTALLS` routes
+  for Cursor's and Grok's clients to it; the hosted logo; an end-to-end test through the demo sign-in; the
   privacy policy naming Cursor and Anysphere; then submission. The packet and
   its checklist are `grok-bot-plugin/SUBMISSION.md`. Supersedes "Grok Bot's
   own sign-in … stays after 1.0" in the 2026-10-13 entry below.

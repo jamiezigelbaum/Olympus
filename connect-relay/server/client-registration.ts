@@ -20,11 +20,20 @@
  * - `https://grok.com/connectors-oauth-exchange-code/` or
  *   `https://console.x.ai/connectors-oauth-exchange-code/` →
  *   `https://grok.com/oauth/mcp-client.json`;
- * - `https://www.cursor.com/agents/mcp/oauth/callback` →
+ * - `https://www.cursor.com/agents/mcp/oauth/callback` or
+ *   `https://www.cursor.com/bot/mcp/oauth/callback` →
  *   `https://cursor.com/oauth/mcp-client.json` (Grok Bot or Cursor). Grok
- *   Bot registers that address together with `http://localhost:8787/callback`
- *   (relay log, 2026-10-12); a loopback address beside it is left out of the
- *   answer, so only the cloud address is registered, as the engine pins it.
+ *   Bot registers `/agents/` together with `http://localhost:8787/callback`
+ *   (relay log, 2026-10-12); Cursor's document lists both cloud addresses,
+ *   Grok's exchange page and two loopback ones. Beside a Cursor address, a
+ *   loopback one is left out of the answer and Grok's exchange page counts
+ *   as Cursor's (the engine pins it for Cursor too), so Cursor's whole
+ *   published list registers as Cursor with its three cloud addresses.
+ *
+ * Grok's exchange page `https://grok.com/connectors-oauth-exchange-code/`
+ * is published by both Grok and Cursor. Without a Cursor address beside it
+ * it registers as Grok, as it always has, so Grok's existing connections
+ * keep their client; with one, as Cursor.
  *
  * Any other return address is refused, so a registration never lets a code
  * go anywhere but one of those apps, and the client it names is one anyone
@@ -45,14 +54,21 @@ const CLAUDE = { clientId: 'https://claude.ai/oauth/mcp-oauth-client-metadata', 
 const GROK = { clientId: 'https://grok.com/oauth/mcp-client.json', clientName: 'Grok' } as const;
 const CURSOR = { clientId: 'https://cursor.com/oauth/mcp-client.json', clientName: 'Grok Bot or Cursor' } as const;
 const CURSOR_REDIRECT = 'https://www.cursor.com/agents/mcp/oauth/callback';
+const CURSOR_BOT_REDIRECT = 'https://www.cursor.com/bot/mcp/oauth/callback';
+const GROK_EXCHANGE = 'https://grok.com/connectors-oauth-exchange-code/';
+/** Addresses only Cursor publishes: one of them makes the registration Cursor's. */
+const CURSOR_ONLY_REDIRECTS: ReadonlySet<string> = new Set([CURSOR_REDIRECT, CURSOR_BOT_REDIRECT]);
+/** Cursor's pinned cloud addresses (engine pinned-clients.ts CURSOR_REDIRECT_URIS). */
+const CURSOR_REDIRECTS: ReadonlySet<string> = new Set([CURSOR_REDIRECT, CURSOR_BOT_REDIRECT, GROK_EXCHANGE]);
 /** Loopback addresses Cursor's document also lists; dropped beside its cloud address, never registered. */
 const CURSOR_LOOPBACK_EXTRAS: ReadonlySet<string> = new Set(['http://localhost:8787/callback', 'http://127.0.0.1:8787/callback']);
 const EXACT_REDIRECTS: ReadonlyMap<string, PinnedRegistration> = new Map([
   [STABLE_REDIRECT, { clientId: STABLE_CLIENT_ID, clientName: 'ChatGPT' }],
   ['https://claude.ai/api/mcp/auth_callback', CLAUDE],
-  ['https://grok.com/connectors-oauth-exchange-code/', GROK],
+  [GROK_EXCHANGE, GROK],
   ['https://console.x.ai/connectors-oauth-exchange-code/', GROK],
   [CURSOR_REDIRECT, CURSOR],
+  [CURSOR_BOT_REDIRECT, CURSOR],
 ]);
 
 export interface PinnedRegistration {
@@ -127,13 +143,15 @@ export function registerPinnedClient(text: string, nowSeconds: number): Registra
     || !redirectUris.every((uri) => typeof uri === 'string')) {
     return refuse('invalid_redirect_uri', 'redirect_uris must list the client\'s return addresses.');
   }
-  // Grok Bot lists Cursor's loopback address beside the cloud one; only the
-  // cloud one is pinned, so the loopback one is left out rather than refused.
+  // Beside a Cursor address, Cursor's loopback ones are left out rather than
+  // refused (only its cloud ones are pinned), and Grok's exchange page is
+  // Cursor's: Cursor publishes it too.
   const requested = redirectUris as string[];
-  const uris = requested.includes(CURSOR_REDIRECT) ? requested.filter((uri) => !CURSOR_LOOPBACK_EXTRAS.has(uri)) : requested;
-  // Engines pin each client to exactly its own return address, so every
+  const cursor = requested.some((uri) => CURSOR_ONLY_REDIRECTS.has(uri));
+  const uris = cursor ? requested.filter((uri) => !CURSOR_LOOPBACK_EXTRAS.has(uri)) : requested;
+  // Engines pin each client to exactly its own return addresses, so every
   // address registered must belong to one and the same pinned client.
-  const clients = uris.map(pinnedClientForRedirect);
+  const clients = cursor ? uris.map((uri) => (CURSOR_REDIRECTS.has(uri) ? CURSOR : undefined)) : uris.map(pinnedClientForRedirect);
   const [client] = clients;
   if (client === undefined || !clients.every((each) => each?.clientId === client.clientId)) {
     return refuse('invalid_redirect_uri', 'Only ChatGPT, Claude, Grok, and Grok Bot or Cursor register here, each with its own return addresses.');

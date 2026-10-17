@@ -95,7 +95,7 @@ import {
   privateAnswerInstallId,
   privateAnswerJobId,
 } from '../shared/private-answer.ts';
-import { authorizeBridge } from './authorize-bridge.ts';
+import { authorizeBridge, bridgeAppName } from './authorize-bridge.ts';
 import { signinBridge } from './signin-bridge.ts';
 import { MAX_REGISTRATION_BYTES, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
 import {
@@ -259,6 +259,17 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
   'mcp-session-id',
   'user-agent',
 ]);
+
+/** A return address as the operator's log shows it: scheme, host and path only, at most 120 characters. */
+function returnAddress(value: string | null): string {
+  if (value === null) return '(none)';
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}${url.pathname}`.slice(0, 120);
+  } catch {
+    return '(not a URL)';
+  }
+}
 
 export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const limits: RelayLimits = { ...DEFAULT_LIMITS, ...config.limits };
@@ -809,9 +820,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    * page, repeated on the form's address by the engine), only ever a demo.
    */
   const demoSignIn = async (request: Request, path: string, ip: string): Promise<Response> => {
-    const demoInstallId = demoInstallFor(new URL(path, origin.origin).searchParams.get('client_id'));
+    const params = new URL(path, origin.origin).searchParams;
+    const demoInstallId = demoInstallFor(params.get('client_id'));
     if (!demoInstallId) return json(404, { error: 'not_found' });
     if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
+    // Which app, and which of its published return addresses, a reviewer's
+    // sign-in took: the app's name and the address without its query (a
+    // fixed published address; never a code or state).
+    if (request.method === 'GET') log('demo_sign_in_page', { install: installTag(demoInstallId), app: bridgeAppName(params.get('client_id')) ?? 'other', returns: returnAddress(params.get('redirect_uri')) });
     const read = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES, ip) : { ok: true as const, body: new Uint8Array(), release: () => {} };
     if (!read.ok) return read.response;
     const body = read.body;

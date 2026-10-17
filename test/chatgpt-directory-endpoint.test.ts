@@ -52,7 +52,7 @@ import { createInProcessOperationContext, createRemoteMcpHandler, DEMO_GRANT_REM
 import { createRemoteOpenApiHandler } from '../src/workers/remote-openapi.ts';
 import { isDemoGrant, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
 import { createRemoteOAuthHandler, protectedResourceMetadata, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
-import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI, CURSOR_REDIRECT_URIS } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 
 const RELAY_HOST = 'mcp.olympus.test';
@@ -544,7 +544,9 @@ describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the r
     { name: 'Claude', clientId: CLAUDE_CLIENT_ID, redirectUri: CLAUDE_REDIRECT_URI },
     { name: 'Grok', clientId: GROK_CLIENT_ID, redirectUri: GROK_REDIRECT_URIS[0]! },
     { name: 'Grok', clientId: GROK_CLIENT_ID, redirectUri: GROK_REDIRECT_URIS[1]! },
-    { name: 'Grok Bot or Cursor', clientId: CURSOR_CLIENT_ID, redirectUri: CURSOR_REDIRECT_URI },
+    { name: 'Grok Bot or Cursor', clientId: CURSOR_CLIENT_ID, redirectUri: CURSOR_REDIRECT_URIS[0]! },
+    { name: 'Grok Bot or Cursor', clientId: CURSOR_CLIENT_ID, redirectUri: CURSOR_REDIRECT_URIS[1]! },
+    { name: 'Grok Bot or Cursor', clientId: CURSOR_CLIENT_ID, redirectUri: CURSOR_REDIRECT_URIS[2]! },
   ] as const;
 
   const hostAuthorizeUrl = (path: string, clientId: string, redirectUri: string, challenge: string, resource?: string) => {
@@ -605,9 +607,9 @@ describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the r
       expect((await rpc(DIRECTORY_MCP_PATH, tokens.access_token, 'tools/list')).status).toBe(401);
     }
     const grants = store.list().filter((connection) => connection.kind === 'oauth');
-    expect(grants.map((connection) => connection.displayName)).toEqual(['Claude', 'Grok', 'Grok', 'Grok Bot or Cursor']);
+    expect(grants.map((connection) => connection.displayName)).toEqual(['Claude', 'Grok', 'Grok', 'Grok Bot or Cursor', 'Grok Bot or Cursor', 'Grok Bot or Cursor']);
     // Each records its host from its pin; Grok Bot or Cursor counts as xAI.
-    expect(grants.map((connection) => connection.provider)).toEqual(['anthropic', 'xai', 'xai', 'xai']);
+    expect(grants.map((connection) => connection.provider)).toEqual(['anthropic', 'xai', 'xai', 'xai', 'xai', 'xai']);
     for (const connection of grants) {
       expect(isChatGptGrant(connection)).toBe(false);
       expect(isDemoGrant(connection)).toBe(false);
@@ -642,12 +644,17 @@ describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the r
       [GROK_CLIENT_ID, 'https://grok.com/connectors/oauth/callback'],
       [GROK_CLIENT_ID, CLAUDE_REDIRECT_URI],
       [GROK_CLIENT_ID, CHATGPT_REDIRECT_URI],
-      // Cursor's document also lists loopback and other addresses; only its cloud agents' address is pinned.
+      // Cursor's document also lists loopback addresses; only its three cloud addresses are pinned.
       [CURSOR_CLIENT_ID, 'http://localhost:8787/callback'],
       [CURSOR_CLIENT_ID, 'http://127.0.0.1:8787/callback'],
-      [CURSOR_CLIENT_ID, 'https://www.cursor.com/bot/mcp/oauth/callback'],
-      [CURSOR_CLIENT_ID, 'https://grok.com/connectors-oauth-exchange-code/'],
+      [CURSOR_CLIENT_ID, 'https://www.cursor.com/bot/mcp/oauth/callback/'],
+      [CURSOR_CLIENT_ID, 'https://cursor.com/bot/mcp/oauth/callback'],
+      [CURSOR_CLIENT_ID, 'https://grok.com/connectors-oauth-exchange-code'],
+      // The xAI console's exchange page is Grok's, not in Cursor's document.
+      [CURSOR_CLIENT_ID, 'https://console.x.ai/connectors-oauth-exchange-code/'],
       [CURSOR_CLIENT_ID, 'cursor://anysphere.cursor-mcp/oauth/callback'],
+      [GROK_CLIENT_ID, CURSOR_REDIRECT_URI],
+      [GROK_CLIENT_ID, 'https://www.cursor.com/bot/mcp/oauth/callback'],
     ] as const) {
       const response = await fetch(hostAuthorizeUrl('/connect/authorize', clientId, redirectUri, pkce().challenge), { redirect: 'manual' });
       expect(response.status).toBe(400);
@@ -659,26 +666,30 @@ describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the r
     expect(await lookalike.text()).toContain('does not recognize this app');
   });
 
-  test('the reviewer demo sign-in connects ChatGPT, and Grok Bot or Cursor, never Claude or Grok', async () => {
-    for (const host of HOSTS.filter((h) => h.clientId !== CURSOR_CLIENT_ID)) {
-      const response = await fetch(hostAuthorizeUrl('/connect/demo/authorize', host.clientId, host.redirectUri, pkce().challenge), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
-      expect(response.status).toBe(400);
-      expect(await response.text()).toContain('The demo connects ChatGPT, Grok Bot and Cursor only.');
-    }
+  test('the reviewer demo sign-in connects ChatGPT, Grok, and Grok Bot or Cursor, never Claude', async () => {
+    const response = await fetch(hostAuthorizeUrl('/connect/demo/authorize', CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, pkce().challenge), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('The demo connects ChatGPT, Grok, Grok Bot and Cursor only.');
     expect(isDemoGrant({ clientId: CLAUDE_CLIENT_ID, displayName: 'Claude (demo sign-in)' })).toBe(false);
-    expect(isDemoGrant({ clientId: GROK_CLIENT_ID, displayName: 'Grok (demo sign-in)' })).toBe(false);
     // ChatGPT still can.
     expect((await grant(undefined, 'demo')).access_token).toBeTruthy();
   });
 
-  /** A Cursor marketplace reviewer: the demo sign-in, as the relay forwards it, then the token. */
-  const cursorDemoGrant = async () => {
+  /** Every way Grok Bot or Cursor and Grok reach the demo: each pinned client with each of its pinned return addresses. */
+  const DEMO_PATHS = [
+    ...CURSOR_REDIRECT_URIS.map((redirectUri) => ({ name: 'Grok Bot or Cursor', clientId: CURSOR_CLIENT_ID, redirectUri })),
+    ...GROK_REDIRECT_URIS.map((redirectUri) => ({ name: 'Grok', clientId: GROK_CLIENT_ID, redirectUri })),
+  ];
+
+  /** A marketplace reviewer: the demo sign-in page, as the relay forwards it, and its form posted. */
+  const demoSignIn = async (clientId: string, redirectUri: string, name: string) => {
     const { verifier, challenge } = pkce();
-    const page = await fetch(hostAuthorizeUrl('/connect/demo/authorize', CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI, challenge, MCP_RESOURCE), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
+    const page = await fetch(hostAuthorizeUrl('/connect/demo/authorize', clientId, redirectUri, challenge, MCP_RESOURCE), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
     const html = await page.text();
     expect(page.status).toBe(200);
     expect(html).toContain('Sign in to the Olympus demo');
-    expect(html).toContain('Grok Bot or Cursor');
+    expect(html).toContain(`<div class="name">${name}</div>`);
+    expect(html).toContain(`you return to <strong>${new URL(redirectUri).host}</strong>`);
     const approved = await fetch(`${base}/connect/demo/authorize`, {
       method: 'POST',
       redirect: 'manual',
@@ -691,14 +702,73 @@ describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the r
     });
     expect(approved.status).toBe(303);
     const callback = new URL(approved.headers.get('location')!);
-    expect(`${callback.origin}${callback.pathname}`).toBe(CURSOR_REDIRECT_URI);
+    expect(`${callback.origin}${callback.pathname}`).toBe(redirectUri);
+    return { verifier, code: callback.searchParams.get('code')! };
+  };
+
+  const demoGrantFor = async (clientId: string, redirectUri: string, name: string) => {
+    const { verifier, code } = await demoSignIn(clientId, redirectUri, name);
     const response = await tokenRequest({
-      grant_type: 'authorization_code', client_id: CURSOR_CLIENT_ID, redirect_uri: CURSOR_REDIRECT_URI,
-      code: callback.searchParams.get('code')!, code_verifier: verifier, resource: MCP_RESOURCE,
+      grant_type: 'authorization_code', client_id: clientId, redirect_uri: redirectUri,
+      code, code_verifier: verifier, resource: MCP_RESOURCE,
     });
     expect(response.status).toBe(200);
     return await response.json() as { access_token: string };
   };
+  const cursorDemoGrant = () => demoGrantFor(CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI, 'Grok Bot or Cursor');
+
+  test('every Grok Bot, Cursor and Grok return address completes the demo sign-in, with the demo tools only', async () => {
+    for (const path of DEMO_PATHS) {
+      const tokens = await demoGrantFor(path.clientId, path.redirectUri, path.name);
+      const connection = store.list().filter((c) => c.kind === 'oauth').at(-1)!;
+      expect(connection).toMatchObject({ displayName: `${path.name} (demo sign-in)`, clientId: path.clientId });
+      expect(isDemoGrant(connection)).toBe(true);
+      expect(isChatGptGrant(connection)).toBe(false);
+      expect(names((await result(await rpc('/mcp', tokens.access_token, 'tools/list'))).tools)).toEqual(['source_index_status']);
+      const refused = await result(await rpc('/mcp', tokens.access_token, 'tools/call', { name: 'source_answer', arguments: { question: 'q' } }));
+      expect(refused.content[0].text).toContain('unknown_operation');
+      expect((await rpc(DIRECTORY_MCP_PATH, tokens.access_token, 'tools/list')).status).toBe(401);
+    }
+    expect(questionsAsked).toBe(0);
+  });
+
+  test('a demo code is bound to its client, return address and PKCE verifier', async () => {
+    for (const path of DEMO_PATHS) {
+      const sibling = (path.clientId === CURSOR_CLIENT_ID ? CURSOR_REDIRECT_URIS : GROK_REDIRECT_URIS).find((uri) => uri !== path.redirectUri)!;
+      const other = path.clientId === CURSOR_CLIENT_ID ? GROK_CLIENT_ID : CURSOR_CLIENT_ID;
+      for (const wrong of [
+        { client_id: path.clientId, redirect_uri: sibling, verifier: 'right' },
+        // Grok's exchange page is pinned for both clients: the code still names the one it was issued to.
+        { client_id: other, redirect_uri: path.redirectUri, verifier: 'right' },
+        { client_id: path.clientId, redirect_uri: path.redirectUri, verifier: 'wrong' },
+      ]) {
+        const { verifier, code } = await demoSignIn(path.clientId, path.redirectUri, path.name);
+        const response = await tokenRequest({
+          grant_type: 'authorization_code', client_id: wrong.client_id, redirect_uri: wrong.redirect_uri,
+          code, code_verifier: wrong.verifier === 'right' ? verifier : pkce().verifier, resource: MCP_RESOURCE,
+        });
+        expect(response.status).toBe(400);
+        expect((await response.json() as { error: string }).error).toBe('invalid_grant');
+      }
+    }
+  });
+
+  test('the demo sign-in refuses loopback and unlisted return addresses on an error page', async () => {
+    for (const [clientId, redirectUri] of [
+      [CURSOR_CLIENT_ID, 'http://localhost:8787/callback'],
+      [CURSOR_CLIENT_ID, 'http://127.0.0.1:8787/callback'],
+      [CURSOR_CLIENT_ID, 'https://console.x.ai/connectors-oauth-exchange-code/'],
+      [CURSOR_CLIENT_ID, 'https://www.cursor.com/bot/mcp/oauth/callback/'],
+      [GROK_CLIENT_ID, 'http://localhost:8787/callback'],
+      [GROK_CLIENT_ID, CURSOR_REDIRECT_URI],
+      [GROK_CLIENT_ID, 'https://grok.com/connectors-oauth-exchange-code'],
+    ] as const) {
+      const response = await fetch(hostAuthorizeUrl('/connect/demo/authorize', clientId, redirectUri, pkce().challenge, MCP_RESOURCE), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
+      expect(response.status).toBe(400);
+      expect(response.headers.get('location')).toBeNull();
+      expect(await response.text()).toContain('The return address is not one this app registered.');
+    }
+  });
 
   test('a Grok Bot or Cursor demo grant gets only the read-only remote tools, on /mcp and OpenAPI', async () => {
     const tokens = await cursorDemoGrant();

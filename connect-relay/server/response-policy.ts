@@ -16,7 +16,8 @@
  *   Dropbox), the engine's loopback port, or the relay itself.
  * - `demo` (`/connect/demo/authorize`, routed only to the operator's demo
  *   install, or the per-app demo install): the reviewer sign-in form,
- *   redirecting back to ChatGPT or Cursor (Grok Bot's sign-in).
+ *   redirecting back to ChatGPT, Cursor or Grok (Grok Bot signs in as
+ *   Cursor or Grok).
  *
  * Every install answer gets `X-Content-Type-Options: nosniff`, a
  * `Referrer-Policy` and the relay's own Content-Security-Policy in addition
@@ -81,7 +82,7 @@ const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 /** Origins of the apps whose reviewers sign in to a demo install (redirect URIs the engine pins). */
-const DEMO_CLIENT_ORIGINS = new Set(['https://chatgpt.com', 'https://www.cursor.com']);
+const DEMO_CLIENT_ORIGINS = new Set(['https://chatgpt.com', 'https://www.cursor.com', 'https://grok.com', 'https://console.x.ai']);
 
 /** Provider sign-in origins the engine's hand-offs redirect to (core/connect.ts authUrl). */
 export const PROVIDER_AUTHORIZE_ORIGINS: readonly string[] = ['https://accounts.google.com', 'https://www.dropbox.com'];
@@ -113,7 +114,7 @@ export function createResponsePolicies(input: { relayOrigin: string; enginePort:
       contentTypes: new Set(text),
       baseOrigin: relayOrigin,
       // ChatGPT's redirect URIs (web, and the desktop app's loopback ones),
-      // Cursor's (Grok Bot's sign-in; the engine pins the exact URI), or the relay.
+      // Cursor's and Grok's (the engine pins the exact URIs), or the relay.
       redirectAllowed: (target) => DEMO_CLIENT_ORIGINS.has(target.origin)
         || target.origin === relayOrigin
         || (target.protocol === 'http:' && LOOPBACK_HOSTS.has(target.hostname)),
