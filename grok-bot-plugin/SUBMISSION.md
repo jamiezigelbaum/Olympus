@@ -58,7 +58,9 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 > 1. Add Olympus (MCP server URL https://mcp.olympusplugin.ai/mcp) in Grok
 >    Bot or Cursor.
 > 2. The app asks you to sign in and opens a page at mcp.olympusplugin.ai.
->    Choose **Reviewing Olympus? Sign in to the demo**.
+>    Choose **Reviewing Olympus? Sign in to the demo**. The sign-in page
+>    names the app it connects ("Grok Bot or Cursor", or "Grok") and the site
+>    you return to.
 > 3. On "Sign in to the Olympus demo", enter the username and password below
 >    and choose **Sign in and connect**. No MFA, email code or private network
 >    is needed. You return to the app, connected.
@@ -101,6 +103,13 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
 - Its `worker.env` must not carry `OLYMPUS_ENGINE_HOST=1` (olympus-demo's
   older build has it): on an OpenClaw-hosted engine it moves the Gateway's
   data folder away from the relay child's, and the relay never comes up.
+- Plugin 1.1.0 from main 931cd17d (2026-10-17). Its worker runs from the
+  user unit `olympus-worker.service` that `olympus worker install` writes.
+  A plugin upgrade installs to a new folder, so after installing the new
+  package and restarting the Gateway, run `olympus worker install` again;
+  the old unit otherwise restarts into a missing file. (`olympus worker
+  uninstall` alone leaves no worker here: the native worker service needs
+  `worker.service` plugin config this engine does not have.)
 - Its only source is a demo Dropbox account (folder `/OlympusDemo`) holding
   `chatgpt-plugin/demo-data/`; it carries the demo marker and has
   `remote.demoConsent` with an Argon2id hash. Credentials are in 1Password
@@ -124,15 +133,24 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
       with `connect-relay/deploy/deploy.sh`, reviewer check passed
       (2026-10-15). PR #429 (6d74a540) lets the demo sign-in redirect back to
       Cursor's callback (before it, the relay refused that redirect with a
-      502); relay redeployed from 6d74a540, reviewer check passed. Drop-in `olympus-relay.service.d/grokbot-demo.conf` sets
-      `RELAY_DEMO_CLIENT_INSTALLS` to the reviewer engine's install id.
+      502); relay redeployed from 6d74a540, reviewer check passed. PR #435
+      (931cd17d, independent Codex review receipt on the PR) admits every
+      cloud return address Cursor's and Grok's client documents publish, by
+      CIMD and by registration; relay redeployed from 931cd17d, reviewer
+      check passed (2026-10-17). Drop-in
+      `olympus-relay.service.d/grokbot-demo.conf` sets
+      `RELAY_DEMO_CLIENT_INSTALLS` for Cursor's and Grok's client ids to the
+      reviewer engine's install id.
 - [x] Reviewer engine running, seeded, and indexed; tiers match
       `chatgpt-plugin/demo-data/README.md` (2026-10-15).
-- [x] Scripted end-to-end receipt as Cursor's client, through the demo
-      sign-in, every §3 case (§6, 2026-10-15).
+- [x] Scripted end-to-end receipt for every sign-in path (Cursor's client
+      with `/agents/`, `/bot/` and Grok's exchange page; Grok's client with
+      grok.com and console.x.ai; each by CIMD and by registration) and
+      every §3 case, plus the refusals (§6, 2026-10-17).
 - [ ] In-app test by Jamie from Grok Bot (his account; demo password from
       1Password): add the server, sign in to the demo, ask the lease
-      question. Also shows whether Grok Bot uses the `/agents/` callback.
+      question. The relay's `demo_sign_in_page` log line then shows which
+      app and return address Grok Bot used.
 - [x] Logo URL serves 200 `image/png`, same bytes as
       `site/assets/img/olympus-logo-512.png` (2026-10-15).
 - [ ] Privacy and terms URLs live (both 200); the live policy names Cursor
@@ -140,13 +158,56 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
       olympusplugin.ai/privacy: it describes 1.1.0 features, so it goes live
       with the 1.1.0 site publish (#422).
 - [x] Legal pass (Olympus profile) on §2 and §3 recorded below (re-run on
-      the final §3, 2026-10-15).
+      the final §3, 2026-10-15; §3 step 2 addition re-checked 2026-10-17).
 - [x] Jamie has accepted the publisher terms, including the indemnity
       (2026-10-15).
 - [ ] Jamie ticks "tested locally and in-app" (only after §6) and clicks
       submit.
 
 ## 6. Receipts
+
+### Every sign-in path (2026-10-17 16:13Z)
+
+Against the live relay (olympus-relay 931cd17daff0) and the reviewer engine
+on plugin 1.1.0 (931cd17d); password read from 1Password on stdin, no code
+or token printed. Each path: demo page 200 naming the app, sign-in 303 to
+exactly the requested return address, `/connect/token` 200 with a refresh
+token, `tools/list` = `olympus_search`, `source_index_status` only,
+`source_answer` refused as `unknown_operation`; by CIMD each also ran the
+lease question (Sam's two emails, the lease summary, the garden by-laws).
+
+| Path | Client named | Returns to | Result |
+|---|---|---|---|
+| CIMD, Cursor's id | Grok Bot or Cursor | `www.cursor.com/agents/mcp/oauth/callback` | ok |
+| CIMD, Cursor's id | Grok Bot or Cursor | `www.cursor.com/bot/mcp/oauth/callback` | ok |
+| CIMD, Cursor's id | Grok Bot or Cursor | `grok.com/connectors-oauth-exchange-code/` | ok |
+| CIMD, Grok's id | Grok | `grok.com/connectors-oauth-exchange-code/` | ok |
+| CIMD, Grok's id | Grok | `console.x.ai/connectors-oauth-exchange-code/` | ok |
+| Registration of Cursor's published list (5 addresses) → Cursor's id with its 3 cloud ones | Grok Bot or Cursor | each of the 3 | ok ×3 |
+| Registration as Grok Bot sent it (`/agents/` + localhost) → Cursor's id, `/agents/` only | Grok Bot or Cursor | `/agents/` | ok |
+| Registration of Grok's exchange page alone → Grok's id | Grok | grok.com | ok |
+| Registration of Grok's published list → Grok's id | Grok | console.x.ai | ok |
+
+Refused, as intended: Cursor's id with a loopback address or console.x.ai,
+and Grok's id with Cursor's `/agents/` or a loopback address (400 error
+page, no redirect); registrations of loopback addresses alone, Cursor's
+address with console.x.ai, or with an unlisted address (400
+`invalid_redirect_uri`). 18/18 checks ok.
+
+Content cases on the new build (Cursor's id, `/bot/`): kitchen budget →
+plan, budget decision and Priya's email; bank overdraft notice (Private) and
+router password (Secret) → "Olympus found no Public or Personal evidence for
+this question in 5 searched sources."
+
+The relay logged one `demo_sign_in_page` line per page, with the app, the
+return address and the status (200 shown, 400 refused), and nothing else.
+olympus-demo untouched; read-only status after the deploy: Dropbox synced
+16:07Z, items unchanged (20 Personal, 4 Private).
+
+Full log: the parent session's notes folder,
+`grok-bot-reviewer-paths-receipt-2026-10-17.log`.
+
+### First receipt (2026-10-15)
 
 2026-10-15 23:35Z, against the live relay (olympus-relay 6d74a5404cc7) as
 Cursor's pinned client (`https://cursor.com/oauth/mcp-client.json`, redirect
@@ -183,6 +244,13 @@ only that the text isn't sent (the demo grant has no answer model, so §2's
 "answer written from them" is not claimed for the demo); §3 says the demo's
 labels were set by its publisher, not detected; the timing claim is "usually
 within a few seconds", not a promise.
+
+Re-checked 2026-10-17 after §3 step 2 gained one sentence (the sign-in page
+names the app and the return site). The 2026-10-17 receipt shows it on every
+path: the page names "Grok Bot or Cursor" for Cursor's client and "Grok" for
+Grok's, and "you return to" the requested host (www.cursor.com, grok.com,
+console.x.ai). "Cursor" is written exactly; nothing in the sentence comments
+on Grok, Grok Bot or Cursor. No other §2 or §3 text changed.
 
 Fixed in this file:
 - §2 said the app gets "at most an answer written on your computer" for
