@@ -158,7 +158,7 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
       olympusplugin.ai/privacy: it describes 1.1.0 features, so it goes live
       with the 1.1.0 site publish (#422).
 - [x] Legal pass (Olympus profile) on §2 and §3 recorded below (re-run on
-      the final §3, 2026-10-15).
+      the final §3, 2026-10-15; §3 step 2 addition re-checked 2026-10-17).
 - [x] Jamie has accepted the publisher terms, including the indemnity
       (2026-10-15).
 - [ ] Jamie ticks "tested locally and in-app" (only after §6) and clicks
@@ -244,6 +244,13 @@ only that the text isn't sent (the demo grant has no answer model, so §2's
 "answer written from them" is not claimed for the demo); §3 says the demo's
 labels were set by its publisher, not detected; the timing claim is "usually
 within a few seconds", not a promise.
+
+Re-checked 2026-10-17 after §3 step 2 gained one sentence (the sign-in page
+names the app and the return site). The 2026-10-17 receipt shows it on every
+path: the page names "Grok Bot or Cursor" for Cursor's client and "Grok" for
+Grok's, and "you return to" the requested host (www.cursor.com, grok.com,
+console.x.ai). "Cursor" is written exactly; nothing in the sentence comments
+on Grok, Grok Bot or Cursor. No other §2 or §3 text changed.
 
 Fixed in this file:
 - §2 said the app gets "at most an answer written on your computer" for
