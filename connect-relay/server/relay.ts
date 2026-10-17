@@ -827,10 +827,6 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const demoInstallId = demoInstallFor(params.get('client_id'));
     if (!demoInstallId) return json(404, { error: 'not_found' });
     if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
-    // Which app, and which of its published return addresses, a reviewer's
-    // sign-in took: the app's name and the address without its query (a
-    // fixed published address; never a code or state).
-    if (request.method === 'GET') log('demo_sign_in_page', { install: installTag(demoInstallId), app: bridgeAppName(params.get('client_id')) ?? 'other', returns: returnAddress(params.get('redirect_uri')) });
     const read = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES, ip) : { ok: true as const, body: new Uint8Array(), release: () => {} };
     if (!read.ok) return read.response;
     const body = read.body;
@@ -838,7 +834,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
     });
-    return toInstall({ installId: demoInstallId, request, path, body, releaseBody: read.release, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
+    const response = await toInstall({ installId: demoInstallId, request, path, body, releaseBody: read.release, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
+    // Which app, and which of its published return addresses, a reviewer's
+    // sign-in took, once the demo has answered: `status` 200 is a page shown,
+    // anything else a refusal or an unavailable demo. Never a code or state.
+    if (request.method === 'GET') {
+      log('demo_sign_in_page', { install: installTag(demoInstallId), app: bridgeAppName(params.get('client_id')) ?? 'other', returns: returnAddress(params.get('redirect_uri')), status: response.status });
+    }
+    return response;
   };
 
   /**

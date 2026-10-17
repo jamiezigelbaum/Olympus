@@ -537,7 +537,7 @@ describe('demo sign-in', () => {
       demoInstallsByClient: { [CURSOR]: reviewerIdentity.installId, [GROK]: reviewerIdentity.installId },
     });
     await connectInstall(relay, chatgptDemo, chatgptIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
-    await connectInstall(relay, reviewerDemo, reviewerIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    const reviewer = await connectInstall(relay, reviewerDemo, reviewerIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
     logLines.length = 0;
     const page = (clientId: string, redirectUri: string) =>
       fetch(`${relay.url}/connect/demo/authorize?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, state: 'secret-state', code_challenge: 'secret-challenge' })}`);
@@ -563,6 +563,7 @@ describe('demo sign-in', () => {
     expect(await (await fetch(`${relay.url}/connect/authorize?${new URLSearchParams({ client_id: GROK, state: 's' })}`)).text()).toContain('Reviewing Olympus? Sign in to the demo');
 
     const pages = logLines.map((line) => JSON.parse(line) as Record<string, string>).filter((line) => line.event === 'demo_sign_in_page');
+    expect(pages.every((line) => Number(line.status) === 200)).toBe(true);
     expect(pages.map((line) => `${line.app} ${line.returns}`)).toEqual([
       'Grok Bot or Cursor https://www.cursor.com/agents/mcp/oauth/callback',
       'Grok Bot or Cursor https://www.cursor.com/bot/mcp/oauth/callback',
@@ -581,6 +582,12 @@ describe('demo sign-in', () => {
       .toEqual(['other', 'other', 'loopback', 'https://chatgpt.com/connector/oauth/(callback id)']);
     expect(logLines.join('\n')).not.toContain('secret-');
     expect(logLines.join('\n')).not.toContain('203.0.113.9');
+    // A demo that is not connected answers 503, and the log says so.
+    await reviewer.client.stop();
+    await until(() => relay.onlineInstalls().length === 1);
+    logLines.length = 0;
+    expect((await page(CURSOR, 'https://www.cursor.com/bot/mcp/oauth/callback')).status).toBe(503);
+    expect(logLines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line.event === 'demo_sign_in_page')).toMatchObject({ app: 'Grok Bot or Cursor', status: 503 });
   });
 
   test('a per-app demo alone is a demo for that app only', async () => {

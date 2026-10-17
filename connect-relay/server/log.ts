@@ -22,7 +22,7 @@ export type RelayEvent =
   | 'surfaces_refused'
   /** An OAuth client registration answered (client-registration.ts); `ok` only. */
   | 'client_registration'
-  /** A reviewer opened a demo sign-in page: the app and its return address, without the query (relay.ts demoSignIn). */
+  /** A demo sign-in page answered: the app, its return address (a pinned one, else a fixed word) and the status (relay.ts demoSignIn). */
   | 'demo_sign_in_page'
   /** A relay-wide budget (registrations, returning registrations, egress) ran dry; once per episode. */
   | 'budget_exhausted';
