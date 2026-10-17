@@ -572,7 +572,15 @@ describe('demo sign-in', () => {
       'ChatGPT https://chatgpt.com/connector_platform_oauth_redirect',
     ]);
     expect(pages[0]!.install).toBe(installTag(reviewerIdentity.installId));
+    // An address the engine has not checked yet never reaches the log as sent.
+    logLines.length = 0;
+    for (const redirectUri of ['https://grok.com/connectors-oauth-exchange-code/secret-token', 'https://203.0.113.9/secret-path', 'http://localhost:8787/callback', 'https://chatgpt.com/connector/oauth/cb_secret-id']) {
+      await (await page(GROK, redirectUri)).text();
+    }
+    expect(logLines.map((line) => JSON.parse(line) as Record<string, string>).filter((line) => line.event === 'demo_sign_in_page').map((line) => line.returns))
+      .toEqual(['other', 'other', 'loopback', 'https://chatgpt.com/connector/oauth/(callback id)']);
     expect(logLines.join('\n')).not.toContain('secret-');
+    expect(logLines.join('\n')).not.toContain('203.0.113.9');
   });
 
   test('a per-app demo alone is a demo for that app only', async () => {

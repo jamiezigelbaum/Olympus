@@ -97,7 +97,7 @@ import {
 } from '../shared/private-answer.ts';
 import { authorizeBridge, bridgeAppName } from './authorize-bridge.ts';
 import { signinBridge } from './signin-bridge.ts';
-import { MAX_REGISTRATION_BYTES, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
+import { MAX_REGISTRATION_BYTES, pinnedClientForRedirect, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
 import {
   ConfirmedCredentials,
   DEFAULT_LIMITS,
@@ -260,16 +260,19 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
   'user-agent',
 ]);
 
-/** A return address as the operator's log shows it: scheme, host and path only, at most 120 characters. */
+/**
+ * A return address as the operator's log shows it: one of the pinned apps'
+ * published addresses, exactly, else a fixed word. The engine has not checked
+ * the address yet, so nothing a caller chose reaches the log.
+ */
 function returnAddress(value: string | null): string {
   if (value === null) return '(none)';
-  try {
-    const url = new URL(value);
-    return `${url.protocol}//${url.host}${url.pathname}`.slice(0, 120);
-  } catch {
-    return '(not a URL)';
-  }
+  const pinned = pinnedClientForRedirect(value);
+  if (!pinned) return CURSOR_LOOPBACKS.has(value) ? 'loopback' : 'other';
+  // ChatGPT's callback-specific address carries an id; the log keeps its shape.
+  return value.startsWith('https://chatgpt.com/connector/oauth/') ? 'https://chatgpt.com/connector/oauth/(callback id)' : value;
 }
+const CURSOR_LOOPBACKS: ReadonlySet<string> = new Set(['http://localhost:8787/callback', 'http://127.0.0.1:8787/callback']);
 
 export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const limits: RelayLimits = { ...DEFAULT_LIMITS, ...config.limits };
