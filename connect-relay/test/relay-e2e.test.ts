@@ -15,6 +15,7 @@ import { PROTOCOL_VERSION, base64url, installIdForPublicKey, signInstallMessage,
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, mintCredential, type CredentialSurface } from '../shared/tokens.ts';
 import { createOAuthRelayNonce, signOAuthRelayState } from '../../src/core/oauth-relay.ts';
 import type { RelayLimits } from '../server/limits.ts';
+import { installTag } from '../server/log.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { NOT_CONNECTED_MESSAGE } from '../server/relay-mcp.ts';
 import generatedRemoteSurface from '../server/generated/remote-tools.json';
@@ -520,6 +521,73 @@ describe('demo sign-in', () => {
     expect(cursorDemo.requests).toHaveLength(2);
     // The bridge offers the demo to both.
     expect(await (await fetch(`${relay.url}/connect/authorize${query(CURSOR)}`)).text()).toContain('Reviewing Olympus? Sign in to the demo');
+  });
+
+  test('Grok Bot\'s two clients, Cursor\'s and Grok\'s, share the reviewer demo; ChatGPT keeps its own; the log names the app and return address only', async () => {
+    const CURSOR = 'https://cursor.com/oauth/mcp-client.json';
+    const GROK = 'https://grok.com/oauth/mcp-client.json';
+    const CHATGPT = 'https://chatgpt.com/oauth/client.json';
+    const chatgptDemo = fakeWorker('chatgpt-demo');
+    const reviewerDemo = fakeWorker('reviewer-demo');
+    cleanups.push(chatgptDemo.stop, reviewerDemo.stop);
+    const chatgptIdentity = loadOrCreateIdentity(tempDir());
+    const reviewerIdentity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), {
+      demoInstallId: chatgptIdentity.installId,
+      demoInstallsByClient: { [CURSOR]: reviewerIdentity.installId, [GROK]: reviewerIdentity.installId },
+    });
+    await connectInstall(relay, chatgptDemo, chatgptIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    const reviewer = await connectInstall(relay, reviewerDemo, reviewerIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    logLines.length = 0;
+    const page = (clientId: string, redirectUri: string) =>
+      fetch(`${relay.url}/connect/demo/authorize?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, state: 'secret-state', code_challenge: 'secret-challenge' })}`);
+    for (const [clientId, redirectUri] of [
+      [CURSOR, 'https://www.cursor.com/agents/mcp/oauth/callback'],
+      [CURSOR, 'https://www.cursor.com/bot/mcp/oauth/callback'],
+      [CURSOR, 'https://grok.com/connectors-oauth-exchange-code/'],
+      [GROK, 'https://grok.com/connectors-oauth-exchange-code/'],
+      [GROK, 'https://console.x.ai/connectors-oauth-exchange-code/'],
+    ] as const) {
+      expect(await (await page(clientId, redirectUri)).json()).toMatchObject({ worker: 'reviewer-demo' });
+    }
+    const posted = await fetch(`${relay.url}/connect/demo/authorize?${new URLSearchParams({ client_id: GROK })}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: `https://${PUBLIC_HOST}` },
+      body: 'request_id=x&csrf=y',
+    });
+    expect(posted.status).toBe(200);
+    expect(reviewerDemo.requests).toHaveLength(6);
+    expect(await (await page(CHATGPT, 'https://chatgpt.com/connector_platform_oauth_redirect')).json()).toMatchObject({ worker: 'chatgpt-demo' });
+    expect(chatgptDemo.requests).toHaveLength(1);
+    // The bridge offers Grok's reviewers the demo too.
+    expect(await (await fetch(`${relay.url}/connect/authorize?${new URLSearchParams({ client_id: GROK, state: 's' })}`)).text()).toContain('Reviewing Olympus? Sign in to the demo');
+
+    const pages = logLines.map((line) => JSON.parse(line) as Record<string, string>).filter((line) => line.event === 'demo_sign_in_page');
+    expect(pages.every((line) => Number(line.status) === 200)).toBe(true);
+    expect(pages.map((line) => `${line.app} ${line.returns}`)).toEqual([
+      'Grok Bot or Cursor https://www.cursor.com/agents/mcp/oauth/callback',
+      'Grok Bot or Cursor https://www.cursor.com/bot/mcp/oauth/callback',
+      'Grok Bot or Cursor https://grok.com/connectors-oauth-exchange-code/',
+      'Grok https://grok.com/connectors-oauth-exchange-code/',
+      'Grok https://console.x.ai/connectors-oauth-exchange-code/',
+      'ChatGPT https://chatgpt.com/connector_platform_oauth_redirect',
+    ]);
+    expect(pages[0]!.install).toBe(installTag(reviewerIdentity.installId));
+    // An address the engine has not checked yet never reaches the log as sent.
+    logLines.length = 0;
+    for (const redirectUri of ['https://grok.com/connectors-oauth-exchange-code/secret-token', 'https://203.0.113.9/secret-path', 'http://localhost:8787/callback', 'https://chatgpt.com/connector/oauth/cb_secret-id']) {
+      await (await page(GROK, redirectUri)).text();
+    }
+    expect(logLines.map((line) => JSON.parse(line) as Record<string, string>).filter((line) => line.event === 'demo_sign_in_page').map((line) => line.returns))
+      .toEqual(['other', 'other', 'loopback', 'https://chatgpt.com/connector/oauth/(callback id)']);
+    expect(logLines.join('\n')).not.toContain('secret-');
+    expect(logLines.join('\n')).not.toContain('203.0.113.9');
+    // A demo that is not connected answers 503, and the log says so.
+    await reviewer.client.stop();
+    await until(() => relay.onlineInstalls().length === 1);
+    logLines.length = 0;
+    expect((await page(CURSOR, 'https://www.cursor.com/bot/mcp/oauth/callback')).status).toBe(503);
+    expect(logLines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line.event === 'demo_sign_in_page')).toMatchObject({ app: 'Grok Bot or Cursor', status: 503 });
   });
 
   test('a per-app demo alone is a demo for that app only', async () => {

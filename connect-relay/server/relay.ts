@@ -95,9 +95,9 @@ import {
   privateAnswerInstallId,
   privateAnswerJobId,
 } from '../shared/private-answer.ts';
-import { authorizeBridge } from './authorize-bridge.ts';
+import { authorizeBridge, bridgeAppName } from './authorize-bridge.ts';
 import { signinBridge } from './signin-bridge.ts';
-import { MAX_REGISTRATION_BYTES, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
+import { MAX_REGISTRATION_BYTES, pinnedClientForRedirect, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
 import {
   ConfirmedCredentials,
   DEFAULT_LIMITS,
@@ -259,6 +259,20 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
   'mcp-session-id',
   'user-agent',
 ]);
+
+/**
+ * A return address as the operator's log shows it: one of the pinned apps'
+ * published addresses, exactly, else a fixed word. The engine has not checked
+ * the address yet, so nothing a caller chose reaches the log.
+ */
+function returnAddress(value: string | null): string {
+  if (value === null) return '(none)';
+  const pinned = pinnedClientForRedirect(value);
+  if (!pinned) return CURSOR_LOOPBACKS.has(value) ? 'loopback' : 'other';
+  // ChatGPT's callback-specific address carries an id; the log keeps its shape.
+  return value.startsWith('https://chatgpt.com/connector/oauth/') ? 'https://chatgpt.com/connector/oauth/(callback id)' : value;
+}
+const CURSOR_LOOPBACKS: ReadonlySet<string> = new Set(['http://localhost:8787/callback', 'http://127.0.0.1:8787/callback']);
 
 export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const limits: RelayLimits = { ...DEFAULT_LIMITS, ...config.limits };
@@ -809,7 +823,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    * page, repeated on the form's address by the engine), only ever a demo.
    */
   const demoSignIn = async (request: Request, path: string, ip: string): Promise<Response> => {
-    const demoInstallId = demoInstallFor(new URL(path, origin.origin).searchParams.get('client_id'));
+    const params = new URL(path, origin.origin).searchParams;
+    const demoInstallId = demoInstallFor(params.get('client_id'));
     if (!demoInstallId) return json(404, { error: 'not_found' });
     if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
     const read = request.method === 'POST' ? await readBody(request, MAX_FORM_BYTES, ip) : { ok: true as const, body: new Uint8Array(), release: () => {} };
@@ -819,7 +834,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
     });
-    return toInstall({ installId: demoInstallId, request, path, body, releaseBody: read.release, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
+    const response = await toInstall({ installId: demoInstallId, request, path, body, releaseBody: read.release, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
+    // Which app, and which of its published return addresses, a reviewer's
+    // sign-in took, once the demo has answered: `status` 200 is a page shown,
+    // anything else a refusal or an unavailable demo. Never a code or state.
+    if (request.method === 'GET') {
+      log('demo_sign_in_page', { install: installTag(demoInstallId), app: bridgeAppName(params.get('client_id')) ?? 'other', returns: returnAddress(params.get('redirect_uri')), status: response.status });
+    }
+    return response;
   };
 
   /**

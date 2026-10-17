@@ -15,6 +15,10 @@ const CLAUDE = 'https://claude.ai/api/mcp/auth_callback';
 const GROK = 'https://grok.com/connectors-oauth-exchange-code/';
 const GROK_CONSOLE = 'https://console.x.ai/connectors-oauth-exchange-code/';
 const CURSOR = 'https://www.cursor.com/agents/mcp/oauth/callback';
+const CURSOR_BOT = 'https://www.cursor.com/bot/mcp/oauth/callback';
+const CURSOR_LOOPBACKS = ['http://localhost:8787/callback', 'http://127.0.0.1:8787/callback'];
+/** Cursor's document as served, read 2026-10-17. */
+const CURSOR_PUBLISHED = [CURSOR, CURSOR_BOT, GROK, ...CURSOR_LOOPBACKS];
 const clientFor = (uri: string) => pinnedClientForRedirect(uri)?.clientId;
 
 const cleanups: Array<() => unknown> = [];
@@ -36,6 +40,7 @@ describe('pinnedClientForRedirect', () => {
     expect(pinnedClientForRedirect(GROK)).toEqual({ clientId: 'https://grok.com/oauth/mcp-client.json', clientName: 'Grok' });
     expect(pinnedClientForRedirect(GROK_CONSOLE)).toEqual({ clientId: 'https://grok.com/oauth/mcp-client.json', clientName: 'Grok' });
     expect(pinnedClientForRedirect(CURSOR)).toEqual({ clientId: 'https://cursor.com/oauth/mcp-client.json', clientName: 'Grok Bot or Cursor' });
+    expect(pinnedClientForRedirect(CURSOR_BOT)).toEqual({ clientId: 'https://cursor.com/oauth/mcp-client.json', clientName: 'Grok Bot or Cursor' });
   });
 
   test('refuses everything else', () => {
@@ -60,7 +65,8 @@ describe('pinnedClientForRedirect', () => {
       'https://x.ai/connectors-oauth-exchange-code/',
       'https://www.cursor.com/agents/mcp/oauth/callback/',
       'https://cursor.com/agents/mcp/oauth/callback',
-      'https://www.cursor.com/bot/mcp/oauth/callback',
+      'https://www.cursor.com/bot/mcp/oauth/callback/',
+      'https://cursor.com/bot/mcp/oauth/callback',
       'http://localhost:8787/callback',
       'cursor://anysphere.cursor-mcp/oauth/callback',
       'grokbot://mcp/oauth/callback',
@@ -125,6 +131,22 @@ describe('registerPinnedClient', () => {
     expect(register({ redirect_uris: [CURSOR, 'http://127.0.0.1:8787/callback'] })).toMatchObject({ ok: true, body: { redirect_uris: [CURSOR] } });
     // The loopback addresses alone, or beside another app, are not Cursor's pin.
     for (const uris of [['http://localhost:8787/callback'], [CLAUDE, 'http://localhost:8787/callback'], [CURSOR, 'http://localhost:9999/callback'], [CURSOR, CLAUDE]]) {
+      expect(register({ redirect_uris: uris })).toMatchObject({ ok: false, error: 'invalid_redirect_uri' });
+    }
+  });
+
+  test('Cursor\'s whole published list registers as Grok Bot or Cursor, with its three cloud addresses', () => {
+    const cursor = { client_id: 'https://cursor.com/oauth/mcp-client.json', client_name: 'Grok Bot or Cursor' };
+    expect(register({ client_name: 'Cursor', redirect_uris: CURSOR_PUBLISHED })).toMatchObject({ ok: true, body: { ...cursor, redirect_uris: [CURSOR, CURSOR_BOT, GROK] } });
+    expect(register({ redirect_uris: [CURSOR_BOT] })).toMatchObject({ ok: true, body: { ...cursor, redirect_uris: [CURSOR_BOT] } });
+    expect(register({ redirect_uris: [CURSOR_BOT, CURSOR_LOOPBACKS[0]] })).toMatchObject({ ok: true, body: { ...cursor, redirect_uris: [CURSOR_BOT] } });
+    // Grok's exchange page beside a Cursor address is Cursor's: Cursor publishes it too.
+    expect(register({ redirect_uris: [GROK, CURSOR_BOT] })).toMatchObject({ ok: true, body: { ...cursor, redirect_uris: [GROK, CURSOR_BOT] } });
+    // Alone, or with the xAI console's page, it stays Grok's, as Grok's connectors register it.
+    expect(register({ redirect_uris: [GROK] })).toMatchObject({ ok: true, body: { client_id: 'https://grok.com/oauth/mcp-client.json', client_name: 'Grok' } });
+    expect(register({ redirect_uris: [GROK, GROK_CONSOLE] })).toMatchObject({ ok: true, body: { client_id: 'https://grok.com/oauth/mcp-client.json' } });
+    // The xAI console's page is not in Cursor's document; nor is any other app's address.
+    for (const uris of [[CURSOR, GROK_CONSOLE], [CURSOR_BOT, CLAUDE], [CURSOR_BOT, STABLE], [CURSOR, GROK, 'https://evil.example/cb'], [CURSOR_BOT, 'http://localhost:9999/callback'], CURSOR_LOOPBACKS]) {
       expect(register({ redirect_uris: uris })).toMatchObject({ ok: false, error: 'invalid_redirect_uri' });
     }
   });

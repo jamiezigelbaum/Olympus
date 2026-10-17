@@ -15881,6 +15881,7 @@ __export(exports_pinned_clients, {
   isChatGptGrant: () => isChatGptGrant,
   GROK_REDIRECT_URIS: () => GROK_REDIRECT_URIS,
   GROK_CLIENT_ID: () => GROK_CLIENT_ID,
+  CURSOR_REDIRECT_URIS: () => CURSOR_REDIRECT_URIS,
   CURSOR_REDIRECT_URI: () => CURSOR_REDIRECT_URI,
   CURSOR_CLIENT_ID: () => CURSOR_CLIENT_ID,
   CLAUDE_REDIRECT_URI: () => CLAUDE_REDIRECT_URI,
@@ -15909,7 +15910,7 @@ function pinnedClient(clientId) {
     return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
   }
   if (clientId === CURSOR_CLIENT_ID) {
-    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: [CURSOR_REDIRECT_URI], verifiedHost: "cursor.com", host: "cursor" };
+    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: CURSOR_REDIRECT_URIS, verifiedHost: "cursor.com", host: "cursor" };
   }
   const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
   if (callback) {
@@ -15927,13 +15928,18 @@ function pinnedGrantProvider(connection) {
   const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
   return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" || host === "cursor" ? "xai" : undefined;
 }
-var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
 var init_pinned_clients = __esm(() => {
   CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
   CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
   GROK_REDIRECT_URIS = Object.freeze([
     "https://grok.com/connectors-oauth-exchange-code/",
     "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
   ]);
 });
 
@@ -153958,7 +153964,7 @@ var DEMO_SIGN_IN_BURST = 10, DEMO_SIGN_IN_WINDOW_MS, DEMO_CLIENT_HOSTS;
 var init_demo_consent = __esm(() => {
   init_pinned_clients();
   DEMO_SIGN_IN_WINDOW_MS = 15 * 60000;
-  DEMO_CLIENT_HOSTS = Object.freeze(["chatgpt", "cursor"]);
+  DEMO_CLIENT_HOSTS = Object.freeze(["chatgpt", "cursor", "grok"]);
 });
 
 // src/workers/remote-oauth/redirect-uris.ts
@@ -154127,7 +154133,7 @@ function createRemoteOAuthHandler(options) {
     if (typeof client === "string")
       return errorPage(400, client);
     if (demo && (client.host === undefined || !DEMO_CLIENT_HOSTS.includes(client.host)))
-      return errorPage(400, "The demo connects ChatGPT, Grok Bot and Cursor only.");
+      return errorPage(400, "The demo connects ChatGPT, Grok, Grok Bot and Cursor only.");
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {
       return errorPage(400, "The return address is not one this app registered.");
     }

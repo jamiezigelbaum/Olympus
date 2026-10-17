@@ -319,7 +319,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (typeof client === 'string') return errorPage(400, client);
     // The demo serves the clients whose surface enforces its read-only limit:
     // ChatGPT's surface, and the remote surface's demo tools (remote-mcp.ts).
-    if (demo && (client.host === undefined || !DEMO_CLIENT_HOSTS.includes(client.host))) return errorPage(400, 'The demo connects ChatGPT, Grok Bot and Cursor only.');
+    if (demo && (client.host === undefined || !DEMO_CLIENT_HOSTS.includes(client.host))) return errorPage(400, 'The demo connects ChatGPT, Grok, Grok Bot and Cursor only.');
     // Until the redirect URI is known to belong to the client, errors stay on
     // this page: redirecting them would make Olympus an open redirector.
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {

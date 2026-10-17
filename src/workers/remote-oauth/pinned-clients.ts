@@ -25,12 +25,15 @@
  * Grok Bot is Cursor's app (bundle com.anysphere.sand) and signs in to a
  * custom server as Cursor's cloud agents do: it registers as client_name
  * "Cursor" with `https://www.cursor.com/agents/mcp/oauth/callback` (plus
- * `http://localhost:8787/callback`; relay log, 2026-10-12), the addresses
+ * `http://localhost:8787/callback`; relay log, 2026-10-12), addresses
  * Cursor's document `https://cursor.com/oauth/mcp-client.json` publishes.
  * Cursor's own cloud agents use the same client and address, so the two
  * cannot be told apart: the owner approved admitting both, named "Grok Bot
- * or Cursor" (2026-10-12). Only the cloud address is pinned; the loopback
- * one would return the code to whatever runs on port 8787.
+ * or Cursor" (2026-10-12). The document's three cloud addresses are pinned:
+ * `/agents/`, `/bot/`, and Grok's exchange page
+ * `https://grok.com/connectors-oauth-exchange-code/` (the document as
+ * served, read 2026-10-17). Its loopback ones are not: they would return the
+ * code to whatever runs on port 8787.
  *
  * These are pinned here rather than fetched: Olympus never fetches a client
  * metadata document, so a stranger naming an arbitrary URL as client_id cannot
@@ -38,8 +41,8 @@
  * metadata-URL client is refused.
  *
  * Being pinned is not being ChatGPT: only ChatGPT's clients get the ChatGPT
- * surface, the directory endpoint and the demo sign-in. Claude, Grok and
- * Grok Bot or Cursor get the remote operation surface on `/mcp` only.
+ * surface and the directory endpoint. Claude, Grok and Grok Bot or Cursor
+ * get the remote operation surface on `/mcp` only.
  */
 export const CHATGPT_CLIENT_ID = 'https://chatgpt.com/oauth/client.json';
 export const CHATGPT_REDIRECT_URI = 'https://chatgpt.com/connector_platform_oauth_redirect';
@@ -56,6 +59,11 @@ export const GROK_REDIRECT_URIS: readonly string[] = Object.freeze([
 ]);
 export const CURSOR_CLIENT_ID = 'https://cursor.com/oauth/mcp-client.json';
 export const CURSOR_REDIRECT_URI = 'https://www.cursor.com/agents/mcp/oauth/callback';
+export const CURSOR_REDIRECT_URIS: readonly string[] = Object.freeze([
+  CURSOR_REDIRECT_URI,
+  'https://www.cursor.com/bot/mcp/oauth/callback',
+  'https://grok.com/connectors-oauth-exchange-code/',
+]);
 
 /** Which hosted agent a pinned client belongs to. */
 export type PinnedHost = 'chatgpt' | 'claude' | 'grok' | 'cursor';
@@ -102,7 +110,7 @@ export function pinnedClient(clientId: string): PinnedClient | undefined {
     return { clientId, clientName: 'Grok', redirectUris: GROK_REDIRECT_URIS, verifiedHost: 'grok.com', host: 'grok' };
   }
   if (clientId === CURSOR_CLIENT_ID) {
-    return { clientId, clientName: 'Grok Bot or Cursor', redirectUris: [CURSOR_REDIRECT_URI], verifiedHost: 'cursor.com', host: 'cursor' };
+    return { clientId, clientName: 'Grok Bot or Cursor', redirectUris: CURSOR_REDIRECT_URIS, verifiedHost: 'cursor.com', host: 'cursor' };
   }
   const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
   if (callback) {

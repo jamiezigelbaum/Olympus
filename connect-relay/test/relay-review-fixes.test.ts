@@ -320,14 +320,23 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     const posted = await fetch(`${relay.url}/connect/demo/authorize`, { method: 'POST', body: 'a=b', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     expect(posted.status).toBe(303);
     expect(posted.headers.get('location')).toStartWith('https://chatgpt.com/');
-    // Grok Bot's sign-in returns to Cursor's callback; anywhere else is refused.
+    // Grok Bot's sign-in returns to Cursor's or Grok's pages; anywhere else is refused.
     const post = (to: string) => fetch(`${relay.url}/connect/demo/authorize`, { method: 'POST', body: new URLSearchParams({ to }).toString(), redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
-    const cursor = await post('https://www.cursor.com/agents/mcp/oauth/callback?code=c&state=s');
-    expect(cursor.status).toBe(303);
-    expect(cursor.headers.get('location')).toBe('https://www.cursor.com/agents/mcp/oauth/callback?code=c&state=s');
-    const elsewhere = await post('https://evil.example/agents/mcp/oauth/callback?code=c');
-    expect(elsewhere.status).toBe(502);
-    expect(elsewhere.headers.get('location')).toBeNull();
+    for (const back of [
+      'https://www.cursor.com/agents/mcp/oauth/callback?code=c&state=s',
+      'https://www.cursor.com/bot/mcp/oauth/callback?code=c&state=s',
+      'https://grok.com/connectors-oauth-exchange-code/?code=c&state=s',
+      'https://console.x.ai/connectors-oauth-exchange-code/?code=c&state=s',
+    ]) {
+      const allowed = await post(back);
+      expect(allowed.status).toBe(303);
+      expect(allowed.headers.get('location')).toBe(back);
+    }
+    for (const elsewhere of ['https://evil.example/agents/mcp/oauth/callback?code=c', 'https://grok.com.evil.example/connectors-oauth-exchange-code/?code=c', 'https://cursor.com/agents/mcp/oauth/callback?code=c']) {
+      const refused = await post(elsewhere);
+      expect(refused.status).toBe(502);
+      expect(refused.headers.get('location')).toBeNull();
+    }
   });
 
   test('the relay origin is not a panel origin by default', async () => {

@@ -45,7 +45,7 @@ import {
   createRemoteMcpHandler,
   withRemoteMcpRoute,
 } from '../src/workers/remote-mcp.ts';
-import { CHATGPT_CLIENT_ID, CHATGPT_CODEX_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, pinnedClient, pinnedGrantProvider } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_CODEX_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, CURSOR_CLIENT_ID, CURSOR_REDIRECT_URIS, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, pinnedClient, pinnedGrantProvider } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { DEMO_SIGN_IN_BURST, isDemoGrant, resolveDemoConsent, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
 import { withRequestPeer } from '../src/core/request-peer.ts';
 import { demoInstallMarked, DEMO_INSTALL_MARKER_FILE, DEMO_INSTALL_MARKER_TEXT } from '../src/core/remote-access.ts';
@@ -678,7 +678,7 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
   });
 
   test('every client the relay\'s registration names is pinned here with that return address and name', () => {
-    for (const redirect of [CHATGPT_REDIRECT_URI, 'https://chatgpt.com/connector/oauth/cb_Abc-123', CLAUDE_REDIRECT_URI, ...GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI]) {
+    for (const redirect of [CHATGPT_REDIRECT_URI, 'https://chatgpt.com/connector/oauth/cb_Abc-123', CLAUDE_REDIRECT_URI, ...GROK_REDIRECT_URIS, ...CURSOR_REDIRECT_URIS]) {
       const outcome = registerPinnedClient(JSON.stringify({ client_name: 'Anything', redirect_uris: [redirect] }), 0);
       expect(outcome.ok).toBe(true);
       const clientId = outcome.ok ? String(outcome.body.client_id) : '';
@@ -689,10 +689,22 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
       // The relay's bridge page names the same app.
       expect(bridgeAppName(clientId)).toBe(pinned!.clientName);
     }
-    // Every pinned https return address registers at the relay as its own client.
+    // Every pinned https return address registers at the relay as its own
+    // client, except Grok's exchange page, which Grok and Cursor both publish:
+    // alone it is Grok's, as it always was.
+    const shared = GROK_REDIRECT_URIS[0]!;
+    expect(CURSOR_REDIRECT_URIS).toContain(shared);
     for (const clientId of [CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID, CURSOR_CLIENT_ID]) {
-      for (const redirect of pinnedClient(clientId)!.redirectUris) expect(pinnedClientForRedirect(redirect)?.clientId).toBe(clientId);
+      for (const redirect of pinnedClient(clientId)!.redirectUris) {
+        expect(pinnedClientForRedirect(redirect)?.clientId).toBe(redirect === shared ? GROK_CLIENT_ID : clientId);
+      }
     }
+    // Cursor's whole published list registers as Cursor, its loopback addresses left out.
+    const cursorList = [...CURSOR_REDIRECT_URIS, 'http://localhost:8787/callback', 'http://127.0.0.1:8787/callback'];
+    const cursor = registerPinnedClient(JSON.stringify({ client_name: 'Cursor', redirect_uris: cursorList }), 0);
+    expect(cursor.ok && cursor.body.client_id).toBe(CURSOR_CLIENT_ID);
+    expect(cursor.ok && cursor.body.redirect_uris).toEqual([...CURSOR_REDIRECT_URIS]);
+    for (const redirect of CURSOR_REDIRECT_URIS) expect(pinnedClient(CURSOR_CLIENT_ID)!.redirectUris).toContain(redirect);
     expect(pinnedClientForRedirect(CHATGPT_REDIRECT_URI)?.clientId).toBe(CHATGPT_CLIENT_ID);
     // The desktop client's id is never handed out: its callbacks are loopback.
     expect(pinnedClientForRedirect('https://chatgpt.com/connector/oauth/codex')).toBeUndefined();
