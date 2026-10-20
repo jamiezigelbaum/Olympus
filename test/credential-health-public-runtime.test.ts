@@ -14,7 +14,6 @@ const CANONICAL_POLICY = {
   raw_source_exposed: false,
   secrets_exposed: false,
   x_refresh_forced: false,
-  op_cached_read_only: true,
 } as const;
 
 const tempRoots: string[] = [];

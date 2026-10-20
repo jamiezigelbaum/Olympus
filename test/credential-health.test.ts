@@ -241,6 +241,18 @@ describe('credential health alarm', () => {
     expect(readCredentialHealthReport(wrongPolicy.reportPath)).toBeUndefined();
   });
 
+  test('still reads a report written with the retired 1Password reader label', () => {
+    const legacy = healthFixture();
+    const report = JSON.parse(readFileSync(legacy.reportPath, 'utf8')) as { policy: Record<string, unknown> };
+    report.policy.op_cached_read_only = true;
+    writeFileSync(legacy.reportPath, JSON.stringify(report), { mode: 0o600 });
+    expect(readCredentialHealthReport(legacy.reportPath)?.policy).not.toHaveProperty('op_cached_read_only');
+
+    report.policy.op_cached_read_only = false;
+    writeFileSync(legacy.reportPath, JSON.stringify(report), { mode: 0o600 });
+    expect(readCredentialHealthReport(legacy.reportPath)).toBeUndefined();
+  });
+
   test('reports surfaces the probe proved unused as unconfigured rather than alarming', () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-credential-health-empty-'));
     const reportPath = join(root, 'credential-health.json');
@@ -315,7 +327,6 @@ describe('daily credential health probe', () => {
       secrets_exposed: false,
       raw_source_exposed: false,
       x_refresh_forced: false,
-      op_cached_read_only: true,
     });
   });
 
@@ -785,7 +796,6 @@ function reportFixture(options: { generatedAt: string; results: CredentialHealth
       raw_source_exposed: false,
       secrets_exposed: false,
       x_refresh_forced: false,
-      op_cached_read_only: true,
     },
   };
 }

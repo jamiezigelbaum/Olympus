@@ -149,7 +149,6 @@ export interface CredentialHealthReport {
     raw_source_exposed: false;
     secrets_exposed: false;
     x_refresh_forced: false;
-    op_cached_read_only: true;
   };
 }
 
@@ -927,7 +926,11 @@ function writeCredentialHealthReport(path: string, report: CredentialHealthRepor
 function isCanonicalCredentialHealthPolicy(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const canonical = credentialHealthPolicy() as unknown as Record<string, unknown>;
-  const policy = value as Record<string, unknown>;
+  // Older reports also carried `op_cached_read_only: true`, a
+  // label for a 1Password reader that no longer exists. Accept it on read so
+  // an upgrade does not flag the last report as unreadable.
+  const { op_cached_read_only: legacyLabel, ...policy } = value as Record<string, unknown>;
+  if (legacyLabel !== undefined && legacyLabel !== true) return false;
   const keys = Object.keys(canonical);
   return Object.keys(policy).length === keys.length
     && keys.every((key) => policy[key] === canonical[key]);
@@ -939,7 +942,6 @@ function credentialHealthPolicy(): CredentialHealthReport['policy'] {
     raw_source_exposed: false,
     secrets_exposed: false,
     x_refresh_forced: false,
-    op_cached_read_only: true,
   };
 }
 
