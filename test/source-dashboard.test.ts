@@ -817,7 +817,7 @@ describe('multi-source source dashboard', () => {
         ],
         policy: {
           counts_only: true, raw_source_exposed: false, secrets_exposed: false,
-          x_refresh_forced: false, op_cached_read_only: true,
+          x_refresh_forced: false,
         },
       },
       now: new Date('2026-08-18T12:01:00.000Z'),
@@ -848,7 +848,7 @@ describe('multi-source source dashboard', () => {
         ],
         policy: {
           counts_only: true, raw_source_exposed: false, secrets_exposed: false,
-          x_refresh_forced: false, op_cached_read_only: true,
+          x_refresh_forced: false,
         },
       },
       now: new Date('2026-08-18T12:01:00.000Z'),
@@ -879,7 +879,7 @@ describe('multi-source source dashboard', () => {
         ],
         policy: {
           counts_only: true, raw_source_exposed: false, secrets_exposed: false,
-          x_refresh_forced: false, op_cached_read_only: true,
+          x_refresh_forced: false,
         },
       },
       now: new Date('2026-08-18T12:01:00.000Z'),
@@ -966,7 +966,7 @@ describe('multi-source source dashboard', () => {
         ],
         policy: {
           counts_only: true, raw_source_exposed: false, secrets_exposed: false,
-          x_refresh_forced: false, op_cached_read_only: true,
+          x_refresh_forced: false,
         },
       },
       now: new Date('2026-08-18T12:01:00.000Z'),
@@ -3694,7 +3694,7 @@ describe('retry counters are not item counts', () => {
         }],
         policy: {
           counts_only: true, raw_source_exposed: false, secrets_exposed: false,
-          x_refresh_forced: false, op_cached_read_only: true,
+          x_refresh_forced: false,
         },
       },
       now: new Date('2026-08-18T12:01:00.000Z'),
@@ -4818,7 +4818,7 @@ function dropboxReauthReport(checkedAt: string): CredentialHealthReport {
     ],
     policy: {
       counts_only: true, raw_source_exposed: false, secrets_exposed: false,
-      x_refresh_forced: false, op_cached_read_only: true,
+      x_refresh_forced: false,
     },
   };
 }

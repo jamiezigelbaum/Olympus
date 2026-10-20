@@ -73761,7 +73761,9 @@ function isCanonicalCredentialHealthPolicy(value2) {
   if (!value2 || typeof value2 !== "object" || Array.isArray(value2))
     return false;
   const canonical = credentialHealthPolicy();
-  const policy = value2;
+  const { op_cached_read_only: legacyLabel, ...policy } = value2;
+  if (legacyLabel !== undefined && legacyLabel !== true)
+    return false;
   const keys = Object.keys(canonical);
   return Object.keys(policy).length === keys.length && keys.every((key2) => policy[key2] === canonical[key2]);
 }
@@ -73770,8 +73772,7 @@ function credentialHealthPolicy() {
     counts_only: true,
     raw_source_exposed: false,
     secrets_exposed: false,
-    x_refresh_forced: false,
-    op_cached_read_only: true
+    x_refresh_forced: false
   };
 }
 function safeId(value2) {
