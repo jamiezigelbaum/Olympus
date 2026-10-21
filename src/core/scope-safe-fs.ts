@@ -102,6 +102,11 @@ const O_CLOEXEC_DARWIN = 0x01000000;
 
 let cachedNative: Native | null | undefined;
 
+/** Test seam: the binding in use, so a test can wrap it (for example to report a placeholder). */
+export function scopeSafeNativeForTests(): Native | null {
+  return loadNative();
+}
+
 /** Test seam: replace or clear the native binding. */
 export function resetScopeSafeNativeForTests(value?: Native | null): void {
   cachedNative = value;

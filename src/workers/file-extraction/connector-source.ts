@@ -36,7 +36,10 @@ import type {
  * after the read.
  */
 export interface BoundedFetchConnector extends SourceConnector {
-  fetchItemWithin(localItemId: string, options: { maxBytes?: number }): Promise<RawItem>;
+  fetchItemWithin(
+    localItemId: string,
+    options: { maxBytes?: number; expectedVersion?: string },
+  ): Promise<RawItem>;
 }
 
 function isBoundedFetchConnector(connector: SourceConnector): connector is BoundedFetchConnector {
@@ -147,7 +150,10 @@ export function createConnectorFileExtractionSource(
       let item: RawItem;
       try {
         item = isBoundedFetchConnector(connector)
-          ? await connector.fetchItemWithin(ref.localItemId, fetchOptions)
+          ? await connector.fetchItemWithin(ref.localItemId, {
+              ...(fetchOptions.maxBytes !== undefined ? { maxBytes: fetchOptions.maxBytes } : {}),
+              ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
+            })
           : await connector.fetchItem(ref.localItemId);
       } catch (error) {
         if (isFileExtractionSourceError(error)) throw error;
