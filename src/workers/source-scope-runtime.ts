@@ -8,6 +8,7 @@ import {
   type FileSourceScopeApprovalSnapshot,
   type FileSourceScopeId,
   type FileSourceScopeSelection,
+  type SourceScopeConnectedHandle,
   type SourceScopeConnectedHandleRegistry,
 } from '../core/source-scope-approval.ts';
 import {
@@ -138,7 +139,15 @@ export class FileSourceScopeAuthority {
   private fileScopeRegistry(): SourceScopeConnectedHandleRegistry {
     const registry = this.readRegistry();
     return {
-      handles: [...registry.handles, ...readThisComputerHandles(this.registryPath)],
+      // Only `this-computer.ts` may mark a handle synthetic: a credential
+      // registry entry carrying the flag is stripped of it.
+      handles: [
+        ...registry.handles.map((handle) => {
+          const { thisComputer: _ignored, ...credential } = handle as SourceScopeConnectedHandle;
+          return credential;
+        }),
+        ...readThisComputerHandles(this.registryPath),
+      ],
     };
   }
 

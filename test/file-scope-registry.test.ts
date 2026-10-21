@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { connectedFileSourceAccountGeneration } from '../src/core/source-scope-approval.ts';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -344,5 +345,24 @@ describe('sources without an account (this computer)', () => {
   test('connecting a source that does not bind to this computer is refused', () => {
     expect(() => connectThisComputerSource(registryPath, 'dropbox.files', NOW)).toThrow();
     expect(() => connectThisComputerSource(registryPath, 'unknown.files', NOW)).toThrow();
+  });
+});
+
+// Persisted approvals stay valid only while the generation inputs never move.
+// Literals, computed outside the code under test, pin Dropbox and Drive.
+describe('account generation is pinned', () => {
+  const registry = {
+    handles: [
+      { handle: 'h1', provider: 'dropbox', allowedCapabilities: ['dropbox.files.sync'], connectedAt: '2026-01-01T00:00:00.000Z', accountRole: 'personal', providerAccountId: 'acct-1' },
+      { handle: 'h1', provider: 'google_drive', allowedCapabilities: ['google_drive.docs.sync'], connectedAt: '2026-01-01T00:00:00.000Z', accountRole: 'personal', providerAccountId: 'acct-1' },
+    ],
+  };
+  test('Dropbox', () => {
+    expect(connectedFileSourceAccountGeneration('dropbox.files', registry)?.generation)
+      .toBe('cf905ee9fb0c0c47eb3b73fdb6a8b09ca260e0dfcd07fc49447e6d17c1ad928f');
+  });
+  test('Drive', () => {
+    expect(connectedFileSourceAccountGeneration('google_drive.docs', registry)?.generation)
+      .toBe('c4cc6d9797b5e8165c94e9e20fbe34deeb1dbf48fdf46e0304b2e6234806de58');
   });
 });

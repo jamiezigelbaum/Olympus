@@ -303,8 +303,6 @@ interface ChangeWakeSubscription {
   subscribe: NonNullable<SourceSchedulerSource['subscribeChanges']>;
   unsubscribe: () => void;
   timer?: ReturnType<typeof setTimeout>;
-  running: boolean;
-  queued: boolean;
   closed: boolean;
 }
 
@@ -633,14 +631,16 @@ export class SourceScheduler {
       const entry: ChangeWakeSubscription = {
         subscribe: source.subscribeChanges!,
         unsubscribe: () => {},
-        running: false,
-        queued: false,
         closed: false,
       };
       try {
         entry.unsubscribe = source.subscribeChanges!(() => this.signalChange(sourceId, entry));
       } catch {
-        // A source that cannot be watched keeps its polling backstop.
+        // A source that cannot be watched keeps its polling backstop. A wake it
+        // signalled before throwing must not fire for an entry nothing can close.
+        entry.closed = true;
+        if (entry.timer) this.clearTimeoutImpl(entry.timer);
+        delete entry.timer;
         continue;
       }
       this.changeWakes.set(sourceId, entry);
@@ -653,7 +653,6 @@ export class SourceScheduler {
     for (const [sourceId, entry] of [...this.changeWakes]) {
       if (!predicate(sourceId, entry)) continue;
       entry.closed = true;
-      entry.queued = false;
       if (entry.timer) this.clearTimeoutImpl(entry.timer);
       delete entry.timer;
       try {
@@ -666,41 +665,38 @@ export class SourceScheduler {
   }
 
   private signalChange(sourceId: string, entry: ChangeWakeSubscription): void {
-    if (entry.closed) return;
-    // A run is in flight: one more follows it, however many signals arrive.
-    if (entry.running) {
-      entry.queued = true;
-      return;
-    }
-    if (entry.timer) return;
+    if (entry.closed || entry.timer) return;
     const timer = this.setTimeoutImpl(() => {
       delete entry.timer;
-      void this.runChangeWake(sourceId, entry);
+      this.runChangeWake(sourceId, entry);
     }, this.changeDebounceMs);
     (timer as { unref?: () => void }).unref?.();
     entry.timer = timer;
   }
 
-  private async runChangeWake(sourceId: string, entry: ChangeWakeSubscription): Promise<void> {
-    if (entry.closed || entry.running) return;
-    entry.running = true;
-    try {
-      do {
-        entry.queued = false;
-        // A task of this source already running (a poll that started first)
-        // cannot take a second run; it runs again within seconds of finishing.
-        const busy = this.states.filter((state) => state.source.sourceId === sourceId && state.running);
-        for (const state of busy) state.wakeAfterRun = true;
-        // The same run path as an approved-run start, as a scheduled run: a
-        // file change is not an owner's request, so request budgets and
-        // account checks apply as on a cadence tick.
-        await this.runSource(sourceId, undefined, 'scheduled');
-      } while (entry.queued && !entry.closed);
-    } catch {
-      // Failures are recorded by the task; the next signal or poll retries.
-    } finally {
-      entry.running = false;
+  /**
+   * Brings the source's tasks forward to now, by the rules `wakeTasksOfKind`
+   * keeps: a task in a failure backoff keeps its backoff, a manual-cadence task
+   * runs only when the owner runs it, and a task running right now runs again
+   * within seconds of finishing (so a burst during a run costs one follow-up).
+   * The run itself is the ordinary due-task tick, with its scheduled
+   * provenance, budgets and status publishing.
+   */
+  private runChangeWake(sourceId: string, entry: ChangeWakeSubscription): void {
+    if (entry.closed) return;
+    const at = this.now().getTime();
+    let woke = false;
+    for (const state of this.states) {
+      if (state.source.sourceId !== sourceId || state.consecutiveFailures > 0) continue;
+      if (taskCadence(state.source, state.task) !== 'continuous') continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        continue;
+      }
+      if (state.nextRunAt > at) state.nextRunAt = at;
+      woke = true;
     }
+    if (woke) void this.runDueTasks();
   }
 
   /**

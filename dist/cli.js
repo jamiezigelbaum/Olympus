@@ -136327,13 +136327,15 @@ class SourceScheduler {
       const entry = {
         subscribe: source.subscribeChanges,
         unsubscribe: () => {},
-        running: false,
-        queued: false,
         closed: false
       };
       try {
         entry.unsubscribe = source.subscribeChanges(() => this.signalChange(sourceId, entry));
       } catch {
+        entry.closed = true;
+        if (entry.timer)
+          this.clearTimeoutImpl(entry.timer);
+        delete entry.timer;
         continue;
       }
       this.changeWakes.set(sourceId, entry);
@@ -136344,7 +136346,6 @@ class SourceScheduler {
       if (!predicate(sourceId, entry))
         continue;
       entry.closed = true;
-      entry.queued = false;
       if (entry.timer)
         this.clearTimeoutImpl(entry.timer);
       delete entry.timer;
@@ -136355,13 +136356,7 @@ class SourceScheduler {
     }
   }
   signalChange(sourceId, entry) {
-    if (entry.closed)
-      return;
-    if (entry.running) {
-      entry.queued = true;
-      return;
-    }
-    if (entry.timer)
+    if (entry.closed || entry.timer)
       return;
     const timer = this.setTimeoutImpl(() => {
       delete entry.timer;
@@ -136370,21 +136365,26 @@ class SourceScheduler {
     timer.unref?.();
     entry.timer = timer;
   }
-  async runChangeWake(sourceId, entry) {
-    if (entry.closed || entry.running)
+  runChangeWake(sourceId, entry) {
+    if (entry.closed)
       return;
-    entry.running = true;
-    try {
-      do {
-        entry.queued = false;
-        const busy = this.states.filter((state) => state.source.sourceId === sourceId && state.running);
-        for (const state of busy)
-          state.wakeAfterRun = true;
-        await this.runSource(sourceId, undefined, "scheduled");
-      } while (entry.queued && !entry.closed);
-    } catch {} finally {
-      entry.running = false;
+    const at = this.now().getTime();
+    let woke = false;
+    for (const state of this.states) {
+      if (state.source.sourceId !== sourceId || state.consecutiveFailures > 0)
+        continue;
+      if (taskCadence(state.source, state.task) !== "continuous")
+        continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        continue;
+      }
+      if (state.nextRunAt > at)
+        state.nextRunAt = at;
+      woke = true;
     }
+    if (woke)
+      this.runDueTasks();
   }
   scheduleContinueWake(at) {
     if (!this.timer)
@@ -138113,7 +138113,13 @@ class FileSourceScopeAuthority {
   fileScopeRegistry() {
     const registry2 = this.readRegistry();
     return {
-      handles: [...registry2.handles, ...readThisComputerHandles(this.registryPath)]
+      handles: [
+        ...registry2.handles.map((handle) => {
+          const { thisComputer: _ignored, ...credential } = handle;
+          return credential;
+        }),
+        ...readThisComputerHandles(this.registryPath)
+      ]
     };
   }
   snapshot(sourceId) {

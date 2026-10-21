@@ -412,6 +412,9 @@ function readState(path: string): StateRead {
   }
 }
 
+// An approval for a source id no longer registered (a downgrade, or a source
+// withdrawn) makes the whole state malformed, resetting every source's
+// selections. That fails closed; it is disruptive only on such a downgrade.
 function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('approval');
   const record = value as Record<string, unknown>;
