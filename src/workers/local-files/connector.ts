@@ -44,7 +44,7 @@ import {
   type LocalFilesDecision,
 } from './scope.ts';
 import type { VolumeResolver } from './volume-identity.ts';
-import { WatchHistoryUnavailableError, type WatchEvent, type WatchHub } from './watch-hub.ts';
+import { WatchHistoryUnavailableError, ignoreGlobsForRoot, type WatchEvent, type WatchHub } from './watch-hub.ts';
 
 export const LOCAL_FILES_CURSOR_PREFIX = 'lf1:';
 /** The cursor of a pass that left no change snapshot: the next pass walks again. */
@@ -111,6 +111,10 @@ export interface LocalFilesWalkStats {
   directories: number;
   files: number;
   unreadable: number;
+  /** Folders and files a walk could not read; what is indexed under them is not judged by that walk. */
+  unreadablePaths?: string[];
+  /** The folders directly under the walked root that the walk met. */
+  topLevel?: string[];
 }
 
 export interface LocalFilesConnectorOptions {
@@ -136,6 +140,22 @@ export interface LocalFilesSourceConnector extends SourceConnector {
     localItemId: string,
     options: { maxBytes?: number; expectedVersion?: string },
   ): Promise<RawItem>;
+}
+
+/**
+ * The relative path as the file system spells it, found by matching each name
+ * on its composed (NFC) form. Undefined when a name is missing, or when two
+ * names compose to the same text (which one is meant cannot be told).
+ */
+function nameAsOnDisk(scopeRoot: ScopeRoot, rel: string): string | undefined {
+  let dir = '';
+  for (const part of rel.split('/')) {
+    const wanted = part.normalize('NFC');
+    const matches = scopeRoot.list(dir).filter((entry) => entry.name.normalize('NFC') === wanted);
+    if (matches.length !== 1) return undefined;
+    dir = joinRelative(dir, matches[0]!.name);
+  }
+  return dir;
 }
 
 export function localFilesItemId(scopePath: string): string {
@@ -203,7 +223,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
     }
   };
 
-  const scopePathOf = (relPath: string): string => (relPath === '' ? root : posix.join(root, relPath));
+  const scopePathOf = (relPath: string): string => (relPath === '' ? root : posix.join(root, relPath).normalize('NFC'));
 
   const fileItem = (
     scopePath: string,
@@ -309,21 +329,38 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
     return items;
   };
 
-  /** The deletions for indexed items under the folder that a complete walk did not meet. */
-  const absentFromWalk = (seenIds: ReadonlySet<string>, deletedSeen: Set<string>): RawItem[] => {
+  /**
+   * The deletions for indexed items under the folder that a complete walk did
+   * not meet. Items under a folder or file the walk could not read are not
+   * judged: only what was fully listed counts as absent. The store refuses to
+   * list "everything under /", so a walk of the whole computer asks per
+   * top-level folder (and per chosen folder) instead.
+   */
+  const absentFromWalk = (
+    seenIds: ReadonlySet<string>,
+    deletedSeen: Set<string>,
+    unreadable: readonly string[],
+    topLevel: readonly string[],
+  ): RawItem[] => {
     const store = options.store;
-    if (!store?.activeItemsUnderLocatorIfIndexed || root === '/') return [];
+    if (!store?.activeItemsUnderLocatorIfIndexed) return [];
     if (store.lookupsReady && !store.lookupsReady()) return [];
+    const bases = root === '/'
+      ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== '/')])]
+      : [root];
     const absent: RawItem[] = [];
-    for (const stored of store.activeItemsUnderLocatorIfIndexed({
-      provider: LOCAL_FILES_PROVIDER,
-      accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-      locatorUri: root,
-      limit: ABSENCE_SCAN_LIMIT,
-    })) {
-      if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId)) continue;
-      deletedSeen.add(stored.identity.providerItemId);
-      absent.push(deletedItem(stored.identity, stored.locatorUri));
+    for (const base of bases) {
+      for (const stored of store.activeItemsUnderLocatorIfIndexed({
+        provider: LOCAL_FILES_PROVIDER,
+        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+        locatorUri: base,
+        limit: ABSENCE_SCAN_LIMIT,
+      })) {
+        if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId)) continue;
+        if (unreadable.some((path) => isWithinScopePath(stored.locatorUri, path))) continue;
+        deletedSeen.add(stored.identity.providerItemId);
+        absent.push(deletedItem(stored.identity, stored.locatorUri));
+      }
     }
     return absent;
   };
@@ -351,6 +388,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           // A folder that cannot be read (permission, a mount point, gone):
           // skipped, counted, never fatal.
           stats.unreadable += 1;
+          (stats.unreadablePaths ??= []).push(scopePathOf(dir));
           continue;
         }
         throw error;
@@ -372,11 +410,14 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           emitted.add(scopePath);
           yield symlinkItem(scopePath, entry.name);
         } else if (entry.kind === 'directory') {
+          if (dir === '' && root === '/') (stats.topLevel ??= []).push(scopePath);
           stack.push(rel);
         } else if (entry.kind === 'file' || entry.kind === undefined) {
           let stat: ScopeStat;
           try {
-            stat = scopeRoot.statRelative(rel);
+            // The directory entry already says what this is; a file's size and
+            // time come from lstat, which needs no permission on the file.
+            stat = scopeRoot.statEntry(rel);
           } catch (error) {
             if (error instanceof ScopeSafeError) {
               if (error.code === 'escape') {
@@ -385,10 +426,16 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
                 yield symlinkItem(scopePath, entry.name);
               } else {
                 stats.unreadable += 1;
+                (stats.unreadablePaths ??= []).push(scopePath);
               }
               continue;
             }
             throw error;
+          }
+          if (stat.kind === 'symlink') {
+            emitted.add(scopePath);
+            yield symlinkItem(scopePath, entry.name);
+            continue;
           }
           if (stat.kind === 'directory') {
             stack.push(rel);
@@ -514,7 +561,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           let wroteSnapshot = false;
           if (options.watch) {
             try {
-              await options.watch.hub.writeSnapshot(real, snapshotFile(nextGen), options.watch.ignore ?? []);
+              await options.watch.hub.writeSnapshot(real, snapshotFile(nextGen), ignoreGlobsForRoot(options.watch.ignore ?? [], real));
               wroteSnapshot = true;
             } catch {
               wroteSnapshot = false;
@@ -524,7 +571,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           if (replay) {
             if (!options.watch) throw new LocalFilesHistoryResetError('no change watcher');
             try {
-              events = await options.watch.hub.eventsSince(real, snapshotFile(priorGen), options.watch.ignore ?? []);
+              events = await options.watch.hub.eventsSince(real, snapshotFile(priorGen), ignoreGlobsForRoot(options.watch.ignore ?? [], real));
             } catch (error) {
               if (error instanceof WatchHistoryUnavailableError) throw new LocalFilesHistoryResetError(error.message);
               throw error;
@@ -548,8 +595,8 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           // A complete walk is a complete picture of the folder: whatever is
           // indexed under it and was not seen has been deleted or moved away
           // (for example while Olympus was not running).
-          if (!events && stats.unreadable === 0) {
-            for (const deletion of absentFromWalk(seenIds, deletedSeen)) {
+          if (!events) {
+            for (const deletion of absentFromWalk(seenIds, deletedSeen, stats.unreadablePaths ?? [], stats.topLevel ?? [])) {
               page.push(deletion);
               if (page.length >= pageSize) {
                 options.scope.assertCurrent();
@@ -565,13 +612,9 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
             pruneSnapshots([nextGen, ...(replay ? [priorGen] : [])]);
           }
           const nextCursor = wroteSnapshot ? `${LOCAL_FILES_CURSOR_PREFIX}${nextGen}` : LOCAL_FILES_POLL_CURSOR;
-          // A walk that could not read some folder is not a complete picture:
-          // ending without `done` keeps the store from reading the folders it
-          // never saw as deleted. The snapshot cursor still moves, so later
-          // passes replay changes as usual.
-          yield stats.unreadable > 0 && !events
-            ? { items: page, nextCursor, done: false }
-            : { items: page, nextCursor, done: true };
+          // Absence was judged above only for what was fully listed, so a
+          // walk with an unreadable corner is still complete for the rest.
+          yield { items: page, nextCursor, done: true };
         } finally {
           walkRoot.close();
         }
@@ -617,10 +660,21 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       const rel = scopePath === holder.scopePath ? '' : scopePath.slice(holder.scopePath === '/' ? 1 : holder.scopePath.length + 1);
       try {
         const expected = parseVersion(fetchOptions.expectedVersion);
-        const bytes = scopeRoot.readFile(rel, {
+        const readOptions = {
           ...(expected ? { expected } : {}),
           maxBytes: Math.min(fetchOptions.maxBytes ?? maxFetchBytes, maxFetchBytes),
-        });
+        };
+        let bytes: Uint8Array;
+        try {
+          bytes = scopeRoot.readFile(rel, readOptions);
+        } catch (error) {
+          // Stored paths are composed (NFC); a file system that keeps the
+          // spelling it was given (Linux) may hold the decomposed one.
+          if (!(error instanceof ScopeSafeError) || error.code !== 'not_found' || !/[^\u0000-\u007f]/.test(rel)) throw error;
+          const actual = nameAsOnDisk(scopeRoot, rel);
+          if (actual === undefined || actual === rel) throw error;
+          bytes = scopeRoot.readFile(actual, readOptions);
+        }
         const mimeType = fileMimeTypeFromName(scopePath.slice(scopePath.lastIndexOf('/') + 1));
         return {
           identity,

@@ -145,6 +145,18 @@ export function createLocalFilesFolderScopeBrowser(
         let isFolder = false;
         try { isFolder = lstatSync(real).isDirectory(); } catch { isFolder = false; }
         if (!isFolder) throw new Error('A selected folder could not be verified. It may have moved.');
+        // A key must name the folder by its real path, spelled as the disk
+        // spells it: a link in the way, or a different case on a disk that
+        // ignores case, would let the default-off and exclude rules (which
+        // compare real names) miss it. A spelling that differs only in case is
+        // rewritten; a path that goes through a link is refused.
+        const canonical = realpathSync.native(real);
+        if (canonical !== real) {
+          if (canonical.normalize('NFC').toLowerCase() !== real.normalize('NFC').toLowerCase()) {
+            throw new Error('A selected folder is reached through a link. Choose the folder itself.');
+          }
+          selection.key = scopePathOfRealPath(volumes, canonical);
+        }
       }
       return effectiveSelections(normalized, (key) => ancestorScopePaths(key));
     },

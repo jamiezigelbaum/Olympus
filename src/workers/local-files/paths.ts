@@ -12,6 +12,7 @@
  *
  * Folders that are off by default are decided here too, from the path alone.
  */
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 export const VOLUME_SEGMENT_PREFIX = '@';
@@ -127,7 +128,12 @@ export interface DefaultExclusionContext {
 export function defaultExclusionContext(
   env: Record<string, string | undefined> = process.env,
 ): DefaultExclusionContext {
-  return { home: homedir(), syncedRoots: configuredSyncedRoots(env), platform: process.platform };
+  // The home folder as the file system names it: walked paths are real paths,
+  // so a home reached through a link (/home -> /var/home) must be compared as
+  // its real self or none of the folders that are off by default would match.
+  let home = env.HOME?.trim() || homedir();
+  try { home = realpathSync.native(home); } catch { /* keep the configured path */ }
+  return { home, syncedRoots: configuredSyncedRoots(env), platform: process.platform };
 }
 
 function configuredSyncedRoots(env: Record<string, string | undefined>): string[] {
@@ -167,19 +173,23 @@ export function defaultExclusionForFolder(
   if (lower.endsWith('.app')) return 'app_bundle';
   if (BUILD_SEGMENTS.has(lower)) return 'build_output';
   if (volumeId) return undefined;
-  const home = context.home;
   const platform = context.platform ?? process.platform;
-  if (platform === 'darwin' && path === `${home}/Library`) return 'system_library';
-  if (platform !== 'darwin' && path === `${home}/.local/share/Trash`) return 'trash';
-  if (path === `${home}/.cache`) return 'cache';
+  // macOS volumes ignore case: `~/library` is `~/Library`.
+  const fold = (value: string): string => (platform === 'darwin' ? value.toLowerCase() : value);
+  const home = fold(context.home);
+  const here = fold(path);
+  if (platform === 'darwin' && here === `${home}/library`) return 'system_library';
+  if (platform !== 'darwin' && here === `${home}/.local/share/trash`) return 'trash';
+  if (here === `${home}/.cache`) return 'cache';
   // Olympus's own stores: reading them back would index the index.
-  if (path === `${home}/.olympus` || path === `${home}/.openclaw` || path === `${home}/.local/share/openclaw`) return 'olympus_data';
-  if (path === `${home}/Dropbox` || path.startsWith(`${home}/Dropbox (`)) return 'synced_by_another_source';
-  if (SYNCED_FOLDER_NAMES.has(lower) && scopeParentPath(path) === home) return 'synced_by_another_source';
-  if (platform === 'darwin' && scopeParentPath(path) === `${home}/Library/CloudStorage`) {
+  if (here === `${home}/.olympus` || here === `${home}/.openclaw` || here === `${home}/.local/share/openclaw`) return 'olympus_data';
+  if (here === `${home}/dropbox` || here.startsWith(`${home}/dropbox (`)) return 'synced_by_another_source';
+  const parentHere = scopeParentPath(path);
+  if (SYNCED_FOLDER_NAMES.has(lower) && parentHere !== undefined && fold(parentHere) === home) return 'synced_by_another_source';
+  if (platform === 'darwin' && parentHere !== undefined && fold(parentHere) === `${home}/library/cloudstorage`) {
     return 'synced_by_another_source';
   }
-  if ((context.syncedRoots ?? []).includes(path)) return 'synced_by_another_source';
+  if ((context.syncedRoots ?? []).some((root) => fold(root) === here)) return 'synced_by_another_source';
   return undefined;
 }
 

@@ -289,7 +289,7 @@ describe('local files connector and store sync', () => {
     cleanups.push(() => { try { chmodSync(join(f.proj, 'locked'), 0o755); } catch { /* gone */ } });
     const second = await handler.pull({ approved_scope_key: f.approvedKey });
     expect(second.receipt.counts.unreadable_folders).toBe(1);
-    expect(second.receipt.counts.traversal_complete).toBe(0);
+    expect(second.receipt.counts.traversal_complete).toBe(1);
     expect(second.receipt.warnings).toContain('local_files_unreadable_folders');
     expect(names(f.store, 'txt')).toEqual(['inside-locked.txt', 'open.txt']);
   });

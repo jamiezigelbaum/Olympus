@@ -26,7 +26,7 @@ import { isWithinScopePath } from './paths.ts';
 import type { LocalFilesProviderStoreSyncHandler } from './provider-store-sync.ts';
 import { LOCAL_FILES_ACCOUNT_SCOPE, LOCAL_FILES_PROVIDER } from './scope.ts';
 import type { VolumeResolver } from './volume-identity.ts';
-import type { WatchHub } from './watch-hub.ts';
+import { ignoreGlobsForRoot, type WatchHub } from './watch-hub.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -192,5 +192,5 @@ function watchApprovedFolders(
     const resolved = realPathOfScopePath(watch.volumes, path);
     return resolved ? [resolved] : [];
   });
-  watch.hub.setRoots(real.map((root) => ({ root, ignore: watch.ignore })));
+  watch.hub.setRoots(real.map((root) => ({ root, ignore: ignoreGlobsForRoot(watch.ignore, root) })));
 }

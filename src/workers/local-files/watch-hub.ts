@@ -71,6 +71,23 @@ export function watchIgnoreGlobs(context: DefaultExclusionContext, extra: readon
   return [...globs, ...extra];
 }
 
+/**
+ * The ignore globs that apply to a watch on `rootReal`. A folder the person
+ * chose by name is watched even when it is, or lies inside, a place that is
+ * off by default (iCloud Drive inside Library, a chosen `.git`): dropping the
+ * glob that would hide it keeps its deletions, renames and edits visible. The
+ * connector's own scope decision still keeps everything else out.
+ */
+export function ignoreGlobsForRoot(globs: readonly string[], rootReal: string): string[] {
+  const segments = new Set(rootReal.split('/').filter(Boolean).map((part) => part.toLowerCase()));
+  const lowerRoot = rootReal.toLowerCase();
+  return globs.filter((glob) => {
+    if (glob.startsWith('**/')) return !segments.has(glob.slice(3).toLowerCase());
+    const lowerGlob = glob.toLowerCase();
+    return !(lowerRoot === lowerGlob || lowerRoot.startsWith(`${lowerGlob}/`));
+  });
+}
+
 export class WatchHub {
   private readonly options: WatchHubOptions;
   private module: Promise<ParcelWatcherModule> | undefined;

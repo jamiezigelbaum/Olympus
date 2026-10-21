@@ -122,7 +122,7 @@ function loadNative(): Native | null {
   if (process.platform !== 'darwin' && process.platform !== 'linux') return null;
   try {
     const ffi = runtimeRequire('bun:ffi') as typeof import('bun:ffi');
-    const { dlopen, FFIType, ptr, read, CString } = ffi;
+    const { dlopen, FFIType, ptr, read, CString, toArrayBuffer } = ffi;
     const darwin = process.platform === 'darwin';
     const intel = process.arch === 'x64';
     // Intel macOS exposes the 64-bit-inode layout under a suffixed symbol.
@@ -142,12 +142,18 @@ function loadNative(): Native | null {
     const errnoFn = s[darwin ? '__error' : '__errno_location'] as () => number;
     const cstr = (value: string): Buffer => Buffer.from(`${value}\0`, 'utf8');
     const errno = (): number => read.i32(errnoFn() as never, 0);
+    const clearErrno = (): void => { new Int32Array(toArrayBuffer(errnoFn() as never, 0, 4))[0] = 0; };
+    /** Keeps a buffer reachable until the foreign call that was handed its address has returned. */
+    const keepAlive = (...buffers: Buffer[]): void => { if (buffers.some((buffer) => buffer.length < 0)) throw new Error('unreachable'); };
     const cloexec = darwin ? O_CLOEXEC_DARWIN : O_CLOEXEC_LINUX;
     const native: Native = {
       lastErrno: errno,
       openat(dirfd, name, flags) {
-        const result = s.openat!(dirfd, ptr(cstr(name)), flags | cloexec) as number;
-        return result < 0 ? -errno() : result;
+        const nameBuffer = cstr(name);
+        const result = s.openat!(dirfd, ptr(nameBuffer), flags | cloexec) as number;
+        const failure = result < 0 ? errno() : 0;
+        keepAlive(nameBuffer);
+        return result < 0 ? -failure : result;
       },
       openat2Beneath(dirfd, relPath, flags) {
         // struct open_how { u64 flags; u64 mode; u64 resolve; }
@@ -155,8 +161,11 @@ function loadNative(): Native | null {
         how.writeBigUInt64LE(BigInt(flags | cloexec), 0);
         how.writeBigUInt64LE(0n, 8);
         how.writeBigUInt64LE(BigInt(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV), 16);
-        const result = Number(s.syscall!(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(cstr(relPath)), ptr(how), 24n) as bigint | number);
-        return result < 0 ? -errno() : result;
+        const pathBuffer = cstr(relPath);
+        const result = Number(s.syscall!(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(pathBuffer), ptr(how), 24n) as bigint | number);
+        const failure = result < 0 ? errno() : 0;
+        keepAlive(pathBuffer, how);
+        return result < 0 ? -failure : result;
       },
       fdopendirDup(fd) {
         const copy = s.dup!(fd) as number;
@@ -171,8 +180,16 @@ function loadNative(): Native | null {
       readdirNames(dir) {
         const out: Array<{ name: string; type: number }> = [];
         for (;;) {
+          // readdir returns NULL both at the end and on an error; only errno
+          // (cleared first) tells them apart, and a failed listing is not a
+          // complete one.
+          clearErrno();
           const entry = s[`readdir${suffix}`]!(dir as never) as number | bigint | null;
-          if (!entry) break;
+          if (!entry) {
+            const failure = errno();
+            if (failure !== 0) throw new ScopeSafeError('io', `readdir errno ${failure}`);
+            break;
+          }
           // macOS (64-bit inode): d_type @20, d_name @21. Linux: d_type @18, d_name @19.
           const typeOffset = darwin ? 20 : 18;
           const nameOffset = darwin ? 21 : 19;
@@ -386,6 +403,42 @@ export class ScopeRoot {
     const { fd, stat } = this.openRelative(relPath);
     fs.closeSync(fd);
     return stat;
+  }
+
+  /**
+   * Metadata of an entry a listing already named, without opening it where the
+   * platform allows: a file whose mode refuses reading still has a size and a
+   * time. A placeholder flag (macOS) needs a descriptor, so there the open is
+   * tried first and lstat answers when the open is refused. A link is
+   * reported as a link; an entry on another device is refused.
+   */
+  statEntry(relPath: string): ScopeStat {
+    this.assertOpen();
+    splitRelative(relPath);
+    if (process.platform === 'darwin') {
+      try {
+        return this.statRelative(relPath);
+      } catch (error) {
+        // Refused, a link, a mount point: lstat below says which.
+        if (!(error instanceof ScopeSafeError)) throw error;
+      }
+    }
+    let st: fs.BigIntStats;
+    try {
+      st = fs.lstatSync(posix.join(this.path, relPath), { bigint: true });
+    } catch (error) {
+      throw mapNodeError(error);
+    }
+    const kind = kindFromMode(Number(st.mode));
+    if (kind !== 'symlink' && st.dev.toString() !== this.dev) throw new ScopeSafeError('escape', 'mount point');
+    return {
+      dev: st.dev.toString(),
+      ino: st.ino.toString(),
+      kind,
+      size: Number(st.size),
+      mtimeMs: Number(st.mtimeMs),
+      dataless: false,
+    };
   }
 
   /**
