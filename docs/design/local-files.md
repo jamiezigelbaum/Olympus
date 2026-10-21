@@ -56,6 +56,11 @@ are generic spine pieces that any local source can use.
    credential handle and an `accountGeneration`. Add a "this computer"
    basis: a stable per-install machine id, so a reinstall or a different
    computer resets the selection fail-closed, as a changed account does today.
+   Folders on removable or network volumes are also bound to that volume's
+   identity: the volume UUID on Mac, the filesystem UUID on Linux, or the
+   server and share for network mounts. A different volume mounted under the
+   same name (for example `/Volumes/Backup`) starts with nothing selected, and
+   the picker asks again.
 3. **Push wake for the scheduler.** `SourceScheduler` only polls. Add a
    generic way for a source to wake its own sync task when changes arrive,
    with the poll interval kept as the backstop. Any future watched source
@@ -71,10 +76,16 @@ shared code:
 
 - It walks with `lstat` and never follows symlinks. A symlink is indexed by
   name as a link, never by its target.
-- It opens with no-follow (`O_NOFOLLOW`), then checks the open descriptor:
-  `fstat` device and inode must match what was listed, and the resolved real
-  path must sit inside an approved folder. A mismatch counts as changed, and
-  the item is re-listed rather than read.
+- It reads through a chain of descriptors, not by path. Starting from a
+  descriptor held on the approved folder, it opens each path component
+  relative to the one before, never following links: `openat2` with
+  `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` on Linux, and an
+  `openat(…, O_NOFOLLOW)` chain on macOS. Swapping an ancestor folder for a
+  symlink mid-walk then fails instead of escaping. Bun has no binding for
+  these calls, so they go through `bun:ffi` to libc.
+- The final descriptor's `fstat` device and inode must match what was
+  listed. A mismatch counts as changed, and the item is re-listed rather than
+  read.
 - Hard links and bind mounts that cross an exclude rule get the same
   containment check.
 
