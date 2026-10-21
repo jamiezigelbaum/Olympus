@@ -65,7 +65,9 @@ export const systemHostIdentity: HostIdentity = () => {
   } catch {
     value = undefined;
   }
-  cachedSystemHostIdentity = { value };
+  // Only a found identity is cached: a lookup that failed once (a slow ioreg)
+  // is tried again rather than treating this host as having none until restart.
+  if (value) cachedSystemHostIdentity = { value };
   return value;
 };
 

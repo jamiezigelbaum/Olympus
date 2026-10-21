@@ -138085,7 +138085,8 @@ var MACHINE_ID_PATTERN, cachedSystemHostIdentity, systemHostIdentity = () => {
   } catch {
     value2 = undefined;
   }
-  cachedSystemHostIdentity = { value: value2 };
+  if (value2)
+    cachedSystemHostIdentity = { value: value2 };
   return value2;
 };
 var init_this_computer = __esm(() => {

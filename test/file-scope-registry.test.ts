@@ -276,7 +276,7 @@ describe('sources without an account (this computer)', () => {
     // On a host with an identity the edited record no longer matches its host
     // binding, so it reads as not connected; without one, as a changed account.
     expect(moved).toMatchObject({ status: 'scope_pending', selections: [] });
-    expect(['account_changed', 'not_connected']).toContain(moved.reason);
+    expect(['account_changed', 'not_connected'] as Array<string | undefined>).toContain(moved.reason);
     expect(moved.accountGeneration).not.toBe(approved.accountGeneration);
     expect(authority().policyRef(LOCAL.sourceId)).toBeUndefined();
     expect(() => authority().assertCurrent({
