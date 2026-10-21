@@ -79,9 +79,13 @@ shared code:
 - It reads through a chain of descriptors, not by path. Starting from a
   descriptor held on the approved folder, it opens each path component
   relative to the one before, never following links: `openat2` with
-  `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` on Linux, and an
-  `openat(…, O_NOFOLLOW)` chain on macOS. Swapping an ancestor folder for a
-  symlink mid-walk then fails instead of escaping. Bun has no binding for
+  `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV` on Linux, and an
+  `openat(…, O_NOFOLLOW)` chain on macOS that compares each component's
+  `fstat` device with its parent's. Swapping an ancestor folder for a
+  symlink mid-walk then fails instead of escaping, and so does crossing a
+  mount point, bind mounts included. A mounted volume under a selected folder
+  is only read when the user selects it separately (bound to its own volume
+  identity, above). Bun has no binding for
   these calls, so they go through `bun:ffi` to libc.
 - The final descriptor's `fstat` device and inode must match what was
   listed. A mismatch counts as changed, and the item is re-listed rather than
@@ -142,15 +146,17 @@ needs no permission.
 Facts:
 
 - **Who macOS asks about.** It attributes access to the *responsible* app.
-  The engine is a LaunchAgent running
-  `/opt/homebrew/Cellar/bun/<version>/bin/bun`, so today any prompt would say
-  "bun". If a prompt can't be shown, the read just fails. Apple's guidance
+  On a standard install the engine is a LaunchAgent running the pinned
+  runtime at `~/Library/Application Support/Olympus/runtime/bun`
+  (`scripts/install-macos.sh`), so today any prompt would say "bun". Developer
+  checkouts may run Homebrew's bun instead. If a prompt can't be shown, the read just fails. Apple's guidance
   for agents is to make the app the responsible code: install with
   `SMAppService`, or set `AssociatedBundleIdentifiers` in the launchd plist.
-- **Bun is Developer ID signed** (Jarred Sumner, team 7FRXF46ZSN), so a grant
-  to bun would survive bun upgrades. Even so, it would cover every bun script
-  on the Mac, the Homebrew path changes with each version, and it shows up as
-  "bun". Rejected.
+- **Bun is Developer ID signed** (Jarred Sumner, team 7FRXF46ZSN, checked on
+  the Homebrew build of the official release). A grant to bun could survive a
+  pinned-runtime update. Even so, it would cover any script run by that
+  binary, it shows up as "bun", and it's exactly the interpreter grant Apple
+  warns against. Rejected.
 - **The existing `Olympus.app`** (`ai.olympusplugin.open`, the `olympus://`
   handler) is ad-hoc signed. Ad-hoc grants are pinned to the exact build hash
   and lost on every rebuild, while System Settings still shows them as on.
@@ -177,9 +183,11 @@ Facts:
      like to access files in your Documents folder". That's one click and no
      trip to System Settings.
    - This is narrower than Full Disk Access and fits where Apple is heading.
-3. **Full Disk Access only if the user picks the whole disk or a volume.**
+3. **Removable and network volumes use their own Files & Folders
+   permission**, asked the same way when a folder on one is first ticked.
+4. **Full Disk Access only if the user picks the whole internal disk.**
    Deep-link to the pane and offer the helper icon to drag in.
-4. **The picker shows a guarded folder as "Needs permission"**, with the
+5. **The picker shows a guarded folder as "Needs permission"**, with the
    button that asks. A denied folder says how to turn it back on. It's never
    silently empty.
 
