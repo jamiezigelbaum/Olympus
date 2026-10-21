@@ -803,7 +803,7 @@ export function dataDeleteCustody(options: {
       };
     }
     const lane = publicCapability.doctor_lane;
-    // A source with no credential has no handle to disconnect: its folders are
+    // A source with no credential has no handle to disconnect; it
     // is connected in the this-computer record instead, which is checked here.
     const connected = (lane !== undefined
       && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider))
