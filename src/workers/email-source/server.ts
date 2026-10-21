@@ -4176,9 +4176,11 @@ export async function main(): Promise<void> {
     };
   };
   // The credential a registered file source reads, or none for a source that
-  // binds to this computer instead of an account.
-  const fileScopeCredentialHandle = (definition: FileScopeSourceDefinition): ConnectedCredentialHandle | undefined =>
-    definition.account === 'this_computer'
+  // binds to this computer instead of an account. Function declarations, so
+  // they are hoisted: the connector-store read scope (assembled with the
+  // scheduler, earlier in main) calls them before this point is reached.
+  function fileScopeCredentialHandle(definition: FileScopeSourceDefinition): ConnectedCredentialHandle | undefined {
+    return definition.account === 'this_computer'
       ? undefined
       : selectedSourceCredentialHandle({
           env: process.env,
@@ -4187,13 +4189,14 @@ export async function main(): Promise<void> {
           capability: definition.credentialCapability!,
           handles: readActiveConnectedHandles(process.env),
         });
-  const fileScopeAccount = (sourceId: string): { accountScope: string } | undefined => {
+  }
+  function fileScopeAccount(sourceId: string): { accountScope: string } | undefined {
     const definition = getFileScopeSource(sourceId);
     if (!definition) return undefined;
     if (definition.account === 'this_computer') return { accountScope: 'this_computer' };
     const handle = fileScopeCredentialHandle(definition);
     return handle ? { accountScope: handle.accountRole?.trim() || 'personal' } : undefined;
-  };
+  }
   const fileScopeBrowserFor = (sourceId: string): SourceFolderScopeBrowser => {
     const definition = requireFileScopeSource(sourceId);
     const handle = fileScopeCredentialHandle(definition);

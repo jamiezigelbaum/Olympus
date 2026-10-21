@@ -161183,14 +161183,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...snapshot.reason === "malformed" ? { error: "Saved mail scope is unreadable. Review and save the scope again." } : {}
     };
   };
-  const fileScopeCredentialHandle = (definition) => definition.account === "this_computer" ? undefined : selectedSourceCredentialHandle({
-    env: process.env,
-    pinEnvName: definition.pinEnvName ?? "",
-    provider: definition.provider,
-    capability: definition.credentialCapability,
-    handles: readActiveConnectedHandles(process.env)
-  });
-  const fileScopeAccount = (sourceId) => {
+  function fileScopeCredentialHandle(definition) {
+    return definition.account === "this_computer" ? undefined : selectedSourceCredentialHandle({
+      env: process.env,
+      pinEnvName: definition.pinEnvName ?? "",
+      provider: definition.provider,
+      capability: definition.credentialCapability,
+      handles: readActiveConnectedHandles(process.env)
+    });
+  }
+  function fileScopeAccount(sourceId) {
     const definition = getFileScopeSource(sourceId);
     if (!definition)
       return;
@@ -161198,7 +161200,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       return { accountScope: "this_computer" };
     const handle = fileScopeCredentialHandle(definition);
     return handle ? { accountScope: handle.accountRole?.trim() || "personal" } : undefined;
-  };
+  }
   const fileScopeBrowserFor = (sourceId) => {
     const definition = requireFileScopeSource(sourceId);
     const handle = fileScopeCredentialHandle(definition);
