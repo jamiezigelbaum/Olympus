@@ -31814,6 +31814,7 @@ var init_x_bookmarks = __esm(() => {
 });
 
 // src/workers/local-files/paths.ts
+import { realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 function normalizeScopePath(value) {
   const composed = value.trim().normalize("NFC");
@@ -31861,7 +31862,11 @@ function scopeParentPath(path) {
   return index <= 0 ? "/" : path.slice(0, index);
 }
 function defaultExclusionContext(env = process.env) {
-  return { home: homedir16(), syncedRoots: configuredSyncedRoots(env), platform: process.platform };
+  let home = env.HOME?.trim() || homedir16();
+  try {
+    home = realpathSync3.native(home);
+  } catch {}
+  return { home, syncedRoots: configuredSyncedRoots(env), platform: process.platform };
 }
 function configuredSyncedRoots(env) {
   const raw = env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON;
@@ -31904,24 +31909,27 @@ function defaultExclusionForFolder(scopePath, context2) {
     return "build_output";
   if (volumeId)
     return;
-  const home = context2.home;
   const platform2 = context2.platform ?? process.platform;
-  if (platform2 === "darwin" && path === `${home}/Library`)
+  const fold = (value) => platform2 === "darwin" ? value.toLowerCase() : value;
+  const home = fold(context2.home);
+  const here = fold(path);
+  if (platform2 === "darwin" && here === `${home}/library`)
     return "system_library";
-  if (platform2 !== "darwin" && path === `${home}/.local/share/Trash`)
+  if (platform2 !== "darwin" && here === `${home}/.local/share/trash`)
     return "trash";
-  if (path === `${home}/.cache`)
+  if (here === `${home}/.cache`)
     return "cache";
-  if (path === `${home}/.olympus` || path === `${home}/.openclaw` || path === `${home}/.local/share/openclaw`)
+  if (here === `${home}/.olympus` || here === `${home}/.openclaw` || here === `${home}/.local/share/openclaw`)
     return "olympus_data";
-  if (path === `${home}/Dropbox` || path.startsWith(`${home}/Dropbox (`))
+  if (here === `${home}/dropbox` || here.startsWith(`${home}/dropbox (`))
     return "synced_by_another_source";
-  if (SYNCED_FOLDER_NAMES.has(lower) && scopeParentPath(path) === home)
+  const parentHere = scopeParentPath(path);
+  if (SYNCED_FOLDER_NAMES.has(lower) && parentHere !== undefined && fold(parentHere) === home)
     return "synced_by_another_source";
-  if (platform2 === "darwin" && scopeParentPath(path) === `${home}/Library/CloudStorage`) {
+  if (platform2 === "darwin" && parentHere !== undefined && fold(parentHere) === `${home}/library/cloudstorage`) {
     return "synced_by_another_source";
   }
-  if ((context2.syncedRoots ?? []).includes(path))
+  if ((context2.syncedRoots ?? []).some((root) => fold(root) === here))
     return "synced_by_another_source";
   return;
 }
@@ -33299,7 +33307,7 @@ var init_open_target = __esm(() => {
 });
 
 // src/core/linux-desktop-opener.ts
-import { accessSync as accessSync2, constants as fsConstants2, lstatSync as lstatSync7, realpathSync as realpathSync3 } from "node:fs";
+import { accessSync as accessSync2, constants as fsConstants2, lstatSync as lstatSync7, realpathSync as realpathSync4 } from "node:fs";
 import { execFile, spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
 import { randomBytes as randomBytes2 } from "node:crypto";
 import { dirname as dirname20, extname, isAbsolute as isAbsolute8, join as join26 } from "node:path";
@@ -33442,7 +33450,7 @@ function inspectLinuxPath(path) {
 }
 function resolvedRealpath(path) {
   try {
-    return realpathSync3.native(path);
+    return realpathSync4.native(path);
   } catch {
     return;
   }
@@ -33559,7 +33567,7 @@ async function openLinuxOwnerTicketFile(path, dependencies = {}) {
   const stat3 = lstatSync7(path);
   const parent = lstatSync7(dirname20(path));
   const uid = dependencies.uid ?? process.getuid?.();
-  if (realpathSync3(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
+  if (realpathSync4(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
     throw new Error("Unsafe owner ticket file.");
   const dispatch = async (opener) => {
     const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
@@ -33631,7 +33639,7 @@ var init_linux_desktop_opener = __esm(() => {
 });
 
 // src/core/worker-transport.ts
-import { lstatSync as lstatSync8, mkdirSync as mkdirSync13, realpathSync as realpathSync4, chmodSync as chmodSync6 } from "node:fs";
+import { lstatSync as lstatSync8, mkdirSync as mkdirSync13, realpathSync as realpathSync5, chmodSync as chmodSync6 } from "node:fs";
 import { dirname as dirname21, isAbsolute as isAbsolute9, join as join27, normalize as normalize4, parse } from "node:path";
 function ownerId(options) {
   const uid = options.uid ?? process.getuid?.();
@@ -33654,7 +33662,7 @@ function validateDirectory(path, uid, privateMode) {
   const stat3 = lstatSync8(path);
   if (privateMode && (stat3.uid !== uid || (stat3.mode & 511) !== 448))
     throw new Error("Worker runtime directory must be owner-owned and 0700.");
-  if (realpathSync4(path) !== path)
+  if (realpathSync5(path) !== path)
     throw new Error("Worker socket directory must not contain symlinks.");
 }
 function workerSocketPath(options = {}) {
@@ -43109,7 +43117,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync19, readFileSync as readFileSync18, readdirSync as readdirSync3, realpathSync as realpathSync5 } from "node:fs";
+import { existsSync as existsSync19, readFileSync as readFileSync18, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -43297,7 +43305,7 @@ function defaultUuidsByDevice() {
       return result;
     for (const name of readdirSync3(dir)) {
       try {
-        result.set(realpathSync5(`${dir}/${name}`), name);
+        result.set(realpathSync6(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -43345,7 +43353,7 @@ function plistString(plist, key2) {
 init_local_open();
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync9, readdirSync as readdirSync4, realpathSync as realpathSync6 } from "node:fs";
+import { lstatSync as lstatSync9, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
 import { join as join32 } from "node:path";
 
@@ -43576,7 +43584,7 @@ init_scope();
 var BROWSE_PAGE_SIZE2 = 100;
 function safeRealpath(path) {
   try {
-    return realpathSync6.native(path);
+    return realpathSync7.native(path);
   } catch {
     return path;
   }
@@ -43678,6 +43686,13 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
+        const canonical = realpathSync7.native(real);
+        if (canonical !== real) {
+          if (canonical.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
+            throw new Error("A selected folder is reached through a link. Choose the folder itself.");
+          }
+          selection.key = scopePathOfRealPath(volumes, canonical);
+        }
       }
       return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
     }

@@ -48270,6 +48270,7 @@ var init_dropbox_files = __esm(() => {
 });
 
 // src/workers/local-files/paths.ts
+import { realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir25 } from "node:os";
 function normalizeScopePath(value) {
   const composed = value.trim().normalize("NFC");
@@ -48320,7 +48321,11 @@ function scopeParentPath(path) {
   return index <= 0 ? "/" : path.slice(0, index);
 }
 function defaultExclusionContext(env = process.env) {
-  return { home: homedir25(), syncedRoots: configuredSyncedRoots(env), platform: process.platform };
+  let home2 = env.HOME?.trim() || homedir25();
+  try {
+    home2 = realpathSync8.native(home2);
+  } catch {}
+  return { home: home2, syncedRoots: configuredSyncedRoots(env), platform: process.platform };
 }
 function configuredSyncedRoots(env) {
   const raw = env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON;
@@ -48363,24 +48368,27 @@ function defaultExclusionForFolder(scopePath, context2) {
     return "build_output";
   if (volumeId)
     return;
-  const home2 = context2.home;
   const platform2 = context2.platform ?? process.platform;
-  if (platform2 === "darwin" && path === `${home2}/Library`)
+  const fold = (value) => platform2 === "darwin" ? value.toLowerCase() : value;
+  const home2 = fold(context2.home);
+  const here = fold(path);
+  if (platform2 === "darwin" && here === `${home2}/library`)
     return "system_library";
-  if (platform2 !== "darwin" && path === `${home2}/.local/share/Trash`)
+  if (platform2 !== "darwin" && here === `${home2}/.local/share/trash`)
     return "trash";
-  if (path === `${home2}/.cache`)
+  if (here === `${home2}/.cache`)
     return "cache";
-  if (path === `${home2}/.olympus` || path === `${home2}/.openclaw` || path === `${home2}/.local/share/openclaw`)
+  if (here === `${home2}/.olympus` || here === `${home2}/.openclaw` || here === `${home2}/.local/share/openclaw`)
     return "olympus_data";
-  if (path === `${home2}/Dropbox` || path.startsWith(`${home2}/Dropbox (`))
+  if (here === `${home2}/dropbox` || here.startsWith(`${home2}/dropbox (`))
     return "synced_by_another_source";
-  if (SYNCED_FOLDER_NAMES.has(lower) && scopeParentPath(path) === home2)
+  const parentHere = scopeParentPath(path);
+  if (SYNCED_FOLDER_NAMES.has(lower) && parentHere !== undefined && fold(parentHere) === home2)
     return "synced_by_another_source";
-  if (platform2 === "darwin" && scopeParentPath(path) === `${home2}/Library/CloudStorage`) {
+  if (platform2 === "darwin" && parentHere !== undefined && fold(parentHere) === `${home2}/library/cloudstorage`) {
     return "synced_by_another_source";
   }
-  if ((context2.syncedRoots ?? []).includes(path))
+  if ((context2.syncedRoots ?? []).some((root) => fold(root) === here))
     return "synced_by_another_source";
   return;
 }
@@ -60306,7 +60314,7 @@ var init_reaction_index = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-import { existsSync as existsSync36, readFileSync as readFileSync34, readdirSync as readdirSync5, realpathSync as realpathSync8, rmSync as rmSync12, statSync as statSync18 } from "node:fs";
+import { existsSync as existsSync36, readFileSync as readFileSync34, readdirSync as readdirSync5, realpathSync as realpathSync9, rmSync as rmSync12, statSync as statSync18 } from "node:fs";
 import { isAbsolute as isAbsolute16, join as join56, relative as relative5 } from "node:path";
 function createWhatsAppLiveSourceConnector(options) {
   const spoolDir = requireNonEmpty4(options.spoolDir, "WhatsApp live connector spoolDir");
@@ -60814,7 +60822,7 @@ function mediaPathOwners(spoolDir) {
 }
 function existingRealPath(path) {
   try {
-    return realpathSync8(path);
+    return realpathSync9(path);
   } catch {
     return;
   }
@@ -64387,7 +64395,7 @@ import {
   mkdirSync as mkdirSync28,
   readFileSync as readFileSync37,
   readdirSync as readdirSync7,
-  realpathSync as realpathSync9,
+  realpathSync as realpathSync10,
   renameSync as renameSync11,
   rmSync as rmSync14,
   statSync as statSync20,
@@ -64504,13 +64512,13 @@ function managedToolExecutable(tool, host = {}) {
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
     return;
   try {
-    const realDir = realpathSync9(versionDir);
+    const realDir = realpathSync10(versionDir);
     for (const required3 of new Set([...asset.required, asset.executable])) {
       if (!trustedInside(realDir, join61(versionDir, required3), uid, versionDir))
         return;
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
-    const real = realpathSync9(join61(versionDir, asset.executable));
+    const real = realpathSync10(join61(versionDir, asset.executable));
     accessSync7(real, constants4.X_OK);
     return real;
   } catch {
@@ -64535,7 +64543,7 @@ function trustedInside(realDir, path, uid, versionDir) {
   }
   let real;
   try {
-    real = realpathSync9(path);
+    real = realpathSync10(path);
   } catch {
     return false;
   }
@@ -64605,13 +64613,13 @@ function earlierManagedFolders(tool, host) {
 async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
   if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
     return [];
-  const realStaging = realpathSync9(staging);
+  const realStaging = realpathSync10(staging);
   const signed = [];
   for (const relative8 of asset.adhocSign) {
     const file = join61(staging, relative8);
     let real;
     try {
-      real = realpathSync9(file);
+      real = realpathSync10(file);
     } catch {
       throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${relative8}, so nothing was installed.`, tool);
     }
@@ -65086,13 +65094,13 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     mkdirs(posix.dirname(entry.target));
     symlinkSync(entry.linkTarget, join61(staging, entry.target));
   }
-  const realStaging = realpathSync9(staging);
+  const realStaging = realpathSync10(staging);
   for (const entry of planned) {
     if (entry.type !== "symlink")
       continue;
     let real;
     try {
-      real = realpathSync9(join61(staging, entry.target));
+      real = realpathSync10(join61(staging, entry.target));
     } catch {
       throw new ManagedToolsError("unsafe_archive", `The archive has a link that leads nowhere (${entry.path}).`, tool);
     }
@@ -66619,7 +66627,7 @@ import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile6, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash48 } from "node:crypto";
-import { lstatSync as lstatSync24, readFileSync as readFileSync39, readlinkSync as readlinkSync2, readdirSync as readdirSync9, realpathSync as realpathSync10 } from "node:fs";
+import { lstatSync as lstatSync24, readFileSync as readFileSync39, readlinkSync as readlinkSync2, readdirSync as readdirSync9, realpathSync as realpathSync11 } from "node:fs";
 import { dirname as dirname43, join as join63 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -66784,7 +66792,7 @@ async function launcherPath(env) {
     if (!path)
       continue;
     try {
-      if (realpathSync10(path) !== path)
+      if (realpathSync11(path) !== path)
         continue;
       let current2 = path;
       while (true) {
@@ -67013,7 +67021,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash49, randomUUID as randomUUID18 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants5, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync40, readlinkSync as readlinkSync3, realpathSync as realpathSync11, rmSync as rmSync16, statSync as statSync21, writeFileSync as writeFileSync13 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants5, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync40, readlinkSync as readlinkSync3, realpathSync as realpathSync12, rmSync as rmSync16, statSync as statSync21, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
 import { homedir as homedir41, tmpdir as tmpdir4 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname44, isAbsolute as isAbsolute19, join as join64, resolve as resolvePath } from "node:path";
@@ -67295,7 +67303,7 @@ function zkapiWalletDirectory(env) {
   const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join64(home2, "Library", "Application Support", "zkapi-clientd") : join64(env.XDG_CONFIG_HOME?.trim() || join64(home2, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath(configured);
   try {
-    return realpathSync11(absolute2);
+    return realpathSync12(absolute2);
   } catch {
     return absolute2;
   }
@@ -67706,7 +67714,7 @@ function childEnvironment(env) {
 function daemonEnvironment(base, daemonExecutable) {
   let real = daemonExecutable;
   try {
-    real = realpathSync11(daemonExecutable);
+    real = realpathSync12(daemonExecutable);
   } catch {}
   const installBin = dirname44(real);
   const rest = (base.PATH ?? "").split(delimiter5).filter((entry) => entry && entry !== installBin);
@@ -69229,7 +69237,7 @@ process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
-    realpath: (path) => realpathSync11(path),
+    realpath: (path) => realpathSync12(path),
     stat: (path) => statSync21(path),
     executable: (path) => {
       try {
@@ -70393,7 +70401,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync26, linkSync, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync42, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync12, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
+import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync26, linkSync, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync42, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync13, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename8, dirname as dirname46, join as join66, relative as relative8, resolve as resolve12, sep as sep10 } from "node:path";
 import { userInfo } from "node:os";
@@ -70466,7 +70474,7 @@ function inspectSystemdEngine(l, exec = linuxEngineExec) {
     return unknown;
   if (f.FragmentPath !== l.unitPath) {
     try {
-      if (!f.FragmentPath || realpathSync12(f.FragmentPath) !== l.unitPath)
+      if (!f.FragmentPath || realpathSync13(f.FragmentPath) !== l.unitPath)
         return { ...unknown, detail: `Conflicting unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}. Stop its custodian before retrying.` };
     } catch {
       return { ...unknown, detail: `Cannot verify unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}.` };
@@ -70603,7 +70611,7 @@ function inheritedUtilLinuxFlock(lockPath) {
   let pid = process.ppid;
   for (let depth2 = 0;pid > 1 && depth2 < 16; depth2 += 1) {
     try {
-      const executable = realpathSync12(`/proc/${pid}/exe`);
+      const executable = realpathSync13(`/proc/${pid}/exe`);
       const executableStat = statSync23(executable);
       const args = readFileSync42(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
       if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve12(arg) === lockPath))
@@ -137038,7 +137046,7 @@ function loadNative() {
     return null;
   try {
     const ffi = runtimeRequire3("bun:ffi");
-    const { dlopen, FFIType, ptr, read, CString } = ffi;
+    const { dlopen, FFIType, ptr, read, CString, toArrayBuffer } = ffi;
     const darwin = process.platform === "darwin";
     const intel = process.arch === "x64";
     const suffix = darwin && intel ? "$INODE64" : "";
@@ -137057,20 +137065,33 @@ function loadNative() {
     const errnoFn = s[darwin ? "__error" : "__errno_location"];
     const cstr = (value2) => Buffer.from(`${value2}\x00`, "utf8");
     const errno = () => read.i32(errnoFn(), 0);
+    const clearErrno = () => {
+      new Int32Array(toArrayBuffer(errnoFn(), 0, 4))[0] = 0;
+    };
+    const keepAlive = (...buffers) => {
+      if (buffers.some((buffer) => buffer.length < 0))
+        throw new Error("unreachable");
+    };
     const cloexec = darwin ? O_CLOEXEC_DARWIN : O_CLOEXEC_LINUX;
     const native = {
       lastErrno: errno,
       openat(dirfd, name, flags) {
-        const result = s.openat(dirfd, ptr(cstr(name)), flags | cloexec);
-        return result < 0 ? -errno() : result;
+        const nameBuffer = cstr(name);
+        const result = s.openat(dirfd, ptr(nameBuffer), flags | cloexec);
+        const failure2 = result < 0 ? errno() : 0;
+        keepAlive(nameBuffer);
+        return result < 0 ? -failure2 : result;
       },
       openat2Beneath(dirfd, relPath, flags) {
         const how = Buffer.alloc(24);
         how.writeBigUInt64LE(BigInt(flags | cloexec), 0);
         how.writeBigUInt64LE(0n, 8);
         how.writeBigUInt64LE(BigInt(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV), 16);
-        const result = Number(s.syscall(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(cstr(relPath)), ptr(how), 24n));
-        return result < 0 ? -errno() : result;
+        const pathBuffer = cstr(relPath);
+        const result = Number(s.syscall(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(pathBuffer), ptr(how), 24n));
+        const failure2 = result < 0 ? errno() : 0;
+        keepAlive(pathBuffer, how);
+        return result < 0 ? -failure2 : result;
       },
       fdopendirDup(fd) {
         const copy = s.dup(fd);
@@ -137086,9 +137107,14 @@ function loadNative() {
       readdirNames(dir) {
         const out = [];
         for (;; ) {
+          clearErrno();
           const entry = s[`readdir${suffix}`](dir);
-          if (!entry)
+          if (!entry) {
+            const failure2 = errno();
+            if (failure2 !== 0)
+              throw new ScopeSafeError("io", `readdir errno ${failure2}`);
             break;
+          }
           const typeOffset = darwin ? 20 : 18;
           const nameOffset = darwin ? 21 : 19;
           const type = read.u8(entry, typeOffset);
@@ -137292,6 +137318,35 @@ class ScopeRoot {
     fs.closeSync(fd);
     return stat7;
   }
+  statEntry(relPath) {
+    this.assertOpen();
+    splitRelative(relPath);
+    if (process.platform === "darwin") {
+      try {
+        return this.statRelative(relPath);
+      } catch (error2) {
+        if (!(error2 instanceof ScopeSafeError))
+          throw error2;
+      }
+    }
+    let st;
+    try {
+      st = fs.lstatSync(posix2.join(this.path, relPath), { bigint: true });
+    } catch (error2) {
+      throw mapNodeError(error2);
+    }
+    const kind = kindFromMode(Number(st.mode));
+    if (kind !== "symlink" && st.dev.toString() !== this.dev)
+      throw new ScopeSafeError("escape", "mount point");
+    return {
+      dev: st.dev.toString(),
+      ino: st.ino.toString(),
+      kind,
+      size: Number(st.size),
+      mtimeMs: Number(st.mtimeMs),
+      dataless: false
+    };
+  }
   list(relDir) {
     this.assertOpen();
     const { fd } = this.openRelative(relDir, { directory: true });
@@ -137405,6 +137460,16 @@ function watchIgnoreGlobs(context2, extra = []) {
   for (const root of context2.syncedRoots ?? [])
     globs.push(root);
   return [...globs, ...extra];
+}
+function ignoreGlobsForRoot(globs, rootReal) {
+  const segments = new Set(rootReal.split("/").filter(Boolean).map((part) => part.toLowerCase()));
+  const lowerRoot = rootReal.toLowerCase();
+  return globs.filter((glob) => {
+    if (glob.startsWith("**/"))
+      return !segments.has(glob.slice(3).toLowerCase());
+    const lowerGlob = glob.toLowerCase();
+    return !(lowerRoot === lowerGlob || lowerRoot.startsWith(`${lowerGlob}/`));
+  });
 }
 
 class WatchHub {
@@ -137631,8 +137696,19 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash72, randomUUID as randomUUID28 } from "node:crypto";
-import { realpathSync as realpathSync14, rmSync as rmSync23, readdirSync as readdirSync15 } from "node:fs";
+import { realpathSync as realpathSync15, rmSync as rmSync23, readdirSync as readdirSync15 } from "node:fs";
 import { join as join105, posix as posix3 } from "node:path";
+function nameAsOnDisk(scopeRoot, rel) {
+  let dir = "";
+  for (const part of rel.split("/")) {
+    const wanted = part.normalize("NFC");
+    const matches2 = scopeRoot.list(dir).filter((entry) => entry.name.normalize("NFC") === wanted);
+    if (matches2.length !== 1)
+      return;
+    dir = joinRelative(dir, matches2[0].name);
+  }
+  return dir;
+}
 function localFilesItemId(scopePath) {
   return `f1.${createHash72("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
 }
@@ -137681,7 +137757,7 @@ function createLocalFilesSourceConnector(options) {
       throw new LocalFilesRootMissingError(root);
     let real;
     try {
-      real = realpathSync14.native(configured);
+      real = realpathSync15.native(configured);
     } catch {
       throw new LocalFilesRootMissingError(root);
     }
@@ -137695,7 +137771,7 @@ function createLocalFilesSourceConnector(options) {
       throw error2;
     }
   };
-  const scopePathOf = (relPath) => relPath === "" ? root : posix3.join(root, relPath);
+  const scopePathOf = (relPath) => relPath === "" ? root : posix3.join(root, relPath).normalize("NFC");
   const fileItem = (scopePath, name, stat7, decision) => {
     const mimeType = fileMimeTypeFromName(name);
     const modified = new Date(stat7.mtimeMs).toISOString();
@@ -137790,23 +137866,28 @@ function createLocalFilesSourceConnector(options) {
     }
     return items;
   };
-  const absentFromWalk = (seenIds, deletedSeen) => {
+  const absentFromWalk = (seenIds, deletedSeen, unreadable, topLevel) => {
     const store = options.store;
-    if (!store?.activeItemsUnderLocatorIfIndexed || root === "/")
+    if (!store?.activeItemsUnderLocatorIfIndexed)
       return [];
     if (store.lookupsReady && !store.lookupsReady())
       return [];
+    const bases = root === "/" ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== "/")])] : [root];
     const absent = [];
-    for (const stored of store.activeItemsUnderLocatorIfIndexed({
-      provider: LOCAL_FILES_PROVIDER,
-      accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-      locatorUri: root,
-      limit: ABSENCE_SCAN_LIMIT
-    })) {
-      if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId))
-        continue;
-      deletedSeen.add(stored.identity.providerItemId);
-      absent.push(deletedItem(stored.identity, stored.locatorUri));
+    for (const base of bases) {
+      for (const stored of store.activeItemsUnderLocatorIfIndexed({
+        provider: LOCAL_FILES_PROVIDER,
+        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+        locatorUri: base,
+        limit: ABSENCE_SCAN_LIMIT
+      })) {
+        if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId))
+          continue;
+        if (unreadable.some((path) => isWithinScopePath(stored.locatorUri, path)))
+          continue;
+        deletedSeen.add(stored.identity.providerItemId);
+        absent.push(deletedItem(stored.identity, stored.locatorUri));
+      }
     }
     return absent;
   };
@@ -137821,6 +137902,7 @@ function createLocalFilesSourceConnector(options) {
       } catch (error2) {
         if (error2 instanceof ScopeSafeError) {
           stats.unreadable += 1;
+          (stats.unreadablePaths ??= []).push(scopePathOf(dir));
           continue;
         }
         throw error2;
@@ -137842,11 +137924,13 @@ function createLocalFilesSourceConnector(options) {
           emitted.add(scopePath);
           yield symlinkItem(scopePath, entry.name);
         } else if (entry.kind === "directory") {
+          if (dir === "" && root === "/")
+            (stats.topLevel ??= []).push(scopePath);
           stack.push(rel);
         } else if (entry.kind === "file" || entry.kind === undefined) {
           let stat7;
           try {
-            stat7 = scopeRoot.statRelative(rel);
+            stat7 = scopeRoot.statEntry(rel);
           } catch (error2) {
             if (error2 instanceof ScopeSafeError) {
               if (error2.code === "escape") {
@@ -137854,10 +137938,16 @@ function createLocalFilesSourceConnector(options) {
                 yield symlinkItem(scopePath, entry.name);
               } else {
                 stats.unreadable += 1;
+                (stats.unreadablePaths ??= []).push(scopePath);
               }
               continue;
             }
             throw error2;
+          }
+          if (stat7.kind === "symlink") {
+            emitted.add(scopePath);
+            yield symlinkItem(scopePath, entry.name);
+            continue;
           }
           if (stat7.kind === "directory") {
             stack.push(rel);
@@ -137971,7 +138061,7 @@ function createLocalFilesSourceConnector(options) {
           let wroteSnapshot = false;
           if (options.watch) {
             try {
-              await options.watch.hub.writeSnapshot(real, snapshotFile(nextGen), options.watch.ignore ?? []);
+              await options.watch.hub.writeSnapshot(real, snapshotFile(nextGen), ignoreGlobsForRoot(options.watch.ignore ?? [], real));
               wroteSnapshot = true;
             } catch {
               wroteSnapshot = false;
@@ -137982,7 +138072,7 @@ function createLocalFilesSourceConnector(options) {
             if (!options.watch)
               throw new LocalFilesHistoryResetError("no change watcher");
             try {
-              events = await options.watch.hub.eventsSince(real, snapshotFile(priorGen), options.watch.ignore ?? []);
+              events = await options.watch.hub.eventsSince(real, snapshotFile(priorGen), ignoreGlobsForRoot(options.watch.ignore ?? [], real));
             } catch (error2) {
               if (error2 instanceof WatchHistoryUnavailableError)
                 throw new LocalFilesHistoryResetError(error2.message);
@@ -138002,8 +138092,8 @@ function createLocalFilesSourceConnector(options) {
               page2 = [];
             }
           }
-          if (!events && stats.unreadable === 0) {
-            for (const deletion of absentFromWalk(seenIds, deletedSeen)) {
+          if (!events) {
+            for (const deletion of absentFromWalk(seenIds, deletedSeen, stats.unreadablePaths ?? [], stats.topLevel ?? [])) {
               page2.push(deletion);
               if (page2.length >= pageSize) {
                 options.scope.assertCurrent();
@@ -138019,7 +138109,7 @@ function createLocalFilesSourceConnector(options) {
             pruneSnapshots([nextGen, ...replay ? [priorGen] : []]);
           }
           const nextCursor = wroteSnapshot ? `${LOCAL_FILES_CURSOR_PREFIX}${nextGen}` : LOCAL_FILES_POLL_CURSOR;
-          yield stats.unreadable > 0 && !events ? { items: page2, nextCursor, done: false } : { items: page2, nextCursor, done: true };
+          yield { items: page2, nextCursor, done: true };
         } finally {
           walkRoot.close();
         }
@@ -138057,17 +138147,28 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       let scopeRoot;
       try {
-        scopeRoot = ScopeRoot.open(realpathSync14.native(rootReal));
+        scopeRoot = ScopeRoot.open(realpathSync15.native(rootReal));
       } catch {
         throw new FileExtractionSourceError("source_unavailable");
       }
       const rel = scopePath === holder.scopePath ? "" : scopePath.slice(holder.scopePath === "/" ? 1 : holder.scopePath.length + 1);
       try {
         const expected = parseVersion(fetchOptions.expectedVersion);
-        const bytes = scopeRoot.readFile(rel, {
+        const readOptions = {
           ...expected ? { expected } : {},
           maxBytes: Math.min(fetchOptions.maxBytes ?? maxFetchBytes, maxFetchBytes)
-        });
+        };
+        let bytes;
+        try {
+          bytes = scopeRoot.readFile(rel, readOptions);
+        } catch (error2) {
+          if (!(error2 instanceof ScopeSafeError) || error2.code !== "not_found" || !/[^\u0000-\u007f]/.test(rel))
+            throw error2;
+          const actual = nameAsOnDisk(scopeRoot, rel);
+          if (actual === undefined || actual === rel)
+            throw error2;
+          bytes = scopeRoot.readFile(actual, readOptions);
+        }
         const mimeType = fileMimeTypeFromName(scopePath.slice(scopePath.lastIndexOf("/") + 1));
         return {
           identity: identity2,
@@ -140304,7 +140405,7 @@ function watchApprovedFolders(watch, scopePaths) {
     const resolved = realPathOfScopePath(watch.volumes, path);
     return resolved ? [resolved] : [];
   });
-  watch.hub.setRoots(real.map((root) => ({ root, ignore: watch.ignore })));
+  watch.hub.setRoots(real.map((root) => ({ root, ignore: ignoreGlobsForRoot(watch.ignore, root) })));
 }
 var DAY_MS3;
 var init_scheduler_source = __esm(() => {
@@ -140314,11 +140415,12 @@ var init_scheduler_source = __esm(() => {
   init_locations();
   init_paths();
   init_scope();
+  init_watch_hub();
   DAY_MS3 = 24 * 60 * 60 * 1000;
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync15, statSync as statSync30 } from "node:fs";
+import { realpathSync as realpathSync16, statSync as statSync30 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -140326,7 +140428,7 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
     if (!resolved)
       continue;
     try {
-      const real = realpathSync15.native(resolved);
+      const real = realpathSync16.native(resolved);
       if (statSync30(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
@@ -140348,7 +140450,7 @@ function createLocalFilesOpenTargets(options) {
     if (!resolved)
       return;
     try {
-      const real = realpathSync15.native(resolved);
+      const real = realpathSync16.native(resolved);
       return statSync30(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
@@ -140363,7 +140465,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash75 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync64, readFileSync as readFileSync68, readdirSync as readdirSync16, realpathSync as realpathSync16 } from "node:fs";
+import { existsSync as existsSync64, readFileSync as readFileSync68, readdirSync as readdirSync16, realpathSync as realpathSync17 } from "node:fs";
 import { homedir as homedir61 } from "node:os";
 
 class VolumeResolver {
@@ -140505,7 +140607,7 @@ function defaultUuidsByDevice() {
       return result;
     for (const name of readdirSync16(dir)) {
       try {
-        result.set(realpathSync16(`${dir}/${name}`), name);
+        result.set(realpathSync17(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -140934,12 +141036,12 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync36, readdirSync as readdirSync17, realpathSync as realpathSync17 } from "node:fs";
+import { lstatSync as lstatSync37, readdirSync as readdirSync17, realpathSync as realpathSync18 } from "node:fs";
 import { homedir as homedir62 } from "node:os";
 import { join as join106 } from "node:path";
 function safeRealpath(path) {
   try {
-    return realpathSync17.native(path);
+    return realpathSync18.native(path);
   } catch {
     return path;
   }
@@ -141035,12 +141137,19 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
           throw new Error("A selected disk is not connected right now.");
         let isFolder = false;
         try {
-          isFolder = lstatSync36(real).isDirectory();
+          isFolder = lstatSync37(real).isDirectory();
         } catch {
           isFolder = false;
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
+        const canonical2 = realpathSync18.native(real);
+        if (canonical2 !== real) {
+          if (canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
+            throw new Error("A selected folder is reached through a link. Choose the folder itself.");
+          }
+          selection.key = scopePathOfRealPath(volumes, canonical2);
+        }
       }
       return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
     }
@@ -158281,7 +158390,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
 import { randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
-import { lstatSync as lstatSync37 } from "node:fs";
+import { lstatSync as lstatSync38 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
   if (timing.outcome === "failed")
@@ -158534,7 +158643,7 @@ class PrivateAnswerJobs {
       return gone();
     let isFile = false;
     try {
-      isFile = lstatSync37(path).isFile();
+      isFile = lstatSync38(path).isFile();
     } catch {
       isFile = false;
     }
@@ -160638,7 +160747,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync29, lstatSync as lstatSync38, mkdirSync as mkdirSync49, statSync as statSync31 } from "node:fs";
+import { chmodSync as chmodSync29, lstatSync as lstatSync39, mkdirSync as mkdirSync49, statSync as statSync31 } from "node:fs";
 import { dirname as dirname76, isAbsolute as isAbsolute28 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -160719,7 +160828,7 @@ function writeConsultSettings(input, location = {}) {
 function ensureSettingsDirectory(directory) {
   let stats;
   try {
-    stats = lstatSync38(directory);
+    stats = lstatSync39(directory);
   } catch (error2) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
@@ -160735,7 +160844,7 @@ function ensureSettingsDirectory(directory) {
       return "directory_unavailable";
     }
     try {
-      stats = lstatSync38(directory);
+      stats = lstatSync39(directory);
     } catch {
       return "directory_unavailable";
     }
