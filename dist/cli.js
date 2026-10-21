@@ -137995,8 +137995,23 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/core/this-computer.ts
+import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync62, readFileSync as readFileSync66 } from "node:fs";
+import { createHash as createHash72, randomUUID as randomUUID27 } from "node:crypto";
 import { dirname as dirname72, join as join102 } from "node:path";
+function hostBinding(machineId, hostIdentity) {
+  const identity = hostIdentity();
+  return identity ? createHash72("sha256").update(`${machineId}:${identity}`).digest("hex") : undefined;
+}
+function readStateForHost(path, hostIdentity) {
+  const state = readState6(path);
+  if (!state)
+    return;
+  const expected = hostBinding(state.machine_id, hostIdentity);
+  if (state.host_binding !== expected)
+    return;
+  return state;
+}
 function defaultThisComputerStatePath(handleRegistryPath) {
   return join102(dirname72(handleRegistryPath), "this-computer.json");
 }
@@ -138008,7 +138023,7 @@ function readState6(path) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return;
     const record5 = parsed;
-    if (record5.version !== 1 || typeof record5.machine_id !== "string" || !MACHINE_ID_PATTERN.test(record5.machine_id) || !Array.isArray(record5.sources))
+    if (record5.version !== 1 || typeof record5.machine_id !== "string" || !MACHINE_ID_PATTERN.test(record5.machine_id) || !Array.isArray(record5.sources) || record5.host_binding !== undefined && (typeof record5.host_binding !== "string" || !/^[a-f0-9]{64}$/.test(record5.host_binding)))
       return;
     const sources = [];
     for (const entry of record5.sources) {
@@ -138019,13 +138034,18 @@ function readState6(path) {
         return;
       sources.push({ source_id: source.source_id, connected_at: source.connected_at });
     }
-    return { version: 1, machine_id: record5.machine_id, sources };
+    return {
+      version: 1,
+      machine_id: record5.machine_id,
+      ...typeof record5.host_binding === "string" ? { host_binding: record5.host_binding } : {},
+      sources
+    };
   } catch {
     return;
   }
 }
-function readThisComputerHandles(handleRegistryPath) {
-  const state = readState6(defaultThisComputerStatePath(handleRegistryPath));
+function readThisComputerHandles(handleRegistryPath, hostIdentity = systemHostIdentity) {
+  const state = readStateForHost(defaultThisComputerStatePath(handleRegistryPath), hostIdentity);
   if (!state)
     return [];
   const handles = [];
@@ -138045,7 +138065,29 @@ function readThisComputerHandles(handleRegistryPath) {
   }
   return handles;
 }
-var MACHINE_ID_PATTERN;
+var MACHINE_ID_PATTERN, cachedSystemHostIdentity, systemHostIdentity = () => {
+  if (cachedSystemHostIdentity)
+    return cachedSystemHostIdentity.value;
+  let value2;
+  try {
+    if (process.platform === "darwin") {
+      const result = spawnSync17("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8", timeout: 5000 });
+      value2 = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(result.stdout ?? "")?.[1];
+    } else if (process.platform === "linux") {
+      for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
+        const id = existsSync62(path) ? readFileSync66(path, "utf8").trim() : "";
+        if (/^[0-9a-f]{32}$/.test(id)) {
+          value2 = id;
+          break;
+        }
+      }
+    }
+  } catch {
+    value2 = undefined;
+  }
+  cachedSystemHostIdentity = { value: value2 };
+  return value2;
+};
 var init_this_computer = __esm(() => {
   init_atomic_file();
   init_file_lease();
@@ -138453,7 +138495,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash72 } from "node:crypto";
+import { createHash as createHash73 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -138486,7 +138528,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash72("sha256").update(`${accessToken}
+    const key2 = createHash73("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -138517,7 +138559,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash72("sha256").update(session.token).digest("hex");
+    const key2 = createHash73("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -154287,7 +154329,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash73, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash74, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -154655,7 +154697,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash73("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash74("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -154922,7 +154964,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha2566(value2) {
-  return createHash73("sha256").update(value2).digest("hex");
+  return createHash74("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -157037,7 +157079,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash74 } from "node:crypto";
+import { createHash as createHash75 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -157054,7 +157096,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text5 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text5, etag: `"${createHash74("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text5, etag: `"${createHash75("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -157430,7 +157472,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash75 } from "node:crypto";
+import { createHash as createHash76 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -157454,7 +157496,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest3 = createHash75("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest3 = createHash76("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest3.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {

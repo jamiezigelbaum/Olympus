@@ -197,8 +197,34 @@ describe('sources without an account (this computer)', () => {
     expect(snapshot).toMatchObject({ status: 'scope_pending', reason: 'missing' });
     expect(snapshot.accountGeneration).toMatch(/^[a-f0-9]{64}$/);
     const stored = JSON.parse(readFileSync(defaultThisComputerStatePath(registryPath), 'utf8'));
-    expect(Object.keys(stored).sort()).toEqual(['machine_id', 'sources', 'version']);
+    // The host binding is a digest; the host's own identity is never stored.
+    expect(Object.keys(stored).filter((key) => key !== 'host_binding').sort()).toEqual(['machine_id', 'sources', 'version']);
+    if (stored.host_binding !== undefined) expect(stored.host_binding).toMatch(/^[a-f0-9]{64}$/);
     expect(statSync(defaultThisComputerStatePath(registryPath)).mode & 0o077).toBe(0);
+  });
+
+  test('a record copied to another computer connects nothing there, and connecting starts a new machine id', () => {
+    const hostA = () => 'host-a-identity';
+    const hostB = () => 'host-b-identity';
+    connectThisComputerSource(registryPath, LOCAL.sourceId, NOW, hostA);
+    const id = JSON.parse(readFileSync(defaultThisComputerStatePath(registryPath), 'utf8')).machine_id;
+    expect(readThisComputerHandles(registryPath, hostA)).toHaveLength(1);
+    expect(readFileSync(defaultThisComputerStatePath(registryPath), 'utf8')).not.toContain('host-a-identity');
+    // The same file, read on another host.
+    expect(readThisComputerHandles(registryPath, hostB)).toEqual([]);
+    expect(disconnectThisComputerSource(registryPath, LOCAL.sourceId, hostB)).toBe(false);
+    connectThisComputerSource(registryPath, LOCAL.sourceId, NOW, hostB);
+    const moved = readThisComputerHandles(registryPath, hostB);
+    expect(moved).toHaveLength(1);
+    expect(moved[0]!.providerAccountId).not.toBe(id);
+    // And the original host no longer matches the rewritten record.
+    expect(readThisComputerHandles(registryPath, hostA)).toEqual([]);
+  });
+
+  test('a record made where the host has no identity is not accepted where one appears', () => {
+    connectThisComputerSource(registryPath, LOCAL.sourceId, NOW, () => undefined);
+    expect(readThisComputerHandles(registryPath, () => undefined)).toHaveLength(1);
+    expect(readThisComputerHandles(registryPath, () => 'host-a-identity')).toEqual([]);
   });
 
   test('the machine id is a random uuid, generated once, and the generation is stable across reads', () => {
@@ -247,7 +273,10 @@ describe('sources without an account (this computer)', () => {
     const state = JSON.parse(readFileSync(path, 'utf8'));
     writeFileSync(path, JSON.stringify({ ...state, machine_id: '11111111-1111-4111-8111-111111111111' }));
     const moved = authority().snapshot(LOCAL.sourceId);
-    expect(moved).toMatchObject({ status: 'scope_pending', reason: 'account_changed', selections: [] });
+    // On a host with an identity the edited record no longer matches its host
+    // binding, so it reads as not connected; without one, as a changed account.
+    expect(moved).toMatchObject({ status: 'scope_pending', selections: [] });
+    expect(['account_changed', 'not_connected']).toContain(moved.reason);
     expect(moved.accountGeneration).not.toBe(approved.accountGeneration);
     expect(authority().policyRef(LOCAL.sourceId)).toBeUndefined();
     expect(() => authority().assertCurrent({
