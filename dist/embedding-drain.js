@@ -1290,6 +1290,7 @@ var init_public_surface = __esm(() => {
     "gmail.email",
     "google_drive.docs",
     "dropbox.files",
+    "local.files",
     "x.bookmarks",
     "telegram.messages",
     "whatsapp.personal.messages",
@@ -1578,6 +1579,38 @@ var init_source_corpus_registry = __esm(() => {
       capabilities: ["answer", "status", "search"],
       createdOnDemand: true,
       description: "Public Dropbox files, routed here by per-item four-tier classification on positive public evidence."
+    },
+    {
+      corpusId: "secure_local.local.files",
+      sourceId: "local.files",
+      provider: "local_files",
+      family: "file",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "sync", "search", "promotion_candidates"],
+      description: "Files in the folders and disks the person chose on this computer."
+    },
+    {
+      corpusId: "internal.local.files",
+      sourceId: "local.files",
+      provider: "local_files",
+      family: "file",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Personal files on this computer (reference material and Personal names), routed here by per-item four-tier classification."
+    },
+    {
+      corpusId: "public_safe.local.files",
+      sourceId: "local.files",
+      provider: "local_files",
+      family: "file",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public files on this computer, routed here by per-item four-tier classification on positive public evidence."
     },
     {
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -29188,6 +29221,19 @@ var init_connector_store = __esm(() => {
   init_filter_capabilities();
 });
 
+// src/workers/connector-store/file-ingestion-matcher.ts
+var POLICY_ADMITTED;
+var init_file_ingestion_matcher = __esm(() => {
+  init_source_ingestion_exclusions();
+  init_still_image_readiness();
+  init_source_ingestion_policy();
+  POLICY_ADMITTED = Object.freeze({
+    excluded: false,
+    disposition: "admit",
+    outcome: "admitted"
+  });
+});
+
 // src/workers/dropbox-files/corpus-adapter.ts
 var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files", DROPBOX_FILES_SOURCE_ID = "dropbox.files";
 var init_corpus_adapter = __esm(() => {
@@ -29204,13 +29250,13 @@ function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir11(), ".local", "share");
   return join19(standaloneLinuxDataDir(env) ?? join19(dataHome, "openclaw", "olympus"), "dropbox-files-connector-store.sqlite");
 }
-var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
+var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT;
 var init_connector_store2 = __esm(() => {
   init_linux_engine_layout();
   init_source_ingestion_exclusions();
-  init_still_image_readiness();
   init_source_ingestion_policy();
   init_connector_store();
+  init_file_ingestion_matcher();
   init_corpus_adapter();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -29221,11 +29267,6 @@ var init_connector_store2 = __esm(() => {
     trustTier: "S4",
     trustDomain: "secure_local",
     secretsInContent: true
-  });
-  POLICY_ADMITTED = Object.freeze({
-    excluded: false,
-    disposition: "admit",
-    outcome: "admitted"
   });
 });
 
@@ -29238,41 +29279,44 @@ var init_provider_store_sync = __esm(() => {
   init_provider_client();
 });
 
-// src/workers/dropbox-files/approved-scope-filter.ts
-function invalidDropboxApprovedScope(expectedPrefix) {
-  return {
+// src/workers/connector-store/locator-path-scope-codec.ts
+function locatorPathApprovedScopeCodec(sourceLabel) {
+  const invalid = (expectedPrefix) => ({
     kind: "invalid",
     message: `"approved_scope_key" must exactly match "${expectedPrefix}:<rooted path>" with no surrounding whitespace.`
-  };
-}
-var MAX_APPROVED_SCOPE_KEY_LENGTH = 4096, UNSAFE_SCOPE_CHARACTERS, DROPBOX_APPROVED_SCOPE_FILTER_CODEC;
-var init_approved_scope_filter = __esm(() => {
-  UNSAFE_SCOPE_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
-  DROPBOX_APPROVED_SCOPE_FILTER_CODEC = Object.freeze({
+  });
+  return Object.freeze({
     resolveLocatorPath(value, principal) {
       const expectedPrefix = `${principal.provider}.${principal.accountScope}`;
       const separator = value.indexOf(":");
       const prefix = separator < 0 ? undefined : value.slice(0, separator);
       const scopedValue = separator < 0 ? undefined : value.slice(separator + 1);
       if (value.length === 0 || value.length > MAX_APPROVED_SCOPE_KEY_LENGTH || value !== value.trim() || UNSAFE_SCOPE_CHARACTERS.test(value) || prefix !== expectedPrefix || scopedValue === undefined || scopedValue.length === 0) {
-        return invalidDropboxApprovedScope(expectedPrefix);
+        return invalid(expectedPrefix);
       }
       if (scopedValue.startsWith("folder_id:")) {
         return {
           kind: "invalid",
-          message: 'The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form Dropbox scope.'
+          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel} scope.`
         };
       }
       if (!scopedValue.startsWith("/") || scopedValue !== scopedValue.trim() || scopedValue !== "/" && scopedValue.endsWith("/")) {
-        return invalidDropboxApprovedScope(expectedPrefix);
+        return invalid(expectedPrefix);
       }
-      return {
-        kind: "path",
-        accountScope: principal.accountScope,
-        locatorPath: scopedValue
-      };
+      return { kind: "path", accountScope: principal.accountScope, locatorPath: scopedValue };
     }
   });
+}
+var MAX_APPROVED_SCOPE_KEY_LENGTH = 4096, UNSAFE_SCOPE_CHARACTERS;
+var init_locator_path_scope_codec = __esm(() => {
+  UNSAFE_SCOPE_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
+});
+
+// src/workers/dropbox-files/approved-scope-filter.ts
+var DROPBOX_APPROVED_SCOPE_FILTER_CODEC;
+var init_approved_scope_filter = __esm(() => {
+  init_locator_path_scope_codec();
+  DROPBOX_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("Dropbox");
 });
 
 // src/workers/dropbox-files/local-file-resolver.ts
@@ -30138,6 +30182,20 @@ var init_file_scope_sources = __esm(() => {
     rootKeys: ["/"],
     label: "Dropbox",
     dispositionSourceId: "dropbox.personal"
+  });
+  registerBuiltIn({
+    sourceId: "local.files",
+    provider: "local_files",
+    account: "this_computer",
+    corpusIdsToInvalidate: ["secure_local.local.files"],
+    filterFamily: "locator_path",
+    normalizeKey: (key2) => {
+      const trimmed = key2.trim().normalize("NFC");
+      return trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
+    },
+    rootKeys: ["/"],
+    label: "Files on this computer",
+    dispositionSourceId: "local.files"
   });
 });
 
@@ -31755,14 +31813,191 @@ var init_x_bookmarks = __esm(() => {
   init_reconcile_state();
 });
 
-// src/workers/telegram-messages/corpus-adapter.ts
+// src/workers/local-files/paths.ts
 import { homedir as homedir16 } from "node:os";
+function normalizeScopePath(value) {
+  const composed = value.trim().normalize("NFC");
+  if (!composed.startsWith("/") || composed.length > MAX_SCOPE_PATH_LENGTH || UNSAFE_PATH_CHARACTERS.test(composed))
+    throw new Error("A folder key must be an absolute path.");
+  const parts = [];
+  for (const part of composed.split("/")) {
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..")
+      throw new Error('A folder key must not contain "..".');
+    parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+function scopePathFor(path, volumeId) {
+  const normalized = normalizeScopePath(path);
+  if (!volumeId)
+    return normalized;
+  if (!VOLUME_ID_PATTERN.test(volumeId))
+    throw new Error("Volume identity is invalid.");
+  return normalized === "/" ? `/${VOLUME_SEGMENT_PREFIX}${volumeId}` : `/${VOLUME_SEGMENT_PREFIX}${volumeId}${normalized}`;
+}
+function splitScopePath(scopePath) {
+  const normalized = normalizeScopePath(scopePath);
+  const parts = normalized.split("/").filter(Boolean);
+  const first = parts[0];
+  if (first?.startsWith(VOLUME_SEGMENT_PREFIX)) {
+    const volumeId = first.slice(1);
+    if (!VOLUME_ID_PATTERN.test(volumeId))
+      throw new Error("Volume identity is invalid.");
+    return { volumeId, path: `/${parts.slice(1).join("/")}` };
+  }
+  return { path: normalized };
+}
+function isWithinScopePath(path, root) {
+  if (root === "/")
+    return true;
+  return path === root || path.startsWith(`${root}/`);
+}
+function scopeParentPath(path) {
+  if (path === "/")
+    return;
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "/" : path.slice(0, index);
+}
+function defaultExclusionContext(env = process.env) {
+  return { home: homedir16(), syncedRoots: configuredSyncedRoots(env), platform: process.platform };
+}
+function configuredSyncedRoots(env) {
+  const raw = env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON;
+  if (!raw?.trim())
+    return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed))
+      return [];
+    return parsed.flatMap((entry) => {
+      const root = entry;
+      const value = typeof root?.rootPath === "string" ? root.rootPath : typeof root?.root_path === "string" ? root.root_path : undefined;
+      try {
+        return value ? [normalizeScopePath(value)] : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+function defaultExclusionForFolder(scopePath, context2) {
+  const { volumeId, path } = splitScopePath(scopePath);
+  const name = path === "/" ? "" : path.slice(path.lastIndexOf("/") + 1);
+  const lower = name.toLowerCase();
+  if (lower === "")
+    return;
+  if (TRASH_SEGMENTS.has(lower))
+    return "trash";
+  if (VCS_SEGMENTS.has(lower))
+    return "version_control";
+  if (DEPENDENCY_SEGMENTS.has(lower))
+    return "dependencies";
+  if (CACHE_SEGMENTS.has(lower))
+    return "cache";
+  if (lower.endsWith(".app"))
+    return "app_bundle";
+  if (BUILD_SEGMENTS.has(lower))
+    return "build_output";
+  if (volumeId)
+    return;
+  const home = context2.home;
+  const platform2 = context2.platform ?? process.platform;
+  if (platform2 === "darwin" && path === `${home}/Library`)
+    return "system_library";
+  if (platform2 !== "darwin" && path === `${home}/.local/share/Trash`)
+    return "trash";
+  if (path === `${home}/.cache`)
+    return "cache";
+  if (path === `${home}/.olympus` || path === `${home}/.openclaw` || path === `${home}/.local/share/openclaw`)
+    return "olympus_data";
+  if (path === `${home}/Dropbox` || path.startsWith(`${home}/Dropbox (`))
+    return "synced_by_another_source";
+  if (SYNCED_FOLDER_NAMES.has(lower) && scopeParentPath(path) === home)
+    return "synced_by_another_source";
+  if (platform2 === "darwin" && scopeParentPath(path) === `${home}/Library/CloudStorage`) {
+    return "synced_by_another_source";
+  }
+  if ((context2.syncedRoots ?? []).includes(path))
+    return "synced_by_another_source";
+  return;
+}
+var VOLUME_SEGMENT_PREFIX = "@", MAX_SCOPE_PATH_LENGTH = 4096, UNSAFE_PATH_CHARACTERS, VOLUME_ID_PATTERN, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES;
+var init_paths = __esm(() => {
+  UNSAFE_PATH_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
+  VOLUME_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{2,80}$/;
+  DEFAULT_EXCLUSION_LABELS = Object.freeze({
+    system_library: "Application data",
+    trash: "Trash",
+    cache: "Caches",
+    version_control: "Version control",
+    dependencies: "Installed dependencies",
+    build_output: "Build output",
+    app_bundle: "Application",
+    olympus_data: "Olympus's own data",
+    synced_by_another_source: "Already indexed through its own source"
+  });
+  CACHE_SEGMENTS = new Set(["caches", ".cache", ".npm", ".bun", ".yarn", ".pnpm-store", ".gradle", ".m2"]);
+  TRASH_SEGMENTS = new Set([".trash", ".trashes", ".trash-1000"]);
+  VCS_SEGMENTS = new Set([".git", ".hg", ".svn"]);
+  DEPENDENCY_SEGMENTS = new Set(["node_modules", ".venv", "venv", "bower_components", "pods"]);
+  BUILD_SEGMENTS = new Set([
+    "dist",
+    "build",
+    "target",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    "__pycache__",
+    "deriveddata",
+    ".build",
+    ".tox"
+  ]);
+  SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
+});
+
+// src/workers/local-files/scope.ts
+var LOCAL_FILES_SOURCE_ID = "local.files", LOCAL_FILES_PROVIDER = "local_files", LOCAL_FILES_ACCOUNT_SCOPE = "this_computer", LOCAL_FILES_POLICY_SOURCE;
+var init_scope = __esm(() => {
+  init_paths();
+  LOCAL_FILES_POLICY_SOURCE = `${LOCAL_FILES_PROVIDER}.${LOCAL_FILES_ACCOUNT_SCOPE}`;
+});
+
+// src/workers/local-files/store.ts
+var LOCAL_FILES_CORPUS_ID = "secure_local.local.files", LOCAL_FILES_INTERNAL_CORPUS_ID = "internal.local.files", LOCAL_FILES_PUBLIC_CORPUS_ID = "public_safe.local.files", LOCAL_FILES_TIER_CORPUS_IDS, LOCAL_FILES_STORE_PLACEMENT;
+var init_store = __esm(() => {
+  init_linux_engine_layout();
+  init_corpus();
+  init_source_ingestion_exclusions();
+  init_source_ingestion_policy();
+  init_tier_ledger();
+  init_connector_store();
+  init_file_ingestion_matcher();
+  init_tiered_store_set();
+  init_scope();
+  LOCAL_FILES_TIER_CORPUS_IDS = Object.freeze({
+    public_safe: LOCAL_FILES_PUBLIC_CORPUS_ID,
+    internal: LOCAL_FILES_INTERNAL_CORPUS_ID,
+    secure_local: LOCAL_FILES_CORPUS_ID
+  });
+  LOCAL_FILES_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/workers/telegram-messages/corpus-adapter.ts
+import { homedir as homedir17 } from "node:os";
 import { join as join25 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join25(standaloneLinuxDataDir(env) ?? join25(env.HOME?.trim() || homedir16(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
+  return join25(standaloneLinuxDataDir(env) ?? join25(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus"), "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join25(standaloneLinuxDataDir(env) ?? join25(env.HOME?.trim() || homedir16(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
+  return join25(standaloneLinuxDataDir(env) ?? join25(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus"), "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_linux_engine_layout();
@@ -31815,6 +32050,7 @@ var init_status = __esm(() => {
   init_readwise();
   init_x_bookmarks();
   init_dropbox_files();
+  init_store();
   init_telegram_messages();
   init_operation_error();
   init_secret_locations();
@@ -31871,6 +32107,18 @@ var init_public_source_capabilities = __esm(() => {
         capability: "dropbox.files.sync",
         env_flag: "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED"
       }
+    },
+    {
+      source_id: "local.files",
+      label: "Files on this computer",
+      authentication: { type: "none", ownership: "no account: the folders you choose on this computer" },
+      contextual_scopes: ["approved folders and disks (nothing is chosen by default)", "metadata-only or full-extract policy per folder", "system, cache, build and version-control folders off by default"],
+      dependencies: [
+        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
+        { id: "file_watcher", label: "Native file watcher (@parcel/watcher)", required_for: "instant updates; without it folders are re-listed on a timer" }
+      ],
+      provider_ceiling: "Changes are seen as the operating system reports them; a folder the system will not let Olympus read (a permission prompt, an unmounted disk) is skipped and reported.",
+      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"]
     },
     {
       source_id: "x.bookmarks",
@@ -32998,9 +33246,9 @@ var init_local_private_answers = __esm(() => {
   TOKEN_TTL_MS = 30 * 60000;
 });
 
-// src/workers/dropbox-files/open-target.ts
+// src/core/local-open.ts
 var OPENABLE_EXTENSIONS;
-var init_open_target = __esm(() => {
+var init_local_open = __esm(() => {
   OPENABLE_EXTENSIONS = new Set([
     "pdf",
     "txt",
@@ -33043,6 +33291,11 @@ var init_open_target = __esm(() => {
     "m4v",
     "mov"
   ]);
+});
+
+// src/workers/dropbox-files/open-target.ts
+var init_open_target = __esm(() => {
+  init_local_open();
 });
 
 // src/core/linux-desktop-opener.ts
@@ -33826,10 +34079,10 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/store-sync.ts
-import { homedir as homedir17 } from "node:os";
+import { homedir as homedir18 } from "node:os";
 import { join as join29 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join29(env.HOME?.trim() || homedir17(), ".local", "share");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join29(env.HOME?.trim() || homedir18(), ".local", "share");
   return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join29(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
@@ -38695,6 +38948,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_store_sync2();
   init_dropbox_files();
   init_telegram_messages();
+  init_store();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
   corpusPopulations = new WeakMap;
 });
@@ -38709,7 +38963,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash23 } from "node:crypto";
+import { createHash as createHash25 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -38721,7 +38975,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash23("sha256").update(material, "utf8").digest("hex");
+  return createHash25("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -39056,9 +39310,9 @@ init_sovereignty();
 init_secret_store();
 init_worker_auth();
 init_dropbox_files();
-import { createHash as createHash25 } from "node:crypto";
-import { existsSync as existsSync19, lstatSync as lstatSync9, mkdirSync as mkdirSync16, writeFileSync as writeFileSync8 } from "node:fs";
-import { dirname as dirname26, isAbsolute as isAbsolute11 } from "node:path";
+import { createHash as createHash26 } from "node:crypto";
+import { existsSync as existsSync21, lstatSync as lstatSync10, mkdirSync as mkdirSync16, writeFileSync as writeFileSync8 } from "node:fs";
+import { dirname as dirname27, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_vocabulary();
@@ -40024,6 +40278,8 @@ function requireNonEmpty2(value, label) {
 }
 
 // src/workers/email-source/file-extraction-runtime.ts
+init_scope();
+init_store();
 init_drive();
 
 // src/workers/google-connectors/drive-extraction-source.ts
@@ -40251,7 +40507,7 @@ import {
   writeFileSync as writeFileSync7
 } from "node:fs";
 import { randomUUID as randomUUID8 } from "node:crypto";
-import { homedir as homedir18 } from "node:os";
+import { homedir as homedir19 } from "node:os";
 import { dirname as dirname23, isAbsolute as isAbsolute10, join as join30 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
@@ -40260,7 +40516,7 @@ var CACHE_SCHEMA_VERSION = 1;
 var MAX_CATALOG_TIMEOUT_MS = 30000;
 var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir18(), type = "text") {
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir19(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
   const cacheRoot = configuredRoot && isAbsolute10(configuredRoot) ? configuredRoot : join30(homeDir, ".cache");
   return join30(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
@@ -40268,7 +40524,7 @@ function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
   const type = options.type ?? "text";
-  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir18(), type);
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir19(), type);
   const cacheKey = `${cachePath}
 ${type}`;
   const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
@@ -40593,6 +40849,7 @@ init_oauth_relay();
 init_connect();
 init_operation_error();
 init_operation_caller();
+init_store();
 init_ingestion_throughput();
 init_secret_store();
 init_source_corpus_registry();
@@ -40611,6 +40868,51 @@ init_answer_latency_trace();
 init_status();
 init_readwise();
 init_x_bookmarks();
+
+// src/workers/local-files/approved-scope-filter.ts
+init_locator_path_scope_codec();
+var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
+
+// src/workers/local-files/locator-result-projector.ts
+init_scope();
+init_paths();
+import { pathToFileURL as pathToFileURL3 } from "node:url";
+var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
+  create(input) {
+    return Object.freeze({
+      project(candidate) {
+        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
+          return;
+        const locator = locatorFromScopePath(candidate.readLocatorUri());
+        return locator ? { locator } : undefined;
+      }
+    });
+  }
+});
+function locatorFromScopePath(value) {
+  if (!value?.startsWith("/"))
+    return;
+  let split;
+  try {
+    split = splitScopePath(value);
+  } catch {
+    return;
+  }
+  if (split.path === "/")
+    return;
+  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
+  const locator = {
+    display_path: split.path,
+    parent_display_path: parent
+  };
+  if (!split.volumeId) {
+    locator.finder_url = pathToFileURL3(split.path).href;
+    locator.parent_finder_url = pathToFileURL3(parent).href;
+  }
+  return locator;
+}
+
+// src/workers/email-source/index.ts
 init_dropbox_files();
 init_telegram_messages();
 init_embeddings();
@@ -41302,6 +41604,11 @@ var CHAT_TITLE_STOPWORDS = new Set([
   "telegram"
 ]);
 
+// src/core/this-computer.ts
+init_atomic_file();
+init_file_lease();
+init_file_scope_sources();
+
 // src/workers/email-source/index.ts
 init_corpora();
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
@@ -41310,6 +41617,10 @@ var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry
   [{ family: "file", provider: "dropbox" }, {
     approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
     resultProjector: DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC
+  }],
+  [{ family: "file", provider: "local_files" }, {
+    approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC,
+    resultProjector: LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC
   }]
 ]);
 var DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox";
@@ -41383,37 +41694,351 @@ init_x_bookmarks();
 init_dropbox_files();
 init_provider_store_sync();
 init_tier_set();
-init_source_ingestion_exclusions();
-init_telegram_messages();
-init_connector_store();
-init_principal();
+init_scope();
+init_store();
 
-// src/workers/email-source/source-answer-lanes.ts
+// src/workers/local-files/provider-store-sync.ts
 init_embeddings();
-init_connector_store();
-
-// src/workers/email-source/gmail-status-scope.ts
-init_google_connectors();
-
-// src/workers/email-source/server.ts
 init_tiered_store_set();
-init_tier_set2();
-init_tier_set3();
+// src/core/file-mime.ts
+var MIME_BY_EXTENSION = Object.freeze({
+  pdf: "application/pdf",
+  txt: "text/plain",
+  text: "text/plain",
+  md: "text/plain",
+  markdown: "text/plain",
+  log: "text/plain",
+  rst: "text/plain",
+  org: "text/plain",
+  tex: "text/plain",
+  srt: "text/plain",
+  vtt: "text/plain",
+  csv: "text/csv",
+  tsv: "text/tab-separated-values",
+  json: "application/json",
+  yaml: "text/plain",
+  yml: "text/plain",
+  toml: "text/plain",
+  xml: "application/xml",
+  html: "text/html",
+  htm: "text/html",
+  rtf: "application/rtf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  bmp: "image/bmp",
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  wav: "audio/wav",
+  flac: "audio/flac",
+  ogg: "audio/ogg",
+  aac: "audio/aac",
+  mp4: "video/mp4",
+  m4v: "video/x-m4v",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  webm: "video/webm",
+  avi: "video/x-msvideo",
+  mpg: "video/mpeg",
+  mpeg: "video/mpeg",
+  "3gp": "video/3gpp"
+});
+var SOURCE_CODE_EXTENSIONS = new Set([
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "mjs",
+  "cjs",
+  "py",
+  "rb",
+  "go",
+  "rs",
+  "java",
+  "kt",
+  "swift",
+  "c",
+  "h",
+  "cc",
+  "cpp",
+  "hpp",
+  "cs",
+  "php",
+  "sh",
+  "bash",
+  "zsh",
+  "sql",
+  "css",
+  "scss",
+  "lua",
+  "pl",
+  "r",
+  "scala",
+  "ini",
+  "cfg",
+  "conf",
+  "env"
+]);
 
-// src/workers/connector-store/tier-visibility.ts
-init_tier_ledger();
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire2 = createRequire4(import.meta.url);
 
-// src/workers/email-source/server.ts
-init_secret_locations();
-init_credential_broker();
-init_types();
-init_secret_store();
-init_credential_degradation();
+// src/workers/local-files/locations.ts
+init_paths();
+function realPathOfScopePath(volumes, scopePath) {
+  const { volumeId, path } = splitScopePath(scopePath);
+  if (!volumeId)
+    return path;
+  const volume = volumes.mountedVolume(volumeId);
+  if (!volume)
+    return;
+  return path === "/" ? volume.mountPoint : `${volume.mountPoint === "/" ? "" : volume.mountPoint}${path}`;
+}
+function scopePathOfRealPath(volumes, realPath) {
+  const volume = volumes.volumeOf(realPath);
+  if (volume.primary)
+    return scopePathFor(realPath);
+  const inside = realPath === volume.mountPoint ? "/" : realPath.slice(volume.mountPoint.length) || "/";
+  return scopePathFor(inside, volume.id);
+}
+
+// src/workers/local-files/connector.ts
+init_paths();
+init_scope();
+
+// src/workers/local-files/watch-hub.ts
+import { createRequire as createRequire5 } from "node:module";
+import { existsSync as existsSync18, readFileSync as readFileSync17 } from "node:fs";
+import { dirname as dirname24, join as join31 } from "node:path";
+
+class WatchHistoryUnavailableError extends Error {
+  constructor(detail) {
+    super(`watch history unavailable: ${detail}`);
+    this.name = "WatchHistoryUnavailableError";
+  }
+}
+class WatchHub {
+  options;
+  module;
+  unavailable;
+  listeners = new Set;
+  subscriptions = new Map;
+  problems = new Map;
+  directoryCounts = new Map;
+  wanted = [];
+  closed = false;
+  constructor(options = {}) {
+    this.options = options;
+  }
+  subscribeChanges = (wake) => {
+    this.listeners.add(wake);
+    this.reconcile();
+    return () => {
+      this.listeners.delete(wake);
+    };
+  };
+  setRoots(roots) {
+    this.wanted = roots.map((entry) => ({ root: entry.root, ignore: [...entry.ignore ?? []] }));
+    this.reconcile();
+  }
+  noteDirectoryCount(root, directories) {
+    this.directoryCounts.set(root, directories);
+    this.reconcile();
+  }
+  problemsNow() {
+    const out = [...this.problems.values()];
+    if (this.unavailable !== undefined)
+      out.unshift({ kind: "watcher_unavailable", detail: this.unavailable });
+    return out;
+  }
+  rescanOnly() {
+    return this.unavailable !== undefined || this.problems.size > 0;
+  }
+  async available() {
+    try {
+      await this.watcher();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async writeSnapshot(root, snapshotPath, ignore = []) {
+    const watcher = await this.watcherOrHistoryError();
+    await watcher.writeSnapshot(root, snapshotPath, { ignore: [...ignore] });
+  }
+  async eventsSince(root, snapshotPath, ignore = []) {
+    const watcher = await this.watcherOrHistoryError();
+    if (!existsSync18(snapshotPath))
+      throw new WatchHistoryUnavailableError("the snapshot is gone");
+    try {
+      return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
+    } catch (error) {
+      throw new WatchHistoryUnavailableError(error instanceof Error ? error.message : "replay failed");
+    }
+  }
+  async close() {
+    this.closed = true;
+    this.listeners.clear();
+    const live = [...this.subscriptions.values()];
+    this.subscriptions.clear();
+    await Promise.all(live.map((entry) => entry === "pending" ? undefined : entry.unsubscribe().catch(() => {
+      return;
+    })));
+  }
+  async watcherOrHistoryError() {
+    try {
+      return await this.watcher();
+    } catch (error) {
+      throw new WatchHistoryUnavailableError(error instanceof Error ? error.message : "the watcher is not available");
+    }
+  }
+  watcher() {
+    if (!this.module) {
+      this.module = (this.options.load ?? (() => loadParcelWatcher(this.options.nativeModuleDirs)))().catch((error) => {
+        this.unavailable = error instanceof Error ? error.message : "the file watcher could not be loaded";
+        throw error;
+      });
+    }
+    return this.module;
+  }
+  inotifyBudgetExceeded() {
+    if ((this.options.platform ?? process.platform) !== "linux")
+      return;
+    const limit = (this.options.inotifyLimit ?? readInotifyLimit)();
+    if (limit === undefined)
+      return;
+    let wanted = 0;
+    for (const entry of this.wanted)
+      wanted += this.directoryCounts.get(entry.root) ?? 0;
+    return wanted > limit * 0.8 ? { kind: "watch_limit_reached", limit, wanted } : undefined;
+  }
+  async reconcile() {
+    if (this.closed || this.listeners.size === 0)
+      return;
+    let watcher;
+    try {
+      watcher = await this.watcher();
+    } catch {
+      return;
+    }
+    const exceeded = this.inotifyBudgetExceeded();
+    if (exceeded)
+      this.problems.set("limit", exceeded);
+    else
+      this.problems.delete("limit");
+    const wantedRoots = new Set(this.wanted.map((entry) => entry.root));
+    for (const [root, entry] of [...this.subscriptions]) {
+      if (wantedRoots.has(root) && !exceeded)
+        continue;
+      this.subscriptions.delete(root);
+      if (entry !== "pending")
+        await entry.unsubscribe().catch(() => {
+          return;
+        });
+    }
+    if (exceeded)
+      return;
+    for (const { root, ignore } of this.wanted) {
+      if (this.subscriptions.has(root))
+        continue;
+      this.subscriptions.set(root, "pending");
+      try {
+        const subscription = await watcher.subscribe(root, (error, events) => {
+          if (error) {
+            this.problems.set(`failed:${root}`, { kind: "watch_failed", root, detail: error.message });
+            this.wake();
+            return;
+          }
+          if (events.length > 0)
+            this.wake();
+        }, { ignore });
+        if (this.closed || !this.wanted.some((entry) => entry.root === root)) {
+          await subscription.unsubscribe().catch(() => {
+            return;
+          });
+          this.subscriptions.delete(root);
+        } else {
+          this.subscriptions.set(root, subscription);
+          this.problems.delete(`failed:${root}`);
+        }
+      } catch (error) {
+        this.subscriptions.delete(root);
+        this.problems.set(`failed:${root}`, {
+          kind: "watch_failed",
+          root,
+          detail: error instanceof Error ? error.message : "subscribe failed"
+        });
+      }
+    }
+  }
+  wake() {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {}
+    }
+  }
+}
+function readInotifyLimit() {
+  try {
+    const value = Number.parseInt(readFileSync17("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch {
+    return;
+  }
+}
+async function loadParcelWatcher(extraDirs = []) {
+  const specifier = "@parcel/watcher";
+  const failures = [];
+  try {
+    return unwrap(await import(specifier));
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error));
+  }
+  const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
+  for (const dir of dirs) {
+    const candidate = join31(dir, "node_modules");
+    if (!existsSync18(join31(candidate, "@parcel", "watcher")))
+      continue;
+    try {
+      const requireFrom = createRequire5(join31(dirname24(candidate), "package.json"));
+      return unwrap(requireFrom(specifier));
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  throw new Error(`the file watcher could not be loaded (${failures[0] ?? "not installed"})`);
+}
+function unwrap(loaded) {
+  const candidate = loaded?.default ?? loaded;
+  const module = candidate;
+  if (typeof module.subscribe !== "function" || typeof module.writeSnapshot !== "function") {
+    throw new Error("the file watcher module has an unexpected shape");
+  }
+  return module;
+}
+
+// src/workers/local-files/connector.ts
+var LOCAL_FILES_CURSOR_PREFIX = "lf1:";
+var LOCAL_FILES_POLL_CURSOR = `${LOCAL_FILES_CURSOR_PREFIX}poll`;
+
+// src/workers/local-files/provider-store-sync.ts
+init_paths();
+init_scope();
+init_store();
+
+// src/workers/local-files/scheduler-source.ts
 init_embeddings();
-init_embedding_identity();
-init_provider();
-init_assets();
-init_manifest();
 
 // src/workers/source-scheduler.ts
 init_config();
@@ -41421,7 +42046,7 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
-import { createHash as createHash24 } from "node:crypto";
+import { createHash as createHash23 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
@@ -41452,6 +42077,7 @@ var SCHEDULER_SOURCE_IDS = {
   gmail: "gmail.email",
   googleDrive: "google_drive.docs",
   dropbox: DROPBOX_FILES_SOURCE_ID,
+  localFiles: "local.files",
   readwise: "readwise.library",
   xBookmarks: "x.bookmarks",
   telegram: TELEGRAM_MESSAGES_SOURCE_ID,
@@ -42307,12 +42933,13 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash24("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash23("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
   "config_missing_folder_argument",
   "scope_root_missing",
+  "scope_root_permission_needed",
   "credential_missing",
   "credential_reauth_required",
   "credential_refresh_busy",
@@ -42428,7 +43055,15 @@ function safeNormalizeFailureRetryAt(error, completedAt, fallbackRetryAfterMs) {
   }
 }
 var EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused";
-var VERBATIM_SCHEDULER_WARNINGS = new Set([EXTRACTION_JOBS_REFUSED_WARNING]);
+var LOCAL_FILES_SCHEDULER_WARNINGS = [
+  "local_files_unreadable_folders",
+  "local_files_watch_limit_reached",
+  "local_files_live_updates_off"
+];
+var VERBATIM_SCHEDULER_WARNINGS = new Set([
+  EXTRACTION_JOBS_REFUSED_WARNING,
+  ...LOCAL_FILES_SCHEDULER_WARNINGS
+]);
 function untypedFailureMessage(errorKind, error) {
   return errorKind === "task_failed" ? ` error_message=${boundedLogErrorMessage(error)}` : "";
 }
@@ -42458,48 +43093,261 @@ ${source.corpusId}
 ${task.id}`;
 }
 
-// src/workers/email-source/server.ts
-init_source_watch();
-init_source_dashboard();
-init_source_ingestion_ledger();
-init_connected_handles();
+// src/workers/local-files/scheduler-source.ts
+init_paths();
+init_scope();
+var DAY_MS = 24 * 60 * 60 * 1000;
 
-// src/workers/source-scope-runtime.ts
-init_source_scope_approval();
-init_file_scope_sources();
-
-// src/core/this-computer.ts
-init_atomic_file();
-init_file_lease();
-init_file_scope_sources();
-
-// src/workers/source-scope-runtime.ts
-init_connected_handles();
-init_mail_source_scope();
+// src/workers/local-files/open-target.ts
+init_paths();
 
 // src/workers/email-source/server.ts
-init_file_scope_sources();
-init_source_scope_approval();
+init_paths();
+init_source_ingestion_policy();
 
-// src/workers/google-connectors/gmail-scope-browser.ts
-init_mail_source_scope();
-init_gmail();
-init_request_budget();
-var GMAIL_PICKER_DAILY_REQUEST_BUDGET = 4 * GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
-var SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
+// src/workers/local-files/volume-identity.ts
+init_paths();
+import { createHash as createHash24 } from "node:crypto";
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { existsSync as existsSync19, readFileSync as readFileSync18, readdirSync as readdirSync3, realpathSync as realpathSync5 } from "node:fs";
+import { homedir as homedir20 } from "node:os";
+var NETWORK_FS_TYPES = new Set([
+  "nfs",
+  "nfs4",
+  "cifs",
+  "smbfs",
+  "smb3",
+  "afpfs",
+  "webdav",
+  "fuse.sshfs",
+  "sshfs",
+  "ceph",
+  "glusterfs",
+  "9p",
+  "davfs"
+]);
+var IGNORED_FS_TYPES = new Set([
+  "autofs",
+  "devfs",
+  "devtmpfs",
+  "proc",
+  "sysfs",
+  "tmpfs",
+  "cgroup",
+  "cgroup2",
+  "overlay",
+  "squashfs",
+  "fdescfs",
+  "securityfs",
+  "debugfs",
+  "tracefs",
+  "pstore",
+  "bpf",
+  "configfs",
+  "fusectl",
+  "mqueue",
+  "hugetlbfs",
+  "binfmt_misc",
+  "ramfs",
+  "rpc_pipefs",
+  "nsfs",
+  "efivarfs",
+  "autofs",
+  "fuse.portal",
+  "fuse.gvfsd-fuse"
+]);
+var CACHE_TTL_MS = 15000;
 
-// src/workers/source-account-guard.ts
-init_provider_account_identity();
-init_source_account_binding();
-init_connected_handles();
-init_credential_broker();
-var sourceExclusiveRunners = new Map;
+class VolumeResolver {
+  deps;
+  cache;
+  constructor(deps = {}) {
+    this.deps = {
+      ...deps,
+      platform: deps.platform ?? process.platform,
+      home: deps.home ?? homedir20(),
+      now: deps.now ?? Date.now
+    };
+  }
+  volumes() {
+    const now = this.deps.now();
+    if (this.cache && now - this.cache.at < CACHE_TTL_MS)
+      return this.cache.volumes;
+    const volumes = this.scan();
+    this.cache = { at: now, volumes };
+    return volumes;
+  }
+  refresh() {
+    this.cache = undefined;
+  }
+  volumeOf(realPath) {
+    let best;
+    for (const volume of this.volumes()) {
+      if (!isWithinScopePath(realPath, volume.mountPoint))
+        continue;
+      if (!best || volume.mountPoint.length > best.mountPoint.length)
+        best = volume;
+    }
+    return best ?? this.primaryFallback();
+  }
+  mountedVolume(id) {
+    return this.volumes().find((volume) => volume.id === id);
+  }
+  locations() {
+    return this.volumes().filter((volume) => !volume.primary);
+  }
+  primaryFallback() {
+    return { id: "primary", mountPoint: "/", label: "Macintosh HD", kind: "internal", primary: true };
+  }
+  scan() {
+    let raw = [];
+    try {
+      const text2 = this.deps.readMounts ? this.deps.readMounts() : defaultReadMounts(this.deps.platform);
+      raw = this.deps.platform === "darwin" ? parseDarwinMounts(text2) : parseLinuxMountinfo(text2);
+    } catch {
+      raw = [];
+    }
+    const uuids = this.deps.platform === "linux" ? (this.deps.uuidsByDevice ?? defaultUuidsByDevice)() : undefined;
+    const homeMount = this.homeMountPoint(raw);
+    const volumes = [];
+    for (const mount of raw) {
+      if (IGNORED_FS_TYPES.has(mount.fsType) && mount.mountPoint !== "/")
+        continue;
+      if (mount.mountPoint !== "/" && /^\/(proc|sys|dev|run|snap|boot)(\/|$)/.test(mount.mountPoint))
+        continue;
+      if (this.deps.platform === "darwin" && /^\/System\/Volumes\/(?!Data$)/.test(mount.mountPoint))
+        continue;
+      if (this.deps.platform === "darwin" && mount.mountPoint.startsWith("/private/var/"))
+        continue;
+      const network = NETWORK_FS_TYPES.has(mount.fsType);
+      const primary = mount.mountPoint === "/" || mount.mountPoint === "/System/Volumes/Data" || mount.mountPoint === homeMount;
+      const id = primary ? "primary" : this.idFor(mount, network, uuids);
+      if (!id)
+        continue;
+      volumes.push({
+        id,
+        mountPoint: mount.mountPoint,
+        label: labelFor2(mount.mountPoint),
+        kind: network ? "network" : primary ? "internal" : "removable",
+        primary
+      });
+    }
+    if (!volumes.some((volume) => volume.mountPoint === "/"))
+      volumes.push(this.primaryFallback());
+    return volumes;
+  }
+  homeMountPoint(mounts) {
+    let best;
+    for (const mount of mounts) {
+      if (!isWithinScopePath(this.deps.home, mount.mountPoint))
+        continue;
+      if (!best || mount.mountPoint.length > best.mountPoint.length)
+        best = mount;
+    }
+    return best?.mountPoint;
+  }
+  idFor(mount, network, uuids) {
+    if (network)
+      return `net-${shortHash(normalizeNetworkSource(mount.source))}`;
+    if (this.deps.platform === "darwin") {
+      const plist = (this.deps.diskutilPlist ?? defaultDiskutilPlist)(mount.mountPoint);
+      const uuid2 = plist ? plistString(plist, "VolumeUUID") : undefined;
+      if (uuid2)
+        return `mac-${uuid2.toLowerCase()}`;
+      return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+    }
+    const uuid = uuids?.get(mount.source);
+    if (uuid)
+      return `lin-${uuid.toLowerCase()}`;
+    return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+  }
+}
+function labelFor2(mountPoint) {
+  if (mountPoint === "/")
+    return "Macintosh HD";
+  return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
+}
+function shortHash(value) {
+  return createHash24("sha256").update(value).digest("hex").slice(0, 16);
+}
+function normalizeNetworkSource(source) {
+  return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
+}
+function defaultReadMounts(platform2) {
+  if (platform2 === "darwin")
+    return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
+  return readFileSync18("/proc/self/mountinfo", "utf8");
+}
+function defaultDiskutilPlist(mountPoint) {
+  try {
+    return execFileSync2("/usr/sbin/diskutil", ["info", "-plist", mountPoint], {
+      encoding: "utf8",
+      timeout: 8000,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+  } catch {
+    return;
+  }
+}
+function defaultUuidsByDevice() {
+  const result = new Map;
+  const dir = "/dev/disk/by-uuid";
+  try {
+    if (!existsSync19(dir))
+      return result;
+    for (const name of readdirSync3(dir)) {
+      try {
+        result.set(realpathSync5(`${dir}/${name}`), name);
+      } catch {}
+    }
+  } catch {}
+  return result;
+}
+function parseDarwinMounts(text2) {
+  const mounts = [];
+  for (const line of text2.split(`
+`)) {
+    const match = /^(.+?) on (\/.*?) \(([^,)]+)/.exec(line);
+    if (!match)
+      continue;
+    mounts.push({ source: match[1], mountPoint: match[2], fsType: match[3].trim() });
+  }
+  return mounts;
+}
+function parseLinuxMountinfo(text2) {
+  const mounts = [];
+  for (const line of text2.split(`
+`)) {
+    const separator = line.indexOf(" - ");
+    if (separator < 0)
+      continue;
+    const head = line.slice(0, separator).split(" ");
+    const tail = line.slice(separator + 3).split(" ");
+    if (head.length < 6 || tail.length < 2)
+      continue;
+    mounts.push({
+      mountPoint: unescapeMountinfo(head[4]),
+      fsType: tail[0],
+      source: unescapeMountinfo(tail[1])
+    });
+  }
+  return mounts;
+}
+function unescapeMountinfo(value) {
+  return value.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
+}
+function plistString(plist, key2) {
+  const match = new RegExp(`<key>${key2}</key>\\s*<string>([^<]+)</string>`).exec(plist);
+  return match?.[1]?.trim();
+}
 
 // src/workers/email-source/server.ts
-init_provider_account_identity();
-init_request_budget();
-init_gmail();
-init_mail_source_scope();
+init_local_open();
+
+// src/workers/local-files/scope-browser.ts
+import { lstatSync as lstatSync9, readdirSync as readdirSync4, realpathSync as realpathSync6 } from "node:fs";
+import { homedir as homedir21 } from "node:os";
+import { join as join32 } from "node:path";
 
 // src/workers/source-scope-browser.ts
 init_credential_broker();
@@ -42716,8 +43564,193 @@ var browserFactories = new Map([
   })]
 ]);
 var builtInBrowserIds = new Set(browserFactories.keys());
+function registerFileScopeBrowserFactory(sourceId, factory) {
+  if (browserFactories.has(sourceId))
+    throw new Error(`A folder browser is already registered for ${sourceId}.`);
+  browserFactories.set(sourceId, factory);
+}
+
+// src/workers/local-files/scope-browser.ts
+init_paths();
+init_scope();
+var BROWSE_PAGE_SIZE2 = 100;
+function safeRealpath(path) {
+  try {
+    return realpathSync6.native(path);
+  } catch {
+    return path;
+  }
+}
+function ancestorScopePaths(scopePath) {
+  const { volumeId, path } = splitScopePath(scopePath);
+  const parts = path.split("/").filter(Boolean);
+  const out = [];
+  if (volumeId)
+    out.push(scopePathFor("/", volumeId));
+  for (let length = 1;length < parts.length; length += 1) {
+    out.push(scopePathFor(`/${parts.slice(0, length).join("/")}`, volumeId));
+  }
+  return out;
+}
+function createLocalFilesFolderScopeBrowser(options = {}) {
+  const volumes = options.volumes ?? new VolumeResolver;
+  const home = safeRealpath(options.home ?? options.context?.home ?? homedir21());
+  const context2 = options.context ?? { ...defaultExclusionContext(), home };
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
+  const node = (scopePath, name, parentKey) => {
+    const reason = defaultExclusionForFolder(scopePath, context2);
+    return {
+      key: scopePath,
+      ...parentKey !== undefined ? { parent_key: parentKey } : {},
+      name: name.normalize("NFC"),
+      kind: "folder",
+      has_children: true,
+      selectable: true,
+      ...reason ? { excluded_by_default: true, default_exclusion_reason: DEFAULT_EXCLUSION_LABELS[reason] } : {}
+    };
+  };
+  const childFolders = (realPath, parentKey) => {
+    let entries;
+    try {
+      entries = readDirectory(realPath);
+    } catch (error) {
+      const code = error.code;
+      if (code === "EACCES" || code === "EPERM") {
+        throw new Error("Olympus is not allowed to read this folder. Allow it in the computer's privacy settings, then update folders.");
+      }
+      throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
+    }
+    return entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => node(scopePathOfRealPath(volumes, join32(realPath, entry.name)), entry.name, parentKey)).sort((a, b) => {
+      const aHidden = a.name.startsWith(".");
+      const bHidden = b.name.startsWith(".");
+      if (aHidden !== bHidden)
+        return aHidden ? 1 : -1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+  };
+  return {
+    sourceId: LOCAL_FILES_SOURCE_ID,
+    async browse(request) {
+      const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
+      const offsetText = decodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? "", request.cursor);
+      const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
+      if (!Number.isInteger(offset) || offset < 0)
+        throw new Error("Folder browse cursor is invalid.");
+      let all;
+      if (parent === undefined) {
+        volumes.refresh();
+        all = [
+          ...childFolders(home, undefined),
+          ...volumes.locations().map((volume) => ({
+            key: scopePathFor("/", volume.id),
+            name: volume.label,
+            kind: "folder",
+            has_children: true,
+            selectable: true
+          }))
+        ];
+      } else {
+        const real = realPathOfScopePath(volumes, parent);
+        if (!real)
+          throw new Error("That disk is not connected right now.");
+        all = childFolders(real, parent);
+      }
+      const page2 = all.slice(offset, offset + BROWSE_PAGE_SIZE2);
+      const next = offset + BROWSE_PAGE_SIZE2;
+      return {
+        nodes: page2,
+        ...next < all.length ? { nextCursor: encodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? "", String(next)) } : {}
+      };
+    },
+    async validateSelections(selections) {
+      const normalized = selections.map((selection) => ({ ...selection, key: normalizeScopePath(selection.key) }));
+      for (const selection of normalized) {
+        if (selection.key === "/")
+          throw new Error("Whole-computer access requires explicit confirmation.");
+        const real = realPathOfScopePath(volumes, selection.key);
+        if (!real)
+          throw new Error("A selected disk is not connected right now.");
+        let isFolder = false;
+        try {
+          isFolder = lstatSync9(real).isDirectory();
+        } catch {
+          isFolder = false;
+        }
+        if (!isFolder)
+          throw new Error("A selected folder could not be verified. It may have moved.");
+      }
+      return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
+    }
+  };
+}
+registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocalFilesFolderScopeBrowser());
 
 // src/workers/email-source/server.ts
+init_source_ingestion_exclusions();
+init_telegram_messages();
+init_connector_store();
+init_principal();
+
+// src/workers/email-source/source-answer-lanes.ts
+init_embeddings();
+init_connector_store();
+
+// src/workers/email-source/gmail-status-scope.ts
+init_google_connectors();
+
+// src/workers/email-source/server.ts
+init_tiered_store_set();
+init_tier_set2();
+init_tier_set3();
+
+// src/workers/connector-store/tier-visibility.ts
+init_tier_ledger();
+
+// src/workers/email-source/server.ts
+init_secret_locations();
+init_credential_broker();
+init_types();
+init_secret_store();
+init_credential_degradation();
+init_embeddings();
+init_embedding_identity();
+init_provider();
+init_assets();
+init_manifest();
+init_source_watch();
+init_source_dashboard();
+init_source_ingestion_ledger();
+init_connected_handles();
+
+// src/workers/source-scope-runtime.ts
+init_source_scope_approval();
+init_file_scope_sources();
+init_connected_handles();
+init_mail_source_scope();
+
+// src/workers/email-source/server.ts
+init_file_scope_sources();
+init_source_scope_approval();
+
+// src/workers/google-connectors/gmail-scope-browser.ts
+init_mail_source_scope();
+init_gmail();
+init_request_budget();
+var GMAIL_PICKER_DAILY_REQUEST_BUDGET = 4 * GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
+var SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
+
+// src/workers/source-account-guard.ts
+init_provider_account_identity();
+init_source_account_binding();
+init_connected_handles();
+init_credential_broker();
+var sourceExclusiveRunners = new Map;
+
+// src/workers/email-source/server.ts
+init_provider_account_identity();
+init_request_budget();
+init_gmail();
+init_mail_source_scope();
 init_unpaired_sources();
 
 // src/workers/classification/installed-tier-classification.ts
@@ -42804,13 +43837,13 @@ import { Database as Database6 } from "bun:sqlite";
 // src/workers/classification-ledger.ts
 init_linux_engine_layout();
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname24, join as join31 } from "node:path";
+import { dirname as dirname25, join as join33 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname24(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname25(path), { recursive: true, mode: 448 });
   const handle = await open4(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -42932,8 +43965,8 @@ init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
-import { mkdirSync as mkdirSync15, readFileSync as readFileSync17 } from "node:fs";
-import { dirname as dirname25 } from "node:path";
+import { mkdirSync as mkdirSync15, readFileSync as readFileSync19 } from "node:fs";
+import { dirname as dirname26 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -42951,7 +43984,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync17(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync19(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -42971,7 +44004,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync15(dirname25(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync15(dirname26(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -43311,7 +44344,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync18 } from "node:fs";
+import { existsSync as existsSync20 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
@@ -43395,7 +44428,7 @@ class TierSnifferService {
         db = new Database6(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync18(path);
+        const hasQueue = existsSync20(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -43594,11 +44627,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync18(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync20(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync18(own3))
+      if (existsSync20(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -44352,7 +45385,8 @@ function parseOptionalTimeoutSeconds(value, name) {
 var BUILT_IN_MODEL_RETRY_MS = 10 * 60000;
 var CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
-  [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }]
+  [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
+  [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
 ]);
 function firstNonEmptyEnv2(env, names) {
   for (const name of names) {
@@ -44888,7 +45922,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash25("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash26("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -45017,7 +46051,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync19(config.dbPath))
+    if (!config.dbPath || !existsSync21(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
@@ -45343,7 +46377,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash25("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash26("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
@@ -45452,9 +46486,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute11(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname26(readinessPath);
+  const directory = dirname27(readinessPath);
   mkdirSync16(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync9(directory);
+  const parent = lstatSync10(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -45475,7 +46509,7 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync16(dirname26(args.reportPath), { recursive: true });
+      mkdirSync16(dirname27(args.reportPath), { recursive: true });
       writeFileSync8(args.reportPath, `${json}
 `);
     }
@@ -45485,7 +46519,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync16(dirname26(args.reportPath), { recursive: true });
+      mkdirSync16(dirname27(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync8(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

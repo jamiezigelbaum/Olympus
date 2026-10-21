@@ -1,6 +1,8 @@
 # Local files
 
-Status: planned (owner direction 2026-10-21). Not built. Where this page and
+Status: owner direction 2026-10-21. The spine landed in #439. The connector
+(delivery step 2) is built; the signed helper for guarded Mac folders (step 3)
+is not. Where this page and
 the code differ, the code is current.
 
 ## Outcome
