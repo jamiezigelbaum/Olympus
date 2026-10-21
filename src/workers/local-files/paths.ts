@@ -176,17 +176,17 @@ export function defaultExclusionForFolder(
   const platform = context.platform ?? process.platform;
   // macOS volumes ignore case: `~/library` is `~/Library`.
   const fold = (value: string): string => (platform === 'darwin' ? value.toLowerCase() : value);
-  const home = fold(context.home);
   const here = fold(path);
-  if (platform === 'darwin' && here === `${home}/library`) return 'system_library';
-  if (platform !== 'darwin' && here === `${home}/.local/share/trash`) return 'trash';
-  if (here === `${home}/.cache`) return 'cache';
+  const at = (suffix: string): string => fold(`${context.home}${suffix}`);
+  if (platform === 'darwin' && here === at('/Library')) return 'system_library';
+  if (platform !== 'darwin' && here === at('/.local/share/Trash')) return 'trash';
+  if (here === at('/.cache')) return 'cache';
   // Olympus's own stores: reading them back would index the index.
-  if (here === `${home}/.olympus` || here === `${home}/.openclaw` || here === `${home}/.local/share/openclaw`) return 'olympus_data';
-  if (here === `${home}/dropbox` || here.startsWith(`${home}/dropbox (`)) return 'synced_by_another_source';
+  if (here === at('/.olympus') || here === at('/.openclaw') || here === at('/.local/share/openclaw')) return 'olympus_data';
+  if (here === at('/Dropbox') || here.startsWith(at('/Dropbox ('))) return 'synced_by_another_source';
   const parentHere = scopeParentPath(path);
-  if (SYNCED_FOLDER_NAMES.has(lower) && parentHere !== undefined && fold(parentHere) === home) return 'synced_by_another_source';
-  if (platform === 'darwin' && parentHere !== undefined && fold(parentHere) === `${home}/library/cloudstorage`) {
+  if (SYNCED_FOLDER_NAMES.has(lower) && parentHere !== undefined && fold(parentHere) === at('')) return 'synced_by_another_source';
+  if (platform === 'darwin' && parentHere !== undefined && fold(parentHere) === at('/Library/CloudStorage')) {
     return 'synced_by_another_source';
   }
   if ((context.syncedRoots ?? []).some((root) => fold(root) === here)) return 'synced_by_another_source';
