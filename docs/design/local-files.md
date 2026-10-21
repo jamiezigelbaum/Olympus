@@ -35,10 +35,13 @@ Drive share.
 
 | Piece | What it is |
 |---|---|
-| Connector `local.files` | Factory `createLocalFilesSourceConnector(): SourceConnector` (contracts.ts). Lists files under the selected folders, cursor = watcher snapshot. `classificationSignals` gives path and folder keys only. |
-| Bytes | A `FileExtractionSource` that reads from disk. Shares the local-path reading in `dropbox-files/local-file-resolver.ts`, lifted to a shared helper. |
+| Connector `local.files` | Factory `createLocalFilesSourceConnector(): SourceConnector` (contracts.ts). Lists files under the selected folders, cursor = watcher snapshot. `fetchItem` returns the bytes. `classificationSignals` gives path and folder keys only. Deletions and renames come out as tombstones (below). |
+| Bytes | Only through the connector's `fetchItem`, read with the scope-safe reader (below), then passed into the shared extraction machinery. No separate per-source `FileExtractionSource`. If the runner still needs that interface, the spine gains one generic adapter that wraps any connector's `fetchItem`. |
 | Folder picker | A `SourceFolderScopeBrowser` over the filesystem, rooted at the home folder, with mounted volumes listed under Locations. |
 | Open | Reveal in Finder / the Linux file manager. Reuses `localOpenArguments` from `dropbox-files/open-target.ts`, lifted to shared. |
+
+The reader, the tombstone translation and the connector-to-extraction adapter
+are generic spine pieces that any local source can use.
 | Watcher | `@parcel/watcher` (the watcher VS Code uses): FSEvents on Mac, inotify on Linux. |
 
 ### Spine work (generic, lands first)
@@ -57,6 +60,34 @@ Drive share.
    generic way for a source to wake its own sync task when changes arrive,
    with the poll interval kept as the backstop. Any future watched source
    (Apple Notes, Obsidian) uses the same path.
+
+### Scope-safe reading
+
+A symlink, or a file swapped for one between listing and reading, must never
+pull in content from outside the approved folders. No existing helper does
+this: Dropbox's local read relies on Dropbox's content hash, and
+`local-file-resolver.ts` only parses root configuration. The reader is new
+shared code:
+
+- It walks with `lstat` and never follows symlinks. A symlink is indexed by
+  name as a link, never by its target.
+- It opens with no-follow (`O_NOFOLLOW`), then checks the open descriptor:
+  `fstat` device and inode must match what was listed, and the resolved real
+  path must sit inside an approved folder. A mismatch counts as changed, and
+  the item is re-listed rather than read.
+- Hard links and bind mounts that cross an exclude rule get the same
+  containment check.
+
+### Deletions and renames
+
+A deleted path can't be fetched, so watcher replay alone would leave it
+searchable. The connector turns every delete event, and each rename's old
+path, into a `RawItem` with `metadata.deleted === true`. That includes every
+indexed item under a deleted or moved folder, taken from the store rather than
+the event. When the watcher can't vouch for its history (the snapshot is lost,
+or FSEvents reports dropped events or a root change), a full absence
+reconciliation runs. Excluding a folder later removes its content through the
+existing scope enforcement.
 
 ### Instant updates
 
@@ -174,6 +205,9 @@ everything works on Linux.
 - On a real Mac and on the Omarchy laptop: connect without signing in, pick
   folders, search finds the content, and an edit or new file is searchable
   within seconds, including after a restart.
+- Deleting or renaming a file or folder takes the old content out of search
+  within seconds, including changes made while Olympus was stopped.
+- A symlink inside a selected folder that points outside it is never read.
 - The picker behaves like Dropbox and Drive: nothing selected at first, and
   the same three choices.
 - Architecture, public-surface and source-agnostic guards pass with no new

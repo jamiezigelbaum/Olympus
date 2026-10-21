@@ -68,6 +68,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/linux-engine-service.md',
   'docs/design/linux-agents.md',
   'docs/design/linux-parity.md',
+  'docs/design/local-files.md',
   'docs/design/per-item-four-tier-classification.md',
   'docs/design/photo-embeddings.md',
   'docs/design/private-answers.md',
