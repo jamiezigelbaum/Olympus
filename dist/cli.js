@@ -48370,22 +48370,22 @@ function defaultExclusionForFolder(scopePath, context2) {
     return;
   const platform2 = context2.platform ?? process.platform;
   const fold = (value) => platform2 === "darwin" ? value.toLowerCase() : value;
-  const home2 = fold(context2.home);
   const here = fold(path);
-  if (platform2 === "darwin" && here === `${home2}/library`)
+  const at = (suffix) => fold(`${context2.home}${suffix}`);
+  if (platform2 === "darwin" && here === at("/Library"))
     return "system_library";
-  if (platform2 !== "darwin" && here === `${home2}/.local/share/trash`)
+  if (platform2 !== "darwin" && here === at("/.local/share/Trash"))
     return "trash";
-  if (here === `${home2}/.cache`)
+  if (here === at("/.cache"))
     return "cache";
-  if (here === `${home2}/.olympus` || here === `${home2}/.openclaw` || here === `${home2}/.local/share/openclaw`)
+  if (here === at("/.olympus") || here === at("/.openclaw") || here === at("/.local/share/openclaw"))
     return "olympus_data";
-  if (here === `${home2}/dropbox` || here.startsWith(`${home2}/dropbox (`))
+  if (here === at("/Dropbox") || here.startsWith(at("/Dropbox (")))
     return "synced_by_another_source";
   const parentHere = scopeParentPath(path);
-  if (SYNCED_FOLDER_NAMES.has(lower) && parentHere !== undefined && fold(parentHere) === home2)
+  if (SYNCED_FOLDER_NAMES.has(lower) && parentHere !== undefined && fold(parentHere) === at(""))
     return "synced_by_another_source";
-  if (platform2 === "darwin" && parentHere !== undefined && fold(parentHere) === `${home2}/library/cloudstorage`) {
+  if (platform2 === "darwin" && parentHere !== undefined && fold(parentHere) === at("/Library/CloudStorage")) {
     return "synced_by_another_source";
   }
   if ((context2.syncedRoots ?? []).some((root) => fold(root) === here))
