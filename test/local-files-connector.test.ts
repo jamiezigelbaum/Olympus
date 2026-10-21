@@ -347,7 +347,7 @@ describe('local files connector and store sync', () => {
     const real = scopeSafeNativeForTests();
     if (!real) return;
     // Report every regular file as a placeholder, as the Mac does for an iCloud-only file.
-    resetScopeSafeNativeForTests({ ...real, fstatFlags: () => 0x40000000 });
+    resetScopeSafeNativeForTests({ ...real, placeholders: true, fstatFlags: () => 0x40000000 });
     const connector = createLocalFilesSourceConnector({
       connectorId: 'placeholder',
       root: f.proj,

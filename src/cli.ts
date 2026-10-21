@@ -128,6 +128,7 @@ import {
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
+import { readThisComputerHandles } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
 import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
@@ -2640,6 +2641,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           sourceId,
           dryRun: options.dryRun,
           connectedRegistry: readConnectedHandleRegistry(registryPath),
+          thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
           workerState,
           engineLoaded,
         })

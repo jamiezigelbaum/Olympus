@@ -740,6 +740,8 @@ export function deleteOlympusDataWithCustody(options: {
   sourceId?: string;
   dryRun?: boolean;
   connectedRegistry?: ConnectedHandleRegistry;
+  /** Source ids connected on this computer without a credential (see core/this-computer.ts). */
+  thisComputerSources?: readonly string[];
   workerState?: WorkerServiceState;
   /** A remote-access relay child is running (it would recreate its keys and keep forwarding). */
   relayRunning?: boolean;
@@ -773,6 +775,7 @@ export function dataDeleteCustody(options: {
   all?: boolean;
   sourceId?: string;
   connectedRegistry?: ConnectedHandleRegistry;
+  thisComputerSources?: readonly string[];
   workerState?: WorkerServiceState;
   relayRunning?: boolean;
   engineLoaded?: boolean;
@@ -801,9 +804,10 @@ export function dataDeleteCustody(options: {
     }
     const lane = publicCapability.doctor_lane;
     // A source with no credential has no handle to disconnect: its folders are
-    // simply no longer read once Disconnect is pressed, which writes nothing here.
-    const connected = lane !== undefined
-      && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider);
+    // is connected in the this-computer record instead, which is checked here.
+    const connected = (lane !== undefined
+      && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider))
+      || (options.thisComputerSources?.includes(source!.sourceId) ?? false);
     return connected
       ? {
           requirement: 'source_disconnected',

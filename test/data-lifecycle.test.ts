@@ -625,3 +625,28 @@ function createMarkedSqliteStore(path: string, storeId: string): void {
     db.close();
   }
 }
+
+describe('a source with no credential', () => {
+  test('local files cannot be deleted while connected in the this-computer record', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-this-computer-'));
+    const homeDir = join(dir, 'home');
+    try {
+      const source = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'local.files')!;
+      const dbPath = source.connectorStorePaths!({ homeDir })[0]!;
+      mkdirSync(dirname(dbPath), { recursive: true });
+      writeFileSync(dbPath, 'local');
+      const connectedRegistry = { version: 1 as const, handles: [] };
+      expect(() => deleteOlympusDataWithCustody({
+        sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: ['local.files'],
+      })).toThrow('Disconnect local.files');
+      expect(existsSync(dbPath)).toBe(true);
+      const deleted = deleteOlympusDataWithCustody({
+        sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: [],
+      });
+      expect(deleted.custody).toMatchObject({ ready: true, observed: 'disconnected' });
+      expect(existsSync(dbPath)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

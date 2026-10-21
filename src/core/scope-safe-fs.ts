@@ -82,6 +82,8 @@ interface Native {
   closedir(dir: number | bigint): void;
   fstatFlags(fd: number): number | undefined;
   lastErrno(): number;
+  /** True where a listing can name a placeholder (a file kept only in the cloud); needs a descriptor to tell. */
+  placeholders: boolean;
 }
 
 const ERRNO = {
@@ -148,6 +150,7 @@ function loadNative(): Native | null {
     const cloexec = darwin ? O_CLOEXEC_DARWIN : O_CLOEXEC_LINUX;
     const native: Native = {
       lastErrno: errno,
+      placeholders: darwin,
       openat(dirfd, name, flags) {
         const nameBuffer = cstr(name);
         const result = s.openat!(dirfd, ptr(nameBuffer), flags | cloexec) as number;
@@ -415,7 +418,7 @@ export class ScopeRoot {
   statEntry(relPath: string): ScopeStat {
     this.assertOpen();
     splitRelative(relPath);
-    if (process.platform === 'darwin') {
+    if (this.native.placeholders) {
       try {
         return this.statRelative(relPath);
       } catch (error) {

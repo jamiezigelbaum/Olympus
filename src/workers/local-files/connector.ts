@@ -131,6 +131,8 @@ export interface LocalFilesConnectorOptions {
   watch?: LocalFilesWatch;
   maxFetchBytes?: number;
   pageSize?: number;
+  /** Test seam: how many indexed items under a deleted folder one lookup returns. */
+  deletedDescendantBatch?: number;
   now?: () => Date;
   onWalk?: (stats: LocalFilesWalkStats) => void;
 }
@@ -204,6 +206,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
   const now = options.now ?? (() => new Date());
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   const maxFetchBytes = options.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES;
+  const batchSize = options.deletedDescendantBatch ?? DELETED_DESCENDANT_BATCH;
 
   const resolveRoot = (): { real: string; walkRoot: ScopeRoot } => {
     const configured = realPathOfScopePath(options.volumes, root);
@@ -311,7 +314,10 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           provider: LOCAL_FILES_PROVIDER,
           accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
           locatorUri: scopePath,
-          limit: DELETED_DESCENDANT_BATCH,
+          // The store lists in a fixed order and does not know what this pass
+          // already collected (nothing is committed yet), so each round asks
+          // for a longer prefix of the same list and keeps only the new rows.
+          limit: batchSize * (batch + 1),
         });
         let fresh = 0;
         for (const descendant of found) {
@@ -323,7 +329,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
         // The store lists only items still active. A batch that brought
         // nothing new means the earlier ones are not committed yet: the next
         // pass finds the rest.
-        if (fresh === 0 || found.length < DELETED_DESCENDANT_BATCH) break;
+        if (fresh === 0 || found.length < batchSize * (batch + 1)) break;
       }
     }
     return items;
@@ -475,8 +481,10 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
   ): AsyncGenerator<RawItem> {
     const latest = new Map<string, WatchEvent['type']>();
     for (const event of events) {
-      if (!event.path.startsWith(`${real}/`)) continue;
-      latest.set(event.path.slice(real.length + 1), event.type);
+      // The whole computer is `/`; every other root is a path without a trailing slash.
+      const prefix = real === '/' ? '/' : `${real}/`;
+      if (!event.path.startsWith(prefix)) continue;
+      latest.set(event.path.slice(prefix.length), event.type);
       if (latest.size > MAX_EVENT_PATHS) throw new LocalFilesHistoryResetError('too many changes to replay');
     }
     // Parents before children, so a created folder is walked once.

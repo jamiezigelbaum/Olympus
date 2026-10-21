@@ -4,7 +4,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, readdirSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import { resetScopeSafeNativeForTests, scopeSafeNativeForTests } from '../src/co
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { defaultLocalFilesIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { createLocalFilesSourceConnector, localFilesItemId } from '../src/workers/local-files/connector.ts';
+import { LOCAL_FILES_CURSOR_PREFIX, createLocalFilesSourceConnector, localFilesItemId } from '../src/workers/local-files/connector.ts';
 import {
   defaultExclusionContext,
   defaultExclusionForFolder,
@@ -34,7 +34,7 @@ import {
   createLocalFilesConnectorStore,
 } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
-import { WatchHub, ignoreGlobsForRoot, watchIgnoreGlobs } from '../src/workers/local-files/watch-hub.ts';
+import { WatchHub, ignoreGlobsForRoot, watchIgnoreGlobs, type ParcelWatcherModule, type WatchEvent } from '../src/workers/local-files/watch-hub.ts';
 
 type Selection = { key: string; state: 'ingest' | 'metadata_only' | 'exclude' };
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -228,5 +228,74 @@ describe('paths are canonical', () => {
     });
     const read = await connector.fetchItemWithin(row.sourceItem.localItemId, {});
     expect(read.content.kind === 'bytes' ? Buffer.from(read.content.bytes).toString() : '').toBe('espresso');
+  });
+});
+
+describe('replay', () => {
+  /** A watcher module that reports fixed events and writes empty snapshot files. */
+  const fakeHub = (events: (dir: string) => WatchEvent[]): WatchHub => new WatchHub({
+    load: async (): Promise<ParcelWatcherModule> => ({
+      subscribe: async () => ({ unsubscribe: async () => undefined }),
+      writeSnapshot: async (_dir, snapshotPath) => { writeFileSync(snapshotPath, 'snap'); return snapshotPath; },
+      getEventsSince: async (dir) => events(dir),
+    }),
+  });
+
+  async function replay(options: {
+    f: ReturnType<typeof fixture>;
+    root: string;
+    hub: WatchHub;
+    store?: Parameters<typeof createLocalFilesSourceConnector>[0]['store'];
+    deletedDescendantBatch?: number;
+  }) {
+    writeFileSync(join(options.f.base, 'watch', 'rp.prior.snap'), 'snap');
+    const connector = createLocalFilesSourceConnector({
+      connectorId: 'rp',
+      root: options.root,
+      scope: options.f.scope,
+      volumes: options.f.volumes,
+      ...(options.store ? { store: options.store } : {}),
+      ...(options.deletedDescendantBatch ? { deletedDescendantBatch: options.deletedDescendantBatch } : {}),
+      watch: { hub: options.hub, snapshotDir: join(options.f.base, 'watch') },
+    });
+    const items = [];
+    for await (const page of connector.listItems({ cursor: `${LOCAL_FILES_CURSOR_PREFIX}prior` })) items.push(...page.items);
+    return items;
+  }
+
+  test('a watcher event is not dropped when the whole computer is the root', async () => {
+    const f = fixture((home) => join(home, 'proj'));
+    writeFileSync(join(f.chosen, 'fresh.txt'), 'new');
+    const hub = fakeHub(() => [{ type: 'create', path: join(f.chosen, 'fresh.txt') }]);
+    cleanups.push(() => hub.close());
+    const items = await replay({ f, root: '/', hub });
+    expect(items.map((item) => item.metadata['name'])).toEqual(['fresh.txt']);
+  });
+
+  test('a deleted folder with more indexed files than one lookup returns loses all of them', async () => {
+    const f = fixture((home) => join(home, 'proj'));
+    const gone = join(f.chosen, 'gone');
+    const rows = Array.from({ length: 7 }, (_, index) => {
+      const locatorUri = `${gone}/file-${index}.txt`;
+      const providerItemId = localFilesItemId(locatorUri);
+      return {
+        identity: {
+          family: 'file' as const, provider: 'local_files', accountScope: 'this_computer',
+          providerItemId, localItemId: `this_computer:${providerItemId}`,
+        },
+        locatorUri,
+      };
+    });
+    // Like the real store: the same leading rows every time, because nothing is committed yet.
+    const store = {
+      activeIdentityForLocatorIfIndexed: () => undefined,
+      activeItemsUnderLocatorIfIndexed: (input: { limit: number }) => rows.slice(0, input.limit),
+    };
+    const hub = fakeHub(() => [{ type: 'delete', path: gone }]);
+    cleanups.push(() => hub.close());
+    const items = await replay({ f, root: f.chosen, hub, store, deletedDescendantBatch: 3 });
+    expect(items.filter((item) => item.metadata['deleted'] === true).length).toBe(7);
+    expect(new Set(items.map((item) => item.identity.providerItemId)).size).toBe(7);
+    expect(readdirSync(join(f.base, 'watch')).length).toBeGreaterThan(0);
   });
 });
