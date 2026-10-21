@@ -569,7 +569,8 @@ export const SCOPE_UI_META_KEY = 'olympus/scope';
 
 /** Sources a person can connect from ChatGPT with Olympus's own (publisher) apps. */
 export type ChatGptOAuthSource = 'gmail' | 'google-drive' | 'dropbox';
-export type ChatGptFolderSourceId = 'google_drive.docs' | 'dropbox.files';
+/** A registered folder-scoped file source (`core/file-scope-sources.ts`); the registry validates it. */
+export type ChatGptFolderSourceId = string;
 export type ChatGptMailSourceId = 'gmail.email';
 export type ChatGptScopeSourceId = ChatGptFolderSourceId | ChatGptMailSourceId;
 export type ChatGptDisconnectSourceId =

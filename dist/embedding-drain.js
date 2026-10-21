@@ -9402,10 +9402,270 @@ var init_credential_broker = __esm(() => {
   REFRESH_TOKEN_REJECTED_DETAIL = /(?:value passed for the (?:refresh )?token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
 });
 // src/workers/dropbox-files/provider-client.ts
-var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
+class DropboxApiMetadataClient {
+  supportsNativeRecursive = true;
+  token;
+  fetchImpl;
+  baseUrl;
+  maxRetries;
+  sleep;
+  requestTimeoutMs;
+  constructor(options) {
+    this.token = required(options.token, "Dropbox metadata token");
+    this.fetchImpl = options.fetch ?? fetch;
+    this.baseUrl = options.baseUrl?.replace(/\/+$/, "") || "https://api.dropboxapi.com/2";
+    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_METADATA_REQUEST_TIMEOUT_MS;
+  }
+  async listFolder(request) {
+    return this.postMetadataPage("/files/list_folder", {
+      path: request.path,
+      recursive: request.recursive,
+      limit: request.limit,
+      include_deleted: request.includeDeleted === true,
+      include_has_explicit_shared_members: false
+    });
+  }
+  async listFolderContinue(request) {
+    return this.postMetadataPage("/files/list_folder/continue", { cursor: request.cursor });
+  }
+  async postMetadataPage(path, body) {
+    const response = await this.send(path, body);
+    const text2 = await response.text();
+    return metadataPageFromDropboxJson(parseJsonObject2(text2, "Dropbox metadata API"));
+  }
+  async send(path, body) {
+    let attempt = 0;
+    while (true) {
+      const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      }, this.requestTimeoutMs);
+      if (response.ok)
+        return response;
+      const detail = await response.text().catch(() => "");
+      const error = dropboxMetadataError(response, detail);
+      if (isRetryableDropboxError(error) && attempt < this.maxRetries) {
+        attempt += 1;
+        await this.sleep(dropboxRetryDelayMs(error, attempt));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+function dropboxMetadataError(response, detail) {
+  const tag = dropboxErrorTag(detail);
+  if (response.status === 409 && tag === "path") {
+    let parsed;
+    try {
+      parsed = JSON.parse(detail);
+    } catch {}
+    if (parsed?.error?.[".tag"] === "path" && parsed.error.path?.[".tag"] === "not_found") {
+      return new DropboxPathNotFoundError;
+    }
+  }
+  if (tag === "reset" && response.status >= 400 && response.status < 500) {
+    return new DropboxCursorResetError(response.status);
+  }
+  if (response.status === 429) {
+    const retryAfterMs = dropboxRetryAfterMs(response);
+    return new DropboxRateLimitError({
+      status: response.status,
+      ...retryAfterMs !== undefined ? { retryAfterMs } : {},
+      ...tag ? { tag } : {}
+    });
+  }
+  return new DropboxApiError(`Dropbox metadata API request failed (${response.status}${tag ? `/${tag}` : ""}).`, response.status, tag);
+}
+function isRetryableDropboxError(error) {
+  return error.status === 429 || error.status >= 500 && error.status < 600;
+}
+function dropboxRetryDelayMs(error, attempt) {
+  const declared = error instanceof DropboxRateLimitError ? error.retryAfterMs : undefined;
+  if (declared !== undefined)
+    return Math.min(declared, MAX_DROPBOX_RETRY_DELAY_MS);
+  return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
+}
+function dropboxRetryAfterMs(response) {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (!retryAfter)
+    return;
+  const seconds = Number.parseFloat(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0)
+    return seconds * 1000;
+  const dateMs = Date.parse(retryAfter);
+  if (Number.isFinite(dateMs))
+    return Math.max(0, dateMs - Date.now());
+  return;
+}
+function dropboxErrorTag(detail) {
+  let parsed;
+  try {
+    parsed = JSON.parse(detail);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return;
+  const record = parsed;
+  const error = record.error;
+  const nested = error && typeof error === "object" && !Array.isArray(error) ? error[".tag"] : undefined;
+  const summary = typeof record.error_summary === "string" ? record.error_summary.split("/")[0] : undefined;
+  return boundedErrorTag(nested) ?? boundedErrorTag(summary);
+}
+function boundedErrorTag(value) {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : undefined;
+}
+function metadataPageFromDropboxJson(payload2) {
+  if (!Array.isArray(payload2.entries)) {
+    throw new Error("Dropbox metadata API page did not include entries.");
+  }
+  return {
+    entries: payload2.entries.map(metadataEntryFromDropboxJson).filter((entry) => entry !== undefined),
+    ...typeof payload2.cursor === "string" && payload2.cursor.trim() ? { cursor: payload2.cursor.trim() } : {},
+    hasMore: payload2.has_more === true
+  };
+}
+function metadataEntryFromDropboxJson(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return;
+  const record = value;
+  const tag = normalizedTag(stringValue(record[".tag"]) ?? stringValue(record.tag));
+  const name = stringValue(record.name) ?? "";
+  const pathDisplay = stringValue(record.path_display) ?? stringValue(record.pathDisplay);
+  const pathLower = stringValue(record.path_lower) ?? stringValue(record.pathLower);
+  if (tag === "deleted") {
+    const id2 = stringValue(record.id);
+    return {
+      tag,
+      name,
+      ...pathDisplay ? { pathDisplay } : {},
+      ...pathLower ? { pathLower } : {},
+      ...id2 ? { id: id2 } : {}
+    };
+  }
+  const id = stringValue(record.id);
+  if (!id || tag !== "file" && tag !== "folder")
+    return;
+  const sharingInfo = sharingInfoFromDropboxJson(record);
+  if (tag === "folder") {
+    return {
+      tag,
+      id,
+      name,
+      ...pathDisplay ? { pathDisplay } : {},
+      ...pathLower ? { pathLower } : {},
+      ...sharingInfo ? { sharingInfo } : {}
+    };
+  }
+  const size = numberValue(record.size);
+  const rev = stringValue(record.rev);
+  const contentHash = stringValue(record.content_hash) ?? stringValue(record.contentHash);
+  const clientModified = stringValue(record.client_modified) ?? stringValue(record.clientModified);
+  const serverModified = stringValue(record.server_modified) ?? stringValue(record.serverModified);
+  const mimeType = stringValue(record.mime_type) ?? stringValue(record.mimeType);
+  return {
+    tag,
+    id,
+    name,
+    ...pathDisplay ? { pathDisplay } : {},
+    ...pathLower ? { pathLower } : {},
+    ...rev ? { rev } : {},
+    ...contentHash ? { contentHash } : {},
+    ...size !== undefined ? { size } : {},
+    ...clientModified ? { clientModified } : {},
+    ...serverModified ? { serverModified } : {},
+    ...mimeType ? { mimeType } : {},
+    ...sharingInfo ? { sharingInfo } : {}
+  };
+}
+function sharingInfoFromDropboxJson(record) {
+  const value = record.sharing_info ?? record.sharingInfo;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return;
+  const sharing = value;
+  const sharedFolderId = stringValue(sharing.shared_folder_id) ?? stringValue(sharing.sharedFolderId);
+  const parentSharedFolderId = stringValue(sharing.parent_shared_folder_id) ?? stringValue(sharing.parentSharedFolderId);
+  const namespaceId = stringValue(sharing.namespace_id) ?? stringValue(sharing.namespaceId);
+  if (Object.keys(sharing).length === 0)
+    return;
+  return {
+    ...sharedFolderId ? { sharedFolderId } : {},
+    ...parentSharedFolderId ? { parentSharedFolderId } : {},
+    ...namespaceId ? { namespaceId } : {}
+  };
+}
+function normalizedTag(value) {
+  return value === "file" || value === "folder" || value === "deleted" ? value : undefined;
+}
+function stringValue(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function numberValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+function parseJsonObject2(text2, label) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text2);
+  } catch {
+    throw new Error(`${label} returned invalid JSON.`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} returned a non-object JSON payload.`);
+  }
+  return parsed;
+}
+function required(value, label) {
+  const normalized = value.trim();
+  if (!normalized)
+    throw new Error(`${label} is required.`);
+  return normalized;
+}
+var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60000, DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS, DropboxApiError, DropboxPathNotFoundError, DropboxCursorResetError, DropboxRateLimitError;
 var init_provider_client = __esm(() => {
   init_http_timeout();
   DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+  DropboxApiError = class DropboxApiError extends Error {
+    status;
+    tag;
+    constructor(message2, status, tag) {
+      super(message2);
+      this.name = "DropboxApiError";
+      this.status = status;
+      this.tag = tag;
+    }
+  };
+  DropboxPathNotFoundError = class DropboxPathNotFoundError extends DropboxApiError {
+    kind = "dropbox_path_not_found";
+    constructor() {
+      super("Dropbox metadata path was not found (409/path/not_found).", 409, "path");
+      this.name = "DropboxPathNotFoundError";
+    }
+  };
+  DropboxCursorResetError = class DropboxCursorResetError extends DropboxApiError {
+    kind = "dropbox_cursor_reset";
+    constructor(status = 409) {
+      super(`Dropbox metadata cursor was reset by the provider (${status}/reset); the traversal must restart.`, status, "reset");
+      this.name = "DropboxCursorResetError";
+    }
+  };
+  DropboxRateLimitError = class DropboxRateLimitError extends DropboxApiError {
+    kind = "dropbox_rate_limited";
+    retryAfterMs;
+    constructor(options = {}) {
+      const status = options.status ?? 429;
+      super(`Dropbox metadata API rate limited (${status})` + (options.retryAfterMs !== undefined ? `; retry after ${Math.ceil(options.retryAfterMs / 1000)}s.` : "."), status, options.tag);
+      this.name = "DropboxRateLimitError";
+      this.retryAfterMs = options.retryAfterMs;
+    }
+  };
 });
 
 // src/workers/dropbox-files/connector.ts
@@ -25451,7 +25711,7 @@ var init_local_index = __esm(() => {
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
     `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, fetchLimit);
-      const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
+      const required2 = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
       let selected = rows;
       const matchedGroups = new Map;
       const matchedGroupIndexes = new Map;
@@ -25472,7 +25732,7 @@ var init_local_index = __esm(() => {
             matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
           }
         }
-        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required2;
         const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
         selected = rows.filter((row) => {
           if (enough(row))
@@ -29825,10 +30085,67 @@ function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
 
+// src/core/file-scope-sources.ts
+function registerFileScopeSource(definition) {
+  const { sourceId, provider } = definition;
+  if (!sourceId || !provider)
+    throw new Error("A file-scope source needs a source id and a provider.");
+  if (definition.account === "provider_account" && !definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to a provider account and needs a credential capability.`);
+  }
+  if (definition.account === "this_computer" && definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to this computer and must not name a credential capability.`);
+  }
+  if (definitions.has(sourceId))
+    throw new Error(`File-scope source ${sourceId} is already registered.`);
+  for (const other of definitions.values()) {
+    if (other.provider === provider) {
+      throw new Error(`File-scope provider ${provider} is already registered by ${other.sourceId}.`);
+    }
+  }
+  definitions.set(sourceId, definition);
+}
+function registerBuiltIn(definition) {
+  registerFileScopeSource(definition);
+  builtInIds.add(definition.sourceId);
+}
+var definitions, builtInIds;
+var init_file_scope_sources = __esm(() => {
+  definitions = new Map;
+  builtInIds = new Set;
+  registerBuiltIn({
+    sourceId: "google_drive.docs",
+    provider: "google_drive",
+    account: "provider_account",
+    credentialCapability: "google_drive.docs.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["internal.drive.docs", "secure_local.drive.docs"],
+    filterFamily: "folder_id",
+    normalizeKey: (key2) => key2.trim(),
+    rootKeys: ["/", "root"],
+    label: "Google Drive",
+    dispositionSourceId: "google_drive.personal"
+  });
+  registerBuiltIn({
+    sourceId: "dropbox.files",
+    provider: "dropbox",
+    account: "provider_account",
+    credentialCapability: "dropbox.files.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["secure_local.dropbox.files"],
+    filterFamily: "locator_path",
+    normalizeKey: (key2) => key2.trim().toLowerCase(),
+    rootKeys: ["/"],
+    label: "Dropbox",
+    dispositionSourceId: "dropbox.personal"
+  });
+});
+
 // src/core/source-scope-approval.ts
 var init_source_scope_approval = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_file_scope_sources();
   init_operation_error();
 });
 
@@ -30352,8 +30669,8 @@ class RestGmailApiClient {
     const record = asRecord6(json, "Gmail messages list response");
     return {
       messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord6(item, "Gmail message list item")).map((item) => ({
-        id: stringValue(item.id),
-        threadId: stringValue(item.threadId)
+        id: stringValue2(item.id),
+        threadId: stringValue2(item.threadId)
       })).filter((item) => item.id) : [],
       ...optionalStringProp(record, "nextPageToken"),
       ...typeof record.resultSizeEstimate === "number" && Number.isFinite(record.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) } : {}
@@ -30417,8 +30734,8 @@ function gmailRetryDelayMs(response, attempt) {
 function gmailLabelFromJson(record) {
   const type = record.type === "system" || record.type === "user" ? record.type : undefined;
   return {
-    id: stringValue(record.id),
-    name: stringValue(record.name),
+    id: stringValue2(record.id),
+    name: stringValue2(record.name),
     ...type ? { type } : {},
     ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
   };
@@ -30570,11 +30887,11 @@ function asRecord6(value, label) {
   }
   return value;
 }
-function stringValue(value) {
+function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
 function optionalStringProp(record, key2) {
-  const value = stringValue(record[key2]).trim();
+  const value = stringValue2(record[key2]).trim();
   return value ? { [key2]: value } : {};
 }
 function safeProviderDetail(value) {
@@ -31114,7 +31431,7 @@ function driveRetryDelayMs(response, attempt) {
 }
 function normalizeDriveFile(record) {
   return {
-    id: stringValue2(record.id),
+    id: stringValue3(record.id),
     ...optionalStringProp2(record, "name"),
     ...optionalStringProp2(record, "mimeType"),
     ...optionalStringProp2(record, "createdTime"),
@@ -31124,7 +31441,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "webViewLink"),
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
-    ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
+    ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue3).filter(Boolean) } : {},
     ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord7(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
@@ -31159,11 +31476,11 @@ function asRecord7(value, label) {
   }
   return value;
 }
-function stringValue2(value) {
+function stringValue3(value) {
   return typeof value === "string" ? value : "";
 }
 function optionalStringProp2(record, key2) {
-  const value = stringValue2(record[key2]).trim();
+  const value = stringValue3(record[key2]).trim();
   return value ? { [key2]: value } : {};
 }
 function safeProviderDetail2(value) {
@@ -40254,6 +40571,7 @@ init_model_transport();
 init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
+init_source_scope_approval();
 init_release_manifest();
 init_google_handle_compatibility();
 
@@ -41139,6 +41457,7 @@ var SCHEDULER_SOURCE_IDS = {
   telegram: TELEGRAM_MESSAGES_SOURCE_ID,
   whatsapp: WHATSAPP_PERSONAL_SOURCE_ID
 };
+var SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500;
 class SourceSchedulerTaskFailure extends Error {
   errorKind;
   warnings;
@@ -41179,6 +41498,8 @@ class SourceScheduler {
   setTimeoutImpl;
   clearTimeoutImpl;
   continueWake;
+  changeDebounceMs;
+  changeWakes = new Map;
   constructor(options) {
     this.enabled = options.enabled;
     this.tickMs = options.tickMs;
@@ -41196,6 +41517,7 @@ class SourceScheduler {
     this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
     this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
+    this.changeDebounceMs = options.changeDebounceMs ?? SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS;
     const firstRun = this.now().getTime();
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => this.createTaskState(source, task, firstRun)));
   }
@@ -41214,6 +41536,7 @@ class SourceScheduler {
     }));
     if (this.timer)
       this.refreshFastWakeTimers();
+    this.syncChangeSubscriptions();
   }
   filterAllowedSources(sources) {
     if (this.allowedSourceIds === undefined)
@@ -41230,6 +41553,7 @@ class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    this.syncChangeSubscriptions();
     for (const state of this.states) {
       try {
         state.task.atStart?.();
@@ -41238,6 +41562,7 @@ class SourceScheduler {
     this.runDueTasks();
   }
   stop() {
+    this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
       this.timer = undefined;
@@ -41249,6 +41574,76 @@ class SourceScheduler {
       this.clearTimeoutImpl(this.continueWake.timer);
       this.continueWake = undefined;
     }
+  }
+  syncChangeSubscriptions() {
+    if (!this.timer)
+      return;
+    const wanted = new Map(this.sources.filter((source) => source.subscribeChanges !== undefined).map((source) => [source.sourceId, source]));
+    this.closeChangeSubscriptions((sourceId, entry) => wanted.get(sourceId)?.subscribeChanges !== entry.subscribe);
+    for (const [sourceId, source] of wanted) {
+      if (this.changeWakes.has(sourceId))
+        continue;
+      const entry = {
+        subscribe: source.subscribeChanges,
+        unsubscribe: () => {},
+        closed: false
+      };
+      try {
+        entry.unsubscribe = source.subscribeChanges(() => this.signalChange(sourceId, entry));
+      } catch {
+        entry.closed = true;
+        if (entry.timer)
+          this.clearTimeoutImpl(entry.timer);
+        delete entry.timer;
+        continue;
+      }
+      this.changeWakes.set(sourceId, entry);
+    }
+  }
+  closeChangeSubscriptions(predicate) {
+    for (const [sourceId, entry] of [...this.changeWakes]) {
+      if (!predicate(sourceId, entry))
+        continue;
+      entry.closed = true;
+      if (entry.timer)
+        this.clearTimeoutImpl(entry.timer);
+      delete entry.timer;
+      try {
+        entry.unsubscribe();
+      } catch {}
+      this.changeWakes.delete(sourceId);
+    }
+  }
+  signalChange(sourceId, entry) {
+    if (entry.closed || entry.timer)
+      return;
+    const timer = this.setTimeoutImpl(() => {
+      delete entry.timer;
+      this.runChangeWake(sourceId, entry);
+    }, this.changeDebounceMs);
+    timer.unref?.();
+    entry.timer = timer;
+  }
+  runChangeWake(sourceId, entry) {
+    if (entry.closed)
+      return;
+    const at = this.now().getTime();
+    let woke = false;
+    for (const state of this.states) {
+      if (state.source.sourceId !== sourceId || state.consecutiveFailures > 0)
+        continue;
+      if (taskCadence(state.source, state.task) !== "continuous")
+        continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        continue;
+      }
+      if (state.nextRunAt > at)
+        state.nextRunAt = at;
+      woke = true;
+    }
+    if (woke)
+      this.runDueTasks();
   }
   scheduleContinueWake(at) {
     if (!this.timer)
@@ -42071,8 +42466,20 @@ init_connected_handles();
 
 // src/workers/source-scope-runtime.ts
 init_source_scope_approval();
+init_file_scope_sources();
+
+// src/core/this-computer.ts
+init_atomic_file();
+init_file_lease();
+init_file_scope_sources();
+
+// src/workers/source-scope-runtime.ts
 init_connected_handles();
 init_mail_source_scope();
+
+// src/workers/email-source/server.ts
+init_file_scope_sources();
+init_source_scope_approval();
 
 // src/workers/google-connectors/gmail-scope-browser.ts
 init_mail_source_scope();
@@ -42098,6 +42505,217 @@ init_mail_source_scope();
 init_credential_broker();
 init_drive();
 init_provider_client();
+var GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+var BROWSE_PAGE_SIZE = 100;
+function createGoogleDriveFolderScopeBrowser(options) {
+  const connector = new GoogleDriveSourceConnector({
+    credentialHandle: options.credentialHandle,
+    ...options.account ? { account: options.account } : {},
+    ...options.credentialBroker ? { credentialBroker: options.credentialBroker } : {},
+    ...options.fetch ? { fetch: options.fetch } : {},
+    ...options.apiClient ? { apiClient: options.apiClient } : {},
+    ...options.requestBudget ? { requestBudget: options.requestBudget } : {},
+    provenance: "operator"
+  });
+  return {
+    sourceId: "google_drive.docs",
+    async browse(request) {
+      const parent = normalizeDriveParent(request.parentKey);
+      const providerCursor = decodeCursor("google_drive.docs", parent, request.cursor);
+      const client = await connector.apiClientForTooling();
+      const page2 = await client.listFiles({
+        pageSize: BROWSE_PAGE_SIZE,
+        ...providerCursor ? { pageToken: providerCursor } : {},
+        query: `trashed = false and mimeType = '${GOOGLE_FOLDER_MIME_TYPE}' and '${parent}' in parents`
+      });
+      return {
+        nodes: page2.files.filter((file) => file.id && file.mimeType === GOOGLE_FOLDER_MIME_TYPE).map((file) => ({
+          key: file.id,
+          ...request.parentKey ? { parent_key: parent } : {},
+          name: file.name?.trim() || "Untitled folder",
+          kind: "folder",
+          has_children: true,
+          selectable: true
+        })),
+        ...page2.nextPageToken ? { nextCursor: encodeCursor("google_drive.docs", parent, page2.nextPageToken) } : {}
+      };
+    },
+    async validateSelections(selections) {
+      const client = await connector.apiClientForTooling();
+      if (!client.getFolder)
+        throw new Error("Google Drive folder validation is unavailable.");
+      const ancestry = new GoogleDriveFolderAncestry(client);
+      const ancestorsByKey = new Map;
+      for (const selection of selections) {
+        const key2 = normalizeDriveParent(selection.key);
+        if (key2 === "root")
+          throw new Error("Whole-account access requires explicit confirmation.");
+        const folder = await client.getFolder(key2);
+        if (folder.id !== key2 || !folder.parents || folder.parents.length === 0) {
+          throw new Error("A selected Google Drive folder could not be verified below the account root.");
+        }
+        const ancestors = await ancestry.resolve({ parents: folder.parents });
+        if (!ancestors)
+          throw new Error("A selected Google Drive folder ancestry could not be verified.");
+        ancestorsByKey.set(key2, ancestors);
+      }
+      return effectiveSelections(selections, (key2) => ancestorsByKey.get(key2) ?? []);
+    }
+  };
+}
+function createDropboxFolderScopeBrowser(options) {
+  const broker = options.credentialBroker ?? createEnvCredentialBroker({
+    ...options.fetch ? { fetch: options.fetch } : {}
+  });
+  let client = options.metadataClient;
+  const metadataClient = async () => {
+    if (client)
+      return client;
+    const session = requireBearerTokenCredentialSession(await broker.issueSession({
+      handle: options.credentialHandle,
+      provider: "dropbox",
+      capability: "dropbox.files.sync",
+      trustDomain: "secure_local",
+      purpose: "Browse Dropbox folders before source-scope approval."
+    }), options.credentialHandle);
+    client = new DropboxApiMetadataClient({
+      token: session.token,
+      ...options.fetch ? { fetch: options.fetch } : {}
+    });
+    return client;
+  };
+  return {
+    sourceId: "dropbox.files",
+    async browse(request) {
+      const parent = normalizeDropboxParent(request.parentKey);
+      const providerCursor = decodeCursor("dropbox.files", parent, request.cursor);
+      const api = await metadataClient();
+      const nodes = [];
+      let cursor = providerCursor;
+      const seenCursors = new Set;
+      for (let pages = 0;pages < 10; pages += 1) {
+        const page2 = cursor ? await api.listFolderContinue({ cursor, limit: BROWSE_PAGE_SIZE }) : await api.listFolder({
+          path: parent === "/" ? "" : parent,
+          recursive: false,
+          limit: BROWSE_PAGE_SIZE,
+          includeDeleted: false
+        });
+        for (const entry of page2.entries) {
+          if (entry.tag !== "folder")
+            continue;
+          const key2 = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
+          if (!nodes.some((node) => node.key === key2))
+            nodes.push({
+              key: key2,
+              ...request.parentKey ? { parent_key: parent } : {},
+              name: entry.name,
+              kind: "folder",
+              has_children: true,
+              selectable: true
+            });
+        }
+        if (!page2.hasMore) {
+          cursor = undefined;
+          break;
+        }
+        if (!page2.cursor || seenCursors.has(page2.cursor) || page2.cursor === cursor) {
+          throw new Error("Dropbox folder listing did not advance. Update folders to retry.");
+        }
+        cursor = page2.cursor;
+        seenCursors.add(cursor);
+        if (nodes.length >= 20)
+          break;
+      }
+      return { nodes, ...cursor ? { nextCursor: encodeCursor("dropbox.files", parent, cursor) } : {} };
+    },
+    async validateSelections(selections) {
+      const api = await metadataClient();
+      for (const selection of selections) {
+        const key2 = normalizeDropboxNodeKey(selection.key);
+        if (key2 === "/")
+          throw new Error("Whole-account access requires explicit confirmation.");
+        await api.listFolder({ path: key2, recursive: false, limit: 1, includeDeleted: false });
+      }
+      return effectiveSelections(selections.map((selection) => ({ ...selection, key: normalizeDropboxNodeKey(selection.key) })), (key2) => dropboxAncestorPaths(normalizeDropboxNodeKey(key2)));
+    }
+  };
+}
+function effectiveSelections(selections, ancestorsFor) {
+  const states = new Map(selections.map((selection) => [selection.key, selection.state]));
+  return selections.map((selection) => {
+    const ancestorKeys = [...ancestorsFor(selection.key)];
+    const ancestorStates = ancestorKeys.map((key2) => states.get(key2)).filter((state2) => state2 !== undefined);
+    const state = ancestorStates.includes("exclude") ? "exclude" : ancestorStates.includes("metadata_only") && selection.state === "ingest" ? "metadata_only" : selection.state;
+    return { key: selection.key, state, ancestorKeys };
+  });
+}
+function dropboxAncestorPaths(path) {
+  const parts = path.split("/").filter(Boolean);
+  const ancestors = [];
+  for (let index = 1;index < parts.length; index += 1) {
+    ancestors.push(`/${parts.slice(0, index).join("/")}`);
+  }
+  return ancestors;
+}
+function encodeCursor(source, parent, providerCursor) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    source,
+    parent,
+    provider_cursor: providerCursor
+  })).toString("base64url");
+}
+function decodeCursor(source, parent, value) {
+  if (value === undefined)
+    return;
+  if (!value || value.length > 8192)
+    throw new Error("Folder browse cursor is invalid.");
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (parsed.version !== 1 || parsed.source !== source || parsed.parent !== parent || typeof parsed.provider_cursor !== "string" || !parsed.provider_cursor || parsed.provider_cursor.length > 6000)
+      throw new Error("shape");
+    return parsed.provider_cursor;
+  } catch {
+    throw new Error("Folder browse cursor is invalid for this source and parent.");
+  }
+}
+function normalizeDriveParent(value) {
+  if (value === undefined)
+    return "root";
+  const parent = value.trim();
+  if (!parent || parent.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(parent)) {
+    throw new Error("Google Drive folder key is invalid.");
+  }
+  return parent;
+}
+function normalizeDropboxParent(value) {
+  if (value === undefined)
+    return "/";
+  return normalizeDropboxNodeKey(value);
+}
+function normalizeDropboxNodeKey(value) {
+  const trimmed = value.trim().replace(/\/{2,}/g, "/");
+  if (!trimmed.startsWith("/") || trimmed.length > 4096 || trimmed.includes("\x00")) {
+    throw new Error("Dropbox folder key is invalid.");
+  }
+  return trimmed.length > 1 && trimmed.endsWith("/") ? trimmed.slice(0, -1).toLowerCase() : trimmed.toLowerCase();
+}
+function requireCredentialHandle(context2) {
+  if (!context2.credentialHandle)
+    throw new Error("This folder source needs a connected credential.");
+  return context2.credentialHandle;
+}
+var browserFactories = new Map([
+  ["google_drive.docs", (context2) => createGoogleDriveFolderScopeBrowser({
+    credentialHandle: requireCredentialHandle(context2),
+    ...context2.account ? { account: context2.account } : {},
+    ...context2.googleDriveRequestBudget ? { requestBudget: context2.googleDriveRequestBudget } : {}
+  })],
+  ["dropbox.files", (context2) => createDropboxFolderScopeBrowser({
+    credentialHandle: requireCredentialHandle(context2)
+  })]
+]);
+var builtInBrowserIds = new Set(browserFactories.keys());
 
 // src/workers/email-source/server.ts
 init_unpaired_sources();
@@ -44242,9 +44860,9 @@ async function runSourceEmbeddingDrain(options) {
     item.laneReport.runs += 1;
     try {
       const result = await runWithHeartbeat("embedding", item.lane.corpusId, scope, () => item.lane.embed(scope, item.lane.maxPendingChunks));
-      const chunksSeen = numberValue(result.chunks_seen);
-      const chunksEmbedded = numberValue(result.chunks_embedded);
-      const chunksSkipped = numberValue(result.chunks_skipped);
+      const chunksSeen = numberValue2(result.chunks_seen);
+      const chunksEmbedded = numberValue2(result.chunks_embedded);
+      const chunksSkipped = numberValue2(result.chunks_skipped);
       scopeReport.chunks_seen += chunksSeen;
       scopeReport.chunks_embedded += chunksEmbedded;
       scopeReport.chunks_skipped += chunksSkipped;
@@ -44730,7 +45348,7 @@ function hashScope(scope) {
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
 }
-function numberValue(value) {
+function numberValue2(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 function optionalPositiveIntOrUnbounded(value, name) {
