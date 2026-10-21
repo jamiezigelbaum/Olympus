@@ -66,6 +66,17 @@ import {
   defaultInternalTelegramConnectorStoreDbPath,
   defaultProtectedTelegramConnectorStoreDbPath,
 } from './telegram-messages/index.ts';
+import {
+  LOCAL_FILES_CORPUS_ID,
+  LOCAL_FILES_INTERNAL_CORPUS_ID,
+  LOCAL_FILES_PUBLIC_CORPUS_ID,
+  LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
+  createLocalFilesConnectorStore,
+  createLocalFilesTierConnectorStore,
+  defaultLocalFilesConnectorStoreDbPath,
+  defaultLocalFilesInternalConnectorStoreDbPath,
+  defaultLocalFilesPublicConnectorStoreDbPath,
+} from './local-files/store.ts';
 import { closeSqliteStore } from '../core/sqlite-store.ts';
 
 export interface SourceIngestionLedgerSnapshot {
@@ -439,6 +450,12 @@ const SOURCE_DEFINITIONS: Record<string, LedgerSourceDefinition> = {
     family: 'chat',
     corpusSourceIds: ['whatsapp.personal.messages'],
   },
+  local_files: {
+    label: 'Files on this computer',
+    primaryCorpusId: 'secure_local.local.files',
+    family: 'file',
+    corpusSourceIds: ['local.files'],
+  },
 };
 
 export function buildSourceIngestionLedgerSnapshot(
@@ -739,7 +756,15 @@ export async function collectLocalSourceIngestionLedger(
           env,
           { readOnly: true },
         )
-        : new LocalConnectorStore({ ...store, ...(gated ? { exclusions: matcher } : {}) });
+        : store.corpusId === LOCAL_FILES_CORPUS_ID
+          ? createLocalFilesConnectorStore(env, { readOnly: true })
+          : store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID || store.corpusId === LOCAL_FILES_PUBLIC_CORPUS_ID
+            ? createLocalFilesTierConnectorStore(
+              store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID ? 'internal' : 'public_safe',
+              env,
+              { readOnly: true },
+            )
+            : new LocalConnectorStore({ ...store, ...(gated ? { exclusions: matcher } : {}) });
     handles.push(handle);
     connectorStores.push(handle);
     if (gated) {
@@ -752,6 +777,10 @@ export async function collectLocalSourceIngestionLedger(
           || store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID
           || store.corpusId === DROPBOX_PUBLIC_FILES_CORPUS_ID
           ? { sourceId: 'dropbox.personal', corpusIds: [store.corpusId] }
+          : store.corpusId === LOCAL_FILES_CORPUS_ID
+            || store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID
+            || store.corpusId === LOCAL_FILES_PUBLIC_CORPUS_ID
+            ? { sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE, corpusIds: [store.corpusId] }
           : driveCorpusIds.has(store.corpusId)
             ? { sourceId: 'google_drive.docs', corpusIds: [store.corpusId] }
             : {}),
@@ -1548,6 +1577,24 @@ function localConnectorStores(env: Record<string, string | undefined>): Array<Co
     {
       corpusId: DROPBOX_PUBLIC_FILES_CORPUS_ID,
       dbPath: defaultDropboxPublicConnectorStoreDbPath(env),
+      family: 'file',
+      trustDomain: 'public_safe',
+    },
+    {
+      corpusId: LOCAL_FILES_CORPUS_ID,
+      dbPath: defaultLocalFilesConnectorStoreDbPath(env),
+      family: 'file',
+      trustDomain: 'secure_local',
+    },
+    {
+      corpusId: LOCAL_FILES_INTERNAL_CORPUS_ID,
+      dbPath: defaultLocalFilesInternalConnectorStoreDbPath(env),
+      family: 'file',
+      trustDomain: 'internal',
+    },
+    {
+      corpusId: LOCAL_FILES_PUBLIC_CORPUS_ID,
+      dbPath: defaultLocalFilesPublicConnectorStoreDbPath(env),
       family: 'file',
       trustDomain: 'public_safe',
     },

@@ -27,7 +27,7 @@ import {
 } from '../src/workers/telegram-messages/index.ts';
 
 describe('source ingestion ledger', () => {
-  test('normalizes source status into the seven-source ingestion census', () => {
+  test('normalizes source status into the eight-source ingestion census', () => {
     const snapshot = buildSourceIngestionLedgerSnapshot(fixtureStatus(), {
       now: new Date('2026-07-08T20:00:00.000Z'),
       schedulerStatus: {
@@ -79,7 +79,7 @@ describe('source ingestion ledger', () => {
       }],
     });
 
-    expect(snapshot.rows).toHaveLength(7);
+    expect(snapshot.rows).toHaveLength(8);
     expect(snapshot.rows.find((row) => row.source_id === 'email')).toMatchObject({
       items: 10,
       content_indexed: 8,
@@ -148,8 +148,8 @@ describe('source ingestion ledger', () => {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
-        expect((db.query('SELECT COUNT(*) AS count FROM source_ingestion_ledger').get() as { count: number }).count).toBe(7);
-        expect((db.query('SELECT COUNT(*) AS count FROM source_dashboard_samples').get() as { count: number }).count).toBe(7);
+        expect((db.query('SELECT COUNT(*) AS count FROM source_ingestion_ledger').get() as { count: number }).count).toBe(8);
+        expect((db.query('SELECT COUNT(*) AS count FROM source_dashboard_samples').get() as { count: number }).count).toBe(8);
         expect(db.query('SELECT items, content_indexed, coverage_percent, ingestion_health_json FROM source_ingestion_ledger WHERE source_id = ?').get('dropbox')).toMatchObject({
           items: 20,
           content_indexed: 4,

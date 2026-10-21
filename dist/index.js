@@ -301,6 +301,7 @@ var init_public_surface = __esm(() => {
     "gmail.email",
     "google_drive.docs",
     "dropbox.files",
+    "local.files",
     "x.bookmarks",
     "telegram.messages",
     "whatsapp.personal.messages",
@@ -674,6 +675,38 @@ var init_source_corpus_registry = __esm(() => {
       description: "Public Dropbox files, routed here by per-item four-tier classification on positive public evidence."
     },
     {
+      corpusId: "secure_local.local.files",
+      sourceId: "local.files",
+      provider: "local_files",
+      family: "file",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "sync", "search", "promotion_candidates"],
+      description: "Files in the folders and disks the person chose on this computer."
+    },
+    {
+      corpusId: "internal.local.files",
+      sourceId: "local.files",
+      provider: "local_files",
+      family: "file",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Personal files on this computer (reference material and Personal names), routed here by per-item four-tier classification."
+    },
+    {
+      corpusId: "public_safe.local.files",
+      sourceId: "local.files",
+      provider: "local_files",
+      family: "file",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public files on this computer, routed here by per-item four-tier classification on positive public evidence."
+    },
+    {
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       sourceId: "telegram.messages",
       provider: "telegram",
@@ -720,6 +753,9 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.dropbox.files",
       "internal.dropbox.files",
       "public_safe.dropbox.files",
+      "secure_local.local.files",
+      "internal.local.files",
+      "public_safe.local.files",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
       "internal.whatsapp.messages"
@@ -739,6 +775,9 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.dropbox.files",
       "internal.dropbox.files",
       "public_safe.dropbox.files",
+      "secure_local.local.files",
+      "internal.local.files",
+      "public_safe.local.files",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
       "internal.whatsapp.messages"
@@ -751,6 +790,7 @@ var init_source_corpus_registry = __esm(() => {
       READWISE_LIBRARY_CORPUS_ID,
       "internal.x.bookmarks",
       "secure_local.dropbox.files",
+      "secure_local.local.files",
       "internal.telegram.messages",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
     ],
@@ -764,12 +804,15 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.dropbox.files",
       "internal.dropbox.files",
       "public_safe.dropbox.files",
+      "secure_local.local.files",
+      "internal.local.files",
+      "public_safe.local.files",
       "internal.x.bookmarks",
       "secure_local.x.bookmarks",
       "internal.telegram.messages",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
     ],
-    promotion_candidates: ["secure_local.dropbox.files"]
+    promotion_candidates: ["secure_local.dropbox.files", "secure_local.local.files"]
   };
   PUBLIC_SOURCE_IDS = new Set(V0_4_PUBLIC_SOURCE_IDS);
   PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
@@ -14053,6 +14096,20 @@ var init_file_scope_sources = __esm(() => {
     label: "Dropbox",
     dispositionSourceId: "dropbox.personal"
   });
+  registerBuiltIn({
+    sourceId: "local.files",
+    provider: "local_files",
+    account: "this_computer",
+    corpusIdsToInvalidate: ["secure_local.local.files"],
+    filterFamily: "locator_path",
+    normalizeKey: (key) => {
+      const trimmed = key.trim().normalize("NFC");
+      return trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
+    },
+    rootKeys: ["/"],
+    label: "Files on this computer",
+    dispositionSourceId: "local.files"
+  });
 });
 
 // src/core/source-scope-approval.ts
@@ -17620,6 +17677,19 @@ var init_connector3 = __esm(() => {
   init_provider_client();
 });
 
+// src/workers/connector-store/file-ingestion-matcher.ts
+var POLICY_ADMITTED;
+var init_file_ingestion_matcher = __esm(() => {
+  init_source_ingestion_exclusions();
+  init_still_image_readiness();
+  init_source_ingestion_policy();
+  POLICY_ADMITTED = Object.freeze({
+    excluded: false,
+    disposition: "admit",
+    outcome: "admitted"
+  });
+});
+
 // src/workers/dropbox-files/corpus-adapter.ts
 var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files";
 var init_corpus_adapter3 = __esm(() => {
@@ -17627,13 +17697,13 @@ var init_corpus_adapter3 = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector-store.ts
-var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
+var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_STORE_PLACEMENT;
 var init_connector_store2 = __esm(() => {
   init_linux_engine_layout();
   init_source_ingestion_exclusions();
-  init_still_image_readiness();
   init_source_ingestion_policy();
   init_connector_store();
+  init_file_ingestion_matcher();
   init_corpus_adapter3();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -17644,11 +17714,6 @@ var init_connector_store2 = __esm(() => {
     trustTier: "S4",
     trustDomain: "secure_local",
     secretsInContent: true
-  });
-  POLICY_ADMITTED = Object.freeze({
-    excluded: false,
-    disposition: "admit",
-    outcome: "admitted"
   });
 });
 
@@ -17661,41 +17726,44 @@ var init_provider_store_sync = __esm(() => {
   init_provider_client();
 });
 
-// src/workers/dropbox-files/approved-scope-filter.ts
-function invalidDropboxApprovedScope(expectedPrefix) {
-  return {
+// src/workers/connector-store/locator-path-scope-codec.ts
+function locatorPathApprovedScopeCodec(sourceLabel) {
+  const invalid = (expectedPrefix) => ({
     kind: "invalid",
     message: `"approved_scope_key" must exactly match "${expectedPrefix}:<rooted path>" with no surrounding whitespace.`
-  };
-}
-var MAX_APPROVED_SCOPE_KEY_LENGTH = 4096, UNSAFE_SCOPE_CHARACTERS, DROPBOX_APPROVED_SCOPE_FILTER_CODEC;
-var init_approved_scope_filter = __esm(() => {
-  UNSAFE_SCOPE_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
-  DROPBOX_APPROVED_SCOPE_FILTER_CODEC = Object.freeze({
+  });
+  return Object.freeze({
     resolveLocatorPath(value, principal) {
       const expectedPrefix = `${principal.provider}.${principal.accountScope}`;
       const separator = value.indexOf(":");
       const prefix = separator < 0 ? undefined : value.slice(0, separator);
       const scopedValue = separator < 0 ? undefined : value.slice(separator + 1);
       if (value.length === 0 || value.length > MAX_APPROVED_SCOPE_KEY_LENGTH || value !== value.trim() || UNSAFE_SCOPE_CHARACTERS.test(value) || prefix !== expectedPrefix || scopedValue === undefined || scopedValue.length === 0) {
-        return invalidDropboxApprovedScope(expectedPrefix);
+        return invalid(expectedPrefix);
       }
       if (scopedValue.startsWith("folder_id:")) {
         return {
           kind: "invalid",
-          message: 'The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form Dropbox scope.'
+          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel} scope.`
         };
       }
       if (!scopedValue.startsWith("/") || scopedValue !== scopedValue.trim() || scopedValue !== "/" && scopedValue.endsWith("/")) {
-        return invalidDropboxApprovedScope(expectedPrefix);
+        return invalid(expectedPrefix);
       }
-      return {
-        kind: "path",
-        accountScope: principal.accountScope,
-        locatorPath: scopedValue
-      };
+      return { kind: "path", accountScope: principal.accountScope, locatorPath: scopedValue };
     }
   });
+}
+var MAX_APPROVED_SCOPE_KEY_LENGTH = 4096, UNSAFE_SCOPE_CHARACTERS;
+var init_locator_path_scope_codec = __esm(() => {
+  UNSAFE_SCOPE_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
+});
+
+// src/workers/dropbox-files/approved-scope-filter.ts
+var DROPBOX_APPROVED_SCOPE_FILTER_CODEC;
+var init_approved_scope_filter = __esm(() => {
+  init_locator_path_scope_codec();
+  DROPBOX_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("Dropbox");
 });
 
 // src/workers/dropbox-files/locator-result-projector.ts
@@ -18024,6 +18092,71 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/workers/local-files/paths.ts
+var UNSAFE_PATH_CHARACTERS, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES;
+var init_paths = __esm(() => {
+  UNSAFE_PATH_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
+  DEFAULT_EXCLUSION_LABELS = Object.freeze({
+    system_library: "Application data",
+    trash: "Trash",
+    cache: "Caches",
+    version_control: "Version control",
+    dependencies: "Installed dependencies",
+    build_output: "Build output",
+    app_bundle: "Application",
+    olympus_data: "Olympus's own data",
+    synced_by_another_source: "Already indexed through its own source"
+  });
+  CACHE_SEGMENTS = new Set(["caches", ".cache", ".npm", ".bun", ".yarn", ".pnpm-store", ".gradle", ".m2"]);
+  TRASH_SEGMENTS = new Set([".trash", ".trashes", ".trash-1000"]);
+  VCS_SEGMENTS = new Set([".git", ".hg", ".svn"]);
+  DEPENDENCY_SEGMENTS = new Set(["node_modules", ".venv", "venv", "bower_components", "pods"]);
+  BUILD_SEGMENTS = new Set([
+    "dist",
+    "build",
+    "target",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    "__pycache__",
+    "deriveddata",
+    ".build",
+    ".tox"
+  ]);
+  SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
+});
+
+// src/workers/local-files/scope.ts
+var LOCAL_FILES_PROVIDER = "local_files", LOCAL_FILES_ACCOUNT_SCOPE = "this_computer", LOCAL_FILES_POLICY_SOURCE;
+var init_scope = __esm(() => {
+  init_paths();
+  LOCAL_FILES_POLICY_SOURCE = `${LOCAL_FILES_PROVIDER}.${LOCAL_FILES_ACCOUNT_SCOPE}`;
+});
+
+// src/workers/local-files/store.ts
+var LOCAL_FILES_CORPUS_ID = "secure_local.local.files", LOCAL_FILES_INTERNAL_CORPUS_ID = "internal.local.files", LOCAL_FILES_PUBLIC_CORPUS_ID = "public_safe.local.files", LOCAL_FILES_TIER_CORPUS_IDS, LOCAL_FILES_STORE_PLACEMENT;
+var init_store = __esm(() => {
+  init_linux_engine_layout();
+  init_corpus();
+  init_source_ingestion_exclusions();
+  init_source_ingestion_policy();
+  init_tier_ledger();
+  init_connector_store();
+  init_file_ingestion_matcher();
+  init_tiered_store_set();
+  init_scope();
+  LOCAL_FILES_TIER_CORPUS_IDS = Object.freeze({
+    public_safe: LOCAL_FILES_PUBLIC_CORPUS_ID,
+    internal: LOCAL_FILES_INTERNAL_CORPUS_ID,
+    secure_local: LOCAL_FILES_CORPUS_ID
+  });
+  LOCAL_FILES_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
 // src/workers/telegram-messages/corpus-adapter.ts
 var init_corpus_adapter4 = __esm(() => {
   init_linux_engine_layout();
@@ -18075,6 +18208,7 @@ var init_status = __esm(() => {
   init_readwise();
   init_x_bookmarks();
   init_dropbox_files();
+  init_store();
   init_telegram_messages();
   init_operation_error();
   init_secret_locations();
@@ -18083,14 +18217,19 @@ var init_status = __esm(() => {
 // src/core/public-source-capabilities.ts
 function publicSourceDoctorLanes() {
   const registry = createSourceCorpusRegistry();
-  return V0_4_PUBLIC_SOURCE_CAPABILITIES.flatMap((source) => registry.list("sync").filter((corpus) => corpus.sourceId === source.source_id).map((corpus) => ({
-    provider: source.doctor_lane.provider,
-    capability: source.doctor_lane.capability,
-    sourceId: source.source_id,
-    corpusId: corpus.corpusId,
-    ...source.doctor_lane.env_flag ? { envFlag: source.doctor_lane.env_flag } : {},
-    ...source.doctor_lane.default_off_when_absent === true ? { defaultOffWhenAbsent: true } : {}
-  })));
+  return V0_4_PUBLIC_SOURCE_CAPABILITIES.flatMap((source) => {
+    const lane = source.doctor_lane;
+    if (!lane)
+      return [];
+    return registry.list("sync").filter((corpus) => corpus.sourceId === source.source_id).map((corpus) => ({
+      provider: lane.provider,
+      capability: lane.capability,
+      sourceId: source.source_id,
+      corpusId: corpus.corpusId,
+      ...lane.env_flag ? { envFlag: lane.env_flag } : {},
+      ...lane.default_off_when_absent === true ? { defaultOffWhenAbsent: true } : {}
+    }));
+  });
 }
 var V0_4_PUBLIC_SOURCE_CAPABILITIES, CAPABILITIES_BY_SOURCE;
 var init_public_source_capabilities = __esm(() => {
@@ -18142,6 +18281,18 @@ var init_public_source_capabilities = __esm(() => {
         capability: "dropbox.files.sync",
         env_flag: "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED"
       }
+    },
+    {
+      source_id: "local.files",
+      label: "Files on this computer",
+      authentication: { type: "none", ownership: "no account: the folders you choose on this computer" },
+      contextual_scopes: ["approved folders and disks (nothing is chosen by default)", "metadata-only or full-extract policy per folder", "system, cache, build and version-control folders off by default"],
+      dependencies: [
+        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
+        { id: "file_watcher", label: "Native file watcher (@parcel/watcher)", required_for: "instant updates; without it folders are re-listed on a timer" }
+      ],
+      provider_ceiling: "Changes are seen as the operating system reports them; a folder the system will not let Olympus read (a permission prompt, an unmounted disk) is skipped and reported.",
+      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"]
     },
     {
       source_id: "x.bookmarks",
@@ -18891,6 +19042,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_store_sync2();
   init_dropbox_files();
   init_telegram_messages();
+  init_store();
   SOURCE_DEFINITIONS = {
     email: {
       label: "Email",
@@ -18933,6 +19085,12 @@ var init_source_ingestion_ledger = __esm(() => {
       primaryCorpusId: "secure_local.whatsapp.messages",
       family: "chat",
       corpusSourceIds: ["whatsapp.personal.messages"]
+    },
+    local_files: {
+      label: "Files on this computer",
+      primaryCorpusId: "secure_local.local.files",
+      family: "file",
+      corpusSourceIds: ["local.files"]
     }
   };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
@@ -19352,7 +19510,7 @@ import { execFile, spawn, spawnSync as spawnSync4 } from "node:child_process";
 import { randomBytes as randomBytes3 } from "node:crypto";
 import { dirname as dirname9, extname, isAbsolute as isAbsolute7, join as join12 } from "node:path";
 import { pathToFileURL } from "node:url";
-// src/workers/dropbox-files/open-target.ts
+// src/core/local-open.ts
 var OPENABLE_EXTENSIONS = new Set([
   "pdf",
   "txt",
@@ -19395,7 +19553,6 @@ var OPENABLE_EXTENSIONS = new Set([
   "m4v",
   "mov"
 ]);
-
 // src/core/linux-desktop-opener.ts
 var SYSTEMCTL = "/usr/bin/systemctl";
 var SYSTEMD_RUN = "/usr/bin/systemd-run";
@@ -26952,7 +27109,7 @@ function defaultOsRelease() {
 async function sourceCapabilityCatalogCheck(deps) {
   const registry = deps.handleRegistry ?? readRegistrySafely(deps);
   const connectedProviders = new Set(registry.handles.filter((handle) => handle.backendState?.status !== "reauth_required").map((handle) => handle.provider));
-  const connected2 = V0_4_PUBLIC_SOURCE_CAPABILITIES.filter((source) => connectedProviders.has(source.doctor_lane.provider));
+  const connected2 = V0_4_PUBLIC_SOURCE_CAPABILITIES.filter((source) => source.doctor_lane === undefined || connectedProviders.has(source.doctor_lane.provider));
   const dependencyLabels = [...new Set(connected2.flatMap((source) => source.dependencies.map((dependency) => dependency.label)))].sort((a, b) => a.localeCompare(b));
   return {
     name: "source_capability_catalog",

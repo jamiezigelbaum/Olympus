@@ -110,5 +110,8 @@
     "happy-dom": "20.14.0",
     "terser": "^5.51.2",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "@parcel/watcher": "2.5.1"
   }
 }

@@ -53,7 +53,7 @@ describe('source ingestion ledger sample retention', () => {
         expect(oldest).toBe('2026-08-01T12:00:00.000Z');
         expect((db.query(
           'SELECT COUNT(*) AS count FROM source_dashboard_samples',
-        ).get() as { count: number }).count).toBe(14);
+        ).get() as { count: number }).count).toBe(16);
       } finally {
         db.close();
       }

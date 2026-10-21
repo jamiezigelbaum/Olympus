@@ -255,10 +255,10 @@ describe('scheduler construction boot receipt', () => {
         outcome: 'constructed' as const,
         reason: 'lane_ready' as const,
       })),
-      selectedSourceIds: LIVE_SELECTED_SOURCE_IDS,
+      selectedSourceIds: Object.values(SCHEDULER_SOURCE_IDS),
     });
 
-    expect(lines.at(-1)).toBe('[source-scheduler] constructed=7 skipped=0 selected=7');
+    expect(lines.at(-1)).toBe('[source-scheduler] constructed=8 skipped=0 selected=8');
   });
 
   test('reports no allowlist as every construction selected, not as drift', () => {

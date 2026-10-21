@@ -210,6 +210,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/transcription.ts',
   'src/workers/file-extraction/extractors/venice-client.ts',
   'src/workers/file-extraction/extractors/vlm.ts',
+  'src/workers/file-extraction/connector-source.ts',
   'src/workers/file-extraction/http-types.ts',
   'src/workers/file-extraction/job-names.ts',
   'src/workers/file-extraction/job-store.ts',

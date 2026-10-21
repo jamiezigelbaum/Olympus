@@ -96,7 +96,7 @@ describe('v0.4 positive public surface', () => {
     expect(plugin.uiHints['worker.authToken']).toMatchObject({ sensitive: true });
     expect(sourceCorpus.properties.sourceId?.enum).toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
     expect(sourceCorpus.properties.provider?.enum)
-      .toEqual(['gmail', 'google_drive', 'dropbox', 'x', 'telegram', 'whatsapp', 'readwise']);
+      .toEqual(['gmail', 'google_drive', 'dropbox', 'local_files', 'x', 'telegram', 'whatsapp', 'readwise']);
     expect(sourceCorpus.properties.family?.enum)
       .toEqual(['email', 'file', 'chat', 'readwise', 'x']);
     expect(sourceCorpus.properties.activationMode?.enum)
@@ -182,8 +182,9 @@ describe('v0.4 positive public surface', () => {
     expect(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((source) => source.source_id))
       .toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
     const doctorLanes = publicSourceDoctorLanes();
+    // A source with no credential (files on this computer) has no doctor lane.
     expect([...new Set(doctorLanes.map((lane) => lane.sourceId))])
-      .toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
+      .toEqual(V0_4_PUBLIC_SOURCE_IDS.filter((id) => id !== 'local.files'));
     expect(doctorLanes.filter((lane) => lane.sourceId === 'gmail.email').map((lane) => lane.corpusId).sort())
       .toEqual(['internal.email', 'secure_local.email.private']);
     expect(doctorLanes.filter((lane) => lane.sourceId === 'google_drive.docs').map((lane) => lane.corpusId).sort())

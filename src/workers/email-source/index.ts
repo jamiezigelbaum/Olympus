@@ -42,6 +42,7 @@ import {
   parseOperationCallerWire,
   type OperationCallerWire,
 } from '../../core/operation-caller.ts';
+import { LOCAL_FILES_CORPUS_ID } from '../local-files/store.ts';
 import { dropboxContentExtractionStallHours } from '../../core/ingestion-throughput.ts';
 import { createDefaultSecretStore, normalizeSecretRef, type SecretStore } from '../../core/secret-store.ts';
 import { canonicalSourceCorpusId, type SourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
@@ -123,6 +124,8 @@ import {
   type XBookmarksContentRecoveryHandler,
   type XBookmarksLiveSyncResult,
 } from '../x-bookmarks/index.ts';
+import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
+import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../local-files/locator-result-projector.ts';
 import {
   DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
   DROPBOX_FILES_CORPUS_ID,
@@ -267,6 +270,7 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
+import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../../core/this-computer.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -277,6 +281,10 @@ const CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegist
   [{ family: 'file', provider: 'dropbox' }, {
     approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
     resultProjector: DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC,
+  }],
+  [{ family: 'file', provider: 'local_files' }, {
+    approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC,
+    resultProjector: LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC,
   }],
 ]);
 
@@ -1375,7 +1383,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // without this the lane stayed stopped until a restart.
             await refreshDashboardSchedulerOnRegistryChange();
             const registryRead = readDashboardRegistryOutcome(sourceDashboard.registryPath);
-            const registry = registryRead.registry;
+            const registry = withThisComputerHandles(registryRead.registry, sourceDashboard.registryPath);
             const secretStore = dashboardSecretStore(sourceDashboard);
             const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
             const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
@@ -2180,6 +2188,34 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
+        // A source on this computer has no sign-in: Connect records that the
+        // owner turned it on, and the owner then picks folders. Nothing is
+        // read until a folder is approved.
+        if (request.method === 'POST' && url.pathname === '/dashboard/connect/this-computer') {
+          return await withDashboardGrantMutation(async () => {
+          if (!sourceDashboard) {
+            throw new EmailSourceWorkerError(
+              501,
+              'source_dashboard_not_supported',
+              'Private source worker does not have the source dashboard configured.',
+            );
+          }
+          const record = await parseObjectBody(request);
+          const source = asOptionalString(record.source);
+          if (source !== 'local.files') {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'source must name a source on this computer.');
+          }
+          connectThisComputerSource(sourceDashboard.registryPath ?? defaultHandleRegistryPath(), source);
+          await refreshDashboardSchedulerSources();
+          return json({
+            ok: true,
+            source,
+            status_message: 'Connected. Choose the folders Olympus may read.',
+            policy: { reads_started: false, folders_chosen_by_owner: true },
+          });
+          });
+        }
+
         if (request.method === 'POST' && url.pathname === '/dashboard/disconnect') {
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
@@ -2190,6 +2226,39 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             );
           }
           const record = await parseObjectBody(request);
+          if (record.source_id === 'local.files') {
+            if (record.acknowledge !== true) {
+              throw new EmailSourceWorkerError(
+                400,
+                'disconnect_confirmation_required',
+                'Confirm that Disconnect keeps the files already indexed and only stops Olympus reading this computer.',
+              );
+            }
+            const wasConnected = disconnectThisComputerSource(
+              sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
+              'local.files',
+            );
+            if (!wasConnected) {
+              throw new EmailSourceWorkerError(409, 'source_not_connected', 'This source is not connected.');
+            }
+            await refreshDashboardSchedulerSources();
+            return json({
+              ok: true,
+              source_id: 'local.files',
+              disconnected_source_ids: ['local.files'],
+              removed_handles: [],
+              scheduling_refreshed: sourceScheduler !== undefined,
+              policy: {
+                scheduled_reads_stopped: true,
+                manual_reads_stopped: true,
+                indexed_data_deleted: false,
+                developer_app_registration_retained: true,
+                provider_grant_revoked: false,
+                restart_required: false,
+                raw_runtime_secrets_exposed: false,
+              },
+            });
+          }
           const sourceId = parseDashboardDisconnectSource(record.source_id);
           if (record.acknowledge !== true) {
             throw new EmailSourceWorkerError(
@@ -4842,6 +4911,7 @@ function sourceSchedulerSourceIdForCorpus(corpusId: string): string | undefined 
     return 'google_drive.docs';
   }
   if (corpusId === DROPBOX_FILES_CORPUS_ID) return 'dropbox.files';
+  if (corpusId === LOCAL_FILES_CORPUS_ID) return 'local.files';
   if (corpusId === READWISE_LIBRARY_CORPUS_ID) return 'readwise.library';
   if (corpusId === X_BOOKMARKS_CORPUS_ID) return 'x.bookmarks';
   if (isTelegramMessagesCorpusId(corpusId)) return 'telegram.messages';
@@ -6099,6 +6169,25 @@ function resolveDashboardExclusionDebt(
   if (!debt) return {};
   cache.set(key, { debt, computed_at_ms: nowMs });
   return debt;
+}
+
+/**
+ * The synthetic handle of every connected source on this computer, beside the
+ * credential handles, so its card reads connected from the same registry the
+ * others do. The credential registry itself never carries them.
+ */
+function withThisComputerHandles(
+  registry: ConnectedHandleRegistry,
+  registryPath: string | undefined,
+): ConnectedHandleRegistry {
+  let synthetic: ConnectedCredentialHandle[];
+  try {
+    synthetic = readThisComputerHandles(registryPath ?? defaultHandleRegistryPath())
+      .map((handle) => ({ ...handle, scopes: [] }) as unknown as ConnectedCredentialHandle);
+  } catch {
+    return registry;
+  }
+  return synthetic.length === 0 ? registry : { ...registry, handles: [...registry.handles, ...synthetic] };
 }
 
 function readDashboardRegistry(registryPath: string | undefined): ConnectedHandleRegistry {

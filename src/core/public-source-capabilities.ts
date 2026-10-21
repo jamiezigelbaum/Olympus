@@ -14,14 +14,15 @@ export interface PublicSourceCapability {
   source_id: V04PublicSourceId;
   label: string;
   authentication: {
-    type: 'oauth2' | 'paired_session' | 'api_key';
+    type: 'oauth2' | 'paired_session' | 'api_key' | 'none';
     ownership: string;
   };
   contextual_scopes: readonly string[];
   dependencies: readonly PublicSourceDependency[];
   provider_ceiling: string;
   supported_formats: readonly string[];
-  doctor_lane: {
+  /** Absent for a source with no credential (nothing to check for a connected handle). */
+  doctor_lane?: {
     provider: ConnectedCredentialHandle['provider'];
     capability: string;
     env_flag?: string;
@@ -85,6 +86,18 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
       capability: 'dropbox.files.sync',
       env_flag: 'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED',
     },
+  },
+  {
+    source_id: 'local.files',
+    label: 'Files on this computer',
+    authentication: { type: 'none', ownership: 'no account: the folders you choose on this computer' },
+    contextual_scopes: ['approved folders and disks (nothing is chosen by default)', 'metadata-only or full-extract policy per folder', 'system, cache, build and version-control folders off by default'],
+    dependencies: [
+      { id: 'local_document_extractors', label: 'Local document extractors', required_for: 'Office, table, PDF, image, and audio content' },
+      { id: 'file_watcher', label: 'Native file watcher (@parcel/watcher)', required_for: 'instant updates; without it folders are re-listed on a timer' },
+    ],
+    provider_ceiling: 'Changes are seen as the operating system reports them; a folder the system will not let Olympus read (a permission prompt, an unmounted disk) is skipped and reported.',
+    supported_formats: ['text', 'Office documents', 'tables', 'PDF', 'common images', 'audio transcription'],
   },
   {
     source_id: 'x.bookmarks',
@@ -169,18 +182,20 @@ export function publicSourceDoctorLanes(): Array<{
   defaultOffWhenAbsent?: boolean;
 }> {
   const registry = createSourceCorpusRegistry();
-  return V0_4_PUBLIC_SOURCE_CAPABILITIES.flatMap((source) =>
-    registry.list('sync')
+  return V0_4_PUBLIC_SOURCE_CAPABILITIES.flatMap((source) => {
+    const lane = source.doctor_lane;
+    if (!lane) return [];
+    return registry.list('sync')
       .filter((corpus) => corpus.sourceId === source.source_id)
       .map((corpus) => ({
-        provider: source.doctor_lane.provider,
-        capability: source.doctor_lane.capability,
+        provider: lane.provider,
+        capability: lane.capability,
         sourceId: source.source_id,
         corpusId: corpus.corpusId,
-        ...(source.doctor_lane.env_flag ? { envFlag: source.doctor_lane.env_flag } : {}),
-        ...(source.doctor_lane.default_off_when_absent === true ? { defaultOffWhenAbsent: true } : {}),
-      }))
-  );
+        ...(lane.env_flag ? { envFlag: lane.env_flag } : {}),
+        ...(lane.default_off_when_absent === true ? { defaultOffWhenAbsent: true } : {}),
+      }));
+  });
 }
 
 function markdownCell(values: readonly string[]): string {

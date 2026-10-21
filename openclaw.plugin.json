@@ -449,6 +449,7 @@
                     "gmail.email",
                     "google_drive.docs",
                     "dropbox.files",
+                    "local.files",
                     "x.bookmarks",
                     "telegram.messages",
                     "whatsapp.personal.messages",
@@ -882,6 +883,9 @@
                         "secure_local.dropbox.files",
                         "internal.dropbox.files",
                         "public_safe.dropbox.files",
+                        "secure_local.local.files",
+                        "internal.local.files",
+                        "public_safe.local.files",
                         "secure_local.telegram.protected.messages",
                         "secure_local.whatsapp.messages",
                         "internal.whatsapp.messages"
@@ -893,6 +897,7 @@
                         "gmail.email",
                         "google_drive.docs",
                         "dropbox.files",
+                        "local.files",
                         "x.bookmarks",
                         "telegram.messages",
                         "whatsapp.personal.messages",
@@ -905,6 +910,7 @@
                         "gmail",
                         "google_drive",
                         "dropbox",
+                        "local_files",
                         "x",
                         "telegram",
                         "whatsapp",
@@ -1383,6 +1389,95 @@
                       "type": "object",
                       "properties": {
                         "corpusId": {
+                          "const": "secure_local.local.files"
+                        },
+                        "sourceId": {
+                          "const": "local.files"
+                        },
+                        "provider": {
+                          "const": "local_files"
+                        },
+                        "family": {
+                          "const": "file"
+                        },
+                        "trustDomain": {
+                          "const": "secure_local"
+                        },
+                        "capabilities": {
+                          "items": {
+                            "enum": [
+                              "answer",
+                              "status",
+                              "sync",
+                              "search",
+                              "promotion_candidates"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "corpusId": {
+                          "const": "internal.local.files"
+                        },
+                        "sourceId": {
+                          "const": "local.files"
+                        },
+                        "provider": {
+                          "const": "local_files"
+                        },
+                        "family": {
+                          "const": "file"
+                        },
+                        "trustDomain": {
+                          "const": "internal"
+                        },
+                        "capabilities": {
+                          "items": {
+                            "enum": [
+                              "answer",
+                              "status",
+                              "search"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "corpusId": {
+                          "const": "public_safe.local.files"
+                        },
+                        "sourceId": {
+                          "const": "local.files"
+                        },
+                        "provider": {
+                          "const": "local_files"
+                        },
+                        "family": {
+                          "const": "file"
+                        },
+                        "trustDomain": {
+                          "const": "public_safe"
+                        },
+                        "capabilities": {
+                          "items": {
+                            "enum": [
+                              "answer",
+                              "status",
+                              "search"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "corpusId": {
                           "const": "secure_local.telegram.protected.messages"
                         },
                         "sourceId": {
@@ -1497,6 +1592,9 @@
                     "secure_local.dropbox.files",
                     "internal.dropbox.files",
                     "public_safe.dropbox.files",
+                    "secure_local.local.files",
+                    "internal.local.files",
+                    "public_safe.local.files",
                     "secure_local.telegram.protected.messages",
                     "secure_local.whatsapp.messages",
                     "internal.whatsapp.messages"
@@ -1508,6 +1606,7 @@
                     "gmail.email",
                     "google_drive.docs",
                     "dropbox.files",
+                    "local.files",
                     "x.bookmarks",
                     "telegram.messages",
                     "whatsapp.personal.messages",
@@ -1520,6 +1619,7 @@
                     "gmail",
                     "google_drive",
                     "dropbox",
+                    "local_files",
                     "x",
                     "telegram",
                     "whatsapp",
@@ -1976,6 +2076,95 @@
                     },
                     "provider": {
                       "const": "dropbox"
+                    },
+                    "family": {
+                      "const": "file"
+                    },
+                    "trustDomain": {
+                      "const": "public_safe"
+                    },
+                    "capabilities": {
+                      "items": {
+                        "enum": [
+                          "answer",
+                          "status",
+                          "search"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "corpusId": {
+                      "const": "secure_local.local.files"
+                    },
+                    "sourceId": {
+                      "const": "local.files"
+                    },
+                    "provider": {
+                      "const": "local_files"
+                    },
+                    "family": {
+                      "const": "file"
+                    },
+                    "trustDomain": {
+                      "const": "secure_local"
+                    },
+                    "capabilities": {
+                      "items": {
+                        "enum": [
+                          "answer",
+                          "status",
+                          "sync",
+                          "search",
+                          "promotion_candidates"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "corpusId": {
+                      "const": "internal.local.files"
+                    },
+                    "sourceId": {
+                      "const": "local.files"
+                    },
+                    "provider": {
+                      "const": "local_files"
+                    },
+                    "family": {
+                      "const": "file"
+                    },
+                    "trustDomain": {
+                      "const": "internal"
+                    },
+                    "capabilities": {
+                      "items": {
+                        "enum": [
+                          "answer",
+                          "status",
+                          "search"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "corpusId": {
+                      "const": "public_safe.local.files"
+                    },
+                    "sourceId": {
+                      "const": "local.files"
+                    },
+                    "provider": {
+                      "const": "local_files"
                     },
                     "family": {
                       "const": "file"

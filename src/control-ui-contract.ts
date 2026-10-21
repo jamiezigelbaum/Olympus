@@ -43,6 +43,14 @@ export interface OlympusFolderScopeNode {
   kind: 'folder';
   has_children: boolean;
   selectable: boolean;
+  /**
+   * Set when the folder is off unless the person turns it on (system data,
+   * caches, version control, build output, another source's folder): the
+   * picker shows it, marked, and never pre-selects it.
+   */
+  excluded_by_default?: boolean;
+  /** Plain words for why, when `excluded_by_default` is set. */
+  default_exclusion_reason?: string;
 }
 
 export type OlympusSourceScopeStatus = 'scope_pending' | 'approved';
@@ -84,6 +92,11 @@ export type OlympusDashboardControlParams =
       action: 'connect_api_key';
       source: OlympusDashboardApiKeySource;
       api_key: string;
+    }
+  | {
+      /** Connect a source on this computer (no sign-in); the owner then picks folders. */
+      action: 'connect_this_computer';
+      source: 'local.files';
     }
   | {
       /** One-time code for approving Claude, ChatGPT or Grok. Shown once. */

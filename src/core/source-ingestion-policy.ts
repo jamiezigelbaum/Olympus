@@ -199,6 +199,32 @@ function buildDefaultDropboxIngestionPolicy(
 }
 
 /**
+ * The local files source's default policy: the same file-type defaults as
+ * Dropbox (video and books kept to names, pictures read where this machine can
+ * prepare them) over no roots at all, since a folder is read only when the
+ * person approves it. The approved folders become its roots.
+ */
+export function defaultLocalFilesIngestionPolicy(
+  options: { stillImagesRead?: StillImagesRead; stillImageFormats?: StillImagesRead } = {},
+): SourceIngestionPolicy {
+  const policy = localFilesPolicyFrom(buildDefaultDropboxIngestionPolicy(options));
+  if (options.stillImagesRead === undefined && options.stillImageFormats === undefined) {
+    READINESS_FOLLOWING_POLICIES.set(policy, policy.rules);
+  }
+  return policy;
+}
+
+function localFilesPolicyFrom(base: SourceIngestionPolicy): SourceIngestionPolicy {
+  return {
+    ...base,
+    source: 'local_files.this_computer',
+    corpusId: 'secure_local.local.files',
+    roots: [],
+    rules: base.rules.filter((rule) => rule.reason !== 'archive_metadata_only'),
+  };
+}
+
+/**
  * The Dropbox lane's corpora, one per tier (design
  * per-item-four-tier-classification.md, section 3.2). The first is the lane's
  * original store: where every file stored before per-item routing stays, and

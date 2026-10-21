@@ -136,3 +136,19 @@ registerBuiltIn({
   label: 'Dropbox',
   dispositionSourceId: 'dropbox.personal',
 });
+
+registerBuiltIn({
+  sourceId: 'local.files',
+  provider: 'local_files',
+  account: 'this_computer',
+  corpusIdsToInvalidate: ['secure_local.local.files'],
+  filterFamily: 'locator_path',
+  // Paths keep their case: a case-sensitive disk can hold two names that differ only by it.
+  normalizeKey: (key) => {
+    const trimmed = key.trim().normalize('NFC');
+    return trimmed.length > 1 ? trimmed.replace(/\/+$/, '') : trimmed;
+  },
+  rootKeys: ['/'],
+  label: 'Files on this computer',
+  dispositionSourceId: 'local.files',
+});

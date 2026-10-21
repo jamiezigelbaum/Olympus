@@ -65,6 +65,9 @@
               "secure_local.dropbox.files",
               "internal.dropbox.files",
               "public_safe.dropbox.files",
+              "secure_local.local.files",
+              "internal.local.files",
+              "public_safe.local.files",
               "secure_local.telegram.protected.messages",
               "secure_local.whatsapp.messages",
               "internal.whatsapp.messages"
@@ -216,6 +219,9 @@
               "secure_local.dropbox.files",
               "internal.dropbox.files",
               "public_safe.dropbox.files",
+              "secure_local.local.files",
+              "internal.local.files",
+              "public_safe.local.files",
               "secure_local.telegram.protected.messages",
               "secure_local.whatsapp.messages",
               "internal.whatsapp.messages"
