@@ -29,8 +29,9 @@ Drive, with nothing selected at first, no sign-in, file-change notifications
 for instant updates, and the same per-item tiers. Spine work lands first: a
 scope-source registry, a "this computer" account basis, and push wake.
 Guarded Mac folders (Desktop, Documents, Downloads, iCloud Drive) need a
-signed Olympus helper app. That needs the Apple Developer organization
-account, which is an owner decision. Design and delivery sequence:
+signed Olympus helper app, signed under the Open Coordination Unlimited
+Apple Developer organization account (owner decision 2026-10-21). Design and
+delivery sequence:
 [local files](design/local-files.md).
 
 ## Olympus 1.0 (ChatGPT)

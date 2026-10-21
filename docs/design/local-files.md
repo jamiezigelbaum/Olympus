@@ -191,9 +191,10 @@ Facts:
    button that asks. A denied folder says how to turn it back on. It's never
    silently empty.
 
-Signing needs the Apple Developer organization account. This is the case the
-2026-10-11 signing ruling named for revisiting it ("a signed Mac app").
-**Owner decision required.** Until then, unguarded folders work on Mac, and
+**Signing (owner decision 2026-10-21):** Developer ID Application under the
+Open Coordination Unlimited Apple Developer organization account, never the
+owner's personal ID. This is the case the 2026-10-11 signing ruling named for
+revisiting. Until the helper ships, unguarded folders work on Mac, and
 everything works on Linux.
 
 ### Spike before building the helper
