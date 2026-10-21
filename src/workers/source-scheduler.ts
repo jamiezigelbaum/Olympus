@@ -296,6 +296,18 @@ export interface SourceSchedulerTaskRunResult {
   wakeAt?: string;
 }
 
+/** Window over which change signals from a source coalesce into one run. */
+export const SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500;
+
+interface ChangeWakeSubscription {
+  subscribe: NonNullable<SourceSchedulerSource['subscribeChanges']>;
+  unsubscribe: () => void;
+  timer?: ReturnType<typeof setTimeout>;
+  running: boolean;
+  queued: boolean;
+  closed: boolean;
+}
+
 export interface SourceSchedulerSource {
   sourceId: string;
   corpusId: string;
@@ -309,6 +321,18 @@ export interface SourceSchedulerSource {
    * carries while one of this source's stores has embedding deferred.
    */
   embeddingDeferredReason?(): string | undefined;
+  /**
+   * Push wake: how the source tells the scheduler that something changed
+   * (a watched file, a notification). The scheduler calls this while it is
+   * running and the source is registered, passes a `wake` callback, and calls
+   * the returned function to unsubscribe when the source is removed or the
+   * scheduler stops. A wake runs the source's tasks within the debounce window;
+   * polling by `intervalMs` stays as the backstop. Signals may arrive in
+   * bursts: the scheduler coalesces them into one run, and at most one more
+   * while a run is in flight. Keep the function's identity stable across
+   * `updateSources` calls, or the scheduler re-subscribes each time.
+   */
+  subscribeChanges?(wake: () => void): () => void;
 }
 
 export interface SourceWatchSchedulerPass {
@@ -367,6 +391,8 @@ export interface SourceSchedulerOptions {
   continueAfterMs?: number;
   setTimeoutImpl?: typeof setTimeout;
   clearTimeoutImpl?: typeof clearTimeout;
+  /** Window over which change signals from `subscribeChanges` coalesce into one run. Defaults to SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS. */
+  changeDebounceMs?: number;
 }
 
 export interface SourceSchedulerStateStore {
@@ -503,6 +529,8 @@ export class SourceScheduler {
   private readonly setTimeoutImpl: typeof setTimeout;
   private readonly clearTimeoutImpl: typeof clearTimeout;
   private continueWake: { at: number; timer: ReturnType<typeof setTimeout> } | undefined;
+  private readonly changeDebounceMs: number;
+  private readonly changeWakes = new Map<string, ChangeWakeSubscription>();
 
   constructor(options: SourceSchedulerOptions) {
     this.enabled = options.enabled;
@@ -523,6 +551,7 @@ export class SourceScheduler {
     this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
     this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
+    this.changeDebounceMs = options.changeDebounceMs ?? SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS;
     const firstRun = this.now().getTime();
     this.states = this.sources.flatMap((source) => source.tasks.map((task) =>
       this.createTaskState(source, task, firstRun)
@@ -545,6 +574,7 @@ export class SourceScheduler {
       return previous;
     }));
     if (this.timer) this.refreshFastWakeTimers();
+    this.syncChangeSubscriptions();
   }
 
   private filterAllowedSources(sources: SourceSchedulerSource[]): SourceSchedulerSource[] {
@@ -561,6 +591,7 @@ export class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    this.syncChangeSubscriptions();
     for (const state of this.states) {
       try {
         state.task.atStart?.();
@@ -572,6 +603,7 @@ export class SourceScheduler {
   }
 
   stop(): void {
+    this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
       this.timer = undefined;
@@ -581,6 +613,93 @@ export class SourceScheduler {
     if (this.continueWake) {
       this.clearTimeoutImpl(this.continueWake.timer);
       this.continueWake = undefined;
+    }
+  }
+
+  /**
+   * Keeps one change subscription per running source that offers
+   * `subscribeChanges`: new sources subscribe, replaced or removed ones
+   * unsubscribe. Nothing is subscribed while the scheduler is stopped.
+   */
+  private syncChangeSubscriptions(): void {
+    if (!this.timer) return;
+    const wanted = new Map(this.sources
+      .filter((source) => source.subscribeChanges !== undefined)
+      .map((source) => [source.sourceId, source] as const));
+    this.closeChangeSubscriptions((sourceId, entry) =>
+      wanted.get(sourceId)?.subscribeChanges !== entry.subscribe);
+    for (const [sourceId, source] of wanted) {
+      if (this.changeWakes.has(sourceId)) continue;
+      const entry: ChangeWakeSubscription = {
+        subscribe: source.subscribeChanges!,
+        unsubscribe: () => {},
+        running: false,
+        queued: false,
+        closed: false,
+      };
+      try {
+        entry.unsubscribe = source.subscribeChanges!(() => this.signalChange(sourceId, entry));
+      } catch {
+        // A source that cannot be watched keeps its polling backstop.
+        continue;
+      }
+      this.changeWakes.set(sourceId, entry);
+    }
+  }
+
+  private closeChangeSubscriptions(
+    predicate: (sourceId: string, entry: ChangeWakeSubscription) => boolean,
+  ): void {
+    for (const [sourceId, entry] of [...this.changeWakes]) {
+      if (!predicate(sourceId, entry)) continue;
+      entry.closed = true;
+      entry.queued = false;
+      if (entry.timer) this.clearTimeoutImpl(entry.timer);
+      delete entry.timer;
+      try {
+        entry.unsubscribe();
+      } catch {
+        // Unsubscribing never stops the scheduler.
+      }
+      this.changeWakes.delete(sourceId);
+    }
+  }
+
+  private signalChange(sourceId: string, entry: ChangeWakeSubscription): void {
+    if (entry.closed) return;
+    // A run is in flight: one more follows it, however many signals arrive.
+    if (entry.running) {
+      entry.queued = true;
+      return;
+    }
+    if (entry.timer) return;
+    const timer = this.setTimeoutImpl(() => {
+      delete entry.timer;
+      void this.runChangeWake(sourceId, entry);
+    }, this.changeDebounceMs);
+    (timer as { unref?: () => void }).unref?.();
+    entry.timer = timer;
+  }
+
+  private async runChangeWake(sourceId: string, entry: ChangeWakeSubscription): Promise<void> {
+    if (entry.closed || entry.running) return;
+    entry.running = true;
+    try {
+      do {
+        entry.queued = false;
+        // A task of this source already running (a poll that started first)
+        // cannot take a second run; it runs again within seconds of finishing.
+        const busy = this.states.filter((state) => state.source.sourceId === sourceId && state.running);
+        for (const state of busy) state.wakeAfterRun = true;
+        // The same run path as an approved-run start, as a scheduled run: a
+        // file change is not an owner's request, so request budgets and
+        // account checks apply as on a cadence tick.
+        await this.runSource(sourceId, undefined, 'scheduled');
+      } while (entry.queued && !entry.closed);
+    } catch {
+      // Failures are recorded by the task; the next signal or poll retries.
+    } finally {
+      entry.running = false;
     }
   }
 

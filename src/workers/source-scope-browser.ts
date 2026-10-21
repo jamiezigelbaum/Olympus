@@ -277,3 +277,50 @@ function normalizeDropboxNodeKey(value: string): string {
   }
   return trimmed.length > 1 && trimmed.endsWith('/') ? trimmed.slice(0, -1).toLowerCase() : trimmed.toLowerCase();
 }
+
+/**
+ * What a browser factory is given. A source that binds to a provider account
+ * receives the selected credential handle; one with no account receives none.
+ */
+export interface FileScopeBrowserContext {
+  credentialHandle?: string;
+  account?: string;
+  googleDriveRequestBudget?: GoogleDailyRequestBudget;
+}
+
+export type FileScopeBrowserFactory = (context: FileScopeBrowserContext) => SourceFolderScopeBrowser;
+
+function requireCredentialHandle(context: FileScopeBrowserContext): string {
+  if (!context.credentialHandle) throw new Error('This folder source needs a connected credential.');
+  return context.credentialHandle;
+}
+
+const browserFactories = new Map<string, FileScopeBrowserFactory>([
+  ['google_drive.docs', (context) => createGoogleDriveFolderScopeBrowser({
+    credentialHandle: requireCredentialHandle(context),
+    ...(context.account ? { account: context.account } : {}),
+    ...(context.googleDriveRequestBudget ? { requestBudget: context.googleDriveRequestBudget } : {}),
+  })],
+  ['dropbox.files', (context) => createDropboxFolderScopeBrowser({
+    credentialHandle: requireCredentialHandle(context),
+  })],
+]);
+
+const builtInBrowserIds = new Set(browserFactories.keys());
+
+/** Adds the picker browser of a source registered in `core/file-scope-sources.ts`. */
+export function registerFileScopeBrowserFactory(sourceId: string, factory: FileScopeBrowserFactory): void {
+  if (browserFactories.has(sourceId)) throw new Error(`A folder browser is already registered for ${sourceId}.`);
+  browserFactories.set(sourceId, factory);
+}
+
+export function unregisterFileScopeBrowserFactory(sourceId: string): void {
+  if (builtInBrowserIds.has(sourceId)) return;
+  browserFactories.delete(sourceId);
+}
+
+export function createFileScopeBrowser(sourceId: string, context: FileScopeBrowserContext): SourceFolderScopeBrowser {
+  const factory = browserFactories.get(sourceId);
+  if (!factory) throw new Error(`No folder browser is registered for ${sourceId}.`);
+  return factory(context);
+}

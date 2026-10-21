@@ -1,3 +1,4 @@
+import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import type { UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
@@ -3422,7 +3423,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       }
       return;
     }
-    if (sourceId === 'google_drive.docs' || sourceId === 'dropbox.files') {
+    if (sourceId !== undefined && isFileSourceScopeId(sourceId)) {
       const scope = sourceDashboard?.fileSourceScopes?.summaries()
         .find((candidate) => candidate.source_id === sourceId);
       const hasSelectedFolders = scope?.whole_account_selected === true
@@ -5258,7 +5259,7 @@ function parseDashboardSyncSource(value: unknown): DashboardConnectSource {
 }
 
 function parseFolderScopeSourceId(value: unknown): OlympusFolderScopeSourceId {
-  if (value === 'google_drive.docs' || value === 'dropbox.files') return value;
+  if (typeof value === 'string' && isFileSourceScopeId(value)) return value;
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id must name a folder-capable source.');
 }
 

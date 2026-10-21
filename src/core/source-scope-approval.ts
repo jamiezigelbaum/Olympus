@@ -3,6 +3,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
+import {
+  fileScopeSourceCapability,
+  fileScopeSourceForProvider,
+  getFileScopeSource,
+  isFileScopeRootKey,
+  type FileScopeSourceDefinition,
+} from './file-scope-sources.ts';
 import { OperationError } from './operation-error.ts';
 
 export interface SourceScopeConnectedHandle {
@@ -13,37 +20,24 @@ export interface SourceScopeConnectedHandle {
   accountRole?: string;
   providerAccountId?: string;
   backendState?: { status?: unknown; [key: string]: unknown };
+  /**
+   * Set only on the synthetic handle of a `this_computer` source
+   * (`this-computer.ts`). The credential registry never carries it, so a real
+   * credential can never stand in for a source that has none.
+   */
+  thisComputer?: true;
 }
 
 export interface SourceScopeConnectedHandleRegistry {
   handles: SourceScopeConnectedHandle[];
 }
 
-export const FILE_SOURCE_SCOPE_IDS = ['google_drive.docs', 'dropbox.files'] as const;
-export type FileSourceScopeId = typeof FILE_SOURCE_SCOPE_IDS[number];
+/**
+ * A folder-scoped file source id. Valid ids are the registered definitions in
+ * `file-scope-sources.ts`; `isFileSourceScopeId` is the validator.
+ */
+export type FileSourceScopeId = string;
 export type FileSourceScopeDisposition = 'ingest' | 'metadata_only' | 'exclude';
-
-export interface FileSourceScopeCapability {
-  sourceId: FileSourceScopeId;
-  provider: 'google_drive' | 'dropbox';
-  credentialCapability: 'google_drive.docs.sync' | 'dropbox.files.sync';
-  scopeRequirement: 'explicit_folder_scope';
-}
-
-export const FILE_SOURCE_SCOPE_CAPABILITIES: Readonly<Record<FileSourceScopeId, FileSourceScopeCapability>> = {
-  'google_drive.docs': {
-    sourceId: 'google_drive.docs',
-    provider: 'google_drive',
-    credentialCapability: 'google_drive.docs.sync',
-    scopeRequirement: 'explicit_folder_scope',
-  },
-  'dropbox.files': {
-    sourceId: 'dropbox.files',
-    provider: 'dropbox',
-    credentialCapability: 'dropbox.files.sync',
-    scopeRequirement: 'explicit_folder_scope',
-  },
-};
 
 export interface FileSourceScopeSelection {
   key: string;
@@ -90,13 +84,11 @@ export function defaultFileSourceScopeStatePath(handleRegistryPath: string): str
 }
 
 export function isFileSourceScopeId(value: string): value is FileSourceScopeId {
-  return (FILE_SOURCE_SCOPE_IDS as readonly string[]).includes(value);
+  return getFileScopeSource(value) !== undefined;
 }
 
 export function fileSourceScopeIdForProvider(provider: string): FileSourceScopeId | undefined {
-  if (provider === 'google_drive') return 'google_drive.docs';
-  if (provider === 'dropbox') return 'dropbox.files';
-  return undefined;
+  return fileScopeSourceForProvider(provider)?.sourceId;
 }
 
 /**
@@ -107,7 +99,15 @@ export function connectedFileSourceAccountGeneration(
   sourceId: FileSourceScopeId,
   registry: SourceScopeConnectedHandleRegistry,
 ): { generation: string; handle: SourceScopeConnectedHandle } | undefined {
-  return connectedSourceScopeAccountGeneration(sourceId, FILE_SOURCE_SCOPE_CAPABILITIES[sourceId], registry);
+  const definition = getFileScopeSource(sourceId);
+  if (!definition) return undefined;
+  return connectedSourceScopeAccountGeneration(
+    sourceId,
+    { provider: definition.provider, credentialCapability: fileScopeSourceCapability(definition) },
+    registry,
+    undefined,
+    definition.account,
+  );
 }
 
 /**
@@ -121,9 +121,13 @@ export function connectedSourceScopeAccountGeneration(
   capability: { provider: string; credentialCapability: string },
   registry: SourceScopeConnectedHandleRegistry,
   pinnedHandle?: string,
+  account: FileScopeSourceDefinition['account'] = 'provider_account',
 ): { generation: string; handle: SourceScopeConnectedHandle } | undefined {
   const eligible = registry.handles.filter((handle) =>
-    handle.provider === capability.provider
+    // A source with no credential reads only its own synthetic handle; every
+    // other source reads only real credential handles.
+    (handle.thisComputer === true) === (account === 'this_computer')
+    && handle.provider === capability.provider
     && handle.allowedCapabilities.includes(capability.credentialCapability)
     && handle.backendState?.status !== 'reauth_required'
   );
@@ -222,9 +226,11 @@ export function approveFileSourceScope(input: {
       }
       throw new OperationError('source_index_policy_violation', 'The source scope changed. Reload it before saving.');
     }
-    if (!input.wholeAccount && selections.some((selection) =>
-      selection.key === '/' || (input.sourceId === 'google_drive.docs' && selection.key.toLowerCase() === 'root')
-    )) {
+    const definition = getFileScopeSource(input.sourceId);
+    if (!definition) {
+      throw new OperationError('invalid_request', 'This source does not take a folder scope.');
+    }
+    if (!input.wholeAccount && selections.some((selection) => isFileScopeRootKey(definition, selection.key))) {
       throw new OperationError('invalid_request', 'Choose Whole account and confirm it explicitly to approve the provider root.');
     }
     const existing = readState(input.statePath);

@@ -18,7 +18,8 @@ export const OLYMPUS_DASHBOARD_TOOL_METHOD = 'olympus.dashboard.tool' as const;
 /** Where the Gateway serves the panel page the tab frames. */
 export const OLYMPUS_DASHBOARD_PANEL_PATH = '/olympus/dashboard/panel' as const;
 
-export type OlympusFolderScopeSourceId = 'google_drive.docs' | 'dropbox.files';
+/** A registered folder-scoped file source (`core/file-scope-sources.ts`); the registry validates it. */
+export type OlympusFolderScopeSourceId = string;
 /** The mail source whose scope is a time window, categories, labels and sender rules. */
 export type OlympusMailScopeSourceId = 'gmail.email';
 

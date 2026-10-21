@@ -13999,10 +13999,67 @@ function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
 
+// src/core/file-scope-sources.ts
+function registerFileScopeSource(definition) {
+  const { sourceId, provider } = definition;
+  if (!sourceId || !provider)
+    throw new Error("A file-scope source needs a source id and a provider.");
+  if (definition.account === "provider_account" && !definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to a provider account and needs a credential capability.`);
+  }
+  if (definition.account === "this_computer" && definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to this computer and must not name a credential capability.`);
+  }
+  if (definitions.has(sourceId))
+    throw new Error(`File-scope source ${sourceId} is already registered.`);
+  for (const other of definitions.values()) {
+    if (other.provider === provider) {
+      throw new Error(`File-scope provider ${provider} is already registered by ${other.sourceId}.`);
+    }
+  }
+  definitions.set(sourceId, definition);
+}
+function registerBuiltIn(definition) {
+  registerFileScopeSource(definition);
+  builtInIds.add(definition.sourceId);
+}
+var definitions, builtInIds;
+var init_file_scope_sources = __esm(() => {
+  definitions = new Map;
+  builtInIds = new Set;
+  registerBuiltIn({
+    sourceId: "google_drive.docs",
+    provider: "google_drive",
+    account: "provider_account",
+    credentialCapability: "google_drive.docs.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["internal.drive.docs", "secure_local.drive.docs"],
+    filterFamily: "folder_id",
+    normalizeKey: (key) => key.trim(),
+    rootKeys: ["/", "root"],
+    label: "Google Drive",
+    dispositionSourceId: "google_drive.personal"
+  });
+  registerBuiltIn({
+    sourceId: "dropbox.files",
+    provider: "dropbox",
+    account: "provider_account",
+    credentialCapability: "dropbox.files.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["secure_local.dropbox.files"],
+    filterFamily: "locator_path",
+    normalizeKey: (key) => key.trim().toLowerCase(),
+    rootKeys: ["/"],
+    label: "Dropbox",
+    dispositionSourceId: "dropbox.personal"
+  });
+});
+
 // src/core/source-scope-approval.ts
 var init_source_scope_approval = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_file_scope_sources();
   init_operation_error();
 });
 

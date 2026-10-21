@@ -48056,6 +48056,83 @@ function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
 
+// src/core/file-scope-sources.ts
+function registerFileScopeSource(definition) {
+  const { sourceId, provider } = definition;
+  if (!sourceId || !provider)
+    throw new Error("A file-scope source needs a source id and a provider.");
+  if (definition.account === "provider_account" && !definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to a provider account and needs a credential capability.`);
+  }
+  if (definition.account === "this_computer" && definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to this computer and must not name a credential capability.`);
+  }
+  if (definitions.has(sourceId))
+    throw new Error(`File-scope source ${sourceId} is already registered.`);
+  for (const other of definitions.values()) {
+    if (other.provider === provider) {
+      throw new Error(`File-scope provider ${provider} is already registered by ${other.sourceId}.`);
+    }
+  }
+  definitions.set(sourceId, definition);
+}
+function getFileScopeSource(sourceId) {
+  return definitions.get(sourceId);
+}
+function requireFileScopeSource(sourceId) {
+  const definition = definitions.get(sourceId);
+  if (!definition)
+    throw new Error(`Unknown file-scope source: ${sourceId}`);
+  return definition;
+}
+function listFileScopeSources() {
+  return [...definitions.values()];
+}
+function fileScopeSourceForProvider(provider) {
+  return listFileScopeSources().find((definition) => definition.provider === provider);
+}
+function fileScopeSourceCapability(definition) {
+  return definition.credentialCapability ?? `${definition.sourceId}.this_computer`;
+}
+function isFileScopeRootKey(definition, key2) {
+  return definition.rootKeys.includes(key2.toLowerCase());
+}
+function registerBuiltIn(definition) {
+  registerFileScopeSource(definition);
+  builtInIds.add(definition.sourceId);
+}
+var definitions, builtInIds;
+var init_file_scope_sources = __esm(() => {
+  definitions = new Map;
+  builtInIds = new Set;
+  registerBuiltIn({
+    sourceId: "google_drive.docs",
+    provider: "google_drive",
+    account: "provider_account",
+    credentialCapability: "google_drive.docs.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["internal.drive.docs", "secure_local.drive.docs"],
+    filterFamily: "folder_id",
+    normalizeKey: (key2) => key2.trim(),
+    rootKeys: ["/", "root"],
+    label: "Google Drive",
+    dispositionSourceId: "google_drive.personal"
+  });
+  registerBuiltIn({
+    sourceId: "dropbox.files",
+    provider: "dropbox",
+    account: "provider_account",
+    credentialCapability: "dropbox.files.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["secure_local.dropbox.files"],
+    filterFamily: "locator_path",
+    normalizeKey: (key2) => key2.trim().toLowerCase(),
+    rootKeys: ["/"],
+    label: "Dropbox",
+    dispositionSourceId: "dropbox.personal"
+  });
+});
+
 // src/core/source-scope-approval.ts
 import { createHash as createHash28, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync31, readFileSync as readFileSync28 } from "node:fs";
@@ -48064,13 +48141,19 @@ function defaultFileSourceScopeStatePath(handleRegistryPath) {
   return join42(dirname32(handleRegistryPath), "file-source-scopes.json");
 }
 function isFileSourceScopeId(value) {
-  return FILE_SOURCE_SCOPE_IDS.includes(value);
+  return getFileScopeSource(value) !== undefined;
+}
+function fileSourceScopeIdForProvider(provider) {
+  return fileScopeSourceForProvider(provider)?.sourceId;
 }
 function connectedFileSourceAccountGeneration(sourceId, registry) {
-  return connectedSourceScopeAccountGeneration(sourceId, FILE_SOURCE_SCOPE_CAPABILITIES[sourceId], registry);
+  const definition = getFileScopeSource(sourceId);
+  if (!definition)
+    return;
+  return connectedSourceScopeAccountGeneration(sourceId, { provider: definition.provider, credentialCapability: fileScopeSourceCapability(definition) }, registry, undefined, definition.account);
 }
-function connectedSourceScopeAccountGeneration(sourceId, capability, registry, pinnedHandle) {
-  const eligible = registry.handles.filter((handle2) => handle2.provider === capability.provider && handle2.allowedCapabilities.includes(capability.credentialCapability) && handle2.backendState?.status !== "reauth_required");
+function connectedSourceScopeAccountGeneration(sourceId, capability, registry, pinnedHandle, account = "provider_account") {
+  const eligible = registry.handles.filter((handle2) => handle2.thisComputer === true === (account === "this_computer") && handle2.provider === capability.provider && handle2.allowedCapabilities.includes(capability.credentialCapability) && handle2.backendState?.status !== "reauth_required");
   const pin = pinnedHandle?.trim();
   const handles = pin ? eligible.filter((handle2) => handle2.handle === pin) : eligible;
   if (handles.length !== 1)
@@ -48138,7 +48221,11 @@ function approveFileSourceScope(input) {
       }
       throw new OperationError("source_index_policy_violation", "The source scope changed. Reload it before saving.");
     }
-    if (!input.wholeAccount && selections.some((selection) => selection.key === "/" || input.sourceId === "google_drive.docs" && selection.key.toLowerCase() === "root")) {
+    const definition = getFileScopeSource(input.sourceId);
+    if (!definition) {
+      throw new OperationError("invalid_request", "This source does not take a folder scope.");
+    }
+    if (!input.wholeAccount && selections.some((selection) => isFileScopeRootKey(definition, selection.key))) {
       throw new OperationError("invalid_request", "Choose Whole account and confirm it explicitly to approve the provider root.");
     }
     const existing = readState3(input.statePath);
@@ -48299,26 +48386,11 @@ function parseApproval(value) {
     ...typeof record.replaced_revision === "string" ? { replaced_revision: record.replaced_revision } : {}
   };
 }
-var FILE_SOURCE_SCOPE_IDS, FILE_SOURCE_SCOPE_CAPABILITIES;
 var init_source_scope_approval = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_file_scope_sources();
   init_operation_error();
-  FILE_SOURCE_SCOPE_IDS = ["google_drive.docs", "dropbox.files"];
-  FILE_SOURCE_SCOPE_CAPABILITIES = {
-    "google_drive.docs": {
-      sourceId: "google_drive.docs",
-      provider: "google_drive",
-      credentialCapability: "google_drive.docs.sync",
-      scopeRequirement: "explicit_folder_scope"
-    },
-    "dropbox.files": {
-      sourceId: "dropbox.files",
-      provider: "dropbox",
-      credentialCapability: "dropbox.files.sync",
-      scopeRequirement: "explicit_folder_scope"
-    }
-  };
 });
 
 // src/core/mail-source-scope.ts
@@ -102016,8 +102088,8 @@ var require_core = __commonJS((exports) => {
           throw new Error("ajv.removeSchema: invalid parameter");
       }
     }
-    addVocabulary(definitions) {
-      for (const def of definitions)
+    addVocabulary(definitions2) {
+      for (const def of definitions2)
         this.addKeyword(def);
       return this;
     }
@@ -133368,7 +133440,7 @@ function createEmailSourceWorker(options = {}) {
       }
       return;
     }
-    if (sourceId === "google_drive.docs" || sourceId === "dropbox.files") {
+    if (sourceId !== undefined && isFileSourceScopeId(sourceId)) {
       const scope = sourceDashboard?.fileSourceScopes?.summaries().find((candidate) => candidate.source_id === sourceId);
       const hasSelectedFolders = scope?.whole_account_selected === true || scope?.selections?.some((selection) => selection.state !== "exclude") === true;
       if (!scope || scope.status !== "approved" || !scope.connected || !hasSelectedFolders) {
@@ -134578,7 +134650,7 @@ function parseDashboardSyncSource(value2) {
   throw new EmailSourceWorkerError(400, "invalid_request", "source must be gmail, google-drive, dropbox, x, or readwise.");
 }
 function parseFolderScopeSourceId(value2) {
-  if (value2 === "google_drive.docs" || value2 === "dropbox.files")
+  if (typeof value2 === "string" && isFileSourceScopeId(value2))
     return value2;
   throw new EmailSourceWorkerError(400, "invalid_request", "source_id must name a folder-capable source.");
 }
@@ -135577,6 +135649,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
+  init_source_scope_approval();
   init_release_manifest();
   init_google_handle_compatibility();
   init_google_publisher_capacity();
@@ -136166,6 +136239,8 @@ class SourceScheduler {
   setTimeoutImpl;
   clearTimeoutImpl;
   continueWake;
+  changeDebounceMs;
+  changeWakes = new Map;
   constructor(options) {
     this.enabled = options.enabled;
     this.tickMs = options.tickMs;
@@ -136183,6 +136258,7 @@ class SourceScheduler {
     this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
     this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
+    this.changeDebounceMs = options.changeDebounceMs ?? SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS;
     const firstRun = this.now().getTime();
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => this.createTaskState(source, task, firstRun)));
   }
@@ -136201,6 +136277,7 @@ class SourceScheduler {
     }));
     if (this.timer)
       this.refreshFastWakeTimers();
+    this.syncChangeSubscriptions();
   }
   filterAllowedSources(sources) {
     if (this.allowedSourceIds === undefined)
@@ -136217,6 +136294,7 @@ class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    this.syncChangeSubscriptions();
     for (const state of this.states) {
       try {
         state.task.atStart?.();
@@ -136225,6 +136303,7 @@ class SourceScheduler {
     this.runDueTasks();
   }
   stop() {
+    this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
       this.timer = undefined;
@@ -136235,6 +136314,76 @@ class SourceScheduler {
     if (this.continueWake) {
       this.clearTimeoutImpl(this.continueWake.timer);
       this.continueWake = undefined;
+    }
+  }
+  syncChangeSubscriptions() {
+    if (!this.timer)
+      return;
+    const wanted = new Map(this.sources.filter((source) => source.subscribeChanges !== undefined).map((source) => [source.sourceId, source]));
+    this.closeChangeSubscriptions((sourceId, entry) => wanted.get(sourceId)?.subscribeChanges !== entry.subscribe);
+    for (const [sourceId, source] of wanted) {
+      if (this.changeWakes.has(sourceId))
+        continue;
+      const entry = {
+        subscribe: source.subscribeChanges,
+        unsubscribe: () => {},
+        running: false,
+        queued: false,
+        closed: false
+      };
+      try {
+        entry.unsubscribe = source.subscribeChanges(() => this.signalChange(sourceId, entry));
+      } catch {
+        continue;
+      }
+      this.changeWakes.set(sourceId, entry);
+    }
+  }
+  closeChangeSubscriptions(predicate) {
+    for (const [sourceId, entry] of [...this.changeWakes]) {
+      if (!predicate(sourceId, entry))
+        continue;
+      entry.closed = true;
+      entry.queued = false;
+      if (entry.timer)
+        this.clearTimeoutImpl(entry.timer);
+      delete entry.timer;
+      try {
+        entry.unsubscribe();
+      } catch {}
+      this.changeWakes.delete(sourceId);
+    }
+  }
+  signalChange(sourceId, entry) {
+    if (entry.closed)
+      return;
+    if (entry.running) {
+      entry.queued = true;
+      return;
+    }
+    if (entry.timer)
+      return;
+    const timer = this.setTimeoutImpl(() => {
+      delete entry.timer;
+      this.runChangeWake(sourceId, entry);
+    }, this.changeDebounceMs);
+    timer.unref?.();
+    entry.timer = timer;
+  }
+  async runChangeWake(sourceId, entry) {
+    if (entry.closed || entry.running)
+      return;
+    entry.running = true;
+    try {
+      do {
+        entry.queued = false;
+        const busy = this.states.filter((state) => state.source.sourceId === sourceId && state.running);
+        for (const state of busy)
+          state.wakeAfterRun = true;
+        await this.runSource(sourceId, undefined, "scheduled");
+      } while (entry.queued && !entry.closed);
+    } catch {} finally {
+      entry.running = false;
     }
   }
   scheduleContinueWake(at) {
@@ -137762,7 +137911,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_operation_error();
@@ -137845,7 +137994,70 @@ var init_source_scheduler = __esm(() => {
   VERBATIM_SCHEDULER_WARNINGS = new Set([EXTRACTION_JOBS_REFUSED_WARNING]);
 });
 
+// src/core/this-computer.ts
+import { existsSync as existsSync62, readFileSync as readFileSync66 } from "node:fs";
+import { dirname as dirname72, join as join102 } from "node:path";
+function defaultThisComputerStatePath(handleRegistryPath) {
+  return join102(dirname72(handleRegistryPath), "this-computer.json");
+}
+function readState6(path) {
+  if (!existsSync62(path))
+    return;
+  try {
+    const parsed = JSON.parse(readFileSync66(path, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return;
+    const record5 = parsed;
+    if (record5.version !== 1 || typeof record5.machine_id !== "string" || !MACHINE_ID_PATTERN.test(record5.machine_id) || !Array.isArray(record5.sources))
+      return;
+    const sources = [];
+    for (const entry of record5.sources) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        return;
+      const source = entry;
+      if (typeof source.source_id !== "string" || typeof source.connected_at !== "string" || !Number.isFinite(Date.parse(source.connected_at)))
+        return;
+      sources.push({ source_id: source.source_id, connected_at: source.connected_at });
+    }
+    return { version: 1, machine_id: record5.machine_id, sources };
+  } catch {
+    return;
+  }
+}
+function readThisComputerHandles(handleRegistryPath) {
+  const state = readState6(defaultThisComputerStatePath(handleRegistryPath));
+  if (!state)
+    return [];
+  const handles = [];
+  for (const entry of state.sources) {
+    const definition = getFileScopeSource(entry.source_id);
+    if (!definition || definition.account !== "this_computer")
+      continue;
+    handles.push({
+      handle: `${definition.sourceId}.this_computer`,
+      provider: definition.provider,
+      allowedCapabilities: [fileScopeSourceCapability(definition)],
+      connectedAt: entry.connected_at,
+      accountRole: "this_computer",
+      providerAccountId: state.machine_id,
+      thisComputer: true
+    });
+  }
+  return handles;
+}
+var MACHINE_ID_PATTERN;
+var init_this_computer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_file_scope_sources();
+  MACHINE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+});
+
 // src/workers/source-scope-runtime.ts
+function isMailSourceScopePolicyRef(ref) {
+  return ref.sourceId === "gmail.email";
+}
+
 class FileSourceScopeAuthority {
   registryPath;
   statePath;
@@ -137885,7 +138097,7 @@ class FileSourceScopeAuthority {
     });
   }
   assertRefCurrent(ref) {
-    if (ref.sourceId === "gmail.email")
+    if (isMailSourceScopePolicyRef(ref))
       this.assertCurrentMail(ref);
     else
       this.assertCurrent(ref);
@@ -137898,11 +138110,17 @@ class FileSourceScopeAuthority {
       ...pinnedHandle ? { pinnedHandle } : {}
     };
   }
+  fileScopeRegistry() {
+    const registry2 = this.readRegistry();
+    return {
+      handles: [...registry2.handles, ...readThisComputerHandles(this.registryPath)]
+    };
+  }
   snapshot(sourceId) {
     try {
       return readFileSourceScopeApproval({
         sourceId,
-        registry: this.readRegistry(),
+        registry: this.fileScopeRegistry(),
         statePath: this.statePath
       });
     } catch {
@@ -137919,14 +138137,14 @@ class FileSourceScopeAuthority {
   approve(input) {
     return approveFileSourceScope({
       ...input,
-      registry: this.readRegistry(),
+      registry: this.fileScopeRegistry(),
       statePath: this.statePath
     });
   }
   assertCurrent(ref) {
     return assertFileSourceScopeApproved({
       sourceId: ref.sourceId,
-      registry: this.readRegistry(),
+      registry: this.fileScopeRegistry(),
       statePath: this.statePath,
       expectedAccountGeneration: ref.accountGeneration,
       expectedRevision: ref.revision
@@ -137943,58 +138161,55 @@ class FileSourceScopeAuthority {
     };
   }
 }
+function scopeKeyFilter(definition, role, keys) {
+  if (keys.length === 0)
+    return {};
+  return { [FILTER_KEYS[definition.filterFamily][role]]: [...keys] };
+}
 function fileSourceScopeContentFilters(approval) {
   if (approval.status !== "approved" || !approval.accountGeneration)
     return { allowed: false };
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition)
+    return { allowed: false };
   const deniedKeys = approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => selection.key);
+  const base = {
+    provider: definition.provider,
+    sourceScopeGeneration: approval.accountGeneration,
+    sourceScopeRevision: approval.revision
+  };
   if (approval.wholeAccount) {
     return {
       allowed: true,
-      filters: {
-        provider: approval.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
-        sourceScopeGeneration: approval.accountGeneration,
-        sourceScopeRevision: approval.revision,
-        ...approval.sourceId === "dropbox.files" && deniedKeys.length > 0 ? { locatorPathExcludedScopes: deniedKeys } : {},
-        ...approval.sourceId === "google_drive.docs" && deniedKeys.length > 0 ? { sourceScopeFolderNoneKeys: deniedKeys } : {}
-      }
+      filters: { ...base, ...scopeKeyFilter(definition, "exclude", deniedKeys) }
     };
   }
   const ingestKeys = approval.selections.filter((selection) => selection.state === "ingest").map((selection) => selection.key);
   if (ingestKeys.length === 0)
     return { allowed: false };
-  return approval.sourceId === "dropbox.files" ? {
+  return {
     allowed: true,
     filters: {
-      provider: "dropbox",
-      sourceScopeGeneration: approval.accountGeneration,
-      sourceScopeRevision: approval.revision,
-      locatorPathScopes: ingestKeys,
-      ...deniedKeys.length > 0 ? { locatorPathExcludedScopes: deniedKeys } : {}
-    }
-  } : {
-    allowed: true,
-    filters: {
-      provider: "google_drive",
-      sourceScopeGeneration: approval.accountGeneration,
-      sourceScopeRevision: approval.revision,
-      sourceScopeFolderAnyKeys: ingestKeys,
-      ...deniedKeys.length > 0 ? { sourceScopeFolderNoneKeys: deniedKeys } : {}
+      ...base,
+      ...scopeKeyFilter(definition, "include", ingestKeys),
+      ...scopeKeyFilter(definition, "exclude", deniedKeys)
     }
   };
 }
 function fileSourceScopeMetadataFilters(approval) {
   if (approval.status !== "approved" || !approval.accountGeneration)
     return { allowed: false };
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition)
+    return { allowed: false };
   const excludedKeys = approval.selections.filter((selection) => selection.state === "exclude").map((selection) => selection.key);
   const metadataOnlyKeys = approval.selections.filter((selection) => selection.state === "metadata_only").map((selection) => selection.key);
   const base = {
-    provider: approval.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
+    provider: definition.provider,
     sourceScopeGeneration: approval.accountGeneration,
     sourceScopeRevision: approval.revision,
-    ...approval.sourceId === "dropbox.files" && excludedKeys.length > 0 ? { locatorPathExcludedScopes: excludedKeys } : {},
-    ...approval.sourceId === "google_drive.docs" && excludedKeys.length > 0 ? { sourceScopeFolderNoneKeys: excludedKeys } : {},
-    ...approval.sourceId === "dropbox.files" && metadataOnlyKeys.length > 0 ? { metadataOnlyLocatorPathScopes: metadataOnlyKeys } : {},
-    ...approval.sourceId === "google_drive.docs" && metadataOnlyKeys.length > 0 ? { metadataOnlySourceScopeFolderKeys: metadataOnlyKeys } : {}
+    ...scopeKeyFilter(definition, "exclude", excludedKeys),
+    ...scopeKeyFilter(definition, "metadataOnly", metadataOnlyKeys)
   };
   if (approval.wholeAccount)
     return { allowed: true, filters: base };
@@ -138003,10 +138218,7 @@ function fileSourceScopeMetadataFilters(approval) {
     return { allowed: false };
   return {
     allowed: true,
-    filters: {
-      ...base,
-      ...approval.sourceId === "dropbox.files" ? { locatorPathScopes: includedKeys } : { sourceScopeFolderAnyKeys: includedKeys }
-    }
+    filters: { ...base, ...scopeKeyFilter(definition, "include", includedKeys) }
   };
 }
 function fileSourceScopeMetadataEnabled(approval) {
@@ -138126,19 +138338,34 @@ function scopeBoundSchedulerSource(input) {
     }))
   };
 }
+var FILTER_KEYS;
 var init_source_scope_runtime = __esm(() => {
   init_source_scope_approval();
+  init_file_scope_sources();
+  init_this_computer();
   init_connected_handles();
   init_mail_source_scope();
+  FILTER_KEYS = {
+    locator_path: {
+      include: "locatorPathScopes",
+      exclude: "locatorPathExcludedScopes",
+      metadataOnly: "metadataOnlyLocatorPathScopes"
+    },
+    folder_id: {
+      include: "sourceScopeFolderAnyKeys",
+      exclude: "sourceScopeFolderNoneKeys",
+      metadataOnly: "metadataOnlySourceScopeFolderKeys"
+    }
+  };
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname72, join as join102 } from "node:path";
+import { dirname as dirname73, join as join103 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join102(dirname72(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join103(dirname73(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -138616,11 +138843,33 @@ function normalizeDropboxNodeKey(value2) {
   }
   return trimmed2.length > 1 && trimmed2.endsWith("/") ? trimmed2.slice(0, -1).toLowerCase() : trimmed2.toLowerCase();
 }
-var GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder", BROWSE_PAGE_SIZE = 100;
+function requireCredentialHandle(context2) {
+  if (!context2.credentialHandle)
+    throw new Error("This folder source needs a connected credential.");
+  return context2.credentialHandle;
+}
+function createFileScopeBrowser(sourceId, context2) {
+  const factory = browserFactories.get(sourceId);
+  if (!factory)
+    throw new Error(`No folder browser is registered for ${sourceId}.`);
+  return factory(context2);
+}
+var GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder", BROWSE_PAGE_SIZE = 100, browserFactories, builtInBrowserIds;
 var init_source_scope_browser = __esm(() => {
   init_credential_broker();
   init_drive();
   init_provider_client();
+  browserFactories = new Map([
+    ["google_drive.docs", (context2) => createGoogleDriveFolderScopeBrowser({
+      credentialHandle: requireCredentialHandle(context2),
+      ...context2.account ? { account: context2.account } : {},
+      ...context2.googleDriveRequestBudget ? { requestBudget: context2.googleDriveRequestBudget } : {}
+    })],
+    ["dropbox.files", (context2) => createDropboxFolderScopeBrowser({
+      credentialHandle: requireCredentialHandle(context2)
+    })]
+  ]);
+  builtInBrowserIds = new Set(browserFactories.keys());
 });
 
 // src/workers/classification/installed-tier-classification.ts
@@ -138703,8 +138952,8 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync48, readFileSync as readFileSync66 } from "node:fs";
-import { dirname as dirname73 } from "node:path";
+import { mkdirSync as mkdirSync48, readFileSync as readFileSync67 } from "node:fs";
+import { dirname as dirname74 } from "node:path";
 
 class SnifferCallBudget {
   maxCallsPerDay;
@@ -138718,7 +138967,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync66(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync67(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -138738,7 +138987,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync48(dirname73(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync48(dirname74(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -139078,7 +139327,7 @@ var init_sniffer_resolver = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database18 } from "bun:sqlite";
-import { existsSync as existsSync62 } from "node:fs";
+import { existsSync as existsSync63 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -139156,7 +139405,7 @@ class TierSnifferService {
         db = new Database18(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync62(path);
+        const hasQueue = existsSync63(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -139355,11 +139604,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync62(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync63(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync62(own3))
+      if (existsSync63(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -153586,7 +153835,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { existsSync as existsSync63 } from "node:fs";
+import { existsSync as existsSync64 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -153751,7 +154000,7 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync63(dbPath))
+    if (!options.create && !existsSync64(dbPath))
       return;
     store = open7(dbPath);
     return store;
@@ -157390,7 +157639,7 @@ var init_setup_backend = __esm(() => {
 
 // src/core/consult-settings-writer.ts
 import { chmodSync as chmodSync29, lstatSync as lstatSync37, mkdirSync as mkdirSync49, statSync as statSync30 } from "node:fs";
-import { dirname as dirname74, isAbsolute as isAbsolute28 } from "node:path";
+import { dirname as dirname75, isAbsolute as isAbsolute28 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -157418,7 +157667,7 @@ function writeConsultSettings(input, location = {}) {
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
-  const custody = ensureSettingsDirectory(dirname74(path));
+  const custody = ensureSettingsDirectory(dirname75(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
   let published = false;
@@ -157475,7 +157724,7 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync30(dirname74(directory));
+      statSync30(dirname75(directory));
     } catch {
       return "home_missing";
     }
@@ -157518,7 +157767,7 @@ __export(exports_dashboard_consult, {
   DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
   DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
 });
-import { delimiter as delimiter9, dirname as dirname75 } from "node:path";
+import { delimiter as delimiter9, dirname as dirname76 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -157567,7 +157816,7 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname75(system)) ? system : undefined;
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname76(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
@@ -158492,8 +158741,8 @@ __export(exports_server2, {
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync64 } from "node:fs";
-import { dirname as dirname76, isAbsolute as isAbsolute29, join as join103 } from "node:path";
+import { existsSync as existsSync65 } from "node:fs";
+import { dirname as dirname77, isAbsolute as isAbsolute29, join as join104 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -158707,7 +158956,7 @@ function localPrivateEmbeddingTargets(input) {
     const scope = connectorStoreReadScope(store);
     if (!scope.allowed || !scope.contentAllowed)
       return [];
-    const mail = ref?.sourceId === "gmail.email" && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
+    const mail = ref && isMailSourceScopePolicyRef(ref) && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
     const accountScope = mail ? gmailAccountScope?.trim() || "personal" : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
     if (mail && !accountScope)
       return [];
@@ -158883,7 +159132,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync64(store.dbPath))
+        if (!existsSync65(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -159997,7 +160246,7 @@ async function main() {
     console.log("[file-extraction] Dropbox extraction waits for Dropbox to be connected.");
   }
   const assertFileSourceScopeCurrent = (provider) => {
-    const sourceId = provider === "dropbox" ? "dropbox.files" : provider === "google_drive" ? "google_drive.docs" : undefined;
+    const sourceId = fileSourceScopeIdForProvider(provider);
     if (!sourceId)
       return;
     const ref = fileSourceScopeAuthority?.policyRef(sourceId);
@@ -160038,7 +160287,7 @@ async function main() {
         assertFileSourceScopeCurrent(config2.provider);
       },
       allowsRef({ config: config2, reader, ref }) {
-        const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
+        const sourceId = fileSourceScopeIdForProvider(config2.provider);
         if (!sourceId)
           return true;
         const approval = fileSourceScopeAuthority?.snapshot(sourceId);
@@ -160132,18 +160381,12 @@ async function main() {
     if (!metadataScope.allowed)
       return { allowed: false };
     const contentScope = fileSourceScopeContentFilters(approval);
-    const handle = selectedSourceCredentialHandle({
-      env: process.env,
-      pinEnvName: sourceId === "dropbox.files" ? "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE" : "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
-      provider: sourceId === "dropbox.files" ? "dropbox" : "google_drive",
-      capability: sourceId === "dropbox.files" ? "dropbox.files.sync" : "google_drive.docs.sync",
-      handles: readActiveConnectedHandles(process.env)
-    });
-    if (!handle)
+    const scopeAccount = fileScopeAccount(sourceId);
+    if (!scopeAccount)
       return { allowed: false };
     return {
       allowed: true,
-      accountScope: handle.accountRole?.trim() || "personal",
+      accountScope: scopeAccount.accountScope,
       filters: metadataScope.filters,
       contentAllowed: contentScope.allowed,
       ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
@@ -160891,11 +161134,36 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...snapshot.reason === "malformed" ? { error: "Saved mail scope is unreadable. Review and save the scope again." } : {}
     };
   };
+  const fileScopeCredentialHandle = (definition) => definition.account === "this_computer" ? undefined : selectedSourceCredentialHandle({
+    env: process.env,
+    pinEnvName: definition.pinEnvName ?? "",
+    provider: definition.provider,
+    capability: definition.credentialCapability,
+    handles: readActiveConnectedHandles(process.env)
+  });
+  const fileScopeAccount = (sourceId) => {
+    const definition = getFileScopeSource(sourceId);
+    if (!definition)
+      return;
+    if (definition.account === "this_computer")
+      return { accountScope: "this_computer" };
+    const handle = fileScopeCredentialHandle(definition);
+    return handle ? { accountScope: handle.accountRole?.trim() || "personal" } : undefined;
+  };
+  const fileScopeBrowserFor = (sourceId) => {
+    const definition = requireFileScopeSource(sourceId);
+    const handle = fileScopeCredentialHandle(definition);
+    if (definition.account !== "this_computer" && !handle) {
+      throw new OperationError("source_index_policy_violation", "The connected source credential is unavailable.");
+    }
+    return createFileScopeBrowser(sourceId, {
+      ...handle ? { credentialHandle: handle.handle } : {},
+      ...handle?.accountRole ? { account: handle.accountRole } : {},
+      ...googleDriveRequestBudget ? { googleDriveRequestBudget } : {}
+    });
+  };
   const fileSourceScopes = fileSourceScopeAuthority ? {
-    summaries: () => [...[
-      ["google_drive.docs", GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE, "Google Drive"],
-      ["dropbox.files", DROPBOX_INGESTION_EXCLUSION_SOURCE, "Dropbox"]
-    ].map(([sourceId, dispositionSourceId, label]) => {
+    summaries: () => [...listFileScopeSources().map(({ sourceId, dispositionSourceId, label }) => {
       const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
       return {
         kind: "folders",
@@ -161010,22 +161278,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       if (!accountGeneration) {
         throw new OperationError("source_index_policy_violation", "Connect this source before browsing folders.");
       }
-      const handles = readActiveConnectedHandles(process.env);
-      const handle = selectedSourceCredentialHandle({
-        env: process.env,
-        pinEnvName: input.sourceId === "dropbox.files" ? "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE" : "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
-        provider: input.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
-        capability: input.sourceId === "dropbox.files" ? "dropbox.files.sync" : "google_drive.docs.sync",
-        handles
-      });
-      if (!handle) {
-        throw new OperationError("source_index_policy_violation", "The connected source credential is unavailable.");
-      }
-      const browser = input.sourceId === "dropbox.files" ? createDropboxFolderScopeBrowser({ credentialHandle: handle.handle }) : createGoogleDriveFolderScopeBrowser({
-        credentialHandle: handle.handle,
-        ...handle.accountRole ? { account: handle.accountRole } : {},
-        ...googleDriveRequestBudget ? { requestBudget: googleDriveRequestBudget } : {}
-      });
+      const browser = fileScopeBrowserFor(input.sourceId);
       const page3 = await browser.browse({
         ...input.parentKey ? { parentKey: input.parentKey } : {},
         ...input.cursor ? { cursor: input.cursor } : {}
@@ -161050,25 +161303,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       };
     },
     approveAndStart: async (input) => {
+      const definition = requireFileScopeSource(input.sourceId);
       const selections = input.selections.map((selection) => ({
-        key: input.sourceId === "dropbox.files" ? selection.key.trim().toLowerCase() : selection.key.trim(),
+        key: definition.normalizeKey(selection.key),
         state: selection.state
       }));
-      const handle = selectedSourceCredentialHandle({
-        env: process.env,
-        pinEnvName: input.sourceId === "dropbox.files" ? "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE" : "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
-        provider: input.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
-        capability: input.sourceId === "dropbox.files" ? "dropbox.files.sync" : "google_drive.docs.sync",
-        handles: readActiveConnectedHandles(process.env)
-      });
-      if (!handle) {
-        throw new OperationError("source_index_policy_violation", "The connected source credential is unavailable.");
-      }
-      const browser = input.sourceId === "dropbox.files" ? createDropboxFolderScopeBrowser({ credentialHandle: handle.handle }) : createGoogleDriveFolderScopeBrowser({
-        credentialHandle: handle.handle,
-        ...handle.accountRole ? { account: handle.accountRole } : {},
-        ...googleDriveRequestBudget ? { requestBudget: googleDriveRequestBudget } : {}
-      });
+      const browser = fileScopeBrowserFor(input.sourceId);
       const verifiedSelections = await browser.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
         sourceId: input.sourceId,
@@ -161080,8 +161320,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
       let invalidatedJobs = 0;
       if (fileExtractionRuntime && approval.replayed !== true) {
-        const corpora = input.sourceId === "dropbox.files" ? [DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID] : [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID];
-        invalidatedJobs = corpora.reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0);
+        invalidatedJobs = definition.corpusIdsToInvalidate.reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0);
       }
       let started = false;
       if (sourceScheduler) {
@@ -162028,7 +162267,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join103(dirname76(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join104(dirname77(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -162707,6 +162946,8 @@ var init_server5 = __esm(async () => {
   init_source_ingestion_ledger();
   init_connected_handles();
   init_source_scope_runtime();
+  init_file_scope_sources();
+  init_source_scope_approval();
   init_gmail_scope_browser();
   init_source_account_guard();
   init_provider_account_identity();
@@ -163174,7 +163415,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { readFileSync as readFileSync67, openSync as openSync18, closeSync as closeSync19, writeSync as writeSync6 } from "node:fs";
+import { readFileSync as readFileSync68, openSync as openSync18, closeSync as closeSync19, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve15 } from "node:path";
@@ -167371,7 +167612,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync67("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync68("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -167726,7 +167967,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync67(resolve15(input2), "utf8");
+    raw = readFileSync68(resolve15(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }

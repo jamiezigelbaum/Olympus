@@ -8,7 +8,13 @@ import {
   type FileSourceScopeApprovalSnapshot,
   type FileSourceScopeId,
   type FileSourceScopeSelection,
+  type SourceScopeConnectedHandleRegistry,
 } from '../core/source-scope-approval.ts';
+import {
+  getFileScopeSource,
+  type FileScopeSourceDefinition,
+} from '../core/file-scope-sources.ts';
+import { readThisComputerHandles } from '../core/this-computer.ts';
 import {
   defaultHandleRegistryPath,
   readConnectedHandleRegistry,
@@ -47,6 +53,10 @@ export interface MailSourceScopePolicyRef {
 
 /** Any approval a lane can be bound to: a folder scope or a mail scope. */
 export type SourceScopePolicyRef = FileSourceScopePolicyRef | MailSourceScopePolicyRef;
+
+export function isMailSourceScopePolicyRef(ref: SourceScopePolicyRef): ref is MailSourceScopePolicyRef {
+  return ref.sourceId === 'gmail.email';
+}
 
 /**
  * The one scope authority for every scope-gated source. Folder sources
@@ -108,7 +118,7 @@ export class FileSourceScopeAuthority {
 
   /** Throws unless the approval `ref` names is still the current one. */
   assertRefCurrent(ref: SourceScopePolicyRef): void {
-    if (ref.sourceId === 'gmail.email') this.assertCurrentMail(ref);
+    if (isMailSourceScopePolicyRef(ref)) this.assertCurrentMail(ref);
     else this.assertCurrent(ref);
   }
 
@@ -121,11 +131,22 @@ export class FileSourceScopeAuthority {
     };
   }
 
+  /**
+   * The handles a folder scope binds to: the credential registry's, plus one
+   * synthetic handle per connected source that has no account.
+   */
+  private fileScopeRegistry(): SourceScopeConnectedHandleRegistry {
+    const registry = this.readRegistry();
+    return {
+      handles: [...registry.handles, ...readThisComputerHandles(this.registryPath)],
+    };
+  }
+
   snapshot(sourceId: FileSourceScopeId): FileSourceScopeApprovalSnapshot {
     try {
       return readFileSourceScopeApproval({
         sourceId,
-        registry: this.readRegistry(),
+        registry: this.fileScopeRegistry(),
         statePath: this.statePath,
       });
     } catch {
@@ -150,7 +171,7 @@ export class FileSourceScopeAuthority {
   }): FileSourceScopeApprovalSnapshot {
     return approveFileSourceScope({
       ...input,
-      registry: this.readRegistry(),
+      registry: this.fileScopeRegistry(),
       statePath: this.statePath,
     });
   }
@@ -158,7 +179,7 @@ export class FileSourceScopeAuthority {
   assertCurrent(ref: FileSourceScopePolicyRef): FileSourceScopeApprovalSnapshot {
     return assertFileSourceScopeApproved({
       sourceId: ref.sourceId,
-      registry: this.readRegistry(),
+      registry: this.fileScopeRegistry(),
       statePath: this.statePath,
       expectedAccountGeneration: ref.accountGeneration,
       expectedRevision: ref.revision,
@@ -176,62 +197,77 @@ export class FileSourceScopeAuthority {
   }
 }
 
+/**
+ * The connector-store filter keys of each scope-key family
+ * (`FileScopeFilterFamily`). A source picks a family in its definition; no
+ * consumer branches on the source.
+ */
+const FILTER_KEYS = {
+  locator_path: {
+    include: 'locatorPathScopes',
+    exclude: 'locatorPathExcludedScopes',
+    metadataOnly: 'metadataOnlyLocatorPathScopes',
+  },
+  folder_id: {
+    include: 'sourceScopeFolderAnyKeys',
+    exclude: 'sourceScopeFolderNoneKeys',
+    metadataOnly: 'metadataOnlySourceScopeFolderKeys',
+  },
+} as const satisfies Record<FileScopeSourceDefinition['filterFamily'], {
+  include: keyof ConnectorStoreSearchFilters;
+  exclude: keyof ConnectorStoreSearchFilters;
+  metadataOnly: keyof ConnectorStoreSearchFilters;
+}>;
+
+function scopeKeyFilter(
+  definition: FileScopeSourceDefinition,
+  role: keyof typeof FILTER_KEYS['locator_path'],
+  keys: readonly string[],
+): ConnectorStoreSearchFilters {
+  if (keys.length === 0) return {};
+  return { [FILTER_KEYS[definition.filterFamily][role]]: [...keys] } as ConnectorStoreSearchFilters;
+}
+
 export function fileSourceScopeContentFilters(
   approval: FileSourceScopeApprovalSnapshot,
 ): { allowed: false } | { allowed: true; filters?: ConnectorStoreSearchFilters } {
   if (approval.status !== 'approved' || !approval.accountGeneration) return { allowed: false };
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition) return { allowed: false };
   const deniedKeys = approval.selections
     .filter((selection) => selection.state !== 'ingest')
     .map((selection) => selection.key);
+  const base: ConnectorStoreSearchFilters = {
+    provider: definition.provider,
+    sourceScopeGeneration: approval.accountGeneration,
+    sourceScopeRevision: approval.revision,
+  };
   if (approval.wholeAccount) {
     return {
       allowed: true,
-      filters: {
-        provider: approval.sourceId === 'dropbox.files' ? 'dropbox' : 'google_drive',
-        sourceScopeGeneration: approval.accountGeneration,
-        sourceScopeRevision: approval.revision,
-        ...(approval.sourceId === 'dropbox.files' && deniedKeys.length > 0
-          ? { locatorPathExcludedScopes: deniedKeys }
-          : {}),
-        ...(approval.sourceId === 'google_drive.docs' && deniedKeys.length > 0
-          ? { sourceScopeFolderNoneKeys: deniedKeys }
-          : {}),
-      },
+      filters: { ...base, ...scopeKeyFilter(definition, 'exclude', deniedKeys) },
     };
   }
   const ingestKeys = approval.selections
     .filter((selection) => selection.state === 'ingest')
     .map((selection) => selection.key);
   if (ingestKeys.length === 0) return { allowed: false };
-  return approval.sourceId === 'dropbox.files'
-    ? {
-        allowed: true,
-        filters: {
-          provider: 'dropbox',
-          sourceScopeGeneration: approval.accountGeneration,
-          sourceScopeRevision: approval.revision,
-          locatorPathScopes: ingestKeys,
-          ...(deniedKeys.length > 0 ? { locatorPathExcludedScopes: deniedKeys } : {}),
-        },
-      }
-    : {
-        allowed: true,
-        filters: {
-          provider: 'google_drive',
-          sourceScopeGeneration: approval.accountGeneration,
-          sourceScopeRevision: approval.revision,
-          sourceScopeFolderAnyKeys: ingestKeys,
-          ...(deniedKeys.length > 0
-            ? { sourceScopeFolderNoneKeys: deniedKeys }
-            : {}),
-        },
-      };
+  return {
+    allowed: true,
+    filters: {
+      ...base,
+      ...scopeKeyFilter(definition, 'include', ingestKeys),
+      ...scopeKeyFilter(definition, 'exclude', deniedKeys),
+    },
+  };
 }
 
 export function fileSourceScopeMetadataFilters(
   approval: FileSourceScopeApprovalSnapshot,
 ): { allowed: false } | { allowed: true; filters: ConnectorStoreSearchFilters } {
   if (approval.status !== 'approved' || !approval.accountGeneration) return { allowed: false };
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition) return { allowed: false };
   const excludedKeys = approval.selections
     .filter((selection) => selection.state === 'exclude')
     .map((selection) => selection.key);
@@ -239,21 +275,11 @@ export function fileSourceScopeMetadataFilters(
     .filter((selection) => selection.state === 'metadata_only')
     .map((selection) => selection.key);
   const base: ConnectorStoreSearchFilters = {
-    provider: approval.sourceId === 'dropbox.files' ? 'dropbox' : 'google_drive',
+    provider: definition.provider,
     sourceScopeGeneration: approval.accountGeneration,
     sourceScopeRevision: approval.revision,
-    ...(approval.sourceId === 'dropbox.files' && excludedKeys.length > 0
-      ? { locatorPathExcludedScopes: excludedKeys }
-      : {}),
-    ...(approval.sourceId === 'google_drive.docs' && excludedKeys.length > 0
-      ? { sourceScopeFolderNoneKeys: excludedKeys }
-      : {}),
-    ...(approval.sourceId === 'dropbox.files' && metadataOnlyKeys.length > 0
-      ? { metadataOnlyLocatorPathScopes: metadataOnlyKeys }
-      : {}),
-    ...(approval.sourceId === 'google_drive.docs' && metadataOnlyKeys.length > 0
-      ? { metadataOnlySourceScopeFolderKeys: metadataOnlyKeys }
-      : {}),
+    ...scopeKeyFilter(definition, 'exclude', excludedKeys),
+    ...scopeKeyFilter(definition, 'metadataOnly', metadataOnlyKeys),
   };
   if (approval.wholeAccount) return { allowed: true, filters: base };
   const includedKeys = approval.selections
@@ -262,12 +288,7 @@ export function fileSourceScopeMetadataFilters(
   if (includedKeys.length === 0) return { allowed: false };
   return {
     allowed: true,
-    filters: {
-      ...base,
-      ...(approval.sourceId === 'dropbox.files'
-        ? { locatorPathScopes: includedKeys }
-        : { sourceScopeFolderAnyKeys: includedKeys }),
-    },
+    filters: { ...base, ...scopeKeyFilter(definition, 'include', includedKeys) },
   };
 }
 
