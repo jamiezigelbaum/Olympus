@@ -193,7 +193,9 @@ Facts:
 
 **Signing (owner decision 2026-10-21):** Developer ID Application under the
 Open Coordination Unlimited Apple Developer organization account, never the
-owner's personal ID. This is the case the 2026-10-11 signing ruling named for
+owner's personal ID for any public build (the personal ID may sign local
+development and test builds only, owner 2026-10-21, while the organization
+enrolment is pending). This is the case the 2026-10-11 signing ruling named for
 revisiting. Until the helper ships, unguarded folders work on Mac, and
 everything works on Linux.
 
