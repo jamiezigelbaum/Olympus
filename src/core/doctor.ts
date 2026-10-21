@@ -278,7 +278,7 @@ async function sourceCapabilityCatalogCheck(deps: DoctorDeps): Promise<DoctorChe
       .map((handle) => handle.provider),
   );
   const connected = V0_4_PUBLIC_SOURCE_CAPABILITIES
-    .filter((source) => connectedProviders.has(source.doctor_lane.provider));
+    .filter((source) => source.doctor_lane === undefined || connectedProviders.has(source.doctor_lane.provider));
   const dependencyLabels = [...new Set(connected.flatMap((source) =>
     source.dependencies.map((dependency) => dependency.label)))].sort((a, b) => a.localeCompare(b));
   return {

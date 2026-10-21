@@ -588,7 +588,8 @@ export interface DashboardDisconnectAction {
   source_id: V04PublicSourceId;
   label: string;
   confirmation: string;
-  provider_revocation_url: string;
+  /** Absent for a source with no provider account to revoke (files on this computer). */
+  provider_revocation_url?: string;
 }
 
 /**
@@ -2765,7 +2766,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
 
 function dashboardDisconnectAction(sourceId: V04PublicSourceId, label: string): DashboardDisconnectAction {
   const google = sourceId === 'gmail.email' || sourceId === 'google_drive.docs';
-  const providerRevocationUrl: Record<V04PublicSourceId, string> = {
+  const providerRevocationUrl: Partial<Record<V04PublicSourceId, string>> = {
     'gmail.email': 'https://myaccount.google.com/connections',
     'google_drive.docs': 'https://myaccount.google.com/connections',
     'dropbox.files': 'https://www.dropbox.com/account/connected_apps',
@@ -2781,7 +2782,7 @@ function dashboardDisconnectAction(sourceId: V04PublicSourceId, label: string): 
     source_id: sourceId,
     label: `Disconnect ${label}`,
     confirmation: `Stop new ${label} reads and remove the selected local credential/account grant.${sharedGoogleImpact} Indexed data and developer-app registration stay. Olympus does not revoke provider-side access.`,
-    provider_revocation_url: providerRevocationUrl[sourceId],
+    ...(providerRevocationUrl[sourceId] === undefined ? {} : { provider_revocation_url: providerRevocationUrl[sourceId] }),
   };
 }
 

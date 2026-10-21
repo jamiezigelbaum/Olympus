@@ -67,6 +67,14 @@ export class LocalFilesRootMissingError extends Error {
   }
 }
 
+/** The system will not let Olympus read the approved folder (a macOS permission prompt, or a mode). */
+export class LocalFilesRootPermissionError extends Error {
+  constructor(readonly scopePath: string) {
+    super('Olympus is not allowed to read a chosen folder.');
+    this.name = 'LocalFilesRootPermissionError';
+  }
+}
+
 /** The change history this pass was to resume from cannot be replayed: list everything again. */
 export class LocalFilesHistoryResetError extends Error {
   constructor(detail: string) {
@@ -190,6 +198,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       return { real, walkRoot: ScopeRoot.open(real) };
     } catch (error) {
       if (error instanceof ScopeSafeError && error.code === 'not_found') throw new LocalFilesRootMissingError(root);
+      if (error instanceof ScopeSafeError && error.code === 'permission') throw new LocalFilesRootPermissionError(root);
       throw error;
     }
   };

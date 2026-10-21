@@ -123,6 +123,7 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
   'gmail.email',
   'google_drive.docs',
   'dropbox.files',
+  'local.files',
   'x.bookmarks',
   'telegram.messages',
   'whatsapp.personal.messages',

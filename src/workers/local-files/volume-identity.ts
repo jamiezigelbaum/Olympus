@@ -228,7 +228,7 @@ export function parseLinuxMountinfo(text: string): RawMount[] {
   const mounts: RawMount[] = [];
   for (const line of text.split('\n')) {
     const separator = line.indexOf(' - ');
-    if (separator < 0) return mounts.length ? mounts : [];
+    if (separator < 0) continue;
     const head = line.slice(0, separator).split(' ');
     const tail = line.slice(separator + 3).split(' ');
     if (head.length < 6 || tail.length < 2) continue;

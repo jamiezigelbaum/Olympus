@@ -33,6 +33,15 @@ import {
 } from '../dropbox-files/connector-store.ts';
 import { DROPBOX_FILES_SOURCE_ID } from '../dropbox-files/corpus-adapter.ts';
 import {
+  LOCAL_FILES_TIER_CORPUS_IDS,
+  createLocalFilesConnectorStore,
+  createLocalFilesTierConnectorStore,
+  defaultLocalFilesConnectorStoreDbPath,
+  defaultLocalFilesInternalConnectorStoreDbPath,
+  defaultLocalFilesPublicConnectorStoreDbPath,
+} from '../local-files/store.ts';
+import { LOCAL_FILES_SOURCE_ID } from '../local-files/scope.ts';
+import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
@@ -141,6 +150,32 @@ export function installedTierMigrationLaneSpecs(
           family: 'file',
           legacy: true,
           open: ({ readOnly }) => createDropboxConnectorStore(env, { readOnly }),
+        },
+      },
+    },
+    {
+      sourceId: LOCAL_FILES_SOURCE_ID,
+      setId: LOCAL_FILES_SOURCE_ID,
+      contentArrivesLater: true,
+      legs: {
+        public_safe: {
+          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.public_safe,
+          dbPath: defaultLocalFilesPublicConnectorStoreDbPath(env),
+          family: 'file',
+          open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore('public_safe', env, { readOnly, tierLedger }),
+        },
+        internal: {
+          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.internal,
+          dbPath: defaultLocalFilesInternalConnectorStoreDbPath(env),
+          family: 'file',
+          open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore('internal', env, { readOnly, tierLedger }),
+        },
+        secure_local: {
+          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.secure_local,
+          dbPath: defaultLocalFilesConnectorStoreDbPath(env),
+          family: 'file',
+          legacy: true,
+          open: ({ readOnly }) => createLocalFilesConnectorStore(env, { readOnly }),
         },
       },
     },

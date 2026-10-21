@@ -31,6 +31,7 @@ import {
 import { defineReadwiseLibraryCorpus } from '../readwise/index.ts';
 import { defineXBookmarksCorpus } from '../x-bookmarks/index.ts';
 import { defineDropboxFilesCorpus } from '../dropbox-files/index.ts';
+import { defineLocalFilesCorpus } from '../local-files/store.ts';
 import {
   defineInternalTelegramMessagesCorpus,
   defineProtectedTelegramMessagesCorpus,
@@ -501,6 +502,7 @@ function defaultCorpusDefinitions(): SourceIndexCorpusDefinition[] {
     defineReadwiseLibraryCorpus(),
     defineXBookmarksCorpus(),
     defineDropboxFilesCorpus(),
+    defineLocalFilesCorpus(),
     defineInternalTelegramMessagesCorpus(),
     defineProtectedTelegramMessagesCorpus(),
   ];

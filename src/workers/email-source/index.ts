@@ -42,6 +42,7 @@ import {
   parseOperationCallerWire,
   type OperationCallerWire,
 } from '../../core/operation-caller.ts';
+import { LOCAL_FILES_CORPUS_ID } from '../local-files/store.ts';
 import { dropboxContentExtractionStallHours } from '../../core/ingestion-throughput.ts';
 import { createDefaultSecretStore, normalizeSecretRef, type SecretStore } from '../../core/secret-store.ts';
 import { canonicalSourceCorpusId, type SourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
@@ -4842,6 +4843,7 @@ function sourceSchedulerSourceIdForCorpus(corpusId: string): string | undefined 
     return 'google_drive.docs';
   }
   if (corpusId === DROPBOX_FILES_CORPUS_ID) return 'dropbox.files';
+  if (corpusId === LOCAL_FILES_CORPUS_ID) return 'local.files';
   if (corpusId === READWISE_LIBRARY_CORPUS_ID) return 'readwise.library';
   if (corpusId === X_BOOKMARKS_CORPUS_ID) return 'x.bookmarks';
   if (isTelegramMessagesCorpusId(corpusId)) return 'telegram.messages';

@@ -121,6 +121,7 @@ export const SCHEDULER_SOURCE_IDS = {
   gmail: 'gmail.email',
   googleDrive: 'google_drive.docs',
   dropbox: DROPBOX_FILES_SOURCE_ID,
+  localFiles: 'local.files',
   readwise: 'readwise.library',
   xBookmarks: 'x.bookmarks',
   telegram: TELEGRAM_MESSAGES_SOURCE_ID,
@@ -1586,7 +1587,7 @@ export function fileExtractionSchedulerTask(input: {
   };
 }
 
-function schedulerScopeHash(approvedScopeKey: string): string {
+export function schedulerScopeHash(approvedScopeKey: string): string {
   return createHash('sha256').update(approvedScopeKey).digest('hex').slice(0, 16);
 }
 
@@ -2322,7 +2323,7 @@ function googleDriveSchedulerFailure(error: unknown): SourceSchedulerTaskFailure
 }
 
 /** A bounded embedding pass; a pass that used its whole limit has more waiting. */
-function embedPassResult(
+export function embedPassResult(
   result: { chunksSeen: number; chunksEmbedded: number; chunksSkipped: number },
   limit: number,
 ): SourceSchedulerTaskRunResult {
@@ -2336,7 +2337,7 @@ function embedPassResult(
   };
 }
 
-function progressFromCounts(counts: Record<string, number>): SourceSchedulerTaskRunResult {
+export function progressFromCounts(counts: Record<string, number>): SourceSchedulerTaskRunResult {
   return {
     status: Object.values(counts).some((value) => value > 0) ? 'progress' : 'idle',
     counts,
@@ -2596,6 +2597,7 @@ const HONEST_SCHEDULER_ERROR_KINDS: ReadonlySet<string> = new Set([
   'api_request_guard',
   'config_missing_folder_argument',
   'scope_root_missing',
+  'scope_root_permission_needed',
   'credential_missing',
   'credential_reauth_required',
   'credential_refresh_busy',
@@ -2766,7 +2768,20 @@ function safeBackendUnavailableWarnings(warnings: readonly string[] | undefined)
  */
 export const EXTRACTION_JOBS_REFUSED_WARNING = 'extraction_jobs_refused';
 
-const VERBATIM_SCHEDULER_WARNINGS: ReadonlySet<string> = new Set([EXTRACTION_JOBS_REFUSED_WARNING]);
+/**
+ * Closed tokens the dashboard reads back to say why a folder source is not
+ * fully working (files on this computer): each is a fixed word, never a path.
+ */
+export const LOCAL_FILES_SCHEDULER_WARNINGS = [
+  'local_files_unreadable_folders',
+  'local_files_watch_limit_reached',
+  'local_files_live_updates_off',
+] as const;
+
+const VERBATIM_SCHEDULER_WARNINGS: ReadonlySet<string> = new Set([
+  EXTRACTION_JOBS_REFUSED_WARNING,
+  ...LOCAL_FILES_SCHEDULER_WARNINGS,
+]);
 
 function extractionWarnings(jobsRefused: number, pauseReason: string | undefined): { warnings?: string[] } {
   const warnings = [

@@ -44,6 +44,7 @@ import {
 } from './core/waiting-private-questions.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
+import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -275,6 +276,15 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       // secret-locations index sit beside the secure (first) one.
       connectorStorePaths: (context) => dropboxTierConnectorStoreDbPaths(envForContext(context)),
       policyPaths: (context) => [defaultDropboxIngestionPolicyPathForHome(context?.homeDir)],
+    },
+    {
+      // No legacy index ever existed: this family is connector-store only.
+      sourceId: 'local.files',
+      label: 'Files on this computer connector store',
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      connectorStorePaths: (context) => localFilesTierConnectorStoreDbPaths(envForContext(context)),
+      // The change snapshots that let a restart catch up without a rescan.
+      rawStatePaths: (context) => [localFilesWatchDir(envForContext(context))],
     },
     {
       sourceId: 'google_drive.docs',
@@ -789,9 +799,11 @@ export function dataDeleteCustody(options: {
         next_action: 'Repair the Olympus connected-handle registry, then Disconnect this source and retry.',
       };
     }
-    const connected = options.connectedRegistry.handles.some(
-      (handle) => handle.provider === publicCapability.doctor_lane.provider,
-    );
+    const lane = publicCapability.doctor_lane;
+    // A source with no credential has no handle to disconnect: its folders are
+    // simply no longer read once Disconnect is pressed, which writes nothing here.
+    const connected = lane !== undefined
+      && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider);
     return connected
       ? {
           requirement: 'source_disconnected',

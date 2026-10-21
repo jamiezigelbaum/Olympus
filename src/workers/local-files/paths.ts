@@ -91,6 +91,7 @@ export type DefaultExclusionReason =
   | 'dependencies'
   | 'build_output'
   | 'app_bundle'
+  | 'olympus_data'
   | 'synced_by_another_source';
 
 /** What the dashboard says about a folder that is off by default. */
@@ -102,6 +103,7 @@ export const DEFAULT_EXCLUSION_LABELS: Readonly<Record<DefaultExclusionReason, s
   dependencies: 'Installed dependencies',
   build_output: 'Build output',
   app_bundle: 'Application',
+  olympus_data: 'Olympus\'s own data',
   synced_by_another_source: 'Already indexed through its own source',
 });
 
@@ -170,6 +172,8 @@ export function defaultExclusionForFolder(
   if (platform === 'darwin' && path === `${home}/Library`) return 'system_library';
   if (platform !== 'darwin' && path === `${home}/.local/share/Trash`) return 'trash';
   if (path === `${home}/.cache`) return 'cache';
+  // Olympus's own stores: reading them back would index the index.
+  if (path === `${home}/.olympus` || path === `${home}/.openclaw` || path === `${home}/.local/share/openclaw`) return 'olympus_data';
   if (path === `${home}/Dropbox` || path.startsWith(`${home}/Dropbox (`)) return 'synced_by_another_source';
   if (SYNCED_FOLDER_NAMES.has(lower) && scopeParentPath(path) === home) return 'synced_by_another_source';
   if (platform === 'darwin' && scopeParentPath(path) === `${home}/Library/CloudStorage`) {

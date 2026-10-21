@@ -78,6 +78,10 @@ function safeKey(key: string): string | undefined {
 export function localFilesRoots(
   approval: Pick<FileSourceScopeApprovalSnapshot, 'selections' | 'wholeAccount'>,
 ): Array<{ scopePath: string; state: 'ingest' | 'metadata_only' }> {
+  // Whole computer: the one root is the top of the primary disk, read in
+  // full except what is excluded or off by default. (Other disks are chosen
+  // by name, since a disk mounted later is a different place.)
+  if (approval.wholeAccount) return [{ scopePath: '/', state: 'ingest' }];
   const roots: Array<{ scopePath: string; state: 'ingest' | 'metadata_only' }> = [];
   for (const selection of approval.selections) {
     if (selection.state === 'exclude') continue;

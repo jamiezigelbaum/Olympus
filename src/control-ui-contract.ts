@@ -43,6 +43,14 @@ export interface OlympusFolderScopeNode {
   kind: 'folder';
   has_children: boolean;
   selectable: boolean;
+  /**
+   * Set when the folder is off unless the person turns it on (system data,
+   * caches, version control, build output, another source's folder): the
+   * picker shows it, marked, and never pre-selects it.
+   */
+  excluded_by_default?: boolean;
+  /** Plain words for why, when `excluded_by_default` is set. */
+  default_exclusion_reason?: string;
 }
 
 export type OlympusSourceScopeStatus = 'scope_pending' | 'approved';

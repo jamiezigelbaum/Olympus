@@ -185,7 +185,7 @@ export function createDropboxFolderScopeBrowser(options: {
   };
 }
 
-function effectiveSelections(
+export function effectiveSelections(
   selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'exclude' }[],
   ancestorsFor: (key: string) => readonly string[],
 ): Array<{
@@ -224,7 +224,7 @@ interface BoundBrowseCursor {
   provider_cursor: string;
 }
 
-function encodeCursor(source: OlympusFolderScopeSourceId, parent: string, providerCursor: string): string {
+export function encodeCursor(source: OlympusFolderScopeSourceId, parent: string, providerCursor: string): string {
   return Buffer.from(JSON.stringify({
     version: 1,
     source,
@@ -233,7 +233,7 @@ function encodeCursor(source: OlympusFolderScopeSourceId, parent: string, provid
   } satisfies BoundBrowseCursor)).toString('base64url');
 }
 
-function decodeCursor(
+export function decodeCursor(
   source: OlympusFolderScopeSourceId,
   parent: string,
   value: string | undefined,
