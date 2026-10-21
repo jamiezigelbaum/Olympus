@@ -202,6 +202,7 @@ describe('source readiness proof', () => {
       'internal.readwise.library',
       'internal.x.bookmarks',
       'secure_local.dropbox.files',
+      'secure_local.local.files',
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
     ]);

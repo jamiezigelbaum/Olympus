@@ -174,6 +174,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     switch (params.action) {
       case 'start_oauth': return 'Connecting…';
       case 'connect_api_key': return 'Validating the key…';
+      case 'connect_this_computer': return 'Connecting…';
       default: return 'Working…';
     }
   }
@@ -187,6 +188,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     switch (params.action) {
       case 'connect_api_key': return 'Key accepted. This card updates when Olympus confirms the connection.';
       case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
+      case 'connect_this_computer': return 'Connected. Choose the folders Olympus may read.';
       default: return 'Saved.';
     }
   }
@@ -320,6 +322,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         source: body.source as Extract<OlympusDashboardControlParams, { action: 'start_oauth' }>['source'],
         ...(body.client_id ? { client_id: body.client_id } : {}),
         ...(body.client_secret ? { client_secret: body.client_secret } : {}),
+      };
+    }
+    if (connect === 'this_computer') {
+      return {
+        action: 'connect_this_computer',
+        source: body.source as Extract<OlympusDashboardControlParams, { action: 'connect_this_computer' }>['source'],
       };
     }
     if (connect === 'api_key') {

@@ -5,7 +5,7 @@ import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/l
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
-import { linuxGraphicalSessionReadinessAsync } from '../../core/linux-desktop-opener.ts';
+import { linuxGraphicalSessionReadinessAsync, openLinuxDesktopPath } from '../../core/linux-desktop-opener.ts';
 import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
 import { workerFetch } from '../../core/worker-transport.ts';
 import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
@@ -35,6 +35,7 @@ import {
   createFileExtractionRuntime,
   pdfExtractionLanes,
   fileExtractionCorporaRoster,
+  connectorStoreExtractionCandidateReader,
   parseFileExtractionCorporaEnv,
 } from './file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
@@ -206,6 +207,39 @@ import {
 } from '../dropbox-files/index.ts';
 import { createDropboxProviderStoreSyncHandler } from '../dropbox-files/provider-store-sync.ts';
 import { createDropboxTierLane } from '../dropbox-files/tier-set.ts';
+import {
+  LOCAL_FILES_ACCOUNT_SCOPE,
+  LOCAL_FILES_POLICY_SOURCE,
+  LOCAL_FILES_PROVIDER,
+  LOCAL_FILES_SOURCE_ID,
+  createScopeBoundLocalFilesContentScope,
+  fileSourceScopeLocalFilesPolicy,
+  localFilesRoots,
+} from '../local-files/scope.ts';
+import {
+  LOCAL_FILES_CORPUS_ID,
+  LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
+  LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
+  createLocalFilesConnectorStore,
+  createLocalFilesTierLane,
+  defaultLocalFilesConnectorStoreDbPath,
+  defineLocalFilesCorpus,
+  localFilesIngestionExclusionMatcher,
+  localFilesWatchDir,
+} from '../local-files/store.ts';
+import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
+import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
+import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
+import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
+import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../local-files/locator-result-projector.ts';
+import { createLocalFilesOpenTargets, localFilesOpenRoots } from '../local-files/open-target.ts';
+import { defaultExclusionContext, isWithinScopePath } from '../local-files/paths.ts';
+import { defaultLocalFilesIngestionPolicy } from '../../core/source-ingestion-policy.ts';
+import { VolumeResolver } from '../local-files/volume-identity.ts';
+import { WatchHub, watchIgnoreGlobs } from '../local-files/watch-hub.ts';
+import { localOpenArguments } from '../../core/local-open.ts';
+import { createConnectorFileExtractionSource } from '../file-extraction/connector-source.ts';
+import '../local-files/scope-browser.ts';
 import { tieredExtractionView } from '../connector-store/tiered-extraction.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
@@ -709,7 +743,7 @@ export function localPrivateEmbeddingTargets(input: {
     if (!definition || definition.activationMode === 'lexical_only' || definition.embeddingPolicy === 'disabled'
       || registered?.activationMode === 'lexical_only' || registered?.embeddingPolicy === 'disabled') return [];
     // Scope-gated source adapters must supply their current binding.
-    if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox].some(id => id === source.sourceId) && (!ref || !fileSourceScopeAuthority)) return [];
+    if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles].some(id => id === source.sourceId) && (!ref || !fileSourceScopeAuthority)) return [];
     const scope = connectorStoreReadScope(store);
     if (!scope.allowed || !scope.contentAllowed) return [];
     const mail = ref && isMailSourceScopePolicyRef(ref) && fileSourceScopeAuthority
@@ -950,6 +984,17 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
     stores: (env) => [{
       dbPath: defaultDropboxConnectorStoreDbPath(env),
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+      trustDomain: 'secure_local',
+    }],
+  },
+  {
+    sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
+    label: 'Files on this computer',
+    enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
+    matcher: (env) => localFilesIngestionExclusionMatcher(env),
+    stores: (env) => [{
+      dbPath: defaultLocalFilesConnectorStoreDbPath(env),
+      corpusId: LOCAL_FILES_CORPUS_ID,
       trustDomain: 'secure_local',
     }],
   },
@@ -1713,6 +1758,7 @@ export function sourceAnswerAccountForCorpus(
 const CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: 'chat' }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
   [{ family: 'file', provider: 'dropbox' }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
+  [{ family: 'file', provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }],
 ]);
 
 export interface ConnectorStoreAnswerScopeStore {
@@ -2093,6 +2139,10 @@ export async function main(): Promise<void> {
       'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS',
     ) ?? sourceIndexEmbeddingProvider
     : sourceIndexEmbeddingProvider;
+  const localFilesEmbeddingProvider = secureLocalPolicyEmbeddingProvider
+    ?? (sourceIndexEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(sourceIndexEmbeddingProvider)
+      ? sourceIndexEmbeddingProvider
+      : undefined);
   const dropboxFilesEmbeddingProvider = secureLocalPolicyEmbeddingProvider
     ?? (sourceIndexEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(sourceIndexEmbeddingProvider)
       ? sourceIndexEmbeddingProvider
@@ -2583,6 +2633,113 @@ export async function main(): Promise<void> {
           : {}),
       })
     : undefined;
+  // Local files: the folders the owner chose on this computer. No credential;
+  // the lane exists once the owner connects it and approves folders. Same three
+  // per-tier stores, exclusion gate and tier set as Dropbox.
+  const localFilesConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
+  const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
+  const localFilesConnectorStore = localFilesConnectorStoreLane.enabled
+    ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy })
+    : undefined;
+  const localFilesSecretLocations = localFilesConnectorStore
+    ? openTierSecretLocations(localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID)
+    : undefined;
+  const localFilesTierLane = localFilesConnectorStore
+    ? createLocalFilesTierLane({
+        secureStore: localFilesConnectorStore,
+        env: process.env,
+        policy: localFilesIngestionPolicy,
+        ...(localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {}),
+        onStoreOpened: (store) => registerTierLegStore(
+          store,
+          LOCAL_FILES_CORPUS_ID,
+          sourceIndexEmbeddingProvider ?? null,
+        ),
+      })
+    : undefined;
+  const localFilesScopeRef = fileSourceScopeAuthority
+    ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID)
+    : undefined;
+  if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider
+    && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
+    localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
+      embedWith: () => {
+        const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
+        return ref && fileSourceScopeAuthority
+          ? scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref)
+          : undefined;
+      },
+    });
+  }
+  if (localFilesTierLane && localFilesConnectorStore) {
+    adoptTierLane({
+      ledger: localFilesTierLane.ledger,
+      secureCorpusId: localFilesConnectorStore.corpusId,
+      corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
+      onDemand: [localFilesTierLane.internal, localFilesTierLane.public],
+      ...(localFilesSecretLocations ? { secrets: localFilesSecretLocations } : {}),
+    });
+  }
+  const localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+  const isLocalFilesTierStore = (store: LocalConnectorStore): boolean => store === localFilesConnectorStore
+    || (localFilesTierLane !== undefined
+      && (store === localFilesTierLane.internal.current() || store === localFilesTierLane.public.current()));
+  // The watcher and the disk-identity resolver live as long as the worker; the
+  // content scope and sync handler are rebuilt whenever the approval changes.
+  const localFilesWatchHub = new WatchHub();
+  const localFilesVolumes = new VolumeResolver();
+  const localFilesExclusionContext = defaultExclusionContext();
+  const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
+  let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;
+  const localFilesSyncFor = (ref: SourceScopePolicyRef) => {
+    if (!localFilesConnectorStore || !fileSourceScopeAuthority) return undefined;
+    const key = `${ref.accountGeneration}:${ref.revision}`;
+    if (localFilesSyncCache?.key === key) return localFilesSyncCache.handler;
+    const handler = createLocalFilesProviderStoreSyncHandler({
+      ...(localFilesTierLane ? { tierSet: localFilesTierLane.set } : {}),
+      store: localFilesConnectorStore,
+      scope: createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext }),
+      volumes: localFilesVolumes,
+      hub: localFilesWatchHub,
+      snapshotDir: localFilesWatchDir(process.env),
+      ignore: localFilesWatchIgnore,
+      ...(localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)
+        ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) }
+        : {}),
+    });
+    localFilesSyncCache = { key, handler };
+    return handler;
+  };
+  const localFilesApprovedScopePaths = (): string[] => {
+    const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
+    return approval && approval.status === 'approved' ? localFilesRoots(approval).map((root) => root.scopePath) : [];
+  };
+  const localFilesOpenTarget = createLocalFilesOpenTargets({
+    volumes: localFilesVolumes,
+    approvedScopePaths: localFilesApprovedScopePaths,
+  });
+  const localFilesOpenableRoots = (): string[] => localFilesOpenRoots(localFilesVolumes, localFilesApprovedScopePaths);
+  // Opens a file this engine resolved for a cited or unreadable source, on a
+  // path re-checked now (core/local-open.ts; the Linux adapter checks it again).
+  const openLocalFile = async (
+    path: string,
+    eligible: () => Promise<boolean>,
+    roots: readonly string[],
+  ): Promise<void> => {
+    if (process.platform === 'linux') {
+      await openLinuxDesktopPath({ path, roots, revalidateEligibility: eligible });
+      return;
+    }
+    if (!(await eligible())) throw new Error('open refused');
+    await new Promise<void>((resolve, reject) => {
+      const args = localOpenArguments(path, roots);
+      if (!args) {
+        reject(new Error('open refused'));
+        return;
+      }
+      execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+    });
+  };
   // WhatsApp's store is product state, not a private deployment mount. Opening
   // the long-standing default path preserves captured history; the scheduler
   // below advances its connector cursor without replaying or replacing it.
@@ -2664,6 +2821,7 @@ export async function main(): Promise<void> {
   );
   const laneConnectorStores = [
     ...(dropboxConnectorStore ? [dropboxConnectorStore] : []),
+    ...(localFilesConnectorStore ? [localFilesConnectorStore] : []),
     ...(gmailInternalConnectorStore ? [gmailInternalConnectorStore] : []),
     ...(gmailSecureConnectorStore ? [gmailSecureConnectorStore] : []),
     ...(googleDriveInternalConnectorStore ? [googleDriveInternalConnectorStore] : []),
@@ -2748,6 +2906,31 @@ export async function main(): Promise<void> {
           },
         }
       : {}),
+    ...(localFilesConnectorStore
+      ? {
+          localFiles: {
+            resolveExtractionScopes: () => {
+              const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
+              if (!ref || !fileSourceScopeAuthority) return [];
+              return fileSourceScopeLocalFilesPolicy(
+                localFilesIngestionPolicy,
+                fileSourceScopeAuthority.assertCurrent(ref),
+              ).roots.filter((root) => root.default_action === 'full_extract').map((root) => root.approved_scope_key);
+            },
+            resolveCandidateFilters: () => {
+              const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
+              const scope = approval ? fileSourceScopeContentFilters(approval) : { allowed: false as const };
+              if (!scope.allowed || !scope.filters) {
+                throw new OperationError(
+                  'source_index_policy_violation',
+                  'Current local files full-ingestion scope is required before candidate enumeration.',
+                );
+              }
+              return scope.filters;
+            },
+          },
+        }
+      : {}),
     ...(whatsappConnectorStore ? { whatsapp: true } : {}),
     ...(googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
       ? {
@@ -2810,6 +2993,7 @@ export async function main(): Promise<void> {
   const fileExtractionTierSets = new Map<string, TieredStoreSet>([
     // The Dropbox lane reads and lands text across its tier stores.
     ...(dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set] as const] : []),
+    ...(localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set] as const] : []),
     // Each Drive store's corpus lists its own store (and the Private one the
     // routed-only Public store too).
     ...(googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
@@ -2824,6 +3008,32 @@ export async function main(): Promise<void> {
     enabled: fileExtractionCorpora.length > 0,
     connectorStores,
     corpora: fileExtractionCorpora,
+    extraSourceFactories: new Map([
+      [LOCAL_FILES_PROVIDER, ({ config, store, view }) => {
+        const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
+        if (!ref || !fileSourceScopeAuthority) throw new OperationError('source_index_policy_violation', 'File-source scope approval is required.');
+        const reader = view ?? store;
+        const connector = createLocalFilesSourceConnector({
+          connectorId: 'local.files.extraction',
+          root: '/',
+          scope: createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext }),
+          volumes: localFilesVolumes,
+          locate: (localItemId) => reader.localContent(localItemId)?.locatorUri,
+        });
+        return createConnectorFileExtractionSource({
+          id: `${config.corpusId}:extraction`,
+          corpusId: config.corpusId,
+          provider: config.provider,
+          connector,
+          candidates: connectorStoreExtractionCandidateReader(reader, config.resolveCandidateFilters?.()),
+          lanes: (config.resolveScopes?.() ?? config.scopes).map((approvedScopeKey) => ({
+            approvedScopeKey,
+            matches: (row) => row.locatorUri !== undefined
+              && isWithinScopePath(row.locatorUri, approvedScopeKey.slice(LOCAL_FILES_POLICY_SOURCE.length + 1)),
+          })),
+        });
+      }],
+    ]),
     ...(fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {}),
     scopeGuard: {
       assertAuthorized({ config }) {
@@ -2940,6 +3150,13 @@ export async function main(): Promise<void> {
       accountScope: dropboxProviderAccount,
     });
   }
+  if (localFilesConnectorStore) {
+    connectorStoreAccountScopes.set(LOCAL_FILES_CORPUS_ID, LOCAL_FILES_ACCOUNT_SCOPE);
+    connectorStorePrincipals.set(LOCAL_FILES_CORPUS_ID, {
+      provider: LOCAL_FILES_PROVIDER,
+      accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+    });
+  }
   if (whatsappConnectorStore) {
     connectorStoreAccountScopes.set(WHATSAPP_LIVE_CORPUS_ID, WHATSAPP_PERSONAL_ACCOUNT_SCOPE);
     connectorStorePrincipals.set(
@@ -2978,6 +3195,8 @@ export async function main(): Promise<void> {
     } => {
     const sourceId = isDropboxTierStore(store)
       ? 'dropbox.files' as const
+      : isLocalFilesTierStore(store)
+        ? LOCAL_FILES_SOURCE_ID
       : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
         || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
         ? 'google_drive.docs' as const
@@ -3036,6 +3255,7 @@ export async function main(): Promise<void> {
     defineReadwiseLibraryCorpus(),
     defineXBookmarksCorpus(),
     defineDropboxFilesCorpus(),
+    defineLocalFilesCorpus(),
     defineInternalTelegramMessagesCorpus(),
     defineProtectedTelegramMessagesCorpus(),
   ].map((definition) => secureEmbeddingCloudApproved && definition.trustDomain === 'secure_local'
@@ -3507,6 +3727,12 @@ export async function main(): Promise<void> {
         terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
         classifyUnreadable: unreadableVerdict,
         currentItem(ref) {
+          if (ref.corpusId === LOCAL_FILES_CORPUS_ID && localFilesConnectorStore) {
+            const readScope = connectorStoreReadScope(localFilesConnectorStore);
+            return readScope.allowed
+              && readScope.contentAllowed
+              && (localFilesExtractionView ?? localFilesConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
+          }
           if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
             return false;
           }
@@ -3516,6 +3742,17 @@ export async function main(): Promise<void> {
             && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
         },
         lanesForCorpus(corpusId) {
+          if (corpusId === LOCAL_FILES_CORPUS_ID) {
+            const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
+            if (!ref || !fileSourceScopeAuthority) return [];
+            return fileSourceScopeLocalFilesPolicy(localFilesIngestionPolicy, fileSourceScopeAuthority.assertCurrent(ref))
+              .roots.filter((root) => root.default_action === 'full_extract').map((root) => ({
+                corpusId,
+                provider: LOCAL_FILES_PROVIDER,
+                accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+                approvedScopeKey: root.approved_scope_key,
+              }));
+          }
           if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
           const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
           if (!ref || !fileSourceScopeAuthority) return [];
@@ -3544,9 +3781,10 @@ export async function main(): Promise<void> {
   // See why): the ledger's own list, so the names are the files its count
   // counted. A file opens where its provider says: a Dropbox file's synced
   // copy here, else its web page.
-  const { createDropboxOpenTargets: unreadableDropboxTargets, localDropboxRoots: unreadableDropboxRoots, localOpenArguments: unreadableOpenArguments } = await import('../dropbox-files/open-target.ts');
+  const { createDropboxOpenTargets: unreadableDropboxTargets, localDropboxRoots: unreadableDropboxRoots } = await import('../dropbox-files/open-target.ts');
   const unreadableOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
     dropbox: unreadableDropboxTargets(),
+    [LOCAL_FILES_PROVIDER]: localFilesOpenTarget,
   };
   const unreadableFiles = createUnreadableFiles({
         items: (corpusId) => {
@@ -3564,19 +3802,10 @@ export async function main(): Promise<void> {
           : provider === 'google_drive' && googleFilePage(locator) ? { url: locator }
           : provider === 'gmail' && /^https:\/\/mail\.google\.com\/mail\/u\/0\/#all\/[A-Za-z0-9_-]+$/.test(locator)
             ? { url: locator } : undefined),
-        ...(process.platform === 'darwin'
+        ...(process.platform === 'darwin' || process.platform === 'linux'
           ? {
-              openFile: async (path: string, eligible: () => Promise<boolean>) => {
-                if (!(await eligible())) throw new Error('open refused');
-                return new Promise<void>((resolve, reject) => {
-                  const args = unreadableOpenArguments(path, unreadableDropboxRoots());
-                  if (!args) {
-                    reject(new Error('open refused'));
-                    return;
-                  }
-                  execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-                });
-              },
+              openFile: (path: string, eligible: () => Promise<boolean>) =>
+                openLocalFile(path, eligible, [...unreadableDropboxRoots(), ...localFilesOpenableRoots()]),
             }
           : {}),
       });
@@ -3862,6 +4091,16 @@ export async function main(): Promise<void> {
               : {}),
           })
       : undefined;
+    const currentLocalFilesScopeRef = fileSourceScopeAuthority
+      ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID)
+      : undefined;
+    const currentLocalFilesSync = currentLocalFilesScopeRef ? localFilesSyncFor(currentLocalFilesScopeRef) : undefined;
+    const currentLocalFilesPolicy = currentLocalFilesScopeRef && fileSourceScopeAuthority
+      ? fileSourceScopeLocalFilesPolicy(
+          localFilesIngestionPolicy,
+          fileSourceScopeAuthority.assertCurrent(currentLocalFilesScopeRef),
+        )
+      : undefined;
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime
       ?.runtimeForHandle(currentXBookmarksHandle);
     if (currentXBookmarksConnectorStoreRuntime) {
@@ -3994,6 +4233,42 @@ export async function main(): Promise<void> {
         },
       ),
       recordLane(
+        SCHEDULER_SOURCE_IDS.localFiles,
+        !localFilesConnectorStore
+          ? 'no_store_sync'
+          : !currentLocalFilesScopeRef
+            ? 'scope_pending'
+            : !currentLocalFilesSync
+              ? 'no_store_sync'
+              : undefined,
+        () => {
+          if (!currentLocalFilesPolicy || !currentLocalFilesScopeRef || !fileSourceScopeAuthority) return undefined;
+          const source = createLocalFilesSchedulerSource({
+            policy: currentLocalFilesPolicy,
+            config: olympusConfig,
+            ...(currentLocalFilesSync ? { providerSync: currentLocalFilesSync } : {}),
+            ...(localFilesConnectorStore ? { store: localFilesConnectorStore } : {}),
+            ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
+            ...(localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)
+              ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, currentLocalFilesScopeRef) }
+              : {}),
+            ...(localFilesTierLane && sourceIndexEmbeddingProvider
+              ? {
+                  tierEmbeddings: [localFilesTierLane.internal, localFilesTierLane.public].map((leg) => ({
+                    corpusId: leg.corpusId,
+                    store: () => leg.current(),
+                    provider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority!, currentLocalFilesScopeRef),
+                  })),
+                }
+              : {}),
+            watch: { hub: localFilesWatchHub, volumes: localFilesVolumes, ignore: localFilesWatchIgnore },
+          });
+          return source
+            ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentLocalFilesScopeRef })
+            : undefined;
+        },
+      ),
+      recordLane(
         SCHEDULER_SOURCE_IDS.readwise,
         !currentReadwiseHandle
           ? 'no_handle'
@@ -4082,7 +4357,7 @@ export async function main(): Promise<void> {
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
     const scopeRefs = new Map<string, SourceScopePolicyRef>();
-    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef]) {
+    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef, currentLocalFilesScopeRef]) {
       if (ref) scopeRefs.set(ref.sourceId, ref);
     }
     const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, source => localPrivateEmbeddingTargets({
@@ -4777,13 +5052,14 @@ export async function main(): Promise<void> {
   const { consultAskLevelFromSettings } = await import('../../core/consult-ask.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
-  const { createDropboxOpenTargets, localDropboxRoots, localOpenArguments } = await import('../dropbox-files/open-target.ts');
+  const { createDropboxOpenTargets, localDropboxRoots } = await import('../dropbox-files/open-target.ts');
   // Where each cited source opens, by the connector that holds it: the
   // provider's own resolver turns the item's locator into a web address and,
   // when the file is synced to this Mac, its local path (kept here; the
   // panel gets a one-time open token for it).
   const sourceOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
     dropbox: createDropboxOpenTargets(),
+    [LOCAL_FILES_PROVIDER]: localFilesOpenTarget,
   };
   // Whether each Private item may be read by a model right now, from live
   // store, ledger and scope state: asked before every model submission and
@@ -4795,18 +5071,9 @@ export async function main(): Promise<void> {
   // resolved for a cited source (never a path from the request), checked
   // again now: no symlink, still inside a Dropbox folder, and only a
   // document type opens; anything else is revealed in Finder.
-  const openCitedFile = process.platform === 'darwin'
-    ? async (path: string, eligible: () => Promise<boolean>) => {
-        if (!(await eligible())) throw new Error('open refused');
-        return new Promise<void>((resolve, reject) => {
-          const args = localOpenArguments(path, localDropboxRoots());
-          if (!args) {
-            reject(new Error('open refused'));
-            return;
-          }
-          execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-        });
-      }
+  const openCitedFile = process.platform === 'darwin' || process.platform === 'linux'
+    ? (path: string, eligible: () => Promise<boolean>) =>
+        openLocalFile(path, eligible, [...localDropboxRoots(), ...localFilesOpenableRoots()])
     : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: answerBuiltInModel,
@@ -4939,8 +5206,8 @@ export async function main(): Promise<void> {
       store: waitingQuestionStore,
       connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
-      ...(openCitedFile ? {
-        openFile: openCitedFile,
+      ...(openCitedFile ? { openFile: openCitedFile } : {}),
+      ...(process.platform === 'darwin' ? {
         openUrl: async (url: string, eligible: () => Promise<boolean>) => {
           if (!(await eligible())) throw new Error('open refused');
           await new Promise<void>((resolve, reject) => execFile('/usr/bin/open', [url], { timeout: 10_000 }, error => error ? reject(error) : resolve()));

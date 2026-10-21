@@ -94,6 +94,11 @@ export type OlympusDashboardControlParams =
       api_key: string;
     }
   | {
+      /** Connect a source on this computer (no sign-in); the owner then picks folders. */
+      action: 'connect_this_computer';
+      source: 'local.files';
+    }
+  | {
       /** One-time code for approving Claude, ChatGPT or Grok. Shown once. */
       action: 'mint_agent_pairing_code';
     }

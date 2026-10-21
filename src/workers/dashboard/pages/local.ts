@@ -314,6 +314,7 @@ function setupBlurb(source: DashboardSourceCard): string {
   const action = source.connection.action;
   if (action.kind === 'guided_session') return action.instructions[0] ?? source.connection.label;
   if (action.kind === 'api_key') return action.instructions.plain_intro;
+  if (action.kind === 'this_computer') return 'Choose the folders on this computer Olympus may read. Nothing is read until you choose.';
   return '';
 }
 
@@ -322,5 +323,6 @@ function connectAction(source: DashboardSourceCard): DashboardActionInput | unde
   const action = source.connection.action;
   if (action.kind === 'oauth') return { label: action.label, kind: 'oauth', source: action.source, primary: false };
   if (action.kind === 'api_key') return { label: action.label, kind: 'api_key', source: action.source, primary: false };
+  if (action.kind === 'this_computer') return { label: action.label, kind: 'this_computer', source: action.source, primary: false };
   return undefined;
 }

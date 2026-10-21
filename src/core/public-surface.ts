@@ -240,6 +240,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/connect/oauth/start' },
   { method: 'POST', path: '/dashboard/connect/oauth/cancel' },
   { method: 'POST', path: '/dashboard/connect/api-key' },
+  { method: 'POST', path: '/dashboard/connect/this-computer' },
   { method: 'POST', path: '/dashboard/models/check' },
   { method: 'POST', path: '/dashboard/sync-now' },
   { method: 'POST', path: '/dashboard/embedding-priority' },

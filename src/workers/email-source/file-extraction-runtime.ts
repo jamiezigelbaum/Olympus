@@ -44,6 +44,8 @@ import {
   type DropboxExtractionLocalRootConfig,
 } from '../dropbox-files/extraction-source.ts';
 import { parseDropboxLocalFileRootsFromEnv } from '../dropbox-files/local-file-resolver.ts';
+import { LOCAL_FILES_ACCOUNT_SCOPE, LOCAL_FILES_PROVIDER } from '../local-files/scope.ts';
+import { LOCAL_FILES_CORPUS_ID } from '../local-files/store.ts';
 import {
   createGoogleDriveDailyRequestBudget,
   createRestGoogleDriveApiClient,
@@ -152,6 +154,16 @@ export interface FileExtractionRuntimeOptions {
       => FileExtractionSource | Promise<FileExtractionSource>
   >;
   /**
+   * Factories added to the defaults, for a family whose source is built from
+   * the product wiring rather than from the environment (a source on this
+   * computer needs the live scope approval). They never replace a default.
+   */
+  extraSourceFactories?: ReadonlyMap<
+    string,
+    (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore; view?: TieredExtractionView })
+      => FileExtractionSource | Promise<FileExtractionSource>
+  >;
+  /**
    * Corpora whose lane keeps per-tier stores with text that arrives after
    * listing (TieredStoreSetOptions.contentArrivesLater or
    * contentArrivesLaterFor), keyed by the lane's own corpus. Such a corpus
@@ -230,10 +242,13 @@ export function createFileExtractionRuntime(
 
   const warn = options.warn ?? ((message: string) => console.warn(message));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
-  const sourceFactories = options.sourceFactories ?? defaultSourceFactories(
-    env,
-    options.credentialBroker ? { credentialBroker: options.credentialBroker } : {},
-  );
+  const sourceFactories = options.sourceFactories ?? new Map([
+    ...defaultSourceFactories(
+      env,
+      options.credentialBroker ? { credentialBroker: options.credentialBroker } : {},
+    ),
+    ...(options.extraSourceFactories ?? []),
+  ]);
 
   // Opened BEFORE the roster loop, because each sink needs it: the lease fence
   // asks the queue whether this worker still holds the job in the statement
@@ -444,6 +459,11 @@ export function fileExtractionCorporaRoster(input: {
     resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
     resolveCredentialHandle: () => string | undefined;
   };
+  /** Present when the local files connector store exists. */
+  localFiles?: {
+    resolveExtractionScopes: () => readonly string[];
+    resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
+  };
   /** True when the WhatsApp connector store exists. */
   whatsapp?: boolean;
   /** Present when the Drive connector stores exist: their PDFs are catalogued by name only. */
@@ -483,6 +503,20 @@ export function fileExtractionCorporaRoster(input: {
         : {}),
     });
   }
+  if (input.localFiles) {
+    canonicalIds.add(LOCAL_FILES_CORPUS_ID);
+    canonical.push({
+      corpusId: LOCAL_FILES_CORPUS_ID,
+      provider: LOCAL_FILES_PROVIDER,
+      scopes: [],
+      resolveScopes: input.localFiles.resolveExtractionScopes,
+      ...(input.localFiles.resolveCandidateFilters
+        ? { resolveCandidateFilters: input.localFiles.resolveCandidateFilters }
+        : {}),
+      resolveAccountScope: () => LOCAL_FILES_ACCOUNT_SCOPE,
+      ownerConnectorId: LOCAL_FILES_PROVIDER,
+    });
+  }
   if (input.whatsapp === true) {
     canonicalIds.add(WHATSAPP_LIVE_CORPUS_ID);
     canonical.push({
@@ -520,7 +554,7 @@ export function pdfExtractionLanes(
   const served = new Set(servedCorpusIds);
   return roster
     .filter((config) => served.has(config.corpusId)
-      && (config.provider === 'dropbox' || config.provider === GOOGLE_DRIVE_PROVIDER))
+      && (config.provider === 'dropbox' || config.provider === GOOGLE_DRIVE_PROVIDER || config.provider === LOCAL_FILES_PROVIDER))
     .flatMap((config) => (config.resolveScopes?.() ?? config.scopes).map((approvedScopeKey) => ({
       corpusId: config.corpusId,
       provider: config.provider,

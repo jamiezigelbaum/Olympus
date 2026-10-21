@@ -269,7 +269,7 @@ export interface DashboardActionInput {
    * renders no form (a sheet toggle when `sheet` is set, else nothing). Sync
    * now, Disconnect, Unpair and the model retries are the panel's own tools.
    */
-  kind: 'oauth' | 'api_key' | 'none';
+  kind: 'oauth' | 'api_key' | 'this_computer' | 'none';
   /** The `source` value the control route expects. */
   source?: string;
   primary?: boolean;
@@ -864,6 +864,7 @@ export function standaloneDashboardControllerScript(
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
+        if (action === 'connect_this_computer') return ['/dashboard/connect/this-computer', withoutAction(params)];
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
         if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
         if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];

@@ -1182,6 +1182,11 @@ export type DashboardSourceAction =
     instructions: string[];
   }
   | {
+    kind: 'this_computer';
+    source: 'local.files';
+    label: 'Connect';
+  }
+  | {
     kind: 'none';
   };
 
@@ -1417,7 +1422,9 @@ export interface DashboardSupportedSourceDefinition {
   connect_action:
     | { kind: 'oauth'; source: DashboardOAuthSource }
     | { kind: 'api_key'; source: DashboardApiKeySource }
-    | { kind: 'guided_session'; source: 'telegram' | 'whatsapp'; instructions: string[] };
+    | { kind: 'guided_session'; source: 'telegram' | 'whatsapp'; instructions: string[] }
+    // A source on this computer: no sign-in, one Connect, then the owner picks folders.
+    | { kind: 'this_computer'; source: 'local.files' };
 }
 
 /**
@@ -1674,6 +1681,18 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     trust_domain: 'secure_local',
     connect_kind: 'oauth',
     connect_action: { kind: 'oauth', source: 'dropbox' },
+  },
+  {
+    source_id: 'local.files',
+    primary_corpus_id: 'secure_local.local.files',
+    corpus_source_ids: ['local.files'],
+    ingestion_ledger_source_id: 'local_files',
+    label: 'Files on this computer',
+    provider: 'local_files',
+    family: 'file',
+    trust_domain: 'secure_local',
+    connect_kind: 'local',
+    connect_action: { kind: 'this_computer', source: 'local.files' },
   },
   {
     source_id: 'x.bookmarks',
@@ -3743,6 +3762,10 @@ function sourceAction(
       instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
       ...(pending ? { pending_attempt: true as const } : {}),
     };
+  }
+  if (definition.connect_action.kind === 'this_computer') {
+    if (connected) return { kind: 'none' };
+    return { kind: 'this_computer', source: definition.connect_action.source, label: 'Connect' };
   }
   if (definition.connect_action.kind === 'api_key') {
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
