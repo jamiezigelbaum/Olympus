@@ -293,6 +293,7 @@ describe('Full Disk Access for the whole computer', () => {
 test('only the standalone engine without the helper lacks an app for macOS to name', () => {
   expect(permissionHostPresent({ OLYMPUS_ENGINE_HOST: '1' })).toBe(false);
   expect(permissionHostPresent({ OLYMPUS_STANDALONE: '1' })).toBe(false);
+  expect(permissionHostPresent({ OLYMPUS_MANAGED_WORKER: '1' })).toBe(false);
   expect(permissionHostPresent({ OLYMPUS_ENGINE_HOST: '1', [ENGINE_HELPER_ENV]: '1' })).toBe(true);
   expect(permissionHostPresent({})).toBe(true);
 });

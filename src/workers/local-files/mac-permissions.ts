@@ -88,13 +88,15 @@ export const MAC_ACCESS_COPY = {
 
 /**
  * Whether a signed app stands behind this process when macOS asks about a
- * guarded folder. The standalone engine runs bun under launchd, so only the
+ * guarded folder. The standalone engine and the managed worker run bun under
+ * launchd, so only the
  * helper app gives it one. Any other host (OpenClaw, a terminal during
  * development) is itself the app macOS names.
  */
 export function permissionHostPresent(env: Record<string, string | undefined>): boolean {
   if (env[ENGINE_HELPER_ENV]) return true;
-  return env.OLYMPUS_ENGINE_HOST !== '1' && env.OLYMPUS_STANDALONE !== '1';
+  // The managed worker LaunchAgent also runs bun directly.
+  return env.OLYMPUS_ENGINE_HOST !== '1' && env.OLYMPUS_STANDALONE !== '1' && env.OLYMPUS_MANAGED_WORKER !== '1';
 }
 
 export class MacPermissions {

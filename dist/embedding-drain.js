@@ -43182,7 +43182,7 @@ var MAC_ACCESS_COPY = {
 function permissionHostPresent(env) {
   if (env[ENGINE_HELPER_ENV])
     return true;
-  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1";
+  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1" && env.OLYMPUS_MANAGED_WORKER !== "1";
 }
 
 class MacPermissions {
