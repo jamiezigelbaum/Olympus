@@ -143,6 +143,21 @@ export class MacPermissions {
     return undefined;
   }
 
+  /**
+   * True when reading this real path would make the Mac ask (or already
+   * guards it) and the engine is not running under the helper app: the read
+   * would be attributed to Bun, not to "Olympus Engine". Covers a guarded
+   * folder, anything that contains one (the home folder, the whole computer),
+   * and so is checked before a choice is saved and before any read.
+   */
+  blocksReadWithoutHelper(realPath: string, volume?: Pick<MountedVolume, 'kind' | 'mountPoint' | 'primary'>): boolean {
+    if (!this.active || this.hasHelper()) return false;
+    if (this.guardOf(realPath, volume)) return true;
+    if (realPath === '/' || realPath === '/Volumes') return true;
+    return [join(this.home, 'Desktop'), join(this.home, 'Documents'), join(this.home, 'Downloads'), join(this.home, 'Library', 'Mobile Documents')]
+      .some((top) => isWithinScopePath(top, realPath));
+  }
+
   /** What a folder row says before anything is asked: "Needs permission" unless the Mac already allowed it. */
   nodeAccess(guard: GuardedFolder): OlympusFolderAccess | undefined {
     if (this.recall(guard) === 'granted') return undefined;
@@ -185,13 +200,19 @@ export class MacPermissions {
    * kept out of unless it holds it (Safari's data) either lists or does not.
    */
   hasFullDiskAccess(): boolean {
-    try {
-      this.listProtected(join(this.home, 'Library', 'Safari'));
-      return true;
-    } catch (error) {
-      // A missing folder says nothing about the permission; only a refusal does.
-      return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    // Safari's folder, or the TCC database folder: both exist on every Mac and
+    // only open with Full Disk Access. If neither can be listed (refused, or
+    // not there), Full Disk Access is not known to be on, so it counts as off.
+    for (const path of [join(this.home, 'Library', 'Safari'), join(this.home, 'Library', 'Application Support', 'com.apple.TCC')]) {
+      try {
+        this.listProtected(path);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        return false;
+      }
     }
+    return false;
   }
 
   private ask(guard: GuardedFolder): Promise<AccessAnswer> {

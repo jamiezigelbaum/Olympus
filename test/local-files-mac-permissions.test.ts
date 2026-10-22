@@ -9,6 +9,8 @@ import {
   MacPermissions,
 } from '../src/workers/local-files/mac-permissions.ts';
 import { revealHelperAndOpenFullDiskAccess } from '../src/workers/local-files/mac-settings.ts';
+import { createLocalFilesSchedulerSource } from '../src/workers/local-files/scheduler-source.ts';
+import { defaultConfig } from '../src/core/config.ts';
 import { createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
 import type { DefaultExclusionContext } from '../src/workers/local-files/paths.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
@@ -164,6 +166,53 @@ describe('the picker\'s states for a guarded folder', () => {
     const f = fixture({ fullDiskAccess: false, helper: false });
     await f.browser.afterApproval!({ wholeAccount: true });
     expect(f.opened()).toBe(0);
+  });
+
+  test('without the engine running under the helper, a guarded folder, the home folder and the whole computer cannot be saved', () => {
+    const f = fixture({ helper: false });
+    const save = (keys: string[], wholeAccount = false) =>
+      f.browser.checkApproval!({ selections: keys.map((key) => ({ key, state: 'ingest' as const })), wholeAccount });
+    expect(() => save([join(f.home, 'Documents')])).toThrow(MAC_ACCESS_COPY.needsHelper);
+    expect(() => save([join(f.home, 'Documents', 'Taxes')])).toThrow(MAC_ACCESS_COPY.needsHelper);
+    expect(() => save([join(f.home, 'Desktop')])).toThrow('helper app');
+    expect(() => save([f.home])).toThrow('helper app');
+    expect(() => save([], true)).toThrow('helper app');
+    expect(() => save(['/'])).toThrow('helper app');
+    expect(() => save([join(f.home, 'Code')])).not.toThrow();
+    expect(() => f.browser.checkApproval!({ selections: [{ key: join(f.home, 'Documents'), state: 'exclude' }], wholeAccount: false })).not.toThrow();
+    const withHelper = fixture({ helper: true });
+    expect(() => withHelper.browser.checkApproval!({ selections: [{ key: join(withHelper.home, 'Documents'), state: 'ingest' }], wholeAccount: true })).not.toThrow();
+  });
+
+  test('the scheduler never pulls, extracts or watches a guarded folder without the helper, whatever was saved', async () => {
+    const f = fixture({ helper: false });
+    const pulled: string[] = [];
+    const root = (path: string) => ({ path, approved_scope_key: `scope:${path}`, default_action: 'full_extract' });
+    const source = createLocalFilesSchedulerSource({
+      policy: { corpusId: 'c', roots: [root(join(f.home, 'Documents')), root(join(f.home, 'Code'))], sync: { cadence: 'daily' }, content: { plan_limit: 1, batch_size: 1 } } as never,
+      config: defaultConfig(),
+      providerSync: { pull: async ({ approved_scope_key }: { approved_scope_key: string }) => { pulled.push(approved_scope_key); return { receipt: { status: 'ok', counts: {} }, checkpoint: 'x' }; }, connectorIdForScope: () => 'k' } as never,
+      store: { lastCompletedSyncRun: () => undefined } as never,
+      fileExtraction: {} as never,
+      macPermissions: f.permissions,
+      volumes: new VolumeResolver({ platform: 'darwin', home: f.home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)' }),
+    })!;
+    const syncs = source.tasks.filter((task) => task.kind === 'sync');
+    expect(syncs).toHaveLength(2);
+    await expect(syncs[0]!.run()).rejects.toThrow(MAC_ACCESS_COPY.needsHelper);
+    await syncs[1]!.run();
+    expect(pulled).toEqual([`scope:${join(f.home, 'Code')}`]);
+    expect(source.tasks.filter((task) => task.id.startsWith('local.files_extract.'))).toHaveLength(1);
+  });
+
+  test('Full Disk Access is only "on" when a protected folder lists; a missing one proves nothing', () => {
+    const probe = (behaviour: (path: string) => void) =>
+      new MacPermissions({ platform: 'darwin', home: '/h', helperPresent: () => true, listProtected: behaviour }).hasFullDiskAccess();
+    expect(probe(() => undefined)).toBe(true);
+    expect(probe(() => { throw refusal('EPERM'); })).toBe(false);
+    expect(probe(() => { throw refusal('ENOENT'); })).toBe(false);
+    expect(probe((path) => { if (path.endsWith('Safari')) throw refusal('ENOENT'); })).toBe(true);
+    expect(probe((path) => { if (path.endsWith('Safari')) throw refusal('ENOENT'); throw refusal('EPERM'); })).toBe(false);
   });
 
   test('waiting: a question still on screen answers "waiting", and the answer is used when it arrives', async () => {

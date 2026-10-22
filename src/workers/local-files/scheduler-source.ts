@@ -20,6 +20,9 @@ import {
   type SourceSchedulerTask,
   type SourceSchedulerTaskRunContext,
 } from '../source-scheduler.ts';
+import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { MAC_ACCESS_COPY, MacPermissions } from './mac-permissions.ts';
 import { LocalFilesRootMissingError, LocalFilesRootPermissionError } from './connector.ts';
 import { realPathOfScopePath } from './locations.ts';
 import { isWithinScopePath } from './paths.ts';
@@ -47,6 +50,9 @@ export interface LocalFilesSchedulerSourceInput {
   }>;
   /** Live change notifications for the approved folders, and what they must not report. */
   watch?: { hub: WatchHub; volumes: VolumeResolver; ignore: readonly string[] };
+  /** The Mac's folder rules; defaults to this computer's. */
+  macPermissions?: MacPermissions;
+  volumes?: VolumeResolver;
 }
 
 function retryTomorrow(context: SourceSchedulerTaskRunContext | undefined, reason: string, afterMs: number = DAY_MS): {
@@ -65,6 +71,18 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
   }
   const roots = input.policy.roots;
   const tasks: SourceSchedulerTask[] = [];
+  // Defence in depth: whatever was saved, a guarded folder is not read unless
+  // the engine runs under the helper app (a read from Bun would be asked in
+  // Bun's name). Those folders stay idle and report that the helper is needed.
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync(homedir()) });
+  const volumeResolver = input.volumes ?? input.watch?.volumes;
+  const needsHelper = (scopePath: string): boolean => {
+    if (!macPermissions.active || macPermissions.hasHelper()) return false;
+    if (scopePath === '/') return true;
+    const real = volumeResolver ? realPathOfScopePath(volumeResolver, scopePath) : scopePath;
+    return real !== undefined && macPermissions.blocksReadWithoutHelper(real, volumeResolver?.volumeOf(real));
+  };
+  const blockedRoots = new Set(roots.filter((root) => needsHelper(root.path)).map((root) => root.path));
 
   for (const root of roots) {
     const approvedScopeKey = root.approved_scope_key;
@@ -74,6 +92,12 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
       kind: 'sync',
       writer: true,
       run: async (context?: SourceSchedulerTaskRunContext) => {
+        if (blockedRoots.has(root.path)) {
+          throw new SourceSchedulerTaskFailure(MAC_ACCESS_COPY.needsHelper, {
+            errorKind: 'scope_root_permission_needed',
+            retryAt: retryTomorrow(context, 'scope_root_permission_needed', PERMISSION_RETRY_MS),
+          });
+        }
         let outcome;
         try {
           outcome = await input.providerSync!.pull({
@@ -110,7 +134,7 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
 
   if (input.fileExtraction) {
     for (const root of roots) {
-      if (root.default_action !== 'full_extract') continue;
+      if (root.default_action !== 'full_extract' || blockedRoots.has(root.path)) continue;
       tasks.push(fileExtractionSchedulerTask({
         id: `local.files_extract.${schedulerScopeHash(root.approved_scope_key)}`,
         runner: input.fileExtraction,
@@ -158,7 +182,7 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
     });
   }
 
-  if (input.watch) watchApprovedFolders(input.watch, roots.map((root) => root.path));
+  if (input.watch) watchApprovedFolders(input.watch, roots.filter((root) => !blockedRoots.has(root.path)).map((root) => root.path));
 
   return {
     sourceId: SCHEDULER_SOURCE_IDS.localFiles,

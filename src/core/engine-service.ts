@@ -1,3 +1,5 @@
+import { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE } from './engine-helper-names.ts';
+export { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE };
 import { linuxDesktopEntryStatus } from './linux-desktop-entry.ts';
 import { withEngineMaintenanceFence, withEngineMaintenanceFenceSync, type EngineMaintenanceFence } from './engine-maintenance.ts';
 import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayoutFor, linuxInstalledBuild, recoverInterruptedLinuxEngineInstall, settleLinuxEngineInstall, startLinuxEngine, stopLinuxEngine, restartLinuxEngine, uninstallLinuxEngine, rollbackLinuxEngine, systemdPidInCgroup, withLinuxEngineLifecycleLockAsync } from './linux-engine-service.ts';
@@ -54,9 +56,6 @@ export const ENGINE_RUN_COMMAND = '__engine-run';
  * from native/macos-engine-host by scripts/build-macos-helper.sh; when it is
  * installed it is the LaunchAgent's program and starts Bun as its child.
  */
-export const ENGINE_HELPER_BUNDLE_ID = 'ai.olympusplugin.engine-host';
-export const ENGINE_HELPER_APP_NAME = 'Olympus Engine.app';
-export const ENGINE_HELPER_EXECUTABLE = 'OlympusEngineHost';
 /**
  * The build launchd runs, in the agent's environment: the package version and
  * a digest of the bundled entrypoints. An upgrade keeps every path the same,

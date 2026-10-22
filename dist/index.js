@@ -24383,6 +24383,10 @@ init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();
 
+// src/core/engine-helper-names.ts
+var ENGINE_HELPER_APP_NAME = "Olympus Engine.app";
+var ENGINE_HELPER_EXECUTABLE = "OlympusEngineHost";
+
 // src/core/engine-service.ts
 init_linux_desktop_entry();
 init_engine_maintenance();
@@ -24485,8 +24489,6 @@ function validatedAbsolutePath(value, label) {
 // src/core/engine-service.ts
 init_consult_transport_zkapi();
 var ENGINE_LABEL = "ai.olympusplugin.engine";
-var ENGINE_HELPER_APP_NAME = "Olympus Engine.app";
-var ENGINE_HELPER_EXECUTABLE = "OlympusEngineHost";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
 function enginePaths(homeDir) {
   const home = absolute2(homeDir, "home directory");

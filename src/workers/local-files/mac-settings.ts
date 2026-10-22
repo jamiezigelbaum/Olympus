@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ENGINE_HELPER_APP_NAME } from '../../core/engine-service.ts';
+import { ENGINE_HELPER_APP_NAME } from '../../core/engine-helper-names.ts';
 import { FULL_DISK_ACCESS_URL } from './mac-permissions.ts';
 
 export function helperAppPathForHome(home: string = homedir()): string {

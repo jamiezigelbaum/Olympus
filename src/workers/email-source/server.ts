@@ -4660,6 +4660,7 @@ export async function main(): Promise<void> {
         state: selection.state,
       }));
       const browser = fileScopeBrowserFor(input.sourceId);
+      browser.checkApproval?.({ selections, wholeAccount: input.wholeAccount });
       const verifiedSelections = await browser.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
         sourceId: input.sourceId,

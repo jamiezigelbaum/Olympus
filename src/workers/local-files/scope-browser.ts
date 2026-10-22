@@ -18,7 +18,7 @@ import {
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
 import { realPathOfScopePath, scopePathOfRealPath } from './locations.ts';
-import { MacPermissions } from './mac-permissions.ts';
+import { MAC_ACCESS_COPY, MacPermissions } from './mac-permissions.ts';
 import {
   DEFAULT_EXCLUSION_LABELS,
   defaultExclusionContext,
@@ -188,6 +188,20 @@ export function createLocalFilesFolderScopeBrowser(
         ...(next < all.length ? { nextCursor: encodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? '', String(next)) } : {}),
         ...(access ? { access } : {}),
       };
+    },
+    checkApproval({ selections, wholeAccount }) {
+      // Until the engine runs under the helper app, a guarded folder (or the
+      // whole computer) cannot be saved: its first read would be attributed to
+      // Bun, and the Mac's question would name the wrong app.
+      if (!permissions.active || permissions.hasHelper()) return;
+      const blocked = wholeAccount || selections.some((selection) => {
+        if (selection.state === 'exclude') return false;
+        const key = normalizeScopePath(selection.key);
+        if (key === '/') return true;
+        const real = realPathOfScopePath(volumes, key);
+        return real !== undefined && permissions.blocksReadWithoutHelper(real, volumes.volumeOf(real));
+      });
+      if (blocked) throw new Error(MAC_ACCESS_COPY.needsHelper);
     },
     async validateSelections(selections) {
       const normalized = selections.map((selection) => ({ ...selection, key: normalizeScopePath(selection.key) }));
