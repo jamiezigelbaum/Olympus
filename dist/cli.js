@@ -72847,21 +72847,28 @@ function dashboardSourceFailureSentence(kind, label, ref) {
     return sentence;
   return `${sentence} ${ref ? DASHBOARD_FAILURE_REF.replace("{ref}", ref) : DASHBOARD_FAILURE_LOG}`;
 }
-function dashboardManualSyncFailedLine(label, failure2, ref, when = "just now") {
+function dashboardManualSyncFailedLine(label, failure2, ref, when = "just now", name) {
+  const mid = name?.mid ?? label;
   if (!failure2)
-    return `Couldn't check ${label} ${when} — Olympus will try again on its own`;
-  return `Couldn't check ${label} ${when}: ${dashboardSourceFailureSentence(failure2, label, ref)} Olympus will try again on its own.`;
+    return `Couldn't check ${mid} ${when} — Olympus will try again on its own`;
+  return `Couldn't check ${mid} ${when}: ${dashboardSourceFailureSentence(failure2, label, ref)} Olympus will try again on its own.`;
 }
 function dashboardManualSyncPendingLine(label) {
-  return `Checking ${label}…`;
+  return `Checking ${syncMid(label)}…`;
+}
+function syncMid(name) {
+  return typeof name === "string" ? name : name.mid;
 }
 function dashboardManualSyncBusyLine(label) {
-  return `Already checking ${label}`;
+  return `Already checking ${syncMid(label)}`;
 }
 function dashboardManualSyncTooSoonLine(label) {
-  return `${label} was checked a moment ago — try again in a minute`;
+  const start = typeof label === "string" ? label : label.start;
+  const verb = typeof label !== "string" && label.plural === true ? "were" : "was";
+  return `${start} ${verb} checked a moment ago — try again in a minute`;
 }
 function dashboardManualSyncLine(source, now) {
+  const name = source.sync_name ?? source.label;
   const sync = source.last_manual_sync;
   if (!sync)
     return;
@@ -72872,11 +72879,11 @@ function dashboardManualSyncLine(source, now) {
   const when = elapsed < 60000 ? "just now" : dashboardRelativeFromMs(elapsed);
   switch (sync.outcome) {
     case "checking":
-      return dashboardManualSyncPendingLine(source.label);
+      return dashboardManualSyncPendingLine(name);
     case "busy":
-      return dashboardManualSyncBusyLine(source.label);
+      return dashboardManualSyncBusyLine(name);
     case "failed":
-      return dashboardManualSyncFailedLine(source.label, sync.failure_kind, sync.failure_kind === "unknown" ? sync.failure_ref : undefined, when);
+      return dashboardManualSyncFailedLine(source.label, sync.failure_kind, sync.failure_kind === "unknown" ? sync.failure_ref : undefined, when, source.sync_name);
     case "checked": {
       const found = sync.new_items;
       if (found === undefined)
@@ -75551,7 +75558,8 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     ...vlmQueued !== undefined ? { vlm_extraction_queued: vlmQueued } : {},
     ...ingestionLedgerRow?.attention.length ? { attention_reasons: [...ingestionLedgerRow.attention] } : {},
     ...metadataSync ? { metadata_sync: metadataSync } : {},
-    ...definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {}
+    ...definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {},
+    ...definition.sync_name ? { sync_name: definition.sync_name } : {}
   };
   card.setup = dashboardSourceSetupStatus(card);
   return card;
@@ -77214,6 +77222,7 @@ var init_source_dashboard = __esm(() => {
       family: "file",
       trust_domain: "secure_local",
       connect_kind: "local",
+      sync_name: { mid: "your files", start: "Your files", plural: true },
       connect_action: { kind: "this_computer", source: "local.files" }
     },
     {
@@ -125290,7 +125299,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (expires)
         meta2.push(expires);
     } else if (checking) {
-      meta2.push(fill2(P.syncCheckingLine, { source: String(source.label || "") }));
+      meta2.push(fill2(P.syncCheckingLine, { source: String(source.syncNoun || source.label || "") }));
     } else if (manual) {
       meta2.push(capitalise(detail));
     } else if (progress) {} else if (item)
@@ -125662,7 +125671,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function totalUnknown(progress) {
     const stages = Array.isArray(progress.details) ? progress.details : [];
-    return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
+    if (stages.length === 0)
+      return false;
+    if (stages.every((stage) => !(Number(stage && stage.total) > 0)))
+      return true;
+    return progress.percent === undefined && progress.itemsLeft === undefined && !(Number(stages[0] && stages[0].total) > 0);
   }
   function progressFinished(progress) {
     return !!progress && progress.itemsLeft !== undefined && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
@@ -133619,7 +133632,7 @@ function createEmailSourceWorker(options = {}) {
             const schedulerSourceId = dashboardSchedulerSourceId(source);
             const key2 = schedulerSourceId ?? source;
             const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === schedulerSourceId);
-            const label = definition?.label ?? "this source";
+            const label = definition?.sync_name ?? definition?.label ?? "this source";
             const answer = (status, statusMessage, lastManualSync) => json({
               ok: true,
               source,
@@ -144486,7 +144499,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     if (fix)
       menu.push(fix);
   }
-  if (status !== "Off" && DISCONNECT_SOURCE_IDS.has(definition.source_id)) {
+  if (status !== "Off" && (DISCONNECT_SOURCE_IDS.has(definition.source_id) || definition.connect_action.kind === "this_computer")) {
     menu.push({
       label: DASHBOARD_CHATGPT_SETUP_LABELS.disconnect,
       tool: DISCONNECT_SOURCE_TOOL_NAME,
@@ -144497,6 +144510,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   return {
     id: definition.source_id,
     label: definition.label,
+    ...definition.sync_name ? { syncNoun: definition.sync_name.mid } : {},
     group: sourceGroup(definition),
     status,
     ...detail ? { detail } : {},
@@ -144836,6 +144850,7 @@ function overallProgress(rows) {
   const units = new Set(open7.map((row) => row.progress.unit));
   const unit = units.size === 1 ? [...units][0] : "items";
   const listing = { done: 0, any: false };
+  let firstWalk = false;
   const reading = { done: 0, total: 0, any: false };
   const indexing = { done: 0, total: 0, any: false };
   const searchable = { done: 0, total: 0 };
@@ -144845,6 +144860,8 @@ function overallProgress(rows) {
     if (progress.stage === "listing") {
       listing.any = true;
       listing.done += counts.found;
+      if (progress.total <= 0)
+        firstWalk = true;
     }
     if (counts.reading) {
       reading.any = true;
@@ -144880,7 +144897,7 @@ function overallProgress(rows) {
   return {
     unit,
     phase: initial ? "initial" : "refresh",
-    ...open7.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
+    ...firstWalk || open7.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
       percent: clampPercent2(Math.min(done, total) / total * 100),
       itemsLeft: Math.max(0, total - done)
     },
@@ -144981,6 +144998,7 @@ function scrubCard(definition, card) {
     } : {},
     ...isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at) } : {},
     ...card.unreadable_files ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } } : {},
+    ...definition.sync_name ? { sync_name: definition.sync_name } : {},
     ...card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at) && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome) ? {
       last_manual_sync: {
         at: isoOrUndefined(card.last_manual_sync.at),
@@ -147656,6 +147674,7 @@ function copySource(source) {
   const out = {
     id: identifier(source.id),
     label: text3(source.label),
+    ...source.syncNoun ? { syncNoun: text3(source.syncNoun) } : {},
     group: source.group === "local" ? "local" : "cloud",
     status: STATUSES.has(source.status) ? source.status : "Waiting"
   };
@@ -148155,7 +148174,7 @@ function syncSourceToolResult(result) {
   if (!sourceId)
     return errorToolResult(new ChatGptSurfaceError("internal"));
   const status = result.status === "busy" || result.status === "too_soon" ? result.status : "checking";
-  const label = SOURCE_LABELS[sourceId];
+  const label = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === sourceId)?.sync_name ?? SOURCE_LABELS[sourceId];
   const text3 = status === "busy" ? `${dashboardManualSyncBusyLine(label)}.` : status === "too_soon" ? `${dashboardManualSyncTooSoonLine(label)}.` : `${dashboardManualSyncPendingLine(label)} The Olympus panel shows what it finds.`;
   const structured = { status, source_id: sourceId };
   return { content: [{ type: "text", text: text3 }], structuredContent: structured };
@@ -148506,8 +148525,8 @@ var init_response_builder = __esm(() => {
   UNSAFE_CHARS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
   OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
   SCOPE_SOURCE_IDS2 = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "local.files"]);
-  DISCONNECT_SOURCE_IDS2 = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
-  SYNC_SOURCE_IDS2 = new Set([...DISCONNECT_SOURCE_IDS2, "local.files"]);
+  DISCONNECT_SOURCE_IDS2 = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library", "local.files"]);
+  SYNC_SOURCE_IDS2 = new Set(DISCONNECT_SOURCE_IDS2);
   FIX_TOOL_ARGS = {
     [DASHBOARD_TOOL_NAME]: {},
     [CONNECT_SOURCE_TOOL_NAME]: { source: OAUTH_SOURCES },
@@ -149110,8 +149129,8 @@ var init_setup_tools = __esm(() => {
   OAUTH_SOURCES2 = ["gmail", "google-drive", "dropbox"];
   FOLDER_SOURCE_IDS = ["google_drive.docs", "dropbox.files", "local.files"];
   SCOPE_SOURCE_IDS3 = ["gmail.email", ...FOLDER_SOURCE_IDS];
-  DISCONNECT_SOURCE_IDS3 = ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"];
-  SYNC_SOURCE_IDS3 = [...DISCONNECT_SOURCE_IDS3, "local.files"];
+  DISCONNECT_SOURCE_IDS3 = ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library", "local.files"];
+  SYNC_SOURCE_IDS3 = DISCONNECT_SOURCE_IDS3;
   WIDGET_AND_MODEL = { ui: { visibility: ["model", "app"] }, "openai/widgetAccessible": true };
   WIDGET_ONLY = { ui: { visibility: ["app"] }, "openai/widgetAccessible": true, "openai/visibility": "private" };
   SELECTION_SCHEMA = {

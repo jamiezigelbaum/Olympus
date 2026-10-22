@@ -32270,7 +32270,10 @@ var init_source_dashboard = __esm(() => {
 
 // src/workers/dashboard/vocabulary.ts
 function dashboardManualSyncPendingLine(label) {
-  return `Checking ${label}…`;
+  return `Checking ${syncMid(label)}…`;
+}
+function syncMid(name) {
+  return typeof name === "string" ? name : name.mid;
 }
 var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
@@ -35190,7 +35193,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       if (expires)
         meta.push(expires);
     } else if (checking) {
-      meta.push(fill2(P.syncCheckingLine, { source: String(source.label || "") }));
+      meta.push(fill2(P.syncCheckingLine, { source: String(source.syncNoun || source.label || "") }));
     } else if (manual) {
       meta.push(capitalise(detail));
     } else if (progress) {} else if (item)
@@ -35562,7 +35565,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function totalUnknown(progress) {
     const stages = Array.isArray(progress.details) ? progress.details : [];
-    return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
+    if (stages.length === 0)
+      return false;
+    if (stages.every((stage) => !(Number(stage && stage.total) > 0)))
+      return true;
+    return progress.percent === undefined && progress.itemsLeft === undefined && !(Number(stages[0] && stages[0].total) > 0);
   }
   function progressFinished(progress) {
     return !!progress && progress.itemsLeft !== undefined && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
