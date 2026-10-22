@@ -16,8 +16,8 @@
  *
  * Linux and unguarded folders never reach this module's checks.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { existsSync, mkdirSync, opendirSync, readFileSync } from 'node:fs';
+import { opendir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import type { OlympusFolderAccess } from '../../control-ui-contract.ts';
@@ -104,8 +104,15 @@ export class MacPermissions {
     this.helperPresent = options.helperPresent ?? (() => Boolean(process.env[ENGINE_HELPER_ENV]));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8_000;
-    this.list = options.list ?? ((path) => readdir(path));
-    this.listProtected = options.listProtected ?? ((path) => { readdirSync(path); });
+    this.list = options.list ?? (async (path) => {
+      // Opening the folder is the ask; one entry is enough to prove the read.
+      const dir = await opendir(path);
+      try { await dir.read(); } finally { await dir.close().catch(() => undefined); }
+    });
+    this.listProtected = options.listProtected ?? ((path) => {
+      const dir = opendirSync(path);
+      try { dir.readSync(); } finally { dir.closeSync(); }
+    });
     this.now = options.now ?? Date.now;
   }
 

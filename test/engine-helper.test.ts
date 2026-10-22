@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { engineStatusReport, runEngineCommand, parseInstallHelperArgs } from '../src/core/engine-cli.ts';
@@ -194,6 +194,37 @@ describe('olympus engine install-helper', () => {
     expect(first).toMatchObject({ ok: true, app_path: enginePaths(home).helperAppPath, team_id: 'ABCDE12345', replaced: false, built: false });
     expect(existsSync(join(first.app_path, 'copied'))).toBe(true);
     expect(installEngineHelper({ platform: 'darwin', homeDir: home, from: app, exec: codesign(GOOD) }).replaced).toBe(true);
+  });
+
+  test('keeps the previous app when the final rename fails, and refuses unhardened or wrong-team apps', () => {
+    const { root, home } = fixture();
+    const app = prebuilt(root);
+    const base = { platform: 'darwin', homeDir: home, from: app, exec: codesign(GOOD) };
+    const first = installEngineHelper(base);
+    writeFileSync(join(first.app_path, 'marker'), 'old');
+    let calls = 0;
+    const failing = (from: string, to: string) => {
+      calls += 1;
+      if (calls === 2) throw new Error('disk full');
+      renameSync(from, to);
+    };
+    expect(() => installEngineHelper({ ...base, rename: failing })).toThrow('previous helper app was kept');
+    expect(readFileSync(join(first.app_path, 'marker'), 'utf8')).toBe('old');
+    expect(() => installEngineHelper({ ...base, exec: codesign(GOOD.replace('(runtime)', '(0x0)').replace('0x10000', '0x0')) })).toThrow('hardened runtime');
+    expect(() => installEngineHelper({ ...base, expectedTeamId: 'ZZZZZZZZZZ' })).toThrow('not the expected team');
+    expect(() => installEngineHelper({ ...base, env: { OLYMPUS_MACOS_HELPER_TEAM_ID: 'ZZZZZZZZZZ' } })).toThrow('not the expected team');
+    expect(installEngineHelper({ ...base, expectedTeamId: 'ABCDE12345' }).replaced).toBe(true);
+  });
+
+  test('refuses a copy whose signature no longer verifies', () => {
+    const { root, home } = fixture();
+    const app = prebuilt(root);
+    let verifies = 0;
+    const inner = codesign(GOOD);
+    const exec: EngineExec = (command, args) => (command === '/usr/bin/codesign' && args[0] === '--verify' && ++verifies === 2
+      ? { status: 1, stdout: '', stderr: 'copy broken' } : inner(command, args));
+    expect(() => installEngineHelper({ platform: 'darwin', homeDir: home, from: app, exec })).toThrow('copied helper app');
+    expect(existsSync(enginePaths(home).helperAppPath!)).toBe(false);
   });
 
   test('refuses an unverifiable, mis-named or ad hoc app, and a missing identity, and Linux', () => {

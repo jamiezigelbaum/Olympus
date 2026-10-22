@@ -111,6 +111,9 @@ export function createLocalFilesFolderScopeBrowser(
         const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
         // A guarded folder the Mac said no to: say how to turn it back on.
         if (guard) throw new AccessRefused(permissions.noteDenied(guard));
+        // Not a guarded place: on a Mac the likely cause is Full Disk Access.
+        const fda = permissions.active && !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
+        if (fda) throw new AccessRefused(fda);
         throw new Error('Your computer does not let Olympus open this folder. Check who may open it in Finder (Get Info, then Sharing & Permissions), then try again.');
       }
       throw new Error('This folder could not be read. It may have moved or its disk may be unmounted.');
@@ -213,7 +216,7 @@ export function createLocalFilesFolderScopeBrowser(
     async afterApproval({ wholeAccount }) {
       // Saving the whole computer without Full Disk Access: open the page where
       // the person switches it on, with the helper app shown in Finder to drag in.
-      if (wholeAccount && permissions.active && !permissions.hasFullDiskAccess()) {
+      if (wholeAccount && permissions.active && permissions.hasHelper() && !permissions.hasFullDiskAccess()) {
         (options.openFullDiskAccess ?? revealHelperAndOpenFullDiskAccess)();
       }
     },

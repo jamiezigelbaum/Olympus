@@ -29,8 +29,10 @@ extern char **environ;
 static volatile sig_atomic_t child_pid = 0;
 
 static void forward(int sig) {
+  int saved_errno = errno;
   pid_t pid = child_pid;
   if (pid > 0) kill(pid, sig);
+  errno = saved_errno;
 }
 
 int main(int argc, char **argv) {
@@ -58,7 +60,15 @@ int main(int argc, char **argv) {
   posix_spawnattr_init(&attr);
   // The child starts with the signal mask this program had on entry.
   posix_spawnattr_setsigmask(&attr, &previous);
-  posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK);
+  // The child starts with default handlers for the signals this program handles.
+  sigset_t defaults;
+  sigemptyset(&defaults);
+  sigaddset(&defaults, SIGPIPE);
+  sigaddset(&defaults, SIGINT);
+  sigaddset(&defaults, SIGTERM);
+  sigaddset(&defaults, SIGHUP);
+  posix_spawnattr_setsigdefault(&attr, &defaults);
+  posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
   int rc = posix_spawn(&pid, argv[1], &actions, &attr, &argv[1], environ);
   posix_spawn_file_actions_destroy(&actions);
   posix_spawnattr_destroy(&attr);
@@ -80,7 +90,10 @@ int main(int argc, char **argv) {
   int status = 0;
   for (;;) {
     pid_t done = waitpid(pid, &status, 0);
-    if (done == pid) break;
+    if (done == pid) {
+      child_pid = 0;
+      break;
+    }
     if (done < 0 && errno != EINTR) return 70;
   }
   if (WIFEXITED(status)) return WEXITSTATUS(status);

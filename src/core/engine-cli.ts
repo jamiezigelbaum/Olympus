@@ -42,7 +42,7 @@ import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, res
 
 export const ENGINE_CLI_USAGE = {
   'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--now] [--dry-run]',
-  'engine install-helper': 'olympus engine install-helper [--from <signed app>] [--identity <Developer ID name or SHA-1>]',
+  'engine install-helper': 'olympus engine install-helper [--from <signed app>] [--identity <Developer ID name or SHA-1>]  (restarts an installed engine so it starts through the helper)',
   'engine uninstall': 'olympus engine uninstall',
   'engine status': 'olympus engine status [--brief]',
   'engine start': 'olympus engine start',
@@ -145,7 +145,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
       ...(deps.health ? { health: deps.health } : {}),
     });
     const { plist: _plist, ...summary } = engine;
-    return { ...helper, engine: summary, next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
+    return { ...helper, engine: summary, restarted_engine: true, note: 'The engine was restarted so its agent starts through the helper app.', next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
   }
   if (command === 'verify') {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...(deps.health ? { health: deps.health } : {}) });

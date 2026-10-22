@@ -43794,7 +43794,7 @@ init_local_open();
 
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
-import { lstatSync as lstatSync9, readdirSync as readdirSync5, realpathSync as realpathSync7 } from "node:fs";
+import { lstatSync as lstatSync9, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
 import { join as join34 } from "node:path";
 
@@ -44022,8 +44022,8 @@ function registerFileScopeBrowserFactory(sourceId, factory) {
 // src/workers/local-files/mac-permissions.ts
 init_atomic_file();
 init_paths();
-import { existsSync as existsSync20, mkdirSync as mkdirSync15, readFileSync as readFileSync19, readdirSync as readdirSync4 } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { existsSync as existsSync20, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync19 } from "node:fs";
+import { opendir } from "node:fs/promises";
 import { dirname as dirname25, join as join32 } from "node:path";
 var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER";
 var FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
@@ -44069,9 +44069,23 @@ class MacPermissions {
     this.helperPresent = options.helperPresent ?? (() => Boolean(process.env[ENGINE_HELPER_ENV]));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8000;
-    this.list = options.list ?? ((path) => readdir(path));
+    this.list = options.list ?? (async (path) => {
+      const dir = await opendir(path);
+      try {
+        await dir.read();
+      } finally {
+        await dir.close().catch(() => {
+          return;
+        });
+      }
+    });
     this.listProtected = options.listProtected ?? ((path) => {
-      readdirSync4(path);
+      const dir = opendirSync(path);
+      try {
+        dir.readSync();
+      } finally {
+        dir.closeSync();
+      }
     });
     this.now = options.now ?? Date.now;
   }
@@ -44255,7 +44269,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
   const volumes = options.volumes ?? new VolumeResolver;
   const home = safeRealpath(options.home ?? options.context?.home ?? homedir22());
   const context2 = options.context ?? { ...defaultExclusionContext(), home };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync5(realPath, { withFileTypes: true }));
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
     memoryPath: join34(olympusDataDir(), "local-files", "folder-access.json")
@@ -44283,6 +44297,9 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
         if (guard)
           throw new AccessRefused(permissions.noteDenied(guard));
+        const fda = permissions.active && !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
+        if (fda)
+          throw new AccessRefused(fda);
         throw new Error("Your computer does not let Olympus open this folder. Check who may open it in Finder (Get Info, then Sharing & Permissions), then try again.");
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
@@ -44379,7 +44396,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
     },
     async afterApproval({ wholeAccount }) {
-      if (wholeAccount && permissions.active && !permissions.hasFullDiskAccess()) {
+      if (wholeAccount && permissions.active && permissions.hasHelper() && !permissions.hasFullDiskAccess()) {
         (options.openFullDiskAccess ?? revealHelperAndOpenFullDiskAccess)();
       }
     }

@@ -147,6 +147,25 @@ describe('the picker\'s states for a guarded folder', () => {
     await expect(browser.browse({ parentKey: join(f.home, 'Code') })).rejects.toThrow(/Sharing & Permissions/);
   });
 
+  test('an unreadable ordinary folder without Full Disk Access points to Full Disk Access', async () => {
+    const f = fixture({ fullDiskAccess: false });
+    const browser = createLocalFilesFolderScopeBrowser({
+      volumes: new VolumeResolver({ platform: 'darwin', home: f.home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)' }),
+      context: { home: f.home, syncedRoots: [], platform: 'darwin' },
+      home: f.home,
+      permissions: f.permissions,
+      readDirectory: () => { throw refusal('EPERM'); },
+    });
+    const page = await browser.browse({ parentKey: join(f.home, 'Code') });
+    expect(page.access?.state).toBe('needs_full_disk_access');
+  });
+
+  test('without the helper app, saving the whole computer opens nothing', async () => {
+    const f = fixture({ fullDiskAccess: false, helper: false });
+    await f.browser.afterApproval!({ wholeAccount: true });
+    expect(f.opened()).toBe(0);
+  });
+
   test('waiting: a question still on screen answers "waiting", and the answer is used when it arrives', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

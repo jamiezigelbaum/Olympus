@@ -28,6 +28,8 @@ import { OperationError } from './operation-error.ts';
 import { olympusPackageRoot } from './package-root.ts';
 
 export const MACOS_SIGNING_IDENTITY_ENV = 'OLYMPUS_MACOS_SIGNING_IDENTITY';
+/** Optional: refuse a helper app signed by any other team. Never committed as a literal. */
+export const MACOS_HELPER_TEAM_ENV = 'OLYMPUS_MACOS_HELPER_TEAM_ID';
 
 export interface EngineHelperInstallOptions {
   homeDir?: string;
@@ -37,7 +39,11 @@ export interface EngineHelperInstallOptions {
   from?: string;
   /** Signing identity for a build; defaults to OLYMPUS_MACOS_SIGNING_IDENTITY. */
   identity?: string;
+  /** Refuse an app whose team id differs; defaults to OLYMPUS_MACOS_HELPER_TEAM_ID when set. */
+  expectedTeamId?: string;
   exec?: EngineExec;
+  /** Test seam for the rename steps of the swap. */
+  rename?: (from: string, to: string) => void;
   /** Where the checkout's scripts live; defaults to the Olympus package root. */
   packageRoot?: string;
 }
@@ -128,6 +134,13 @@ export function installEngineHelper(options: EngineHelperInstallOptions = {}): E
         `Sign it with ${MACOS_SIGNING_IDENTITY_ENV}.`,
       );
     }
+    if (!details.hardened) {
+      throw new OperationError('config_error', 'The helper app is not signed with the hardened runtime.', 'Sign it with --options runtime (scripts/build-macos-helper.sh does).');
+    }
+    const expectedTeam = options.expectedTeamId ?? env[MACOS_HELPER_TEAM_ENV];
+    if (expectedTeam && details.teamId !== expectedTeam) {
+      throw new OperationError('config_error', `The helper app is signed by team ${details.teamId ?? 'none'}, not the expected team.`);
+    }
     const executable = join(candidate, 'Contents', 'MacOS', ENGINE_HELPER_EXECUTABLE);
     if (!existsSync(executable)) {
       throw new OperationError('config_error', `The helper app has no ${ENGINE_HELPER_EXECUTABLE} program.`);
@@ -142,8 +155,21 @@ export function installEngineHelper(options: EngineHelperInstallOptions = {}): E
     const copy = join(staging, 'copy.app');
     const ditto = run(options.exec, '/usr/bin/ditto', [candidate, copy]);
     if (ditto.status !== 0) throw new OperationError('config_error', `Could not copy the helper app: ${ditto.stderr.trim()}`);
-    if (replaced) rmSync(target, { recursive: true, force: true });
-    renameSync(copy, target);
+    const copyCheck = run(options.exec, '/usr/bin/codesign', ['--verify', '--strict', '--deep', copy]);
+    if (copyCheck.status !== 0) {
+      throw new OperationError('config_error', `The copied helper app's signature does not verify: ${copyCheck.stderr.trim().split('\n')[0] ?? ''}`);
+    }
+    // Move the old app aside, move the new one in, and put the old one back
+    // if that fails; the old app is deleted only once the new one is in place.
+    const rename = options.rename ?? renameSync;
+    const aside = join(staging, 'previous.app');
+    if (replaced) rename(target, aside);
+    try {
+      rename(copy, target);
+    } catch (error) {
+      if (replaced) rename(aside, target);
+      throw new OperationError('config_error', `Could not put the helper app in place: ${error instanceof Error ? error.message : String(error)}${replaced ? ' The previous helper app was kept.' : ''}`);
+    }
     return {
       ok: true,
       app_path: target,

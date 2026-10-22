@@ -141111,8 +141111,8 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync67, mkdirSync as mkdirSync49, readFileSync as readFileSync69, readdirSync as readdirSync17 } from "node:fs";
-import { readdir as readdir4 } from "node:fs/promises";
+import { existsSync as existsSync67, mkdirSync as mkdirSync49, opendirSync, readFileSync as readFileSync69 } from "node:fs";
+import { opendir } from "node:fs/promises";
 import { dirname as dirname75, join as join107 } from "node:path";
 
 class MacPermissions {
@@ -141132,9 +141132,23 @@ class MacPermissions {
     this.helperPresent = options.helperPresent ?? (() => Boolean(process.env[ENGINE_HELPER_ENV]));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8000;
-    this.list = options.list ?? ((path) => readdir4(path));
+    this.list = options.list ?? (async (path) => {
+      const dir = await opendir(path);
+      try {
+        await dir.read();
+      } finally {
+        await dir.close().catch(() => {
+          return;
+        });
+      }
+    });
     this.listProtected = options.listProtected ?? ((path) => {
-      readdirSync17(path);
+      const dir = opendirSync(path);
+      try {
+        dir.readSync();
+      } finally {
+        dir.closeSync();
+      }
     });
     this.now = options.now ?? Date.now;
   }
@@ -141314,7 +141328,7 @@ var init_mac_settings = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync38, readdirSync as readdirSync18, realpathSync as realpathSync18 } from "node:fs";
+import { lstatSync as lstatSync38, readdirSync as readdirSync17, realpathSync as realpathSync18 } from "node:fs";
 import { homedir as homedir64 } from "node:os";
 import { join as join109 } from "node:path";
 function safeRealpath(path) {
@@ -141339,7 +141353,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
   const volumes = options.volumes ?? new VolumeResolver;
   const home2 = safeRealpath(options.home ?? options.context?.home ?? homedir64());
   const context2 = options.context ?? { ...defaultExclusionContext(), home: home2 };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync18(realPath, { withFileTypes: true }));
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync17(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home: home2,
     memoryPath: join109(olympusDataDir(), "local-files", "folder-access.json")
@@ -141367,6 +141381,9 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
         if (guard)
           throw new AccessRefused(permissions.noteDenied(guard));
+        const fda = permissions.active && !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
+        if (fda)
+          throw new AccessRefused(fda);
         throw new Error("Your computer does not let Olympus open this folder. Check who may open it in Finder (Get Info, then Sharing & Permissions), then try again.");
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
@@ -141463,7 +141480,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
     },
     async afterApproval({ wholeAccount }) {
-      if (wholeAccount && permissions.active && !permissions.hasFullDiskAccess()) {
+      if (wholeAccount && permissions.active && permissions.hasHelper() && !permissions.hasFullDiskAccess()) {
         (options.openFullDiskAccess ?? revealHelperAndOpenFullDiskAccess)();
       }
     }
@@ -170342,6 +170359,7 @@ import { existsSync as existsSync58, lstatSync as lstatSync32, mkdirSync as mkdi
 import { homedir as homedir55 } from "node:os";
 import { join as join88, resolve as resolve13 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
+var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
   if (exec)
     return exec(command, args);
@@ -170407,6 +170425,13 @@ function installEngineHelper(options = {}) {
     if (!details.developerId) {
       throw new OperationError("config_error", "The helper app is not signed with a Developer ID. macOS forgets folder permissions for an app that is not, every time it changes.", `Sign it with ${MACOS_SIGNING_IDENTITY_ENV}.`);
     }
+    if (!details.hardened) {
+      throw new OperationError("config_error", "The helper app is not signed with the hardened runtime.", "Sign it with --options runtime (scripts/build-macos-helper.sh does).");
+    }
+    const expectedTeam = options.expectedTeamId ?? env[MACOS_HELPER_TEAM_ENV];
+    if (expectedTeam && details.teamId !== expectedTeam) {
+      throw new OperationError("config_error", `The helper app is signed by team ${details.teamId ?? "none"}, not the expected team.`);
+    }
     const executable = join88(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
     if (!existsSync58(executable)) {
       throw new OperationError("config_error", `The helper app has no ${ENGINE_HELPER_EXECUTABLE} program.`);
@@ -170419,9 +170444,22 @@ function installEngineHelper(options = {}) {
     const ditto = run(options.exec, "/usr/bin/ditto", [candidate, copy]);
     if (ditto.status !== 0)
       throw new OperationError("config_error", `Could not copy the helper app: ${ditto.stderr.trim()}`);
+    const copyCheck = run(options.exec, "/usr/bin/codesign", ["--verify", "--strict", "--deep", copy]);
+    if (copyCheck.status !== 0) {
+      throw new OperationError("config_error", `The copied helper app's signature does not verify: ${copyCheck.stderr.trim().split(`
+`)[0] ?? ""}`);
+    }
+    const rename2 = options.rename ?? renameSync16;
+    const aside = join88(staging, "previous.app");
     if (replaced)
-      rmSync20(target, { recursive: true, force: true });
-    renameSync16(copy, target);
+      rename2(target, aside);
+    try {
+      rename2(copy, target);
+    } catch (error) {
+      if (replaced)
+        rename2(aside, target);
+      throw new OperationError("config_error", `Could not put the helper app in place: ${error instanceof Error ? error.message : String(error)}${replaced ? " The previous helper app was kept." : ""}`);
+    }
     return {
       ok: true,
       app_path: target,
@@ -170443,7 +170481,7 @@ init_operation_error();
 init_remote_access();
 var ENGINE_CLI_USAGE = {
   "engine install": "olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--now] [--dry-run]",
-  "engine install-helper": "olympus engine install-helper [--from <signed app>] [--identity <Developer ID name or SHA-1>]",
+  "engine install-helper": "olympus engine install-helper [--from <signed app>] [--identity <Developer ID name or SHA-1>]  (restarts an installed engine so it starts through the helper)",
   "engine uninstall": "olympus engine uninstall",
   "engine status": "olympus engine status [--brief]",
   "engine start": "olympus engine start",
@@ -170520,7 +170558,7 @@ async function runEngineCommand(args, deps = {}) {
       ...deps.health ? { health: deps.health } : {}
     });
     const { plist: _plist, ...summary } = engine;
-    return { ...helper, engine: summary, next: engine.ok ? "Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus." : "Run olympus engine logs to see why the engine did not become healthy." };
+    return { ...helper, engine: summary, restarted_engine: true, note: "The engine was restarted so its agent starts through the helper app.", next: engine.ok ? "Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus." : "Run olympus engine logs to see why the engine did not become healthy." };
   }
   if (command === "verify") {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...deps.health ? { health: deps.health } : {} });
