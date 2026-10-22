@@ -1800,7 +1800,7 @@ describe('multi-source source dashboard', () => {
     const unknownText = await unknown.text();
 
     expect(unknown.status).toBe(400);
-    expect(unknownText).toContain('source must be gmail, google-drive, dropbox, x, or readwise');
+    expect(unknownText).toContain('source must be gmail, google-drive, dropbox, x, readwise, or a source on this computer');
 
     const response = await fetch(new Request('http://worker.test/dashboard/sync-now', {
       method: 'POST',
