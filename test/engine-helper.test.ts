@@ -148,6 +148,7 @@ describe('engine status knows about the helper', () => {
     installFakeHelper(home);
     const waiting = await report(home, fake.exec);
     expect(waiting.helper).toMatchObject({ installed: true, in_use: false });
+    expect(waiting.ok).toBe(false);
     expect(waiting.missing).toContain('The Olympus helper app is installed but the engine agent does not use it yet: run olympus engine install.');
     installEngine(service);
     const using = await report(home, fake.exec);

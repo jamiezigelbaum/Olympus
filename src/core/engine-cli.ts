@@ -145,7 +145,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
       ...(deps.health ? { health: deps.health } : {}),
     });
     const { plist: _plist, ...summary } = engine;
-    return { ...helper, engine: summary, restarted_engine: true, note: 'The engine was restarted so its agent starts through the helper app.', next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
+    return { ...helper, engine: summary, restarted_engine: true, note: 'The engine was restarted so its agent starts through the helper app.', next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
   }
   if (command === 'verify') {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...(deps.health ? { health: deps.health } : {}) });
@@ -254,7 +254,8 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   // macOS: the signed helper app is what the Mac names when it asks about Desktop, Documents and the like.
   const helperPath = paths.linux ? undefined : installedEngineHelper(paths);
   const helperInUse = Boolean(installedProgram(paths.plistPath)?.helperPath);
-  if (helperPath && agent.installed && !helperInUse) missing.push('The Olympus helper app is installed but the engine agent does not use it yet: run olympus engine install.');
+  const helperUnused = Boolean(helperPath) && agent.installed && !helperInUse;
+  if (helperUnused) missing.push('The Olympus helper app is installed but the engine agent does not use it yet: run olympus engine install.');
   if (agent.state === 'running' && !worker.reachable) missing.push('The worker is not answering yet: see olympus engine logs.');
   // The engine's own service health says only that it started the relay;
   // the relay's status file and pid say whether it is running now.
@@ -262,7 +263,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },

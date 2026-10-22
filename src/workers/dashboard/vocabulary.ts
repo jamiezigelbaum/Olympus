@@ -27,7 +27,7 @@ export const DASHBOARD_UPDATE_COPY = {
 };
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
-export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Your Mac is not letting Olympus Engine open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine';
+export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
 
