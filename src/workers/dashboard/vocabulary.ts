@@ -1587,6 +1587,8 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   /** A source's progress bar: its first unfinished stage. */
   sourceStages: { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing' },
   findingItems: 'Finding items',
+  /** Before a total is known, what is: no percentage, only the count so far. {unit} is plural. */
+  findingFound: 'Finding {unit} · {done} found so far',
   sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
   /**
    * The page-wide progress line names what stopped instead of a bare
@@ -2277,6 +2279,7 @@ export const DASHBOARD_LOCAL_COPY = {
   /** A source's bar: its first unfinished stage. */
   sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
   findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+  findingFound: DASHBOARD_CHATGPT_PAGE_COPY.findingFound,
   sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
   /** One plain sentence per reason a source is not moving; {source} is its name. */
   stalledReasons: {

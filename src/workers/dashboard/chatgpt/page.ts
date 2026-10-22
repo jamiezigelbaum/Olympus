@@ -185,6 +185,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .progress-line.stalled{font-weight:600}
 .bar{height:0.5rem;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
 .bar-fill{height:100%;border-radius:999px;background:var(--run);min-width:0}
+.bar.indeterminate{position:relative;overflow:hidden}
+.bar.indeterminate .bar-fill{position:absolute;top:0;width:35%;animation:bar-sweep 1.6s ease-in-out infinite}
+@keyframes bar-sweep{0%{left:-35%}100%{left:100%}}
+@media (prefers-reduced-motion:reduce){.bar.indeterminate .bar-fill{animation:none;left:0;width:100%;opacity:.35}}
 .disclosure{margin-top:0.75rem}
 .disclosure summary,.models summary{color:var(--muted);font-size:0.875rem;padding:0.25rem 0}
 .models summary{font-size:1rem;color:var(--text);font-weight:600}

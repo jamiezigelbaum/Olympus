@@ -1300,7 +1300,7 @@ export function chatgptDashboardClient(
   function sourceProgressLabel(progress: Any): string {
     const total = Number(progress.total) || 0;
     if (progress.percent === undefined && progress.stage !== 'listing') return (P.sourceStages as Any)[progress.stage] || P.findingItems;
-    if (total <= 0) return P.findingItems;
+    if (total <= 0) return foundSoFar(progress.stage === 'listing' ? progress.done : 0, progress.unit);
     const stage = (P.sourceStages as Any)[progress.stage] || P.findingItems;
     return fill(P.sourceProgress, {
       stage,
@@ -1309,6 +1309,26 @@ export function chatgptDashboardClient(
       total: count(total),
       unit: unitWord(progress.unit, total),
     });
+  }
+
+  /**
+   * Listing before any total is known: how many were found so far, never a
+   * percentage (the dashboard metric ruling). Nothing found yet says only that
+   * it is finding.
+   */
+  function foundSoFar(found: Any, unit: Any): string {
+    const n = Number(found) || 0;
+    if (n <= 0) return P.findingItems;
+    const words = (P.units as Any)[unit] || P.units.items;
+    return fill(P.findingFound, { unit: words.many, done: count(n) });
+  }
+
+  /** A bar with no end to measure against: it moves, and carries no value. */
+  function indeterminateBar(label: string): HTMLElement {
+    const bar = el('div', 'bar indeterminate');
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-label', label);
+    return add(bar, el('div', 'bar-fill'));
   }
 
   /**
@@ -1336,7 +1356,11 @@ export function chatgptDashboardClient(
     }
     const label = sourceProgressLabel(progress);
     add(box, el('p', 'muted', label));
-    if (progress.percent !== undefined) add(box, progressBar(progress.percent, name + ': ' + label));
+    // A listing with no total has no percentage, even from an engine that still
+    // sends 0: only a sized folder walk (a real percent) draws a filled bar.
+    const unsized = progress.stage === 'listing' && (Number(progress.total) || 0) <= 0 && !(Number(progress.percent) > 0);
+    if (unsized) add(box, indeterminateBar(name + ': ' + label));
+    else if (progress.percent !== undefined) add(box, progressBar(progress.percent, name + ': ' + label));
     return box;
   }
 
@@ -1450,7 +1474,8 @@ export function chatgptDashboardClient(
     const phase = progress.phase === 'initial' ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
       const paused = progressPaused() ? ', ' + P.progressPaused : progress.stalled ? ', ' + stalledNames() : '';
-      return phase + ': ' + P.findingItems + paused;
+      const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
+      return phase + ': ' + foundSoFar(first && first.done, progress.unit) + paused;
     }
     const parts = progress.percent === undefined ? [P.sourceStages.indexing] : [fill(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
@@ -1491,6 +1516,7 @@ export function chatgptDashboardClient(
     const line = el('p', stalled ? 'progress-line stalled' : progressPaused() ? 'progress-line paused' : 'progress-line', progressText(progress));
     add(section, line);
     if (progress.percent !== undefined) add(section, progressBar(progress.percent, P.progress));
+    else if (totalUnknown(progress) && !stalled && !progressPaused()) add(section, indeterminateBar(P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
     const faster = indexFasterControl();
     if (withDetails && (stages.length || faster)) {

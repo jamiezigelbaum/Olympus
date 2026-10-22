@@ -211,6 +211,43 @@ describe('per-source progress', () => {
     expect(row(host, 'Google Drive').querySelector('.source-progress p')!.textContent).toBe('Finding items');
   });
 
+  test('during the first walk it says how many were found so far, on a bar with no value, never a percentage', () => {
+    const host = mount({});
+    const walking: DashboardSource = {
+      id: 'local.files', label: 'Files on this computer', group: 'local', status: 'Working', detail: 'Finding items',
+      progress: { stage: 'listing', unit: 'files', done: 12400, total: 0, stalled: false },
+    };
+    host.push({ structuredContent: model({ sources: [walking] }) });
+    const block = row(host, 'Files on this computer').querySelector('.source-progress')!;
+    expect(block.querySelector('p')!.textContent).toBe('Finding files · 12,400 found so far');
+    const bar = block.querySelector('[role=progressbar]')!;
+    expect(bar.className).toBe('bar indeterminate');
+    expect(bar.hasAttribute('aria-valuenow')).toBe(false);
+    expect(block.textContent).not.toContain('%');
+    // An engine that still sends a 0% for the walk is not shown as 0%.
+    const older = mount({});
+    older.push({ structuredContent: model({ sources: [{ ...walking, progress: { ...walking.progress!, percent: 0 } }] }) });
+    const olderBar = row(older, 'Files on this computer').querySelector('[role=progressbar]')!;
+    expect(olderBar.className).toBe('bar indeterminate');
+    expect(olderBar.hasAttribute('aria-valuenow')).toBe(false);
+  });
+
+  test('nothing found yet says Finding items; once the total is known the ordinary percent bar returns', () => {
+    const host = mount({});
+    const walking: DashboardSource = {
+      id: 'local.files', label: 'Files on this computer', group: 'local', status: 'Working',
+      progress: { stage: 'listing', unit: 'files', done: 0, total: 0, stalled: false },
+    };
+    host.push({ structuredContent: model({ sources: [walking] }) });
+    expect(row(host, 'Files on this computer').querySelector('.source-progress p')!.textContent).toBe('Finding items');
+    host.push({ structuredContent: model({ sources: [{ ...walking, progress: { stage: 'reading', unit: 'files', done: 3100, total: 12400, percent: 25, stalled: false } }] }) });
+    const block = row(host, 'Files on this computer').querySelector('.source-progress')!;
+    expect(block.querySelector('p')!.textContent).toBe('Reading — 25%, 3,100 of 12,400 files');
+    const bar = block.querySelector('[role=progressbar]')!;
+    expect(bar.className).toBe('bar');
+    expect(bar.getAttribute('aria-valuenow')).toBe('25');
+  });
+
   test('stalled: amber bar and one plain sentence per reason; the row\'s fix comes from the view model', () => {
     const reasons = [
       ['waiting_for_credentials', 'Paused: Olympus needs you to sign in to Dropbox again'],
@@ -268,6 +305,15 @@ describe('top-level progress', () => {
     const host = mount({});
     host.push({ structuredContent: model({ progress: { ...base, details: [{ stage: 'Finding items', unit: 'files', done: 0, total: 0 }] } }) });
     expect(host.doc.querySelector('.progress-line')!.textContent).toBe('First index: Finding items');
+  });
+  test('the page-wide line counts what was found, and its bar has no value, while no total is known', () => {
+    const host = mount({});
+    const { percent: _percent, itemsLeft: _itemsLeft, ...unmeasured } = base;
+    host.push({ structuredContent: model({ progress: { ...unmeasured, details: [{ stage: 'Finding items', unit: 'files', done: 12400, total: 0 }] } }) });
+    expect(host.doc.querySelector('.progress-line')!.textContent).toBe('First index: Finding files · 12,400 found so far');
+    const bar = host.doc.querySelector('.progress-line')!.parentElement!.querySelector('[role=progressbar]')!;
+    expect(bar.className).toBe('bar indeterminate');
+    expect(host.text()).not.toContain('0%');
   });
   test('hidden once nothing is unfinished', () => {
     const host = mount({});

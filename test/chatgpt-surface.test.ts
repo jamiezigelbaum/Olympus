@@ -175,7 +175,7 @@ describe('dashboard view-model producer', () => {
       ],
     });
     expect(vm.sources[0]!.status).toBe('Working');
-    expect(vm.sources[0]!.progress).toEqual({ stage: 'listing', unit: 'files', done: 200, total: 0, percent: 0, stalled: false });
+    expect(vm.sources[0]!.progress).toEqual({ stage: 'listing', unit: 'files', done: 200, total: 0, stalled: false });
   });
 
   test('per-source progress names the first unfinished stage; reading counts the in-scope population only', () => {

@@ -727,7 +727,10 @@ function measuredSourceProgress(
   let percent: number | undefined = 0;
   if (open.id === 'metadata_sync') {
     // Listing counts the source's own items found so far; a folder walk's
-    // share, when the walk is sized, is the only percentage it has.
+    // share, when the walk is sized, is the only percentage it has. Until
+    // then there is no percentage at all (the dashboard metric ruling: never a
+    // fake one): the row says how many were found and the bar is indeterminate.
+    percent = undefined;
     done = found;
     if (measure.kind === 'ratio' && open.unit !== 'folders') total = measure.total;
     if (measure.kind === 'ratio' && measure.total > 0) percent = clampPercent((measure.done / measure.total) * 100);
@@ -1066,8 +1069,10 @@ function overallProgress(
   return {
     unit,
     phase: initial ? 'initial' : 'refresh',
-    ...(open.some((row) => row.counts.searchableUnknown) ? {} : {
-      percent: total > 0 ? clampPercent((Math.min(done, total) / total) * 100) : 0,
+    // No total known yet (every source still counting what it has): no
+    // percentage and no items left, rather than 0% over an empty bar.
+    ...(open.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
+      percent: clampPercent((Math.min(done, total) / total) * 100),
       itemsLeft: Math.max(0, total - done),
     }),
     ...(eta !== undefined ? { etaSeconds: eta } : {}),
