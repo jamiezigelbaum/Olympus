@@ -261,6 +261,24 @@ describe('olympus engine install-helper', () => {
     expect(readFileSync(enginePaths(home).plistPath, 'utf8')).toContain(ENGINE_HELPER_BUNDLE_ID);
   });
 
+  test('replacing the helper of an engine already on it restarts the agent, so the new launcher runs', async () => {
+    const { root, home, checkout, bun } = fixture();
+    const fake = launchctl();
+    const service = { platform: 'darwin', homeDir: home, uid: 501, exec: fake.exec };
+    const helper = installFakeHelper(home);
+    installEngine({ ...service, fromCheckout: checkout, bunBin: bun });
+    let restarts = 0;
+    const result = await runEngineCommand(['install-helper', '--from', prebuilt(root)], {
+      ...service,
+      health: { timeoutMs: 20, pollMs: 5, pidAlive: () => true, fetchImpl: (async () => new Response('{"ok":true}')) as unknown as typeof fetch },
+      installHelper: () => ({ ok: true, app_path: enginePaths(home).helperAppPath!, executable_path: helper, bundle_id: ENGINE_HELPER_BUNDLE_ID, team_id: 'ABCDE12345', signed_with: 'developer_id', built: false, replaced: true }),
+      restartEngine: () => { restarts += 1; return { ok: true, command: [] }; },
+    }) as Record<string, any>;
+    expect(result.engine.action).toBe('unchanged');
+    expect(restarts).toBe(1);
+    expect(result.restarted_engine).toBe(true);
+  });
+
   test('arguments', () => {
     expect(parseInstallHelperArgs(['--from', '/a.app', '--identity', 'Developer ID Application: X'])).toEqual({ from: '/a.app', identity: 'Developer ID Application: X' });
     expect(() => parseInstallHelperArgs(['--from'])).toThrow('needs a value');

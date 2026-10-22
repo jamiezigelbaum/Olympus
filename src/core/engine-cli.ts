@@ -65,6 +65,8 @@ export interface EngineCliDeps {
   openclawPath?: () => string | undefined;
   /** Test seam: put the signed helper app in place (engine-helper.ts). */
   installHelper?: (options: EngineHelperInstallOptions) => EngineHelperInstallResult;
+  /** Test seam: restart the agent (engine-service.ts). */
+  restartEngine?: typeof restartEngine;
   /** Test seam for the post-install health proof. */
   health?: EngineHealthDeps;
   /**
@@ -144,6 +146,9 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
       ...(current ? { fromCheckout: dirname(dirname(current.entryPath)), bunBin: current.runtimePath } : {}),
       ...(deps.health ? { health: deps.health } : {}),
     });
+    // An agent already on the helper is unchanged, but its running launcher is
+    // the old app: restart it so the new one is what runs.
+    if (engine.action === 'unchanged') (deps.restartEngine ?? restartEngine)(service);
     const { plist: _plist, ...summary } = engine;
     return { ...helper, engine: summary, restarted_engine: true, note: 'The engine was restarted so its agent starts through the helper app.', next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
   }

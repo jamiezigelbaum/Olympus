@@ -170614,6 +170614,8 @@ async function runEngineCommand(args, deps = {}) {
       ...current2 ? { fromCheckout: dirname65(dirname65(current2.entryPath)), bunBin: current2.runtimePath } : {},
       ...deps.health ? { health: deps.health } : {}
     });
+    if (engine.action === "unchanged")
+      (deps.restartEngine ?? restartEngine)(service);
     const { plist: _plist, ...summary } = engine;
     return { ...helper, engine: summary, restarted_engine: true, note: "The engine was restarted so its agent starts through the helper app.", next: engine.ok ? "Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine." : "Run olympus engine logs to see why the engine did not become healthy." };
   }
