@@ -1,13 +1,13 @@
 # Olympus: Grok Bot and Cursor marketplace submission
 
-Status: READY except two items (§5): the live privacy policy must name Cursor
-(merged in #424, published with the 1.1.0 site), and Jamie's in-app test from
-Grok Bot. Scripted end-to-end receipt and legal pass done 2026-10-15. Form:
-https://x.ai/bot/marketplace/submit-a-plugin. Publisher terms (Anysphere):
-https://cursor.com/marketplace-publisher-terms. Jamie accepted the publisher
-terms for Open Coordination Unlimited, Inc., including their indemnity of
-Anysphere, on 2026-10-15 ("Yes, I accept the terms."). Jamie clicks submit
-himself.
+Status: SUBMITTED 2026-10-22 (form: https://x.ai/bot/marketplace/submit-a-plugin;
+x.ai follows up by email to support@olympusplugin.ai). Publisher terms
+(Anysphere): https://cursor.com/marketplace-publisher-terms. Jamie accepted the
+publisher terms for Open Coordination Unlimited, Inc., including their
+indemnity of Anysphere, on 2026-10-15 ("Yes, I accept the terms."). The form's
+Brief Description and Testing Instructions each cap at 600 characters, so the
+text actually submitted is the short form in §8; §2 and §3 remain the full
+reviewed wording.
 
 This file is kit material only. Nothing in it ships in the package.
 
@@ -147,22 +147,19 @@ support@olympusplugin.ai. Licence: MIT (https://github.com/jamiezigelbaum/Olympu
       with `/agents/`, `/bot/` and Grok's exchange page; Grok's client with
       grok.com and console.x.ai; each by CIMD and by registration) and
       every §3 case, plus the refusals (§6, 2026-10-17).
-- [ ] In-app test by Jamie from Grok Bot (his account; demo password from
-      1Password): add the server, sign in to the demo, ask the lease
-      question. The relay's `demo_sign_in_page` log line then shows which
-      app and return address Grok Bot used.
+- [x] In-app test by Jamie from Grok Bot (2026-10-22 19:50Z; relay log: app
+      Grok, returns `grok.com/connectors-oauth-exchange-code/`, 200, reviewer
+      demo; lease question answered from the demo data). Grok Bot signs in
+      through grok.com's connection as Grok's client.
 - [x] Logo URL serves 200 `image/png`, same bytes as
       `site/assets/img/olympus-logo-512.png` (2026-10-15).
-- [ ] Privacy and terms URLs live (both 200); the live policy names Cursor
-      and Anysphere. Merged in #424 (f2778d53) but not yet on
-      olympusplugin.ai/privacy: it describes 1.1.0 features, so it goes live
-      with the 1.1.0 site publish (#422).
+- [x] Privacy and terms URLs live (both 200); the live policy names Cursor
+      and Anysphere (#424, live with the 1.1.0 site; checked 2026-10-22).
 - [x] Legal pass (Olympus profile) on §2 and §3 recorded below (re-run on
       the final §3, 2026-10-15; §3 step 2 addition re-checked 2026-10-17).
 - [x] Jamie has accepted the publisher terms, including the indemnity
       (2026-10-15).
-- [ ] Jamie ticks "tested locally and in-app" (only after §6) and clicks
-      submit.
+- [x] Submitted 2026-10-22 with "tested locally and in-app" ticked.
 
 ## 6. Receipts
 
@@ -292,3 +289,25 @@ Owner ruling to revisit: 2026-10-13, "Nothing is added in Grok Bot; it uses
 the grok.com connection". A marketplace listing adds Olympus inside Grok Bot.
 Once listed, `site/install/grok/` and the reply brief should mention that
 route too (website and legal sessions, after acceptance).
+
+## 8. Text as submitted (600-character fields)
+
+Brief Description (596 characters):
+
+> Olympus lets Grok Bot and Cursor answer from your own mail, files and notes, with citations. It runs on your computer and labels each item Personal, Private or Secret; automatic labels can be wrong. The app gets excerpts only from Personal items. For Private items it may get an answer written from them (on your computer, or by Venice if you set it up) and their titles and sources, never their text, though the answer can repeat it. A recognized Secret is never sent or answered from. Free and open source (MIT).
+> Privacy: https://olympusplugin.ai/privacy · Terms: https://olympusplugin.ai/terms
+
+Testing Instructions (513 characters before the login, which Jamie pasted
+from 1Password):
+
+> Read-only demo with made-up data; nothing to install.  
+> 1. Add https://mcp.olympusplugin.ai/mcp in Grok Bot or Cursor.  
+> 2. On the sign-in page choose "Reviewing Olympus? Sign in to the demo", enter the login below, then "Sign in and connect". No MFA.  
+> 3. Ask "Use Olympus: what did Sam say about renewing my lease?" Cited excerpts: $2,215 a month from 1 December.  
+> 4. Ask "Use Olympus: what does my bank's overdraft notice say?" It is Private, so its text is not sent: no Personal evidence found.  
+> Username:   
+> Password: 
+
+Same claims as §2 and §3, shortened: §2 drops the platform list and the
+one-click approval sentence; §3 keeps the sign-in steps, the lease case and
+the Private case, and drops the kitchen, index-status and Secret cases.
