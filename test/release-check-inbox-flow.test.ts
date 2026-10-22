@@ -3,9 +3,12 @@
 // question, the in-machine check's result, the checks and screenshots that come out, and the self-tests that must fail the run.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PNG } from 'pngjs';
+import { SCREENS, SCREEN_THEMES, SCREEN_WIDTHS, screenName } from '../scripts/release-check/visual.ts';
 import { FIXTURE_ITEMS, PRIVATE_FACTS, PRIVATE_MARKER } from '../scripts/release-check/fixture.ts';
 import { REMOTE_PRIVATE_NOTE } from '../src/core/remote-result.ts';
 import { SOURCE_ANSWER_HANDOFF_MAX_MS } from '../src/core/source-answer-jobs.ts';
@@ -19,7 +22,7 @@ const ID = 'AbCdEfGhIjKlMnOpQrStUv';
  * make one part of it go wrong.
  */
 const SCRIPTED_DRIVER = String.raw`#!/usr/bin/env bun
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 const [verb, ...rest] = process.argv.slice(2);
 const state = process.env.FAKE_STATE;
 const log = (line) => appendFileSync(state + '/driver.log', line + '\n');
@@ -29,7 +32,8 @@ const say = (value) => console.log(JSON.stringify(value));
 if (verb === 'provision') {
   console.log('{"machine":"fake-' + arg('--run-id') + '","label":"Scripted machine","os":"linux","driver":"fake"}');
 } else if (verb === 'get') {
-  writeFileSync(arg('--to'), 'png');
+  if (/journeys\.tgz$/.test(arg('--from'))) copyFileSync(state + '/journeys.tgz', arg('--to'));
+  else writeFileSync(arg('--to'), 'png');
 } else if (verb === 'exec') {
   const script = await new Response(Bun.stdin.stream()).text();
   const sub = /agent\.js (\S+)/.exec(script)?.[1];
@@ -93,12 +97,14 @@ if (verb === 'provision') {
       fixes: { venice: { clicked: true, landedAt: '/dashboard?keys#venice-setup', anchorShown: true }, anonymous: { clicked: true, landedAt: '/dashboard?keys#anonymous', anchorShown: true } },
       refusals: { venice: 403 },
       egress: { samples: 500, intervalMs: 150, baseline: 2, fresh: mode === 'egress' ? ['203.0.113.7:443 (bun)'] : [], pageRequests: 30, pageOutside: [] },
+      trace: [{ n: 1, name: 'Open the Ask page', action: 'open the owner link, press Unlock', expected: 'the controls unlock', actual: 'unlocked', ok: true, ms: 1200, at: '/dashboard?private-answers', screenshot: 'trace-01.jpg', consoleErrors: [], failedRequests: [], findings: [] }],
       shots: ['ask-page-1280.png', 'ask-page-390.png', ...(faulted ? [] : ['inbox-entry-1280.png', 'inbox-entry-390.png']), 'ask-answered-1280.png'].map(file),
     };
     if (mode === 'not-ok') say({ ok: false, detail: 'the Private answers page did not open its controls (Unlock was not offered)' });
     else if (mode === 'no-shots') say({ ...observation, shots: observation.shots.slice(0, 2) });
     else say(observation);
   }
+  else if (sub === 'journeys') say(JSON.parse(readFileSync(state + '/journeys.json', 'utf8')));
   else if (sub === 'dashboard-json') say({ ok: true, status: 200, body: '{}' });
   else if (sub === 'collect-logs') say({ ok: true, files: [] });
   else say({ ok: false, detail: 'scripted machine: unknown ' + sub });
@@ -147,7 +153,7 @@ const agentLog = (): string[] => readFileSync(join(dir, 'agent.log'), 'utf8').sp
 function options(extra: Record<string, unknown> = {}) {
   const runId = newRunId();
   const config: RunConfigFile = { driver: [driverPath], agents: [], settleTimeoutS: 5 };
-  return { runId, candidateDir, candidateLabel: 'inbox test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, ...extra };
+  return { runId, candidateDir, candidateLabel: 'inbox test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipJourneys: true, ...extra };
 }
 type Report = Awaited<ReturnType<typeof runReleaseCheck>>;
 const allChecks = (report: Report) => [...report.machines[0]!.checks, ...report.machines[0]!.agents.flatMap((agent) => agent.checks)];
@@ -372,4 +378,84 @@ describe('the Inbox self-test arguments', () => {
     expect(() => parseCli([...base(), '--inbox-selftest', 'wrong-link-id', '--mistier', 'private'])).toThrow('separate self-test');
     expect(() => parseCli([...base(), '--inbox-selftest', 'wrong-link-id', '--skip-inbox'])).toThrow('needs the Inbox leg');
   });
+});
+
+
+describe('the journeys and the visual baselines against a scripted machine', () => {
+  const names = SCREENS.flatMap((screen) => SCREEN_THEMES.flatMap((theme) => SCREEN_WIDTHS.map((width) => ({ screen: screen.id, width, theme, name: screenName(screen.id, width, theme) }))));
+
+  /** What the machine hands back: an archive with a picture per screen and a picture per step, and the traces that go with it. */
+  function prepareMachine(opts: { failing?: boolean; shade?: number } = {}): void {
+    const stage = join(dir, 'journeys-stage');
+    mkdirSync(join(stage, 'screens'), { recursive: true });
+    mkdirSync(join(stage, 'traces', 'sources-healthy'), { recursive: true });
+    const image = new PNG({ width: 40, height: 40 });
+    image.data.fill(opts.shade ?? 240);
+    const bytes = PNG.sync.write(image);
+    for (const item of names) writeFileSync(join(stage, 'screens', `${item.name}.png`), bytes);
+    writeFileSync(join(stage, 'traces', 'sources-healthy', '01-open-the-dashboard.jpg'), 'jpg');
+    const trace = { id: 'sources-healthy', title: 'Sources shows the connected source as healthy', source: 'test', ok: !opts.failing, ms: 900, steps: [
+      { n: 1, name: 'Open the dashboard', action: 'open the dashboard', expected: 'the page says "Sources"', actual: opts.failing ? 'it does not' : 'it does', ok: !opts.failing, ms: 800, at: '/dashboard', screenshot: 'sources-healthy/01-open-the-dashboard.jpg', consoleErrors: [], failedRequests: [], findings: [] },
+    ] };
+    spawnSync('tar', ['-czf', join(dir, 'journeys.tgz'), '-C', stage, '.']);
+    writeFileSync(join(dir, 'journeys.json'), JSON.stringify({ ok: true, traces: [trace], screens: names.map((item) => ({ ...item, bytes: bytes.length, height: 40 })), archive: '/home/test/rc/journeys.tgz' }));
+  }
+
+  test('without --baselines the journeys run and the screens are not compared; the traces and the Inbox leg steps are in the report with their pictures', async () => {
+    prepareMachine();
+    const opts = options({ skipJourneys: false });
+    const report = await runReleaseCheck(opts);
+    expect(failedIds(report)).toEqual([]);
+    expect(checkOf(report, 'journey.sources-healthy')?.status).toBe('pass');
+    expect(checkOf(report, 'visual.baselines')?.status).toBe('skip');
+    const traces = report.machines[0]!.traces!;
+    expect(traces.map((trace) => trace.id)).toEqual(['inbox-check', 'sources-healthy']);
+    expect(existsSync(join(opts.outDir, 'traces', 'sources-healthy', '01-open-the-dashboard.jpg'))).toBe(true);
+    expect(existsSync(join(opts.outDir, 'traces', 'inbox-check', 'trace-01.jpg'))).toBe(true);
+    const html = readFileSync(join(opts.outDir, 'report.html'), 'utf8');
+    expect(html).toContain('traces/sources-healthy/01-open-the-dashboard.jpg');
+    expect(html).toContain('traces/inbox-check/trace-01.jpg');
+    expect(agentLog().find((line) => line.startsWith('journeys'))).toContain('--out ~/rc/journeys');
+  }, 120_000);
+
+  test('a journey that did not reach its outcome fails the run on journey.<id>', async () => {
+    prepareMachine({ failing: true });
+    const report = await runReleaseCheck(options({ skipJourneys: false }));
+    expect(report.verdict).toBe('fail');
+    expect(failedIds(report)).toContain('journey.sources-healthy');
+    expect(failedIds(report)).not.toContain('journey.inbox-check');
+  }, 120_000);
+
+  test('--only-journeys is handed to the machine', async () => {
+    prepareMachine();
+    await runReleaseCheck(options({ skipJourneys: false, onlyJourneys: ['sources-healthy', 'no-public-tier'] }));
+    expect(agentLog().find((line) => line.startsWith('journeys'))).toContain("--only 'sources-healthy,no-public-tier'");
+  }, 120_000);
+
+  test('baselines: no approved picture fails every screen; --update-baselines writes candidates (warn); then a plain run passes; a changed screen fails', async () => {
+    prepareMachine();
+    const baselinesDir = join(dir, 'baselines');
+    const missing = await runReleaseCheck(options({ skipJourneys: false, baselinesDir }));
+    const visualIds = (report: Report, status: string) => allChecks(report).filter((c) => c.id.startsWith('visual.') && c.status === status).map((c) => c.id);
+    expect(visualIds(missing, 'fail')).toHaveLength(names.length);
+
+    const updated = await runReleaseCheck(options({ skipJourneys: false, baselinesDir, updateBaselines: true }));
+    expect(visualIds(updated, 'warn')).toHaveLength(names.length);
+    expect(failedIds(updated)).toEqual([]);
+    expect(readdirSync(baselinesDir).sort()).toEqual(names.map((item) => `${item.name}.png`).sort());
+
+    const approvedBefore = readFileSync(join(baselinesDir, `${names[0]!.name}.png`));
+    const again = await runReleaseCheck(options({ skipJourneys: false, baselinesDir }));
+    expect(visualIds(again, 'pass')).toHaveLength(names.length);
+    expect(failedIds(again)).toEqual([]);
+
+    prepareMachine({ shade: 20 });
+    const changed = options({ skipJourneys: false, baselinesDir });
+    const different = await runReleaseCheck(changed);
+    expect(visualIds(different, 'fail')).toHaveLength(names.length);
+    expect(existsSync(join(changed.outDir, 'visual', `${names[0]!.name}.diff.png`))).toBe(true);
+    expect(readFileSync(join(changed.outDir, 'report.html'), 'utf8')).toContain('Visual baselines');
+    // A plain run never changes an approved picture.
+    expect(readFileSync(join(baselinesDir, `${names[0]!.name}.png`)).equals(approvedBefore)).toBe(true);
+  }, 240_000);
 });
