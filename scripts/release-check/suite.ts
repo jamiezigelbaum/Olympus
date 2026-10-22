@@ -58,7 +58,16 @@ function check(id: string, title: string, ok: boolean, detail: string, ms?: numb
   return { id, title, status: ok ? 'pass' : 'fail', detail, ...(ms === undefined ? {} : { ms }) };
 }
 
-export function evaluateObservation(obs: QuestionObservation, markers: readonly LeakMarker[]): CheckResult[] {
+export interface ObservationOptions {
+  /**
+   * Whether the Open link of a Private note is judged. False for the earlier release in an upgrade run (its "before" stage): the
+   * link is a 1.1.0 feature, so an earlier release without it must not fail the run. The links are judged after the update, where
+   * the candidate is what answers.
+   */
+  judgeLinks?: boolean;
+}
+
+export function evaluateObservation(obs: QuestionObservation, markers: readonly LeakMarker[], options: ObservationOptions = {}): CheckResult[] {
   const q = obs.question;
   const prefix = q.id;
   const checks: CheckResult[] = [];
@@ -119,7 +128,14 @@ export function evaluateObservation(obs: QuestionObservation, markers: readonly 
       obs.privateNote,
       obs.privateNote ? 'the product\'s fixed Private note was returned' : 'no Private note in the tool output',
     ));
-    if (obs.privateNoteText !== undefined) {
+    if (obs.privateNoteText !== undefined && options.judgeLinks === false) {
+      checks.push({
+        id: `${prefix}.link`,
+        title: `${q.id}: the Private question got the "answer is in Olympus" note with an Open link`,
+        status: 'skip',
+        detail: 'not judged on the earlier release: the Open link is judged after the update, on the candidate',
+      });
+    } else if (obs.privateNoteText !== undefined) {
       checks.push(...noteChecks(prefix, q.id, obs.privateNoteText, q.text, markers).checks);
       const ids = privateLinkIdsIn(obs.privateNoteText ?? '');
       if (ids.length === 1) {

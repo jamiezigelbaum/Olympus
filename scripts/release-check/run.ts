@@ -187,6 +187,8 @@ class Run {
     this.stage = this.stages.get(id)!;
   }
 
+  /** The Open-link checks are judged on the candidate: not on the earlier release of an upgrade run (its "before" stage). */
+  get linksJudged(): boolean { return this.stage.id !== 'before'; }
   get timings(): Record<string, number> { return this.stage.timings; }
   get checks(): CheckResult[] { return this.stage.checks; }
   get agents(): AgentReport[] { return this.stage.agents; }
@@ -566,8 +568,9 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
     await run.phase(`agent-${spec.id}`, async () => {
       for (const question of SUITE_QUESTIONS) {
         const { observation, answer } = await ask!(question);
-        agent.checks.push(...evaluateObservation(observation, run.markers));
-        for (const id of privateLinkIdsIn(observation.privateNoteText ?? '')) run.agentLinks.push({ agent: spec.id, id });
+        agent.checks.push(...evaluateObservation(observation, run.markers, { judgeLinks: run.linksJudged }));
+        // Only the candidate's links reach the Inbox leg: an earlier release's ids name entries the update may not carry.
+        if (run.linksJudged) for (const id of privateLinkIdsIn(observation.privateNoteText ?? '')) run.agentLinks.push({ agent: spec.id, id });
         // The judge sees an answer only when nothing leaked into it.
         const leaked = agent.checks.some((c) => c.id === `${question.id}.no-leak` && c.status === 'fail');
         const judged = leaked ? undefined : await judgeAnswer(judge, question, answer);
