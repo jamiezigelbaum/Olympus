@@ -19,6 +19,8 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //                the Private answers list and the panel's Needs you line.
 //   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env
 //                picks the Agents fixture.
+//   &picker=open[,everything|folder:<Name>...]  with a local-files-* state: opens
+//                the folder picker (and clicks on) as soon as the panel loads.
 //
 // Only the dashboard read answers; every other panel tool says it needs a
 // worker.
@@ -34,7 +36,8 @@ import {
   dashboardOutsideHelpRedirect,
   renderDashboardLocalPage,
 } from '../src/workers/dashboard/index.ts';
-import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME, SCOPE_LIST_TOOL_NAME, SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { dashboardToolResult } from '../src/workers/chatgpt/response-builder.ts';
@@ -443,6 +446,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
     return view;
   }
+  if (state.startsWith('local-files')) return localFilesPreview(state.startsWith('local-files-picker') ? 'local-files-connected' : state);
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -562,6 +566,68 @@ function withPreviewMovement(view: ReturnType<typeof buildSourceDashboardViewMod
     if (card.source_id === 'google_drive.docs') card.movement = { extraction_at: at(30 * 3600) };
   }
   return view;
+}
+
+/**
+ * "Files on this computer" (local.files): fixture-only states for the owner's
+ * review. The source needs no account, so the registry carries no handle; the
+ * states differ in the scheduler's evidence and the scope status.
+ *   local-files-off          not connected (no scheduler source)
+ *   local-files-connected    connected, no folders chosen yet (Choose folders)
+ *   local-files-indexing      folders chosen, first indexing running
+ *   local-files-reading       indexed and current
+ *   local-files-needs-permission   a chosen folder the Mac will not open (stalled)
+ * The local-files-picker-* states are the connected row plus the folder
+ * picker's answers (see previewScopeList).
+ */
+function localFilesPreview(state: string) {
+  const mode = state === 'local-files-off' ? 'off'
+    : state === 'local-files-indexing' ? 'syncing'
+      : state === 'local-files-reading' ? 'synced'
+        : state === 'local-files-needs-permission' ? 'permission'
+          : 'connected';
+  const status = emptyStatus();
+  if (mode === 'syncing' || mode === 'synced' || mode === 'permission') {
+    const files = corpus('secure_local.local.files', 'file', 'secure_local', 'local_files',
+      mode === 'synced' ? 18_420 : mode === 'permission' ? 2_310 : 6_200,
+      mode === 'synced' ? 92_000 : mode === 'permission' ? 11_500 : 31_000,
+      mode === 'synced' ? { withText: 18_000, embedded: 18_000 } : { withText: mode === 'permission' ? 2_300 : 3_900, embedded: mode === 'permission' ? 2_300 : 1_200 });
+    status.corpora = [files];
+  }
+  const source = schedulerSource('local.files', 'secure_local.local.files', mode === 'synced' ? 0.2 : 0.5);
+  if (mode === 'permission') {
+    source.tasks = [{
+      id: 'local.files_store_pull.preview',
+      kind: 'sync' as const,
+      running: false,
+      consecutive_failures: 1,
+      last_error_kind: 'scope_root_permission_needed',
+      degraded_reason: 'scope_root_permission_needed',
+    }] as unknown as typeof source.tasks;
+  } else if (mode === 'syncing') {
+    source.tasks = [{ id: 'local.files_store_pull.preview', kind: 'sync' as const, running: true, consecutive_failures: 0 }] as unknown as typeof source.tasks;
+  }
+  const chosen = mode === 'syncing' || mode === 'synced' || mode === 'permission';
+  return buildSourceDashboardViewModel({
+    sourceIndexStatus: status,
+    schedulerStatus: scheduler(mode === 'off' ? [] : [source]),
+    sovereigntyEngine: engine,
+    connectedHandleRegistry: registry(mode === 'off' ? [] : [{
+      ...handle('local.files.this_computer', 'local_files', ['local.files.sync'], []),
+      accountRole: 'this_computer',
+      thisComputer: true,
+    } as unknown as ConnectedHandleRegistry['handles'][number]]),
+    apiKeyAvailability: {},
+    oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
+    oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
+    googlePilotClientConfigured: true,
+    oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+    ...(mode === 'off' ? {} : {
+      fileSourceScopeStatus: { 'local.files': chosen ? 'approved' : 'scope_pending' },
+      fileSourceScopeIngestionEnabled: { 'local.files': chosen },
+    }),
+    now: NOW,
+  });
 }
 
 function dropboxPreview(mode: 'initial' | 'update') {
@@ -713,11 +779,114 @@ export const DASHBOARD_PREVIEW_STATES = [
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
   'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
+  'local-files-off', 'local-files-connected', 'local-files-indexing', 'local-files-reading', 'local-files-needs-permission',
+  'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
 ] as const;
+
+const LOCAL_FILES_HOME = '/Users/you';
+
+type PreviewFolderAccess = { state: 'needs_permission' | 'waiting' | 'denied' | 'needs_helper' | 'needs_full_disk_access'; message: string; settings_url?: string };
+
+/**
+ * The folder picker's answers for "Files on this computer", as the Mac's
+ * scope browser gives them (local-files/scope-browser.ts), with a fake home.
+ * The product's ChatGPT panel does not offer Choose folders for this source
+ * yet, so the harness adds that button to the row (see
+ * previewDashboardToolResult); the picker itself is the shipped one.
+ *   local-files-picker          helper installed: Desktop, Documents, Downloads
+ *                               and iCloud Drive say Needs permission; opening
+ *                               Desktop lists its folders (the Mac allowed it)
+ *   local-files-picker-waiting  opening Desktop: the Mac is asking
+ *   local-files-picker-denied   opening Desktop: the Mac said no
+ *   local-files-picker-helper   no helper app: guarded folders need it
+ * Choosing Everything shows the Full Disk Access note (the top level's access).
+ */
+export function previewScopeList(state: string, args: { parent_key?: unknown }) {
+  const helper = state !== 'local-files-picker-helper';
+  const guardedAccess: PreviewFolderAccess = helper
+    ? { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission }
+    : { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelper };
+  const folder = (name: string, extra: Record<string, unknown> = {}, parent?: string) => ({
+    key: `${parent ?? LOCAL_FILES_HOME}/${name}`,
+    ...(parent ? { parent_key: parent } : {}),
+    name,
+    kind: 'folder' as const,
+    has_children: true,
+    selectable: true,
+    ...extra,
+  });
+  const base = { kind: 'folders' as const, source_id: 'local.files', account_generation: 'preview-generation', scope_revision: 'preview-revision', status: 'scope_pending' as const, selections: [], whole_account_selected: false };
+  const parent = typeof args.parent_key === 'string' ? args.parent_key : '';
+  let list: Record<string, unknown>;
+  if (!parent) {
+    list = {
+      ...base,
+      nodes: [
+        folder('Code', { size_bytes: 14_800_000_000, file_count: 412_000 }),
+        folder('Desktop', { access: guardedAccess }),
+        folder('Documents', { access: guardedAccess }),
+        folder('Downloads', { access: guardedAccess }),
+        folder('iCloud Drive', { access: guardedAccess }),
+        folder('Movies'),
+        folder('Music'),
+        folder('Pictures'),
+        { key: '/@disk-1', name: 'Backup Drive', kind: 'folder', has_children: true, selectable: true, access: guardedAccess },
+      ],
+      access: helper
+        ? { state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL }
+        : { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelper },
+    };
+  } else if (parent === `${LOCAL_FILES_HOME}/Desktop`) {
+    const access: PreviewFolderAccess | undefined = !helper ? { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelper }
+      : state === 'local-files-picker-waiting' ? { state: 'waiting', message: MAC_ACCESS_COPY.waiting }
+        : state === 'local-files-picker-denied' ? { state: 'denied', message: MAC_ACCESS_COPY.denied('desktop'), settings_url: FILES_AND_FOLDERS_URL }
+          : undefined;
+    list = access
+      ? { ...base, nodes: [], access }
+      : { ...base, nodes: [folder('Client work', {}, parent), folder('Sketches', {}, parent), folder('Receipts 2026', {}, parent)] };
+  } else if (parent === `${LOCAL_FILES_HOME}/Code`) {
+    list = { ...base, nodes: [folder('olympus', { size_bytes: 2_100_000_000, file_count: 61_000 }, parent), folder('notes', {}, parent), folder('website', {}, parent)] };
+  } else {
+    list = { ...base, nodes: [] };
+  }
+  return {
+    content: [{ type: 'text', text: 'Folders on this computer (preview).' }],
+    structuredContent: { kind: 'folders', source_id: 'local.files', status: 'scope_pending' },
+    _meta: { [SCOPE_UI_META_KEY]: list },
+  };
+}
+
+/**
+ * Deep link into the picker: `&picker=open,everything` or `&picker=open,folder:Desktop`
+ * appends a few clicks to the panel (harness only), in order, each once its
+ * control exists.
+ */
+function pickerAutoScript(spec: string): string {
+  const steps = spec.split(',').map((step) => step.trim()).filter((step) => /^[A-Za-z0-9:_ .-]+$/.test(step)).slice(0, 6);
+  return `<script>(function(){var steps=${JSON.stringify(steps)};var i=0;var tries=0;`
+    + `function find(step){if(step==='open'){return Array.prototype.filter.call(document.querySelectorAll('button'),function(b){return b.textContent==='Choose folders'})[0];}`
+    + `if(step==='everything')return document.querySelector('[data-key="picker:seg:@account:ingest"]');`
+    + `if(step.indexOf('folder:')===0)return document.querySelector('[data-key="picker:open:${LOCAL_FILES_HOME}/'+step.slice(7)+'"]');return null;}`
+    + `function tick(){if(i>=steps.length||tries++>200)return;var n=find(steps[i]);if(n&&!n.disabled){n.click();i++;setTimeout(tick,400);return;}setTimeout(tick,150);}`
+    + `setTimeout(tick,300);})();</script>`;
+}
+
+/** The harness adds the Choose folders button the product panel does not show for this source yet. */
+function withLocalFilesChooseFolders<T extends { structuredContent?: unknown }>(state: string, result: T): T {
+  if (!state.startsWith('local-files-') || state === 'local-files-off') return result;
+  const content = result.structuredContent as { sources?: Array<{ id: string; status: string; primary?: unknown }>; needsYou?: Array<{ id: string; fix?: unknown }> } | undefined;
+  const row = content?.sources?.find((source) => source.id === 'local.files');
+  if (!content || !row || !(state === 'local-files-connected' || state.startsWith('local-files-picker'))) return result;
+  const fix = { label: 'Choose folders', tool: SCOPE_LIST_TOOL_NAME, args: { source_id: 'local.files' } };
+  row.primary = fix;
+  const need = content.needsYou?.find((entry) => entry.id === 'source:local.files');
+  if (need) need.fix = fix;
+  return result;
+}
 
 /** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
-  const result = dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) }));
+  const result = withLocalFilesChooseFolders(state, dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) })));
   return {
     ...result,
     _meta: {
@@ -837,7 +1006,10 @@ if (import.meta.main) {
       return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount);
     }
     if (request.method === 'POST' && url.pathname === '/dashboard/tools/call') {
-      const body = await request.json().catch(() => ({})) as { name?: unknown };
+      const body = await request.json().catch(() => ({})) as { name?: unknown; arguments?: { source_id?: unknown; parent_key?: unknown } };
+      if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
+        return Response.json(previewScopeList(state, body.arguments));
+      }
       // The waiting count rides only an unlocked session, as on the computer.
       if (body.name === DASHBOARD_TOOL_NAME) return Response.json(previewDashboardToolResult(state, false, previewUnlocked ? waitingCount : 0));
       return Response.json({
@@ -884,7 +1056,12 @@ if (import.meta.main) {
       if (page === 'panel_read') return Response.json(previewDashboardToolResult(pageState, false));
       if (page === 'host') {
         return withCookies(html(renderComputerHostPage({
-          panelHtml: dashboardResourceHtml(),
+          panelHtml: (() => {
+            const panel = dashboardResourceHtml();
+            const auto = url.searchParams.get('picker');
+            const at = panel.lastIndexOf('</body>');
+            return auto && at >= 0 ? `${panel.slice(0, at)}${pickerAutoScript(auto)}${panel.slice(at)}` : panel;
+          })(),
           origin: url.origin,
           ...(unlocked ? { csrfToken: 'preview-csrf-token' } : {}),
         }), COMPUTER_HOST_PAGE_CSP), cookies);
