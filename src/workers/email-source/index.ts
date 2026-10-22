@@ -2249,7 +2249,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // custody check that trusts it) waits until the read has ended.
             const localFilesBusy = () => dashboardManualSyncRuns.has('local.files')
               || (sourceScheduler !== undefined
-                && dashboardDisconnectHasRunningRead(sourceScheduler.status(), new Set(['local.files'] as V04PublicSourceId[])));
+                && dashboardDisconnectHasRunningRead(sourceScheduler, new Set(['local.files'] as V04PublicSourceId[])));
             const busyError = () => new EmailSourceWorkerError(
               409,
               'disconnect_source_busy',
@@ -2328,7 +2328,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 const removedHandleIds = new Set(plan.handles.map((handle) => handle.handle));
                 const remainingHandles = registry.handles.filter((handle) => !removedHandleIds.has(handle.handle));
                 const nextSources = await sourceDashboard.refreshSchedulerSources(remainingHandles);
-                if (dashboardDisconnectHasRunningRead(sourceScheduler.status(), plan.sourceIds)) {
+                if (dashboardDisconnectHasRunningRead(sourceScheduler, plan.sourceIds)) {
                   throw new EmailSourceWorkerError(
                     409,
                     'disconnect_source_busy',
@@ -2495,7 +2495,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 const removedHandleIds = new Set(plan.handles.map((handle) => handle.handle));
                 const remainingHandles = registry.handles.filter((handle) => !removedHandleIds.has(handle.handle));
                 const nextSources = await sourceDashboard.refreshSchedulerSources(remainingHandles);
-                if (dashboardDisconnectHasRunningRead(sourceScheduler.status(), selectedSourceIds)) {
+                if (dashboardDisconnectHasRunningRead(sourceScheduler, selectedSourceIds)) {
                   throw new EmailSourceWorkerError(
                     409,
                     'unpair_source_busy',
@@ -5789,11 +5789,14 @@ interface DashboardDisconnectPlan {
 }
 
 function dashboardDisconnectHasRunningRead(
-  status: ReturnType<SourceScheduler['status']>,
+  scheduler: SourceScheduler,
   sourceIds: ReadonlySet<V04PublicSourceId>,
 ): boolean {
   const selected = new Set<string>(sourceIds);
-  return status.sources.some((source) =>
+  // A task a refresh dropped from the roster is still executing and can still
+  // write; status() no longer lists it.
+  if (scheduler.hasExecutingTask?.(selected)) return true;
+  return scheduler.status().sources.some((source) =>
     (selected.has(source.source_id) || selected.has(source.corpus_id))
     && source.tasks.some((task) => task.running)
   );

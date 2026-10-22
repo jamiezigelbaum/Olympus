@@ -285,6 +285,30 @@ describe('/dashboard/sync-now for Files on this computer', () => {
     expect(readThisComputerHandles(f.registryPath).map((handle) => handle.handle)).not.toContain('local.files.this_computer');
   });
 
+  test('a read a scope refresh dropped from the roster still holds off Disconnect', async () => {
+    const f = fixture();
+    const scheduled = f.scheduler.runSource('local.files');
+    await until(() => f.passes() === 1);
+    // A revised folder scope replaces the task with a new id; the old pass runs on.
+    const [current] = f.scheduler.status().sources;
+    expect(current?.tasks.some((task) => task.running)).toBe(true);
+    f.scheduler.updateSources([{
+      sourceId: 'local.files',
+      corpusId: 'secure_local.local.files',
+      cadence: 'continuous',
+      intervalMs: 30 * 60_000,
+      freshnessThresholdHours: 26,
+      tasks: [{ id: 'local.files_store_pull.revised', kind: 'sync', writer: true, run: async () => ({ status: 'idle' }) }],
+    }]);
+    expect(f.scheduler.status().sources.flatMap((source) => source.tasks).some((task) => task.running)).toBe(false);
+    const refused = await f.worker.fetch(post('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true }));
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error.code).toBe('disconnect_source_busy');
+    f.release();
+    await scheduled;
+    expect(f.scheduler.hasExecutingTask(new Set(['local.files']))).toBe(false);
+  });
+
   test('a source on this computer that is not declared is not accepted', async () => {
     const f = fixture();
     const response = await f.worker.fetch(post('/dashboard/sync-now', { source: 'photos.library' }));

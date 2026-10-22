@@ -133722,7 +133722,7 @@ function createEmailSourceWorker(options = {}) {
               if (sourceScheduler && !sourceDashboard.refreshSchedulerSources) {
                 throw new EmailSourceWorkerError(501, "disconnect_scheduler_refresh_not_supported", "Disconnect cannot safely refresh the active scheduler in this worker.");
               }
-              const localFilesBusy = () => dashboardManualSyncRuns.has("local.files") || sourceScheduler !== undefined && dashboardDisconnectHasRunningRead(sourceScheduler.status(), new Set(["local.files"]));
+              const localFilesBusy = () => dashboardManualSyncRuns.has("local.files") || sourceScheduler !== undefined && dashboardDisconnectHasRunningRead(sourceScheduler, new Set(["local.files"]));
               const busyError = () => new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
               if (localFilesBusy())
                 throw busyError();
@@ -133777,7 +133777,7 @@ function createEmailSourceWorker(options = {}) {
                 const removedHandleIds = new Set(plan.handles.map((handle) => handle.handle));
                 const remainingHandles = registry2.handles.filter((handle) => !removedHandleIds.has(handle.handle));
                 const nextSources = await sourceDashboard.refreshSchedulerSources(remainingHandles);
-                if (dashboardDisconnectHasRunningRead(sourceScheduler.status(), plan.sourceIds)) {
+                if (dashboardDisconnectHasRunningRead(sourceScheduler, plan.sourceIds)) {
                   throw new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
                 }
                 sourceScheduler.updateSources(nextSources);
@@ -133870,7 +133870,7 @@ function createEmailSourceWorker(options = {}) {
                 const removedHandleIds = new Set(plan.handles.map((handle) => handle.handle));
                 const remainingHandles = registry2.handles.filter((handle) => !removedHandleIds.has(handle.handle));
                 const nextSources = await sourceDashboard.refreshSchedulerSources(remainingHandles);
-                if (dashboardDisconnectHasRunningRead(sourceScheduler.status(), selectedSourceIds)) {
+                if (dashboardDisconnectHasRunningRead(sourceScheduler, selectedSourceIds)) {
                   throw new EmailSourceWorkerError(409, "unpair_source_busy", "This source is finishing a read. Retry Unpair after the current read completes.");
                 }
                 sourceScheduler.updateSources(nextSources);
@@ -135975,9 +135975,11 @@ function assertDashboardAccountCardinality(registry2, source) {
     throw new EmailSourceWorkerError(409, "dashboard_account_cardinality_violation", "The dashboard supports one connected account per provider. Disconnect the existing account before connecting another.");
   }
 }
-function dashboardDisconnectHasRunningRead(status, sourceIds) {
+function dashboardDisconnectHasRunningRead(scheduler, sourceIds) {
   const selected = new Set(sourceIds);
-  return status.sources.some((source) => (selected.has(source.source_id) || selected.has(source.corpus_id)) && source.tasks.some((task) => task.running));
+  if (scheduler.hasExecutingTask?.(selected))
+    return true;
+  return scheduler.status().sources.some((source) => (selected.has(source.source_id) || selected.has(source.corpus_id)) && source.tasks.some((task) => task.running));
 }
 function dashboardDisconnectPlan(registry2, sourceId) {
   const providers = new Set(dashboardProvidersForSource(sourceId));
@@ -138679,6 +138681,7 @@ class SourceScheduler {
   allowedSourceIds;
   missingSelectedSourceIds = [];
   states;
+  executingStates = new Set;
   now;
   sleep;
   setIntervalImpl;
@@ -138932,6 +138935,13 @@ class SourceScheduler {
     await this.runStates(states.filter((state) => !state.running), now.getTime(), provenance);
     return this.status(this.now());
   }
+  hasExecutingTask(sourceIds) {
+    for (const state of this.executingStates) {
+      if (sourceIds.has(state.source.sourceId) || sourceIds.has(state.source.corpusId))
+        return true;
+    }
+    return false;
+  }
   status(now = this.now()) {
     return {
       kind: "source_scheduler_status",
@@ -138988,10 +138998,12 @@ class SourceScheduler {
           if (state.running)
             continue;
           state.running = true;
+          this.executingStates.add(state);
           try {
             await this.runTask(state, dueAt, provenance);
           } finally {
             state.running = false;
+            this.executingStates.delete(state);
           }
         }
         if (provenance === "scheduled") {
@@ -139002,10 +139014,12 @@ class SourceScheduler {
             if (state.running)
               continue;
             state.running = true;
+            this.executingStates.add(state);
             try {
               await this.runTask(state, state.nextRunAt, provenance);
             } finally {
               state.running = false;
+              this.executingStates.delete(state);
             }
           }
         }
