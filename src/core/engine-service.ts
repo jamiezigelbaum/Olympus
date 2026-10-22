@@ -1,3 +1,5 @@
+import { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE } from './engine-helper-names.ts';
+export { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE };
 import { linuxDesktopEntryStatus } from './linux-desktop-entry.ts';
 import { withEngineMaintenanceFence, withEngineMaintenanceFenceSync, type EngineMaintenanceFence } from './engine-maintenance.ts';
 import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayoutFor, linuxInstalledBuild, recoverInterruptedLinuxEngineInstall, settleLinuxEngineInstall, startLinuxEngine, stopLinuxEngine, restartLinuxEngine, uninstallLinuxEngine, rollbackLinuxEngine, systemdPidInCgroup, withLinuxEngineLifecycleLockAsync } from './linux-engine-service.ts';
@@ -49,6 +51,12 @@ export const ENGINE_LABEL = 'ai.olympusplugin.engine';
 export const STANDALONE_RELAY_HOST = 'mcp.olympusplugin.ai';
 export const ENGINE_RUN_COMMAND = '__engine-run';
 /**
+ * The signed app macOS names ("Olympus") when the engine asks for Desktop,
+ * Documents, Downloads, iCloud Drive or a removable or network volume. Built
+ * from native/macos-engine-host by scripts/build-macos-helper.sh; when it is
+ * installed it is the LaunchAgent's program and starts Bun as its child.
+ */
+/**
  * The build launchd runs, in the agent's environment: the package version and
  * a digest of the bundled entrypoints. An upgrade keeps every path the same,
  * so without this the plist would not change and launchd would keep the old
@@ -77,6 +85,9 @@ export interface EnginePaths {
   /** The owner's privacy and model policy, seeded on first install. */
   sovereigntyPath: string;
   appSupportDir: string;
+  /** The signed helper app (macOS only; see ENGINE_HELPER_BUNDLE_ID). When installed it runs the engine. */
+  helperAppPath?: string;
+  helperExecutablePath?: string;
   /** Where scripts/install-macos.sh unpacks the package, and the one it replaced. */
   appDir: string;
   previousAppDir: string;
@@ -108,6 +119,8 @@ export function enginePaths(homeDir: string): EnginePaths {
     configPath: join(home, '.olympus', 'engine.json'),
     sovereigntyPath: join(home, '.olympus', 'sovereignty.json'),
     appSupportDir,
+    helperAppPath: join(appSupportDir, ENGINE_HELPER_APP_NAME),
+    helperExecutablePath: join(appSupportDir, ENGINE_HELPER_APP_NAME, 'Contents', 'MacOS', ENGINE_HELPER_EXECUTABLE),
     appDir: join(appSupportDir, 'app'),
     previousAppDir: join(appSupportDir, 'app.previous'),
     runtimeDir: join(appSupportDir, 'runtime'),
@@ -146,6 +159,8 @@ export interface EngineProgram {
   source: 'checkout' | 'package';
   /** `<version>+<digest>`; see ENGINE_BUILD_ENV. */
   build?: string;
+  /** The signed helper's executable: when set, launchd runs it and it starts the runtime. */
+  helperPath?: string;
 }
 
 /** `<package version>+<first 16 hex of a SHA-256 over the bundled entrypoints>`. */
@@ -206,12 +221,17 @@ export function renderEnginePlist(input: { paths: EnginePaths; program: EnginePr
   <key>Label</key>
   <string>${xml(paths.label)}</string>
   <key>ProgramArguments</key>
-  <array>
+  <array>${program.helperPath ? `
+    <string>${xml(program.helperPath)}</string>` : ''}
     <string>${xml(program.runtimePath)}</string>
     <string>--no-env-file</string>
     <string>${xml(program.entryPath)}</string>
     <string>${ENGINE_RUN_COMMAND}</string>
-  </array>
+  </array>${program.helperPath ? `
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>${ENGINE_HELPER_BUNDLE_ID}</string>
+  </array>` : ''}
   <key>WorkingDirectory</key>
   <string>${xml(program.workingDirectory)}</string>
   <key>EnvironmentVariables</key>
@@ -468,11 +488,13 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
   const paths = enginePaths(homeDir);
-  const program = resolveEngineProgram({
+  const baseProgram = resolveEngineProgram({
     ...(options.fromCheckout !== undefined ? { fromCheckout: options.fromCheckout } : {}),
     ...(options.bunBin ? { bunBin: options.bunBin } : {}),
     ...(options.cwd ? { cwd: options.cwd } : {}),
   });
+  const helperPath = installedEngineHelper(paths);
+  const program: EngineProgram = helperPath ? { ...baseProgram, helperPath } : baseProgram;
   const plist = renderEnginePlist({ paths, program, homeDir });
   const warnings = engineConflictWarnings(homeDir, 'darwin');
   const sovereigntyBlocker = existsSync(paths.sovereigntyPath)
@@ -1060,6 +1082,7 @@ function engineKeptItems(paths: EnginePaths): EngineKeptItem[] {
     { path: paths.logDir, what: 'engine logs' },
     { path: paths.appDir, what: 'the Olympus app the installer unpacked' },
     { path: paths.previousAppDir, what: 'the previous Olympus app (rollback copy)' },
+    ...(paths.helperAppPath ? [{ path: paths.helperAppPath, what: 'the Olympus helper app macOS knows your folder permissions by (remove it in System Settings, Privacy & Security, Files & Folders, too)' }] : []),
     { path: paths.runtimeDir, what: 'the Bun runtime the installer downloaded' },
     { path: paths.modelsDir, what: 'downloaded built-in models', bytes: directoryBytes(paths.modelsDir) },
     { path: paths.remoteAccessDir, what: "this Mac's relay registration and keys; ChatGPT stays linked until you disconnect it or delete this data" },
@@ -1280,8 +1303,29 @@ function swapAppDirectories(paths: EnginePaths): void {
   }
 }
 
-/** The runtime and entrypoint the installed plist runs, or undefined when there is none. */
-export function installedProgram(plistPath: string): { runtimePath: string; entryPath: string } | undefined {
+/**
+ * The signed helper's executable when one is installed in the app-support
+ * folder, otherwise undefined and the engine runs Bun directly. A helper that
+ * is not a regular executable file counts as absent.
+ */
+export function installedEngineHelper(paths: EnginePaths): string | undefined {
+  const path = paths.helperExecutablePath;
+  if (!path) return undefined;
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || (stat.mode & 0o111) === 0) return undefined;
+    return path;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The runtime and entrypoint the installed plist runs, or undefined when there
+ * is none. Both plist shapes are read: Bun first, or the signed helper first
+ * with Bun as its argument (then `helperPath` names the helper).
+ */
+export function installedProgram(plistPath: string): { runtimePath: string; entryPath: string; helperPath?: string } | undefined {
   let text: string;
   try {
     const stat = lstatSync(plistPath);
@@ -1293,10 +1337,12 @@ export function installedProgram(plistPath: string): { runtimePath: string; entr
   const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
   if (!block) return undefined;
   const strings = [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => unxml(match[1]!));
-  const runtimePath = strings[0];
-  const entryPath = strings.find((value, index) => index > 0 && !value.startsWith('--'));
+  const helperPath = basename(strings[0] ?? '') === ENGINE_HELPER_EXECUTABLE ? strings[0] : undefined;
+  const args = helperPath ? strings.slice(1) : strings;
+  const runtimePath = args[0];
+  const entryPath = args.find((value, index) => index > 0 && !value.startsWith('--'));
   if (!runtimePath || !entryPath) return undefined;
-  return { runtimePath, entryPath };
+  return helperPath ? { runtimePath, entryPath, helperPath } : { runtimePath, entryPath };
 }
 
 export type EngineAgentState = 'running' | 'loaded' | 'not_loaded' | 'unknown';

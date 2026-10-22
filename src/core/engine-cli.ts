@@ -7,7 +7,7 @@ import { workerFetch } from './worker-transport.ts';
  */
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { configFromPluginConfig } from './config.ts';
@@ -20,6 +20,8 @@ import {
   waitForEngineHealthy,
   inspectEngine,
   installEngineVerified,
+  installedEngineHelper,
+  installedProgram,
   readEngineConfig,
   readEngineLogs,
   redactLogLine,
@@ -32,6 +34,7 @@ import {
   type EngineExec,
   type EngineHealthDeps,
 } from './engine-service.ts';
+import { installEngineHelper, type EngineHelperInstallOptions, type EngineHelperInstallResult } from './engine-helper.ts';
 import { installOpenHandler, uninstallOpenHandler, type OpenHandlerOptions, type OpenHandlerResult } from './open-handler.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
@@ -39,6 +42,7 @@ import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, res
 
 export const ENGINE_CLI_USAGE = {
   'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--now] [--dry-run]',
+  'engine install-helper': 'olympus engine install-helper [--from <signed app>] [--identity <Developer ID name or SHA-1>]  (restarts an installed engine so it starts through the helper)',
   'engine uninstall': 'olympus engine uninstall',
   'engine status': 'olympus engine status [--brief]',
   'engine start': 'olympus engine start',
@@ -59,6 +63,10 @@ export interface EngineCliDeps {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   openclawPath?: () => string | undefined;
+  /** Test seam: put the signed helper app in place (engine-helper.ts). */
+  installHelper?: (options: EngineHelperInstallOptions) => EngineHelperInstallResult;
+  /** Test seam: restart the agent (engine-service.ts). */
+  restartEngine?: typeof restartEngine;
   /** Test seam for the post-install health proof. */
   health?: EngineHealthDeps;
   /**
@@ -116,6 +124,33 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
           ? 'Run olympus engine status; the engine links itself to the relay once the worker is ready.'
           : 'Run olympus engine logs to see why the engine did not become healthy.',
     };
+  }
+  if (command === 'install-helper') {
+    const options = parseInstallHelperArgs(rest);
+    const helper = (deps.installHelper ?? installEngineHelper)({
+      ...(deps.homeDir ? { homeDir: deps.homeDir } : {}),
+      ...(deps.platform ? { platform: deps.platform } : {}),
+      ...(deps.env ? { env: deps.env } : {}),
+      ...(deps.exec ? { exec: deps.exec } : {}),
+      ...options,
+    });
+    // An installed engine is reloaded so its agent starts through the helper.
+    const paths = engineServicePaths({ ...service, homeDir: deps.homeDir ?? homedir() });
+    if (!existsSync(paths.plistPath)) {
+      return { ...helper, engine: 'not_installed', next: 'Run olympus engine install; the engine will start through the Olympus helper app.' };
+    }
+    // Keep the build and runtime the agent already runs; only its launcher changes.
+    const current = installedProgram(paths.plistPath);
+    const engine = await installEngineVerified({
+      ...service,
+      ...(current ? { fromCheckout: dirname(dirname(current.entryPath)), bunBin: current.runtimePath } : {}),
+      ...(deps.health ? { health: deps.health } : {}),
+    });
+    // An agent already on the helper is unchanged, but its running launcher is
+    // the old app: restart it so the new one is what runs.
+    if (engine.action === 'unchanged') (deps.restartEngine ?? restartEngine)(service);
+    const { plist: _plist, ...summary } = engine;
+    return { ...helper, engine: summary, restarted_engine: true, note: 'The engine was restarted so its agent starts through the helper app.', next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
   }
   if (command === 'verify') {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...(deps.health ? { health: deps.health } : {}) });
@@ -221,6 +256,11 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   else if (agent.state === 'not_loaded') missing.push('The engine agent is installed but not loaded: run olympus engine install.');
   if (!pluginConfig && !configError) missing.push(`${paths.configPath} is missing: run olympus engine install.`);
   if (configError) missing.push(configError);
+  // macOS: the signed helper app is what the Mac names when it asks about Desktop, Documents and the like.
+  const helperPath = paths.linux ? undefined : installedEngineHelper(paths);
+  const helperInUse = Boolean(installedProgram(paths.plistPath)?.helperPath);
+  const helperUnused = Boolean(helperPath) && agent.installed && !helperInUse;
+  if (helperUnused) missing.push('The Olympus helper app is installed but the engine agent does not use it yet: run olympus engine install.');
   if (agent.state === 'running' && !worker.reachable) missing.push('The worker is not answering yet: see olympus engine logs.');
   // The engine's own service health says only that it started the relay;
   // the relay's status file and pid say whether it is running now.
@@ -228,11 +268,12 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },
     agent,
+    ...(paths.linux ? {} : { helper: { installed: Boolean(helperPath), in_use: helperInUse, ...(paths.helperAppPath ? { path: paths.helperAppPath } : {}) } }),
     engine: host ?? null,
     config: {
       path: paths.configPath,
@@ -310,6 +351,21 @@ export function parseInstallArgs(args: string[]): { fromCheckout?: string; bunBi
     } else if (arg.startsWith('--from-checkout=')) options.fromCheckout = arg.slice('--from-checkout='.length);
     else if (arg.startsWith('--bun=')) options.bunBin = arg.slice('--bun='.length);
     else throw new OperationError('invalid_params', `Unknown engine install option: ${arg}`);
+  }
+  return options;
+}
+
+export function parseInstallHelperArgs(args: string[]): { from?: string; identity?: string } {
+  const options: { from?: string; identity?: string } = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--from' || arg === '--identity') {
+      const value = args[index + 1];
+      if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${arg} needs a value.`);
+      if (arg === '--from') options.from = value;
+      else options.identity = value;
+      index += 1;
+    } else throw new OperationError('invalid_params', `Unknown engine install-helper option: ${arg}`);
   }
   return options;
 }

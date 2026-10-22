@@ -1,4 +1,5 @@
 import type {
+  OlympusFolderAccess,
   OlympusFolderScopeNode,
   OlympusFolderScopeSourceId,
 } from '../control-ui-contract.ts';
@@ -30,6 +31,8 @@ export interface SourceFolderScopeBrowseRequest {
 export interface SourceFolderScopeBrowsePage {
   nodes: OlympusFolderScopeNode[];
   nextCursor?: string;
+  /** Why a level has no folders, or what the whole computer needs; see OlympusFolderAccess. */
+  access?: OlympusFolderAccess;
 }
 
 export interface SourceFolderScopeBrowser {
@@ -42,6 +45,10 @@ export interface SourceFolderScopeBrowser {
     state: 'ingest' | 'metadata_only' | 'exclude';
     ancestorKeys: string[];
   }>>;
+  /** Called before a choice is saved; throws to refuse it (for a source whose computer cannot read some places yet). */
+  checkApproval?(input: { selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'exclude' }[]; wholeAccount: boolean }): void;
+  /** Called once a choice is saved, for a source whose computer wants something done then (never required). */
+  afterApproval?(input: { wholeAccount: boolean }): Promise<void>;
 }
 
 export function createGoogleDriveFolderScopeBrowser(options: {

@@ -32258,7 +32258,7 @@ var init_source_dashboard = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -32495,6 +32495,7 @@ var init_vocabulary = __esm(() => {
       waiting_for_credentials: "Paused: Olympus needs you to sign in to {source} again",
       scope_pending: "Paused until you choose folders",
       scope_root_missing: DASHBOARD_MISSING_FOLDER,
+      scope_root_permission_needed: DASHBOARD_FOLDER_NEEDS_PERMISSION,
       provider_unavailable: "Paused: {source} isn't responding; Olympus will retry",
       model_downloading: "Waiting for the search model to finish downloading"
     },
@@ -32568,6 +32569,8 @@ var init_vocabulary = __esm(() => {
     goToModels: "Go to Models",
     connected: "{source} is connected.",
     foldersTitle: "Choose folders",
+    needsPermission: "Needs permission",
+    openPrivacySettings: "Open privacy settings",
     foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
     mailTitle: "Choose mail",
     mailIntro: "Choose which {source} mail Olympus may read. Nothing starts until you save.",
@@ -36639,6 +36642,7 @@ function chatgptPickerProgram(kit) {
       catalog: new Map,
       remaining: new Map,
       truncated: new Set,
+      access: new Map,
       ancestors: new Map,
       own: new Map,
       whole: false,
@@ -36746,6 +36750,11 @@ function chatgptPickerProgram(kit) {
       p.ancestors.set(node.key, trail);
     }
     const nodes = previous.concat(fresh).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
+    const levelAccess = page2.access && typeof page2.access.message === "string" && page2.access.message ? page2.access : null;
+    if (levelAccess)
+      p.access.set(parentKey, levelAccess);
+    else
+      p.access.delete(parentKey);
     const next = typeof page2.next_cursor === "string" && page2.next_cursor ? page2.next_cursor : "";
     const more = typeof page2.remaining === "number" && isFinite(page2.remaining) && page2.remaining > 0 ? Math.round(page2.remaining) : 0;
     if (next && more)
@@ -36754,7 +36763,9 @@ function chatgptPickerProgram(kit) {
       p.remaining.delete(parentKey);
     if (page2.truncated === true)
       p.truncated.add(parentKey);
-    if (parentKey) {
+    if (parentKey && blockedByComputer(levelAccess)) {
+      p.branches.delete(parentKey);
+    } else if (parentKey) {
       p.branches.set(parentKey, nodes);
       if (next)
         p.cursors.set(parentKey, next);
@@ -36769,6 +36780,26 @@ function chatgptPickerProgram(kit) {
       after();
     else
       kit.render(focus);
+  }
+  function blockedByComputer(access) {
+    return !!access && access.state !== "needs_full_disk_access";
+  }
+  function accessNote(access, retry) {
+    const note = el("div", "banner");
+    note.setAttribute("role", "status");
+    const body = add(el("div", "banner-body"), el("p", "", access.message));
+    const actions = el("div", "actions");
+    if (typeof access.settings_url === "string" && access.settings_url.indexOf("x-apple.systempreferences:") === 0) {
+      const link = el("a", "btn", Q.openPrivacySettings);
+      link.href = access.settings_url;
+      link.setAttribute("data-key", "picker:access:settings");
+      add(actions, link);
+    }
+    if (retry)
+      add(actions, kit.button(Q.tryAgain, "picker:access:retry", p.loading || p.saving ? null : retry, "plain"));
+    if (actions.childNodes.length)
+      add(body, actions);
+    return add(note, body);
   }
   function trailOf(key2) {
     return (p.ancestors.get(key2) || []).concat([key2]);
@@ -37219,6 +37250,11 @@ function chatgptPickerProgram(kit) {
       tag.title = fill2(Q.mixedSome, { state: Q.statesLower[differs] });
       add(main, tag);
     }
+    if (node && node.access && (node.access.state === "needs_permission" || node.access.state === "needs_helper")) {
+      const ask = el("span", "ftag", Q.needsPermission);
+      ask.title = String(node.access.message || "");
+      add(main, ask);
+    }
     add(target, main);
     if (node) {
       const [bytes, files] = nodeMeta(node);
@@ -37330,6 +37366,8 @@ function chatgptPickerProgram(kit) {
     add(body, topRow(fill2(Q.accountRow, { source: p.label }), accountControl()));
     if (p.whole && !p.wholeConfirmed)
       add(body, wholeConfirm());
+    if (p.whole && p.access.get("") && p.access.get("").state !== "denied")
+      add(body, accessNote(p.access.get(""), null));
     const rules = exceptions();
     if (rules.length)
       add(body, exceptionList(rules));
@@ -37364,7 +37402,11 @@ function chatgptPickerProgram(kit) {
     } else
       add(body, topRow(Q.thisFolder, folderControl(key2, nameOf(key2), node)));
     add(body, loadingLine());
-    add(body, levelList(key2, p.branches.get(key2) || [], p.cursors.has(key2)));
+    const refused = p.access.get(key2);
+    if (blockedByComputer(refused) && !p.loading)
+      add(body, accessNote(refused, () => list(key2, false)));
+    else
+      add(body, levelList(key2, p.branches.get(key2) || [], p.cursors.has(key2)));
   }
   function noticeAndError(body) {
     if (p.notice) {
@@ -38693,6 +38735,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .index-faster{margin-top:0.5rem}
 .btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
 .btn:hover:not(:disabled){background:var(--surface)}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
 .btn.danger{border-color:var(--danger);color:var(--danger)}
@@ -38969,6 +39012,9 @@ var init_delphi = __esm(() => {
   init_zkapi_consult_settings();
   init_secret_store();
 });
+
+// src/core/engine-helper-names.ts
+var ENGINE_HELPER_APP_NAME = "Olympus Engine.app";
 
 // src/workers/credential-degradation.ts
 import { createHash as createHash25 } from "node:crypto";
@@ -39319,8 +39365,8 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash26 } from "node:crypto";
-import { existsSync as existsSync21, lstatSync as lstatSync10, mkdirSync as mkdirSync16, writeFileSync as writeFileSync8 } from "node:fs";
-import { dirname as dirname27, isAbsolute as isAbsolute11 } from "node:path";
+import { existsSync as existsSync23, lstatSync as lstatSync10, mkdirSync as mkdirSync17, writeFileSync as writeFileSync8 } from "node:fs";
+import { dirname as dirname28, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_vocabulary();
@@ -43101,10 +43147,225 @@ ${source.corpusId}
 ${task.id}`;
 }
 
+// src/workers/local-files/mac-permissions.ts
+init_atomic_file();
+init_paths();
+import { existsSync as existsSync19, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync18 } from "node:fs";
+import { opendir } from "node:fs/promises";
+import { dirname as dirname25, join as join32 } from "node:path";
+var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER";
+var FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+var FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
+var SETTINGS_NAMES = {
+  desktop: "Desktop Folder",
+  documents: "Documents Folder",
+  downloads: "Downloads Folder",
+  icloud: "iCloud Drive",
+  removable: "Removable Volumes",
+  network: "Network Volumes"
+};
+var PLACE_WORDS = {
+  desktop: "your Desktop",
+  documents: "your Documents",
+  downloads: "your Downloads",
+  icloud: "iCloud Drive",
+  removable: "a USB drive or memory card",
+  network: "a network drive"
+};
+var MAC_ACCESS_COPY = {
+  needsPermission: "Your Mac will ask before Olympus opens this folder.",
+  waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
+  needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
+  denied: (kind) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under Olympus Engine. Then choose Try again.`,
+  fullDiskAccess: "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save."
+};
+function permissionHostPresent(env) {
+  if (env[ENGINE_HELPER_ENV])
+    return true;
+  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1" && env.OLYMPUS_MANAGED_WORKER !== "1";
+}
+
+class MacPermissions {
+  platform;
+  home;
+  helperPresent;
+  memoryPath;
+  askTimeoutMs;
+  list;
+  listProtected;
+  now;
+  inFlight = new Map;
+  memory;
+  constructor(options) {
+    this.platform = options.platform ?? process.platform;
+    this.home = options.home;
+    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
+    this.memoryPath = options.memoryPath;
+    this.askTimeoutMs = options.askTimeoutMs ?? 8000;
+    this.list = options.list ?? (async (path) => {
+      const dir = await opendir(path);
+      try {
+        await dir.read();
+      } finally {
+        await dir.close().catch(() => {
+          return;
+        });
+      }
+    });
+    this.listProtected = options.listProtected ?? ((path) => {
+      const dir = opendirSync(path);
+      try {
+        dir.readSync();
+      } finally {
+        dir.closeSync();
+      }
+    });
+    this.now = options.now ?? Date.now;
+  }
+  get active() {
+    return this.platform === "darwin";
+  }
+  hasHelper() {
+    return this.helperPresent();
+  }
+  guardOf(realPath, volume) {
+    if (!this.active)
+      return;
+    const tops = [
+      ["desktop", join32(this.home, "Desktop")],
+      ["documents", join32(this.home, "Documents")],
+      ["downloads", join32(this.home, "Downloads")],
+      ["icloud", join32(this.home, "Library", "Mobile Documents")]
+    ];
+    for (const [kind, root] of tops) {
+      if (isWithinScopePath(realPath, root))
+        return { kind, root };
+    }
+    if (volume && !volume.primary && (volume.kind === "removable" || volume.kind === "network")) {
+      return { kind: volume.kind, root: volume.mountPoint };
+    }
+    return;
+  }
+  blocksReadWithoutHelper(realPath, volume) {
+    if (!this.active || this.hasHelper())
+      return false;
+    if (this.guardOf(realPath, volume))
+      return true;
+    if (realPath === "/" || realPath === "/Volumes")
+      return true;
+    return [join32(this.home, "Desktop"), join32(this.home, "Documents"), join32(this.home, "Downloads"), join32(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+  }
+  nodeAccess(guard) {
+    if (this.recall(guard) === "granted")
+      return;
+    return {
+      state: this.hasHelper() ? "needs_permission" : "needs_helper",
+      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : MAC_ACCESS_COPY.needsHelper
+    };
+  }
+  async open(guard) {
+    if (!this.hasHelper()) {
+      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelper };
+    }
+    const answer = await this.ask(guard);
+    if (answer === "granted")
+      return;
+    if (answer === "waiting")
+      return { state: "waiting", message: MAC_ACCESS_COPY.waiting };
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+  }
+  noteDenied(guard) {
+    this.remember(guard, "denied");
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+  }
+  fullDiskAccessNote() {
+    if (!this.active || this.hasFullDiskAccess())
+      return;
+    if (!this.hasHelper())
+      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelper };
+    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL };
+  }
+  hasFullDiskAccess() {
+    for (const path of [join32(this.home, "Library", "Safari"), join32(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+      try {
+        this.listProtected(path);
+        return true;
+      } catch (error) {
+        if (error.code === "ENOENT")
+          continue;
+        return false;
+      }
+    }
+    return false;
+  }
+  ask(guard) {
+    let pending = this.inFlight.get(guard.root);
+    if (!pending) {
+      pending = this.list(guard.root).then(() => {
+        this.remember(guard, "granted");
+        return "granted";
+      }, (error) => {
+        if (error.code === "EPERM" || error.code === "EACCES") {
+          this.remember(guard, "denied");
+          return "denied";
+        }
+        throw error;
+      }).finally(() => {
+        this.inFlight.delete(guard.root);
+      });
+      this.inFlight.set(guard.root, pending);
+    }
+    const waiting = new Promise((resolve8) => {
+      const timer = setTimeout(() => resolve8("waiting"), this.askTimeoutMs);
+      timer.unref?.();
+      pending.finally(() => clearTimeout(timer)).catch(() => {
+        return;
+      });
+    });
+    return Promise.race([pending, waiting]);
+  }
+  key(guard) {
+    return guard.root;
+  }
+  recall(guard) {
+    return this.load()[this.key(guard)]?.answer;
+  }
+  remember(guard, answer) {
+    const memory = this.load();
+    if (memory[this.key(guard)]?.answer === answer)
+      return;
+    memory[this.key(guard)] = { answer, at: new Date(this.now()).toISOString() };
+    if (!this.memoryPath)
+      return;
+    try {
+      mkdirSync15(dirname25(this.memoryPath), { recursive: true, mode: 448 });
+      writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
+`);
+    } catch {}
+  }
+  load() {
+    if (this.memory)
+      return this.memory;
+    let loaded = {};
+    if (this.memoryPath && existsSync19(this.memoryPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync18(this.memoryPath, "utf8"));
+        if (parsed && typeof parsed === "object")
+          loaded = parsed;
+      } catch {
+        loaded = {};
+      }
+    }
+    this.memory = loaded;
+    return loaded;
+  }
+}
+
 // src/workers/local-files/scheduler-source.ts
 init_paths();
 init_scope();
 var DAY_MS = 24 * 60 * 60 * 1000;
+var PERMISSION_RETRY_MS = 10 * 60 * 1000;
 
 // src/workers/local-files/open-target.ts
 init_paths();
@@ -43117,7 +43378,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync19, readFileSync as readFileSync18, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync20, readFileSync as readFileSync19, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -43284,7 +43545,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync18("/proc/self/mountinfo", "utf8");
+  return readFileSync19("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -43301,7 +43562,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync19(dir))
+    if (!existsSync20(dir))
       return result;
     for (const name of readdirSync3(dir)) {
       try {
@@ -43353,9 +43614,10 @@ function plistString(plist, key2) {
 init_local_open();
 
 // src/workers/local-files/scope-browser.ts
+init_remote_access();
 import { lstatSync as lstatSync9, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
-import { homedir as homedir21 } from "node:os";
-import { join as join32 } from "node:path";
+import { homedir as homedir22 } from "node:os";
+import { join as join34 } from "node:path";
 
 // src/workers/source-scope-browser.ts
 init_credential_broker();
@@ -43581,7 +43843,35 @@ function registerFileScopeBrowserFactory(sourceId, factory) {
 // src/workers/local-files/scope-browser.ts
 init_paths();
 init_scope();
+
+// src/workers/local-files/mac-settings.ts
+import { spawn as spawn3 } from "node:child_process";
+import { existsSync as existsSync21 } from "node:fs";
+import { homedir as homedir21 } from "node:os";
+import { join as join33 } from "node:path";
+function helperAppPathForHome(home = homedir21()) {
+  return join33(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+}
+function revealHelperAndOpenFullDiskAccess(deps = {}) {
+  const run = deps.run ?? ((command, args) => {
+    spawn3(command, args, { stdio: "ignore", detached: true }).unref();
+  });
+  const helper = deps.helperApp ?? helperAppPathForHome();
+  if ((deps.exists ?? existsSync21)(helper))
+    run("/usr/bin/open", ["-R", helper]);
+  run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
+}
+
+// src/workers/local-files/scope-browser.ts
 var BROWSE_PAGE_SIZE2 = 100;
+
+class AccessRefused extends Error {
+  access;
+  constructor(access) {
+    super(access.message);
+    this.access = access;
+  }
+}
 function safeRealpath(path) {
   try {
     return realpathSync7.native(path);
@@ -43602,10 +43892,14 @@ function ancestorScopePaths(scopePath) {
 }
 function createLocalFilesFolderScopeBrowser(options = {}) {
   const volumes = options.volumes ?? new VolumeResolver;
-  const home = safeRealpath(options.home ?? options.context?.home ?? homedir21());
+  const home = safeRealpath(options.home ?? options.context?.home ?? homedir22());
   const context2 = options.context ?? { ...defaultExclusionContext(), home };
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
-  const node = (scopePath, name, parentKey) => {
+  const permissions = options.permissions ?? new MacPermissions({
+    home,
+    memoryPath: join34(olympusDataDir(), "local-files", "folder-access.json")
+  });
+  const node = (scopePath, name, parentKey, access) => {
     const reason = defaultExclusionForFolder(scopePath, context2);
     return {
       key: scopePath,
@@ -43614,7 +43908,8 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       kind: "folder",
       has_children: true,
       selectable: true,
-      ...reason ? { excluded_by_default: true, default_exclusion_reason: DEFAULT_EXCLUSION_LABELS[reason] } : {}
+      ...reason ? { excluded_by_default: true, default_exclusion_reason: DEFAULT_EXCLUSION_LABELS[reason] } : {},
+      ...access ? { access } : {}
     };
   };
   const childFolders = (realPath, parentKey) => {
@@ -43624,11 +43919,22 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
     } catch (error) {
       const code = error.code;
       if (code === "EACCES" || code === "EPERM") {
-        throw new Error("Olympus is not allowed to read this folder. Allow it in the computer's privacy settings, then update folders.");
+        const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
+        if (guard)
+          throw new AccessRefused(permissions.noteDenied(guard));
+        const fda = permissions.active && !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
+        if (fda)
+          throw new AccessRefused(fda);
+        throw new Error("Your computer does not let Olympus open this folder. Check who may open it in Finder (Get Info, then Sharing & Permissions), then try again.");
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
     }
-    return entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => node(scopePathOfRealPath(volumes, join32(realPath, entry.name)), entry.name, parentKey)).sort((a, b) => {
+    return entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => {
+      const childReal = join34(realPath, entry.name);
+      const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
+      const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
+      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
+    }).sort((a, b) => {
       const aHidden = a.name.startsWith(".");
       const bHidden = b.name.startsWith(".");
       if (aHidden !== bHidden)
@@ -43645,30 +43951,63 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       if (!Number.isInteger(offset) || offset < 0)
         throw new Error("Folder browse cursor is invalid.");
       let all;
+      let access;
       if (parent === undefined) {
         volumes.refresh();
         all = [
           ...childFolders(home, undefined),
-          ...volumes.locations().map((volume) => ({
-            key: scopePathFor("/", volume.id),
-            name: volume.label,
-            kind: "folder",
-            has_children: true,
-            selectable: true
-          }))
+          ...volumes.locations().map((volume) => {
+            const guard = permissions.guardOf(volume.mountPoint, volume);
+            const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
+            return {
+              key: scopePathFor("/", volume.id),
+              name: volume.label,
+              kind: "folder",
+              has_children: true,
+              selectable: true,
+              ...diskAccess ? { access: diskAccess } : {}
+            };
+          })
         ];
+        access = permissions.fullDiskAccessNote();
       } else {
         const real = realPathOfScopePath(volumes, parent);
         if (!real)
           throw new Error("That disk is not connected right now.");
-        all = childFolders(real, parent);
+        const guard = permissions.guardOf(real, volumes.volumeOf(real));
+        const refused = guard ? await permissions.open(guard) : undefined;
+        if (refused)
+          return { nodes: [], access: refused };
+        try {
+          all = childFolders(real, parent);
+        } catch (error) {
+          if (error instanceof AccessRefused)
+            return { nodes: [], access: error.access };
+          throw error;
+        }
       }
       const page2 = all.slice(offset, offset + BROWSE_PAGE_SIZE2);
       const next = offset + BROWSE_PAGE_SIZE2;
       return {
         nodes: page2,
-        ...next < all.length ? { nextCursor: encodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? "", String(next)) } : {}
+        ...next < all.length ? { nextCursor: encodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? "", String(next)) } : {},
+        ...access ? { access } : {}
       };
+    },
+    checkApproval({ selections, wholeAccount }) {
+      if (!permissions.active || permissions.hasHelper())
+        return;
+      const blocked = wholeAccount || selections.some((selection) => {
+        if (selection.state === "exclude")
+          return false;
+        const key2 = normalizeScopePath(selection.key);
+        if (key2 === "/")
+          return true;
+        const real = realPathOfScopePath(volumes, key2);
+        return real !== undefined && permissions.blocksReadWithoutHelper(real, volumes.volumeOf(real));
+      });
+      if (blocked)
+        throw new Error(MAC_ACCESS_COPY.needsHelper);
     },
     async validateSelections(selections) {
       const normalized = selections.map((selection) => ({ ...selection, key: normalizeScopePath(selection.key) }));
@@ -43695,6 +44034,11 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
       }
       return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
+    },
+    async afterApproval({ wholeAccount }) {
+      if (wholeAccount && permissions.active && permissions.hasHelper() && !permissions.hasFullDiskAccess()) {
+        (options.openFullDiskAccess ?? revealHelperAndOpenFullDiskAccess)();
+      }
     }
   };
 }
@@ -43852,13 +44196,13 @@ import { Database as Database6 } from "bun:sqlite";
 // src/workers/classification-ledger.ts
 init_linux_engine_layout();
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname25, join as join33 } from "node:path";
+import { dirname as dirname26, join as join35 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname25(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname26(path), { recursive: true, mode: 448 });
   const handle = await open4(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -43980,8 +44324,8 @@ init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
-import { mkdirSync as mkdirSync15, readFileSync as readFileSync19 } from "node:fs";
-import { dirname as dirname26 } from "node:path";
+import { mkdirSync as mkdirSync16, readFileSync as readFileSync20 } from "node:fs";
+import { dirname as dirname27 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -43999,7 +44343,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync19(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync20(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -44019,7 +44363,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync15(dirname26(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync16(dirname27(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -44359,7 +44703,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync20 } from "node:fs";
+import { existsSync as existsSync22 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
@@ -44443,7 +44787,7 @@ class TierSnifferService {
         db = new Database6(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync20(path);
+        const hasQueue = existsSync22(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -44642,11 +44986,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync20(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync22(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync20(own3))
+      if (existsSync22(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -46066,7 +46410,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync21(config.dbPath))
+    if (!config.dbPath || !existsSync23(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
@@ -46501,8 +46845,8 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute11(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname27(readinessPath);
-  mkdirSync16(directory, { recursive: true, mode: 448 });
+  const directory = dirname28(readinessPath);
+  mkdirSync17(directory, { recursive: true, mode: 448 });
   const parent = lstatSync10(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
@@ -46524,7 +46868,7 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync16(dirname27(args.reportPath), { recursive: true });
+      mkdirSync17(dirname28(args.reportPath), { recursive: true });
       writeFileSync8(args.reportPath, `${json}
 `);
     }
@@ -46534,7 +46878,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync16(dirname27(args.reportPath), { recursive: true });
+      mkdirSync17(dirname28(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync8(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

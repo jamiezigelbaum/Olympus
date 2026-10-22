@@ -42,6 +42,7 @@ import type {
   DashboardViewModelV1,
   DisconnectSourceResult,
   FolderScopeList,
+  ScopeFolderAccess,
   MailCategory,
   MailScopeList,
   MailWindow,
@@ -342,7 +343,7 @@ function copyUnreadable(value: unknown): DashboardUnreadable | undefined {
 const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checking', 'checked', 'failed', 'busy']);
 
 const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
-const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'scope_root_missing', 'provider_unavailable', 'model_downloading']);
+const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'scope_root_missing', 'scope_root_permission_needed', 'provider_unavailable', 'model_downloading']);
 const STALL_CAUSES = new Set<SourceStallDetail['cause']>(['failing', 'paused', 'switched_off', 'no_movement']);
 const STALL_STAGES = new Set<NonNullable<SourceStallDetail['stage']>>(['listing', 'reading', 'indexing']);
 
@@ -1158,6 +1159,19 @@ function scopeSummaryText(summary: ScopeSummary): string {
     : `${label}: ${summary.shown} labels listed; choices ${state}. The mail choices are shown to the owner in the Olympus panel.`;
 }
 
+const ACCESS_STATES: ReadonlySet<string> = new Set(['needs_permission', 'waiting', 'denied', 'needs_helper', 'needs_full_disk_access']);
+
+/** The computer's permission note for a folder, copied field by field; anything unexpected is dropped. */
+function copyAccess(access: ScopeFolderAccess | undefined): ScopeFolderAccess | undefined {
+  if (!access || typeof access !== 'object' || !ACCESS_STATES.has(access.state) || typeof access.message !== 'string') return undefined;
+  return {
+    state: access.state,
+    message: text(access.message),
+    ...(typeof access.settings_url === 'string' && access.settings_url.startsWith('x-apple.systempreferences:')
+      ? { settings_url: access.settings_url.slice(0, 200) } : {}),
+  };
+}
+
 /** Field-by-field copy of the picker data. Names and keys pass (owner decision 2026-10-01), bounded. */
 function copyScopeList(list: ScopeList): ScopeList {
   if (list.kind === 'folders') {
@@ -1176,8 +1190,10 @@ function copyScopeList(list: ScopeList): ScopeList {
         selectable: node.selectable === true,
         ...(finite(node.size_bytes) ? { size_bytes: whole(node.size_bytes) } : {}),
         ...(finite(node.file_count) ? { file_count: whole(node.file_count) } : {}),
+        ...(copyAccess(node.access) ? { access: copyAccess(node.access)! } : {}),
       })),
       ...(list.next_cursor ? { next_cursor: opaque(list.next_cursor) } : {}),
+      ...(copyAccess(list.access) ? { access: copyAccess(list.access)! } : {}),
       ...(list.next_cursor && finite(list.remaining) ? { remaining: whole(list.remaining) } : {}),
       ...(list.truncated === true ? { truncated: true as const } : {}),
       selections: (list.selections ?? []).slice(0, MAX_SCOPE_NODES).map(copySelection),

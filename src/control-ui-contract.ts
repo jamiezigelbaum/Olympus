@@ -35,6 +35,32 @@ export interface OlympusMailScopeDraft {
   skip_senders: string[];
 }
 
+/**
+ * Where the computer's own privacy rules stand for a folder (macOS asks the
+ * person before an app reads Desktop, Documents, Downloads, iCloud Drive or a
+ * disk that can be unplugged). Never silent: every state carries the words
+ * the picker shows, and a folder that cannot be listed says why.
+ */
+export type OlympusFolderAccessState =
+  /** On a folder row: opening it makes the computer ask. On a level: the same, before the ask. */
+  | 'needs_permission'
+  /** The computer is showing its question and has no answer yet. */
+  | 'waiting'
+  /** The person said no (or turned it off later). */
+  | 'denied'
+  /** The helper app that makes the question say "Olympus" is not installed. */
+  | 'needs_helper'
+  /** Searching the whole computer needs Full Disk Access, which the person switches on. */
+  | 'needs_full_disk_access';
+
+export interface OlympusFolderAccess {
+  state: OlympusFolderAccessState;
+  /** Plain words, in the picker's voice. */
+  message: string;
+  /** A link that opens the computer's privacy page for this, where one exists. */
+  settings_url?: string;
+}
+
 /** Opaque provider folder identity. Names are returned only by an explicit browser request. */
 export interface OlympusFolderScopeNode {
   key: string;
@@ -51,6 +77,8 @@ export interface OlympusFolderScopeNode {
   excluded_by_default?: boolean;
   /** Plain words for why, when `excluded_by_default` is set. */
   default_exclusion_reason?: string;
+  /** Set on a folder the computer asks the person about; see OlympusFolderAccess. */
+  access?: OlympusFolderAccess;
 }
 
 export type OlympusSourceScopeStatus = 'scope_pending' | 'approved';
@@ -71,6 +99,11 @@ export interface OlympusFolderScopeBrowseResult {
   status: OlympusSourceScopeStatus;
   nodes: OlympusFolderScopeNode[];
   next_cursor?: string;
+  /**
+   * Why this level has no folders (or, at the top level, what searching the
+   * whole computer needs). Absent when the level listed normally.
+   */
+  access?: OlympusFolderAccess;
   selections: OlympusSourceScopeSelection[];
   whole_account_selected: boolean;
 }
