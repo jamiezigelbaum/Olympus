@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>ai.olympusplugin.engine-host</string>
+  <key>CFBundleName</key>
+  <string>Olympus</string>
+  <key>CFBundleDisplayName</key>
+  <string>Olympus</string>
+  <key>CFBundleExecutable</key>
+  <string>OlympusEngineHost</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>So you can search the folders you choose, Olympus reads files on your Desktop.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>So you can search the folders you choose, Olympus reads files in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>So you can search the folders you choose, Olympus reads files in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>So you can search the folders you choose, Olympus reads files on USB drives and memory cards.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>So you can search the folders you choose, Olympus reads files on network drives.</string>
+</dict>
+</plist>
