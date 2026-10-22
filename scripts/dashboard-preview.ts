@@ -578,21 +578,35 @@ function withPreviewMovement(view: ReturnType<typeof buildSourceDashboardViewMod
  *   local-files-indexing      folders chosen, first indexing running
  *   local-files-reading       indexed and current
  *   local-files-needs-permission   a chosen folder the Mac will not open (stalled)
+ *   local-files-finding      the first walk: files found so far, no total yet
+ *   local-files-finding-page  the same walk while Dropbox is also working: the
+ *                            page-wide line says files found so far, not a percent
+ *   local-files-sync-checking / local-files-sync-checked   Sync now pressed on a
+ *                            current source: "Checking …", then the kept result line
  * The local-files-picker-* states are the connected row plus the folder
  * picker's answers (see previewScopeList).
  */
 function localFilesPreview(state: string) {
   const mode = state === 'local-files-off' ? 'off'
     : state === 'local-files-indexing' ? 'syncing'
-      : state === 'local-files-reading' ? 'synced'
+      : state === 'local-files-finding' || state === 'local-files-finding-page' ? 'walking'
+      : state === 'local-files-reading' || state === 'local-files-sync-checking' || state === 'local-files-sync-checked' ? 'synced'
         : state === 'local-files-needs-permission' ? 'permission'
           : 'connected';
   const status = emptyStatus();
+  if (mode === 'walking') {
+    // The first walk: items are being listed, none read yet, no total known.
+    status.corpora = [corpus('secure_local.local.files', 'file', 'secure_local', 'local_files', 12_400, 0)];
+  }
+  const alsoDropbox = state === 'local-files-finding-page';
+  if (alsoDropbox) {
+    status.corpora.push(corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 4000, 4000, { withText: 2000, embedded: 0 }));
+  }
   if (mode === 'syncing' || mode === 'synced' || mode === 'permission') {
     const files = corpus('secure_local.local.files', 'file', 'secure_local', 'local_files',
       mode === 'synced' ? 18_420 : mode === 'permission' ? 2_310 : 6_200,
       mode === 'synced' ? 92_000 : mode === 'permission' ? 11_500 : 31_000,
-      mode === 'synced' ? { withText: 18_000, embedded: 18_000 } : { withText: mode === 'permission' ? 2_300 : 3_900, embedded: mode === 'permission' ? 2_300 : 1_200 });
+      mode === 'synced' ? (state.startsWith('local-files-sync') ? { withText: 18_420, embedded: 18_420 } : { withText: 18_000, embedded: 18_000 }) : { withText: mode === 'permission' ? 2_300 : 3_900, embedded: mode === 'permission' ? 2_300 : 1_200 });
     status.corpora = [files];
   }
   const source = schedulerSource('local.files', 'secure_local.local.files', mode === 'synced' ? 0.2 : 0.5);
@@ -605,28 +619,40 @@ function localFilesPreview(state: string) {
       last_error_kind: 'scope_root_permission_needed',
       degraded_reason: 'scope_root_permission_needed',
     }] as unknown as typeof source.tasks;
-  } else if (mode === 'syncing') {
+  } else if (mode === 'syncing' || mode === 'walking') {
     source.tasks = [{ id: 'local.files_store_pull.preview', kind: 'sync' as const, running: true, consecutive_failures: 0 }] as unknown as typeof source.tasks;
   }
-  const chosen = mode === 'syncing' || mode === 'synced' || mode === 'permission';
+  const sources = [source];
+  if (alsoDropbox) {
+    const dropbox = schedulerSource('dropbox.files', 'secure_local.dropbox.files', 0.3);
+    dropbox.tasks = [{ id: 'dropbox.files_store_pull.preview', kind: 'sync' as const, running: true, consecutive_failures: 0 }] as unknown as typeof dropbox.tasks;
+    sources.push(dropbox);
+  }
+  const chosen = mode === 'syncing' || mode === 'walking' || mode === 'synced' || mode === 'permission';
+  const manualSync = state === 'local-files-sync-checking'
+    ? { at: NOW.toISOString(), outcome: 'checking' as const }
+    : state === 'local-files-sync-checked' ? { at: NOW.toISOString(), outcome: 'checked' as const, new_items: 0 } : undefined;
   return buildSourceDashboardViewModel({
     sourceIndexStatus: status,
-    schedulerStatus: scheduler(mode === 'off' ? [] : [source]),
+    schedulerStatus: scheduler(mode === 'off' ? [] : sources),
     sovereigntyEngine: engine,
     connectedHandleRegistry: registry(mode === 'off' ? [] : [{
       ...handle('local.files.this_computer', 'local_files', ['local.files.sync'], []),
       accountRole: 'this_computer',
       thisComputer: true,
-    } as unknown as ConnectedHandleRegistry['handles'][number]]),
+    } as unknown as ConnectedHandleRegistry['handles'][number], ...(alsoDropbox ? [handle('dropbox.personal', 'dropbox', ['dropbox.files.sync'], ['files.content.read'])] : [])]),
     apiKeyAvailability: {},
     oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
     oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
     googlePilotClientConfigured: true,
     oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
     ...(mode === 'off' ? {} : {
-      fileSourceScopeStatus: { 'local.files': chosen ? 'approved' : 'scope_pending' },
-      fileSourceScopeIngestionEnabled: { 'local.files': chosen },
+      fileSourceScopeStatus: { 'local.files': chosen ? 'approved' : 'scope_pending', ...(alsoDropbox ? { 'dropbox.files': 'approved' } : {}) },
+      fileSourceScopeIngestionEnabled: { 'local.files': chosen, ...(alsoDropbox ? { 'dropbox.files': true } : {}) },
     }),
+    // This worker can run Sync now for it (the scheduler holds the source).
+    syncNowAvailable: () => true,
+    ...(manualSync ? { manualSyncs: { 'local.files': manualSync } } : {}),
     now: NOW,
   });
 }
@@ -781,6 +807,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
   'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
   'local-files-off', 'local-files-connected', 'local-files-indexing', 'local-files-reading', 'local-files-needs-permission',
+  'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
 ] as const;
 

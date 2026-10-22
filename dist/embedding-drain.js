@@ -32270,7 +32270,10 @@ var init_source_dashboard = __esm(() => {
 
 // src/workers/dashboard/vocabulary.ts
 function dashboardManualSyncPendingLine(label) {
-  return `Checking ${label}…`;
+  return `Checking ${syncMid(label)}…`;
+}
+function syncMid(name) {
+  return typeof name === "string" ? name : name.mid;
 }
 var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
@@ -32488,6 +32491,7 @@ var init_vocabulary = __esm(() => {
     },
     sourceStages: { listing: "Finding items", reading: "Reading", indexing: "Indexing" },
     findingItems: "Finding items",
+    findingFound: "Finding {unit} · {done} found so far",
     sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
     stalledSources: "{sources} paused",
     stalledAnd: "{first} and {last}",
@@ -32866,6 +32870,7 @@ var init_vocabulary = __esm(() => {
     units: DASHBOARD_CHATGPT_PAGE_COPY.units,
     sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
     findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+    findingFound: DASHBOARD_CHATGPT_PAGE_COPY.findingFound,
     sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
     stalledReasons: {
       waiting_for_credentials: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.waiting_for_credentials,
@@ -35188,7 +35193,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       if (expires)
         meta.push(expires);
     } else if (checking) {
-      meta.push(fill2(P.syncCheckingLine, { source: String(source.label || "") }));
+      meta.push(fill2(P.syncCheckingLine, { source: String(source.syncNoun || source.label || "") }));
     } else if (manual) {
       meta.push(capitalise(detail));
     } else if (progress) {} else if (item)
@@ -35428,7 +35433,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (progress.percent === undefined && progress.stage !== "listing")
       return P.sourceStages[progress.stage] || P.findingItems;
     if (total <= 0)
-      return P.findingItems;
+      return foundSoFar(progress.stage === "listing" ? progress.done : 0, progress.unit);
     const stage = P.sourceStages[progress.stage] || P.findingItems;
     return fill2(P.sourceProgress, {
       stage,
@@ -35437,6 +35442,19 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       total: count(total),
       unit: unitWord(progress.unit, total)
     });
+  }
+  function foundSoFar(found, unit) {
+    const n = Number(found) || 0;
+    if (n <= 0)
+      return P.findingItems;
+    const words2 = P.units[unit] || P.units.items;
+    return fill2(P.findingFound, { unit: words2.many, done: count(n) });
+  }
+  function indeterminateBar(label) {
+    const bar = el("div", "bar indeterminate");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-label", label);
+    return add(bar, el("div", "bar-fill"));
   }
   function sourceProgressBlock(progress, source, stalledWords) {
     const box = el("div", progress.stalled ? "source-progress stalled" : "source-progress");
@@ -35458,7 +35476,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     const label = sourceProgressLabel(progress);
     add(box, el("p", "muted", label));
-    if (progress.percent !== undefined)
+    const unsized = progress.stage === "listing" && (Number(progress.total) || 0) <= 0 && !(Number(progress.percent) > 0);
+    if (unsized)
+      add(box, indeterminateBar(name + ": " + label));
+    else if (progress.percent !== undefined)
       add(box, progressBar(progress.percent, name + ": " + label));
     return box;
   }
@@ -35544,7 +35565,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function totalUnknown(progress) {
     const stages = Array.isArray(progress.details) ? progress.details : [];
-    return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
+    if (stages.length === 0)
+      return false;
+    if (stages.every((stage) => !(Number(stage && stage.total) > 0)))
+      return true;
+    return progress.percent === undefined && progress.itemsLeft === undefined && !(Number(stages[0] && stages[0].total) > 0);
   }
   function progressFinished(progress) {
     return !!progress && progress.itemsLeft !== undefined && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
@@ -35553,7 +35578,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
       const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
-      return phase + ": " + P.findingItems + paused;
+      const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
+      return phase + ": " + foundSoFar(first && first.done, progress.unit) + paused;
     }
     const parts = progress.percent === undefined ? [P.sourceStages.indexing] : [fill2(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
@@ -35593,6 +35619,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     add(section, line);
     if (progress.percent !== undefined)
       add(section, progressBar(progress.percent, P.progress));
+    else if (totalUnknown(progress) && !stalled && !progressPaused())
+      add(section, indeterminateBar(P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
     const faster = indexFasterControl();
     if (withDetails && (stages.length || faster)) {
@@ -38786,6 +38814,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .progress-line.stalled{font-weight:600}
 .bar{height:0.5rem;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
 .bar-fill{height:100%;border-radius:999px;background:var(--run);min-width:0}
+.bar.indeterminate{position:relative;overflow:hidden}
+.bar.indeterminate .bar-fill{position:absolute;top:0;width:35%;animation:bar-sweep 1.6s ease-in-out infinite}
+@keyframes bar-sweep{0%{left:-35%}100%{left:100%}}
+@media (prefers-reduced-motion:reduce){.bar.indeterminate .bar-fill{animation:none;left:0;width:100%;opacity:.35}}
 .disclosure{margin-top:0.75rem}
 .disclosure summary,.models summary{color:var(--muted);font-size:0.875rem;padding:0.25rem 0}
 .models summary{font-size:1rem;color:var(--text);font-weight:600}

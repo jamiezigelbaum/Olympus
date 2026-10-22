@@ -162,9 +162,8 @@ describe('dashboard view-model producer', () => {
     expect(vm.progress).toEqual({
       unit: 'files',
       phase: 'initial',
-      // Searchable (indexed) items, not items read: 20 of 200.
-      percent: 10,
-      itemsLeft: 180,
+      // The first listing is still running: no percent and no items left
+      // (metric ruling); the page says how many were found so far.
       etaSeconds: 5400,
       stalled: false,
       details: [
@@ -175,7 +174,7 @@ describe('dashboard view-model producer', () => {
       ],
     });
     expect(vm.sources[0]!.status).toBe('Working');
-    expect(vm.sources[0]!.progress).toEqual({ stage: 'listing', unit: 'files', done: 200, total: 0, percent: 0, stalled: false });
+    expect(vm.sources[0]!.progress).toEqual({ stage: 'listing', unit: 'files', done: 200, total: 0, stalled: false });
   });
 
   test('per-source progress names the first unfinished stage; reading counts the in-scope population only', () => {

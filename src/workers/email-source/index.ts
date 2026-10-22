@@ -219,6 +219,8 @@ import {
   type DashboardManualSync,
   type DashboardApiKeySource,
   type DashboardConnectSource,
+  type DashboardSyncSource,
+  type DashboardThisComputerSource,
   type DashboardOAuthSource,
   type DashboardPendingConnect,
   type DashboardUnpairedSourceState,
@@ -571,7 +573,7 @@ export interface EmailSourceWorkerOptions {
      * asked about is assumed served -- today's behaviour for hosts and tests
      * that wire a hook serving everything.
      */
-    triggerSourceSyncSources?: readonly DashboardConnectSource[];
+    triggerSourceSyncSources?: readonly DashboardSyncSource[];
     refreshSchedulerSources?: (
       connectedHandlesOverride?: ConnectedCredentialHandle[],
     ) => SourceSchedulerSource[] | Promise<SourceSchedulerSource[]>;
@@ -673,7 +675,7 @@ export interface ConnectorStoreDeclaredPrincipal {
 export type ConnectorStoreChatPrincipal = ConnectorStoreDeclaredPrincipal;
 
 export interface DashboardSourceSyncRequest {
-  source: DashboardConnectSource;
+  source: DashboardSyncSource;
   reason: 'post_connect' | 'manual';
 }
 
@@ -775,7 +777,8 @@ export function dashboardSourceSyncNotSupportedError(
 /** The card's own name for a connect source; the id itself when nothing claims it. */
 function dashboardConnectSourceLabel(source: string): string {
   return DASHBOARD_SUPPORTED_SOURCES.find((definition) =>
-    (definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key')
+    (definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key'
+      || definition.connect_action.kind === 'this_computer')
     && definition.connect_action.source === source)?.label
     ?? source;
 }
@@ -897,7 +900,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // rebuild and apply after close() returned. A closed worker must do no
   // further scheduler work, so the flag is re-checked at every await boundary.
   let dashboardWorkerClosed = false;
-  const dashboardPostConnectRuns = new Map<DashboardConnectSource, Promise<void>>();
+  const dashboardPostConnectRuns = new Map<DashboardSyncSource, Promise<void>>();
   if (options.sourceScheduler && options.sourceDashboard?.refreshSchedulerSources) {
     const intervalMs = options.sourceDashboard.registryAdoptionIntervalMs ?? 30_000;
     if (intervalMs > 0) {
@@ -2129,7 +2132,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const schedulerSourceId = dashboardSchedulerSourceId(source);
           const key = schedulerSourceId ?? source;
           const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === schedulerSourceId);
-          const label = definition?.label ?? 'this source';
+          const label = definition?.sync_name ?? definition?.label ?? 'this source';
           const answer = (status: 'checking' | 'busy' | 'too_soon', statusMessage: string, lastManualSync?: DashboardManualSync) => json({
             ok: true,
             source,
@@ -3676,13 +3679,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
    * True when the host's dashboard hook serves this source, not merely when a
    * hook exists. See `triggerSourceSyncSources`.
    */
-  function dashboardSyncHookServes(source: DashboardConnectSource): boolean {
+  function dashboardSyncHookServes(source: DashboardSyncSource): boolean {
     if (sourceDashboard?.triggerSourceSync === undefined) return false;
     const served = sourceDashboard.triggerSourceSyncSources;
     return served === undefined || served.includes(source);
   }
 
-  function dashboardSourceSyncAvailable(source: DashboardConnectSource): boolean {
+  function dashboardSourceSyncAvailable(source: DashboardSyncSource): boolean {
     const schedulerId = dashboardSchedulerSourceId(source);
     if (schedulerId && sourceScheduler?.status().sources.some((candidate) => candidate.source_id === schedulerId || candidate.corpus_id === schedulerId)) return true;
 
@@ -5322,10 +5325,10 @@ function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource | 'ge
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gemini, venice, or readwise.');
 }
 
-function parseDashboardSyncSource(value: unknown): DashboardConnectSource {
+function parseDashboardSyncSource(value: unknown): DashboardSyncSource {
   const source = asOptionalString(value);
   if (source && isDashboardSyncSource(source)) return source;
-  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gmail, google-drive, dropbox, x, or readwise.');
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gmail, google-drive, dropbox, x, readwise, or a source on this computer.');
 }
 
 function parseFolderScopeSourceId(value: unknown): OlympusFolderScopeSourceId {
@@ -5850,10 +5853,19 @@ function dashboardOAuthSourcesForDisconnected(sourceIds: Set<V04PublicSourceId>)
 }
 
 function assertDashboardSourceMayRead(
-  source: DashboardConnectSource,
+  source: DashboardSyncSource,
   sourceDashboard: NonNullable<EmailSourceWorkerOptions['sourceDashboard']>,
   disconnected: Set<V04PublicSourceId>,
 ): void {
+  // A source on this computer has no credential handle: it is connected when
+  // the this-computer record says so.
+  if (isDashboardThisComputerSource(source)) {
+    const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
+    if (!readThisComputerHandles(registryPath).some((handle) => handle.handle === `${source}.this_computer`)) {
+      throw new EmailSourceWorkerError(409, 'source_disconnected', 'Reconnect this source before starting a manual read.');
+    }
+    return;
+  }
   const sourceId = dashboardPublicSourceIdForConnectSource(source);
   if (!sourceId) return;
   const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
@@ -5926,11 +5938,20 @@ function markDashboardSourceConnected(
   if (source === 'readwise') disconnected.delete('readwise.library');
 }
 
-function isDashboardSyncSource(source: DashboardConnectSource | string): source is DashboardConnectSource {
-  return source === 'gmail' || source === 'google-drive' || source === 'dropbox' || source === 'x' || source === 'readwise';
+function isDashboardSyncSource(source: DashboardSyncSource | string): source is DashboardSyncSource {
+  return source === 'gmail' || source === 'google-drive' || source === 'dropbox' || source === 'x' || source === 'readwise'
+    || isDashboardThisComputerSource(source);
 }
 
-function dashboardSchedulerSourceId(source: DashboardConnectSource): string | undefined {
+/** A source with no account, by the id its Connect action names (read off the definitions). */
+function isDashboardThisComputerSource(source: string): source is DashboardThisComputerSource {
+  return DASHBOARD_SUPPORTED_SOURCES.some((definition) =>
+    definition.connect_action.kind === 'this_computer' && definition.connect_action.source === source);
+}
+
+function dashboardSchedulerSourceId(source: DashboardSyncSource): string | undefined {
+  // A source on this computer is scheduled under its own id.
+  if (isDashboardThisComputerSource(source)) return source;
   if (source === 'gmail') return 'gmail.email';
   if (source === 'google-drive') return 'google_drive.docs';
   if (source === 'dropbox') return 'dropbox.files';

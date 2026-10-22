@@ -131,6 +131,8 @@ export interface SourceProgress {
 export interface DashboardSource {
   id: string;
   label: string;
+  /** How a sentence names this source ("your files"); absent: the label. */
+  syncNoun?: string;
   group: 'local' | 'cloud';
   status: DashboardStatus;
   detail?: string;
@@ -585,7 +587,8 @@ export type ChatGptDisconnectSourceId =
   | 'google_drive.docs'
   | 'dropbox.files'
   | 'x.bookmarks'
-  | 'readwise.library';
+  | 'readwise.library'
+  | 'local.files';
 
 /**
  * `olympus_connect_source {source}` → structuredContent. The provider's sign-in
