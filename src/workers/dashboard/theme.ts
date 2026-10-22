@@ -248,8 +248,12 @@ input, select, textarea { max-width: 100%; min-width: 0; }
 .attncard.error { background: var(--err-bg); border-color: var(--err-line); }
 .attncard.error::before { background: var(--bad); }
 .attncard.plain { background: var(--panel); border-color: var(--line); }
-.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before { display: none; }
+.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before, .attncard.plain[data-dashboard-control-gate]::before { display: none; }
 .attncard .grow { flex: 1; }
+/* One rule for a row's actions: they sit on the row's right edge, and when a
+   narrow row wraps them under the text they stay on that right edge. */
+.attncard > :not(.grow) { margin-left: auto; }
+.attncard > .rowform { justify-content: flex-end; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
    an agent-prompt button squeezed a whole paragraph into a ~30-character column
@@ -364,7 +368,7 @@ table { table-layout: fixed; border-collapse: collapse; width: 100%; font-size: 
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
 /* A not-connected source: one flat list row, like the source rows above it. */
-.setrow { display: grid; grid-template-columns: 20px minmax(0, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
+.setrow { display: grid; grid-template-columns: 20px minmax(0, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 16px; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
 .setrow.noblurb { grid-template-columns: 20px minmax(0, 1fr) auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
