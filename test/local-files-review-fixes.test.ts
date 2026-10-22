@@ -272,6 +272,21 @@ describe('replay', () => {
     expect(items.map((item) => item.metadata['name'])).toEqual(['fresh.txt']);
   });
 
+  test('a skipped folder renamed to another case is not replayed in', async () => {
+    const f = fixture((home) => join(home, 'proj'));
+    f.selections.push({ key: join(f.chosen, 'Private'), state: 'exclude' });
+    mkdirSync(join(f.chosen, 'private'), { recursive: true });
+    writeFileSync(join(f.chosen, 'private', 'a.txt'), 'secret');
+    writeFileSync(join(f.chosen, 'open.txt'), 'fine');
+    const hub = fakeHub(() => [
+      { type: 'create', path: join(f.chosen, 'private', 'a.txt') },
+      { type: 'create', path: join(f.chosen, 'open.txt') },
+    ]);
+    cleanups.push(() => hub.close());
+    const items = await replay({ f, root: f.chosen, hub });
+    expect(items.map((item) => item.metadata['name'])).toEqual(['open.txt']);
+  });
+
   test('a deleted folder with more indexed files than one lookup returns loses all of them', async () => {
     const f = fixture((home) => join(home, 'proj'));
     const gone = join(f.chosen, 'gone');
