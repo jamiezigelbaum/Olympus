@@ -124,7 +124,7 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
  * may carry (enum values). Anything else falls back to checking again.
  */
 const OAUTH_SOURCES = new Set<ChatGptOAuthSource>(['gmail', 'google-drive', 'dropbox']);
-const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files']);
+const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
 const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [DASHBOARD_TOOL_NAME]: {},
@@ -953,6 +953,7 @@ const SOURCE_LABELS: Record<string, string> = {
   'gmail.email': 'Gmail',
   'google_drive.docs': 'Google Drive',
   'dropbox.files': 'Dropbox',
+  'local.files': 'Files on this computer',
   'x.bookmarks': 'X bookmarks',
   'readwise.library': 'Readwise',
 };
@@ -1159,6 +1160,14 @@ function scopeSummaryText(summary: ScopeSummary): string {
     : `${label}: ${summary.shown} labels listed; choices ${state}. The mail choices are shown to the owner in the Olympus panel.`;
 }
 
+const WHOLE_WORD_KEYS = ['row', 'prompt', 'confirm', 'summary', 'onlyFull', 'needConfirm'] as const;
+
+/** The source's words for choosing everything, copied field by field; anything incomplete is dropped. */
+function copyWholeWords(words: FolderScopeList['whole_words']): FolderScopeList['whole_words'] | undefined {
+  if (!words || typeof words !== 'object' || !WHOLE_WORD_KEYS.every((key) => typeof words[key] === 'string')) return undefined;
+  return Object.fromEntries(WHOLE_WORD_KEYS.map((key) => [key, text(words[key])])) as NonNullable<FolderScopeList['whole_words']>;
+}
+
 const ACCESS_STATES: ReadonlySet<string> = new Set(['needs_permission', 'waiting', 'denied', 'needs_helper', 'needs_full_disk_access']);
 
 /** The computer's permission note for a folder, copied field by field; anything unexpected is dropped. */
@@ -1177,7 +1186,7 @@ function copyScopeList(list: ScopeList): ScopeList {
   if (list.kind === 'folders') {
     const out: FolderScopeList = {
       kind: 'folders',
-      source_id: list.source_id === 'dropbox.files' ? 'dropbox.files' : 'google_drive.docs',
+      source_id: list.source_id === 'dropbox.files' || list.source_id === 'local.files' ? list.source_id : 'google_drive.docs',
       account_generation: opaque(list.account_generation),
       scope_revision: opaque(list.scope_revision),
       status: list.status === 'approved' ? 'approved' : 'scope_pending',
@@ -1191,11 +1200,13 @@ function copyScopeList(list: ScopeList): ScopeList {
         ...(finite(node.size_bytes) ? { size_bytes: whole(node.size_bytes) } : {}),
         ...(finite(node.file_count) ? { file_count: whole(node.file_count) } : {}),
         ...(copyAccess(node.access) ? { access: copyAccess(node.access)! } : {}),
+        ...(node.is_disk === true ? { is_disk: true as const } : {}),
       })),
       ...(list.next_cursor ? { next_cursor: opaque(list.next_cursor) } : {}),
       ...(copyAccess(list.access) ? { access: copyAccess(list.access)! } : {}),
       ...(list.next_cursor && finite(list.remaining) ? { remaining: whole(list.remaining) } : {}),
       ...(list.truncated === true ? { truncated: true as const } : {}),
+      ...(copyWholeWords(list.whole_words) ? { whole_words: copyWholeWords(list.whole_words)! } : {}),
       selections: (list.selections ?? []).slice(0, MAX_SCOPE_NODES).map(copySelection),
       whole_account_selected: list.whole_account_selected === true,
     };

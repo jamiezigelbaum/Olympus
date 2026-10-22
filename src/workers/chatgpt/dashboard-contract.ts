@@ -470,6 +470,11 @@ export const COMPUTER_META_KEY = 'olympus/computer';
 export interface ComputerDashboardMeta {
   /** Chosen missing roots; this metadata is never sent through ChatGPT. */
   missingFolders?: Array<{ sourceId: string; paths: string[] }>;
+  /**
+   * Sources stalled on a folder the Mac will not let Olympus open, with the
+   * System Settings page that fixes it (macOS only; absent elsewhere).
+   */
+  permissionSettings?: Array<{ sourceId: string; url: string }>;
   /** Present while the overnight guard reports a known state; `on` is the operator override. */
   indexFaster?: { on: boolean };
   /**
@@ -621,6 +626,8 @@ export interface ScopeFolderNode {
   file_count?: number;
   /** The computer asks the person before this folder opens (control-ui-contract.ts OlympusFolderAccess). */
   access?: ScopeFolderAccess;
+  /** A mounted disk rather than a folder: listed after the folders, tagged Disk. */
+  is_disk?: true;
 }
 
 /** Where the computer's own privacy rules stand for a folder, in the words the picker shows. */
@@ -654,6 +661,8 @@ export interface FolderScopeList {
   truncated?: true;
   /** Why this level lists no folders, or what the whole computer needs (top level). */
   access?: ScopeFolderAccess;
+  /** The source's own words for choosing everything (file-scope-sources.ts), when it has no account. */
+  whole_words?: { row: string; prompt: string; confirm: string; summary: string; onlyFull: string; needConfirm: string };
   selections: ScopeSelection[];
   whole_account_selected: boolean;
 }

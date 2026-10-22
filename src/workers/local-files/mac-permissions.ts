@@ -81,6 +81,7 @@ export const MAC_ACCESS_COPY = {
   needsPermission: 'Your Mac will ask before Olympus opens this folder.',
   waiting: 'Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.',
   needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
+  needsHelperWholeComputer: 'To read the whole computer, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then open this list again.',
   denied: (kind: GuardedFolderKind) =>
     `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under Olympus Engine. Then choose Try again.`,
   fullDiskAccess: 'To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save.',
@@ -204,7 +205,7 @@ export class MacPermissions {
   /** The top level's note about searching the whole computer, when Full Disk Access is not on. */
   fullDiskAccessNote(): OlympusFolderAccess | undefined {
     if (!this.active || this.hasFullDiskAccess()) return undefined;
-    if (!this.hasHelper()) return { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelper };
+    if (!this.hasHelper()) return { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelperWholeComputer };
     return { state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL };
   }
 

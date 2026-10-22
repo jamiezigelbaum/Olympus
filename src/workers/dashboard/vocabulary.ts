@@ -27,7 +27,7 @@ export const DASHBOARD_UPDATE_COPY = {
 };
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
-export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder';
+export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
 
@@ -1791,6 +1791,8 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   /** Beside a folder your Mac asks about before Olympus may open it. */
   needsPermission: 'Needs permission',
   openPrivacySettings: 'Open privacy settings',
+  /** Beside a mounted disk in the list of folders, so it does not read as a folder. */
+  disk: 'Disk',
   foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',
   mailTitle: 'Choose mail',
   mailIntro: 'Choose which {source} mail Olympus may read. Nothing starts until you save.',

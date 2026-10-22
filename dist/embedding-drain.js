@@ -30195,7 +30195,15 @@ var init_file_scope_sources = __esm(() => {
     },
     rootKeys: ["/"],
     label: "Files on this computer",
-    dispositionSourceId: "local.files"
+    dispositionSourceId: "local.files",
+    wholeScopeWords: {
+      row: "Everything on this computer",
+      prompt: "Olympus will read every folder on this computer, now and later, except folders you set to Names only or Skip.",
+      confirm: "Yes, use the whole computer",
+      summary: "Everything else on this computer: fully indexed, including folders added later.",
+      onlyFull: "The whole computer is all or nothing. Set Names only or Skip on folders instead.",
+      needConfirm: "Confirm the whole computer first."
+    }
   });
 });
 
@@ -32258,7 +32266,7 @@ var init_source_dashboard = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -32571,6 +32579,7 @@ var init_vocabulary = __esm(() => {
     foldersTitle: "Choose folders",
     needsPermission: "Needs permission",
     openPrivacySettings: "Open privacy settings",
+    disk: "Disk",
     foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
     mailTitle: "Choose mail",
     mailIntro: "Choose which {source} mail Olympus may read. Nothing starts until you save.",
@@ -35430,6 +35439,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== "done";
       if (stalledWords)
         add(box, el("p", "stall-line", stalledWords));
+      const fixes = progress.stalledReason === "scope_root_permission_needed" && onComputer() && state.computerMeta && Array.isArray(state.computerMeta.permissionSettings) ? state.computerMeta.permissionSettings.filter((entry) => entry && entry.sourceId === source.id && typeof entry.url === "string" && entry.url.indexOf("x-apple.systempreferences:") === 0) : [];
+      if (fixes.length) {
+        const link = el("a", "btn", config.picker.copy.openPrivacySettings);
+        link.href = String(fixes[0].url);
+        link.setAttribute("data-key", "source:" + String(source.id) + ":privacy-settings");
+        add(box, add(el("div", "actions"), link));
+      }
       if (real)
         add(box, progressBar(progress.percent, name + ": " + (stalledWords || sourceProgressLabel(progress))));
       return box;
@@ -36643,6 +36659,7 @@ function chatgptPickerProgram(kit) {
       remaining: new Map,
       truncated: new Set,
       access: new Map,
+      wholeWords: null,
       ancestors: new Map,
       own: new Map,
       whole: false,
@@ -36729,6 +36746,7 @@ function chatgptPickerProgram(kit) {
       p.generation = page2.account_generation;
       p.revision = page2.scope_revision;
       p.whole = page2.whole_account_selected === true;
+      p.wholeWords = page2.whole_words && typeof page2.whole_words === "object" ? page2.whole_words : null;
       p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page2.selections) ? page2.selections : [];
       for (const selection of saved) {
@@ -36749,7 +36767,7 @@ function chatgptPickerProgram(kit) {
       p.catalog.set(node.key, node);
       p.ancestors.set(node.key, trail);
     }
-    const nodes = previous.concat(fresh).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
+    const nodes = previous.concat(fresh).sort((a, b) => (a.is_disk === true ? 1 : 0) - (b.is_disk === true ? 1 : 0) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const levelAccess = page2.access && typeof page2.access.message === "string" && page2.access.message ? page2.access : null;
     if (levelAccess)
       p.access.set(parentKey, levelAccess);
@@ -36881,7 +36899,7 @@ function chatgptPickerProgram(kit) {
     return state ? Q.states[state] : Q.notIncluded;
   }
   function sourceName(from) {
-    return from === ACCOUNT ? fill2(Q.accountRow, { source: p.label }) : nameOf(from);
+    return from === ACCOUNT ? wholeWord("row") : nameOf(from);
   }
   function size(bytes) {
     const units = ["bytes", "KB", "MB", "GB", "TB"];
@@ -37036,7 +37054,7 @@ function chatgptPickerProgram(kit) {
       parts.push(part);
     }
     if (p.whole)
-      lines.push(fill2(Q.summaryWhole, { source: p.label }));
+      lines.push(wholeWord("summary"));
     if (parts.length) {
       const bytes = indexedBytes();
       lines.push(parts.join(", ") + (bytes > 0 ? " · " + fill2(Q.summarySize, { size: size(bytes) }) : ""));
@@ -37107,10 +37125,17 @@ function chatgptPickerProgram(kit) {
       kit.render(focus);
     });
   }
+  function wholeWord(kind) {
+    const own3 = p.wholeWords && typeof p.wholeWords[kind] === "string" ? String(p.wholeWords[kind]) : "";
+    if (own3)
+      return own3;
+    const values = { source: p.label };
+    return kind === "row" ? fill2(Q.accountRow, values) : kind === "prompt" ? fill2(Q.wholePrompt, values) : kind === "confirm" ? Q.wholeConfirm : kind === "onlyFull" ? Q.wholeOnlyFull : kind === "needConfirm" ? Q.needConfirm : fill2(Q.summaryWhole, values);
+  }
   function wholeConfirm() {
     const confirm = el("div", "confirm-box");
     confirm.setAttribute("role", "alert");
-    add(confirm, el("p", "strong", fill2(Q.wholePrompt, { source: p.label })), add(el("div", "actions"), kit.button(Q.wholeConfirm, "picker:whole:yes", p.saving ? null : () => {
+    add(confirm, el("p", "strong", wholeWord("prompt")), add(el("div", "actions"), kit.button(wholeWord("confirm"), "picker:whole:yes", p.saving ? null : () => {
       p.wholeConfirmed = true;
       kit.render("picker:seg:" + ACCOUNT + ":ingest");
     }, "danger"), kit.button(Q.cancel, "picker:whole:no", p.saving ? null : () => {
@@ -37204,10 +37229,10 @@ function chatgptPickerProgram(kit) {
     });
   }
   function accountControl() {
-    return segControl(fill2(Q.accountRow, { source: p.label }), "picker:seg:" + ACCOUNT + ":", {
+    return segControl(wholeWord("row"), "picker:seg:" + ACCOUNT + ":", {
       pressed: p.whole ? "ingest" : "",
       inherited: "",
-      blocked: (state) => state === "ingest" ? "" : Q.wholeOnlyFull,
+      blocked: (state) => state === "ingest" ? "" : wholeWord("onlyFull"),
       note: () => "",
       pick: (state) => choose(ACCOUNT, p.whole ? "" : state, "picker:seg:" + ACCOUNT + ":" + state)
     });
@@ -37255,6 +37280,8 @@ function chatgptPickerProgram(kit) {
       ask.title = String(node.access.message || "");
       add(main, ask);
     }
+    if (node && node.is_disk === true)
+      add(main, el("span", "ftag", Q.disk));
     add(target, main);
     if (node) {
       const [bytes, files] = nodeMeta(node);
@@ -37363,7 +37390,7 @@ function chatgptPickerProgram(kit) {
       add(body, only);
       return;
     }
-    add(body, topRow(fill2(Q.accountRow, { source: p.label }), accountControl()));
+    add(body, topRow(wholeWord("row"), accountControl()));
     if (p.whole && !p.wholeConfirmed)
       add(body, wholeConfirm());
     if (p.whole && p.access.get("") && p.access.get("").state !== "denied")
@@ -37431,7 +37458,7 @@ function chatgptPickerProgram(kit) {
     if (p.own.size >= MAX_RULES)
       add(summary, el("p", "reason strong", fill2(Q.capReached, { max: kit.count(MAX_RULES) })));
     add(footer, summary);
-    add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ""));
+    add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? wholeWord("needConfirm") : !anyChosen() && !p.edited ? Q.needChoice : ""));
     return footer;
   }
   function foldersView(page2) {
@@ -37730,7 +37757,7 @@ function chatgptPickerProgram(kit) {
     const deep = p.mode === "folders" && p.path.length > 0;
     const backButton = deep ? kit.button(Q.up, "picker:up", escape, "plain") : kit.button(p.pick ? p.pick.words.back : Q.back, "picker:back", escape, "plain");
     if (deep) {
-      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : fill2(Q.accountRow, { source: p.label });
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : wholeWord("row");
       backButton.setAttribute("aria-label", fill2(Q.upTo, { name: above }));
     }
     backButton.className = "btn back";
@@ -39011,6 +39038,221 @@ var init_delphi = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_secret_store();
+});
+
+// src/workers/local-files/mac-permissions.ts
+import { existsSync as existsSync19, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync18 } from "node:fs";
+import { opendir } from "node:fs/promises";
+import { dirname as dirname25, join as join32 } from "node:path";
+function permissionHostPresent(env) {
+  if (env[ENGINE_HELPER_ENV])
+    return true;
+  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1" && env.OLYMPUS_MANAGED_WORKER !== "1";
+}
+
+class MacPermissions {
+  platform;
+  home;
+  helperPresent;
+  memoryPath;
+  askTimeoutMs;
+  list;
+  listProtected;
+  now;
+  inFlight = new Map;
+  memory;
+  constructor(options) {
+    this.platform = options.platform ?? process.platform;
+    this.home = options.home;
+    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
+    this.memoryPath = options.memoryPath;
+    this.askTimeoutMs = options.askTimeoutMs ?? 8000;
+    this.list = options.list ?? (async (path) => {
+      const dir = await opendir(path);
+      try {
+        await dir.read();
+      } finally {
+        await dir.close().catch(() => {
+          return;
+        });
+      }
+    });
+    this.listProtected = options.listProtected ?? ((path) => {
+      const dir = opendirSync(path);
+      try {
+        dir.readSync();
+      } finally {
+        dir.closeSync();
+      }
+    });
+    this.now = options.now ?? Date.now;
+  }
+  get active() {
+    return this.platform === "darwin";
+  }
+  hasHelper() {
+    return this.helperPresent();
+  }
+  guardOf(realPath, volume) {
+    if (!this.active)
+      return;
+    const tops = [
+      ["desktop", join32(this.home, "Desktop")],
+      ["documents", join32(this.home, "Documents")],
+      ["downloads", join32(this.home, "Downloads")],
+      ["icloud", join32(this.home, "Library", "Mobile Documents")]
+    ];
+    for (const [kind, root] of tops) {
+      if (isWithinScopePath(realPath, root))
+        return { kind, root };
+    }
+    if (volume && !volume.primary && (volume.kind === "removable" || volume.kind === "network")) {
+      return { kind: volume.kind, root: volume.mountPoint };
+    }
+    return;
+  }
+  blocksReadWithoutHelper(realPath, volume) {
+    if (!this.active || this.hasHelper())
+      return false;
+    if (this.guardOf(realPath, volume))
+      return true;
+    if (realPath === "/" || realPath === "/Volumes")
+      return true;
+    return [join32(this.home, "Desktop"), join32(this.home, "Documents"), join32(this.home, "Downloads"), join32(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+  }
+  nodeAccess(guard) {
+    if (this.recall(guard) === "granted")
+      return;
+    return {
+      state: this.hasHelper() ? "needs_permission" : "needs_helper",
+      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : MAC_ACCESS_COPY.needsHelper
+    };
+  }
+  async open(guard) {
+    if (!this.hasHelper()) {
+      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelper };
+    }
+    const answer = await this.ask(guard);
+    if (answer === "granted")
+      return;
+    if (answer === "waiting")
+      return { state: "waiting", message: MAC_ACCESS_COPY.waiting };
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+  }
+  noteDenied(guard) {
+    this.remember(guard, "denied");
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+  }
+  fullDiskAccessNote() {
+    if (!this.active || this.hasFullDiskAccess())
+      return;
+    if (!this.hasHelper())
+      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelperWholeComputer };
+    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL };
+  }
+  hasFullDiskAccess() {
+    for (const path of [join32(this.home, "Library", "Safari"), join32(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+      try {
+        this.listProtected(path);
+        return true;
+      } catch (error) {
+        if (error.code === "ENOENT")
+          continue;
+        return false;
+      }
+    }
+    return false;
+  }
+  ask(guard) {
+    let pending = this.inFlight.get(guard.root);
+    if (!pending) {
+      pending = this.list(guard.root).then(() => {
+        this.remember(guard, "granted");
+        return "granted";
+      }, (error) => {
+        if (error.code === "EPERM" || error.code === "EACCES") {
+          this.remember(guard, "denied");
+          return "denied";
+        }
+        throw error;
+      }).finally(() => {
+        this.inFlight.delete(guard.root);
+      });
+      this.inFlight.set(guard.root, pending);
+    }
+    const waiting = new Promise((resolve8) => {
+      const timer = setTimeout(() => resolve8("waiting"), this.askTimeoutMs);
+      timer.unref?.();
+      pending.finally(() => clearTimeout(timer)).catch(() => {
+        return;
+      });
+    });
+    return Promise.race([pending, waiting]);
+  }
+  key(guard) {
+    return guard.root;
+  }
+  recall(guard) {
+    return this.load()[this.key(guard)]?.answer;
+  }
+  remember(guard, answer) {
+    const memory = this.load();
+    if (memory[this.key(guard)]?.answer === answer)
+      return;
+    memory[this.key(guard)] = { answer, at: new Date(this.now()).toISOString() };
+    if (!this.memoryPath)
+      return;
+    try {
+      mkdirSync15(dirname25(this.memoryPath), { recursive: true, mode: 448 });
+      writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
+`);
+    } catch {}
+  }
+  load() {
+    if (this.memory)
+      return this.memory;
+    let loaded = {};
+    if (this.memoryPath && existsSync19(this.memoryPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync18(this.memoryPath, "utf8"));
+        if (parsed && typeof parsed === "object")
+          loaded = parsed;
+      } catch {
+        loaded = {};
+      }
+    }
+    this.memory = loaded;
+    return loaded;
+  }
+}
+var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER", FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders", SETTINGS_NAMES, PLACE_WORDS, MAC_ACCESS_COPY;
+var init_mac_permissions = __esm(() => {
+  init_atomic_file();
+  init_paths();
+  SETTINGS_NAMES = {
+    desktop: "Desktop Folder",
+    documents: "Documents Folder",
+    downloads: "Downloads Folder",
+    icloud: "iCloud Drive",
+    removable: "Removable Volumes",
+    network: "Network Volumes"
+  };
+  PLACE_WORDS = {
+    desktop: "your Desktop",
+    documents: "your Documents",
+    downloads: "your Downloads",
+    icloud: "iCloud Drive",
+    removable: "a USB drive or memory card",
+    network: "a network drive"
+  };
+  MAC_ACCESS_COPY = {
+    needsPermission: "Your Mac will ask before Olympus opens this folder.",
+    waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
+    needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
+    needsHelperWholeComputer: 'To read the whole computer, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then open this list again.',
+    denied: (kind) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under Olympus Engine. Then choose Try again.`,
+    fullDiskAccess: "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save."
+  };
 });
 
 // src/core/engine-helper-names.ts
@@ -43147,221 +43389,8 @@ ${source.corpusId}
 ${task.id}`;
 }
 
-// src/workers/local-files/mac-permissions.ts
-init_atomic_file();
-init_paths();
-import { existsSync as existsSync19, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync18 } from "node:fs";
-import { opendir } from "node:fs/promises";
-import { dirname as dirname25, join as join32 } from "node:path";
-var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER";
-var FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
-var FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
-var SETTINGS_NAMES = {
-  desktop: "Desktop Folder",
-  documents: "Documents Folder",
-  downloads: "Downloads Folder",
-  icloud: "iCloud Drive",
-  removable: "Removable Volumes",
-  network: "Network Volumes"
-};
-var PLACE_WORDS = {
-  desktop: "your Desktop",
-  documents: "your Documents",
-  downloads: "your Downloads",
-  icloud: "iCloud Drive",
-  removable: "a USB drive or memory card",
-  network: "a network drive"
-};
-var MAC_ACCESS_COPY = {
-  needsPermission: "Your Mac will ask before Olympus opens this folder.",
-  waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
-  needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
-  denied: (kind) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under Olympus Engine. Then choose Try again.`,
-  fullDiskAccess: "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save."
-};
-function permissionHostPresent(env) {
-  if (env[ENGINE_HELPER_ENV])
-    return true;
-  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1" && env.OLYMPUS_MANAGED_WORKER !== "1";
-}
-
-class MacPermissions {
-  platform;
-  home;
-  helperPresent;
-  memoryPath;
-  askTimeoutMs;
-  list;
-  listProtected;
-  now;
-  inFlight = new Map;
-  memory;
-  constructor(options) {
-    this.platform = options.platform ?? process.platform;
-    this.home = options.home;
-    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
-    this.memoryPath = options.memoryPath;
-    this.askTimeoutMs = options.askTimeoutMs ?? 8000;
-    this.list = options.list ?? (async (path) => {
-      const dir = await opendir(path);
-      try {
-        await dir.read();
-      } finally {
-        await dir.close().catch(() => {
-          return;
-        });
-      }
-    });
-    this.listProtected = options.listProtected ?? ((path) => {
-      const dir = opendirSync(path);
-      try {
-        dir.readSync();
-      } finally {
-        dir.closeSync();
-      }
-    });
-    this.now = options.now ?? Date.now;
-  }
-  get active() {
-    return this.platform === "darwin";
-  }
-  hasHelper() {
-    return this.helperPresent();
-  }
-  guardOf(realPath, volume) {
-    if (!this.active)
-      return;
-    const tops = [
-      ["desktop", join32(this.home, "Desktop")],
-      ["documents", join32(this.home, "Documents")],
-      ["downloads", join32(this.home, "Downloads")],
-      ["icloud", join32(this.home, "Library", "Mobile Documents")]
-    ];
-    for (const [kind, root] of tops) {
-      if (isWithinScopePath(realPath, root))
-        return { kind, root };
-    }
-    if (volume && !volume.primary && (volume.kind === "removable" || volume.kind === "network")) {
-      return { kind: volume.kind, root: volume.mountPoint };
-    }
-    return;
-  }
-  blocksReadWithoutHelper(realPath, volume) {
-    if (!this.active || this.hasHelper())
-      return false;
-    if (this.guardOf(realPath, volume))
-      return true;
-    if (realPath === "/" || realPath === "/Volumes")
-      return true;
-    return [join32(this.home, "Desktop"), join32(this.home, "Documents"), join32(this.home, "Downloads"), join32(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
-  }
-  nodeAccess(guard) {
-    if (this.recall(guard) === "granted")
-      return;
-    return {
-      state: this.hasHelper() ? "needs_permission" : "needs_helper",
-      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : MAC_ACCESS_COPY.needsHelper
-    };
-  }
-  async open(guard) {
-    if (!this.hasHelper()) {
-      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelper };
-    }
-    const answer = await this.ask(guard);
-    if (answer === "granted")
-      return;
-    if (answer === "waiting")
-      return { state: "waiting", message: MAC_ACCESS_COPY.waiting };
-    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
-  }
-  noteDenied(guard) {
-    this.remember(guard, "denied");
-    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
-  }
-  fullDiskAccessNote() {
-    if (!this.active || this.hasFullDiskAccess())
-      return;
-    if (!this.hasHelper())
-      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelper };
-    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL };
-  }
-  hasFullDiskAccess() {
-    for (const path of [join32(this.home, "Library", "Safari"), join32(this.home, "Library", "Application Support", "com.apple.TCC")]) {
-      try {
-        this.listProtected(path);
-        return true;
-      } catch (error) {
-        if (error.code === "ENOENT")
-          continue;
-        return false;
-      }
-    }
-    return false;
-  }
-  ask(guard) {
-    let pending = this.inFlight.get(guard.root);
-    if (!pending) {
-      pending = this.list(guard.root).then(() => {
-        this.remember(guard, "granted");
-        return "granted";
-      }, (error) => {
-        if (error.code === "EPERM" || error.code === "EACCES") {
-          this.remember(guard, "denied");
-          return "denied";
-        }
-        throw error;
-      }).finally(() => {
-        this.inFlight.delete(guard.root);
-      });
-      this.inFlight.set(guard.root, pending);
-    }
-    const waiting = new Promise((resolve8) => {
-      const timer = setTimeout(() => resolve8("waiting"), this.askTimeoutMs);
-      timer.unref?.();
-      pending.finally(() => clearTimeout(timer)).catch(() => {
-        return;
-      });
-    });
-    return Promise.race([pending, waiting]);
-  }
-  key(guard) {
-    return guard.root;
-  }
-  recall(guard) {
-    return this.load()[this.key(guard)]?.answer;
-  }
-  remember(guard, answer) {
-    const memory = this.load();
-    if (memory[this.key(guard)]?.answer === answer)
-      return;
-    memory[this.key(guard)] = { answer, at: new Date(this.now()).toISOString() };
-    if (!this.memoryPath)
-      return;
-    try {
-      mkdirSync15(dirname25(this.memoryPath), { recursive: true, mode: 448 });
-      writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
-`);
-    } catch {}
-  }
-  load() {
-    if (this.memory)
-      return this.memory;
-    let loaded = {};
-    if (this.memoryPath && existsSync19(this.memoryPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync18(this.memoryPath, "utf8"));
-        if (parsed && typeof parsed === "object")
-          loaded = parsed;
-      } catch {
-        loaded = {};
-      }
-    }
-    this.memory = loaded;
-    return loaded;
-  }
-}
-
 // src/workers/local-files/scheduler-source.ts
+init_mac_permissions();
 init_paths();
 init_scope();
 var DAY_MS = 24 * 60 * 60 * 1000;
@@ -43841,10 +43870,12 @@ function registerFileScopeBrowserFactory(sourceId, factory) {
 }
 
 // src/workers/local-files/scope-browser.ts
+init_mac_permissions();
 init_paths();
 init_scope();
 
 // src/workers/local-files/mac-settings.ts
+init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync21 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
@@ -43965,6 +43996,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
               kind: "folder",
               has_children: true,
               selectable: true,
+              is_disk: true,
               ...diskAccess ? { access: diskAccess } : {}
             };
           })

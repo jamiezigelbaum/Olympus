@@ -47,6 +47,23 @@ export interface FileScopeSourceDefinition {
   label: string;
   /** The ingestion-disposition source id the dashboard files its exclusions under. */
   dispositionSourceId: string;
+  /**
+   * The picker's words for choosing everything in this source, when "account"
+   * would be wrong (a computer has no account). Absent: the picker's own words.
+   */
+  wholeScopeWords?: FileScopeWholeWords;
+}
+
+/** How the picker names "everything" for a source; `{source}` is not used here. */
+export interface FileScopeWholeWords {
+  row: string;
+  prompt: string;
+  confirm: string;
+  summary: string;
+  /** The note beside a disabled Names only or Skip on the everything row. */
+  onlyFull: string;
+  /** The save button's reason while the everything choice is unconfirmed. */
+  needConfirm: string;
 }
 
 const definitions = new Map<string, FileScopeSourceDefinition>();
@@ -151,4 +168,12 @@ registerBuiltIn({
   rootKeys: ['/'],
   label: 'Files on this computer',
   dispositionSourceId: 'local.files',
+  wholeScopeWords: {
+    row: 'Everything on this computer',
+    prompt: 'Olympus will read every folder on this computer, now and later, except folders you set to Names only or Skip.',
+    confirm: 'Yes, use the whole computer',
+    summary: 'Everything else on this computer: fully indexed, including folders added later.',
+    onlyFull: 'The whole computer is all or nothing. Set Names only or Skip on folders instead.',
+    needConfirm: 'Confirm the whole computer first.',
+  },
 });

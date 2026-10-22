@@ -54,6 +54,7 @@ import { callChatGptTool, type ChatGptSurfaceOptions } from '../chatgpt/mcp-surf
 import type { ChatGptToolResult } from '../chatgpt/response-builder.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-tools.ts';
 import type { OperationContext } from '../../core/operations.ts';
+import { FILES_AND_FOLDERS_URL } from '../local-files/mac-permissions.ts';
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
 import { DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../http.ts';
 
@@ -336,10 +337,15 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
       const missingFolders = (view?.sources ?? []).flatMap(source => source.schedule?.missing_folders?.length
         ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
+      const permissionSettings = process.platform === 'darwin'
+        ? (view?.sources ?? []).flatMap(source => source.schedule?.degraded_reason === 'scope_root_permission_needed'
+          ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : [])
+        : [];
       const waiting = context.localSession === true ? waitingCount(options) : 0;
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0) return result;
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
+        ...(permissionSettings.length ? { permissionSettings } : {}),
         ...(on !== undefined ? { indexFaster: { on } } : {}),
         ...(unpair.length > 0 ? { unpair } : {}),
         ...(unreadable.length > 0 ? { unreadable } : {}),

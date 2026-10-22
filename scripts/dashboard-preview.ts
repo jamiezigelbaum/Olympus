@@ -37,6 +37,7 @@ import {
   renderDashboardLocalPage,
 } from '../src/workers/dashboard/index.ts';
 import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME, SCOPE_LIST_TOOL_NAME, SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
 import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from '../src/workers/chatgpt/dashboard-view-model.ts';
@@ -790,9 +791,6 @@ type PreviewFolderAccess = { state: 'needs_permission' | 'waiting' | 'denied' | 
 /**
  * The folder picker's answers for "Files on this computer", as the Mac's
  * scope browser gives them (local-files/scope-browser.ts), with a fake home.
- * The product's ChatGPT panel does not offer Choose folders for this source
- * yet, so the harness adds that button to the row (see
- * previewDashboardToolResult); the picker itself is the shipped one.
  *   local-files-picker          helper installed: Desktop, Documents, Downloads
  *                               and iCloud Drive say Needs permission; opening
  *                               Desktop lists its folders (the Mac allowed it)
@@ -815,7 +813,7 @@ export function previewScopeList(state: string, args: { parent_key?: unknown }) 
     selectable: true,
     ...extra,
   });
-  const base = { kind: 'folders' as const, source_id: 'local.files', account_generation: 'preview-generation', scope_revision: 'preview-revision', status: 'scope_pending' as const, selections: [], whole_account_selected: false };
+  const base = { kind: 'folders' as const, source_id: 'local.files', whole_words: getFileScopeSource('local.files')!.wholeScopeWords, account_generation: 'preview-generation', scope_revision: 'preview-revision', status: 'scope_pending' as const, selections: [], whole_account_selected: false };
   const parent = typeof args.parent_key === 'string' ? args.parent_key : '';
   let list: Record<string, unknown>;
   if (!parent) {
@@ -830,11 +828,11 @@ export function previewScopeList(state: string, args: { parent_key?: unknown }) 
         folder('Movies'),
         folder('Music'),
         folder('Pictures'),
-        { key: '/@disk-1', name: 'Backup Drive', kind: 'folder', has_children: true, selectable: true, access: guardedAccess },
+        { key: '/@disk-1', name: 'Backup Drive', kind: 'folder', has_children: true, selectable: true, is_disk: true, access: guardedAccess },
       ],
       access: helper
         ? { state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL }
-        : { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelper },
+        : { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelperWholeComputer },
     };
   } else if (parent === `${LOCAL_FILES_HOME}/Desktop`) {
     const access: PreviewFolderAccess | undefined = !helper ? { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelper }
@@ -871,27 +869,14 @@ function pickerAutoScript(spec: string): string {
     + `setTimeout(tick,300);})();</script>`;
 }
 
-/** The harness adds the Choose folders button the product panel does not show for this source yet. */
-function withLocalFilesChooseFolders<T extends { structuredContent?: unknown }>(state: string, result: T): T {
-  if (!state.startsWith('local-files-') || state === 'local-files-off') return result;
-  const content = result.structuredContent as { sources?: Array<{ id: string; status: string; primary?: unknown }>; needsYou?: Array<{ id: string; fix?: unknown }> } | undefined;
-  const row = content?.sources?.find((source) => source.id === 'local.files');
-  if (!content || !row || !(state === 'local-files-connected' || state.startsWith('local-files-picker'))) return result;
-  const fix = { label: 'Choose folders', tool: SCOPE_LIST_TOOL_NAME, args: { source_id: 'local.files' } };
-  row.primary = fix;
-  const need = content.needsYou?.find((entry) => entry.id === 'source:local.files');
-  if (need) need.fix = fix;
-  return result;
-}
-
 /** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
-  const result = withLocalFilesChooseFolders(state, dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) })));
+  const result = dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) }));
   return {
     ...result,
     _meta: {
       ...(result._meta ?? {}),
-      [COMPUTER_META_KEY]: { indexFaster: { on: indexFasterOn }, ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}) },
+      [COMPUTER_META_KEY]: { indexFaster: { on: indexFasterOn }, ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}), ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}) },
     },
   };
 }

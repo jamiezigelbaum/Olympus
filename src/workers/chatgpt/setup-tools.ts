@@ -24,6 +24,7 @@ import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
 import { randomBytes as setupRandomBytes } from 'node:crypto';
 import { parsePrivacyProfileInput, privacyRuleId } from '../classification/privacy-profile.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { getFileScopeSource } from '../../core/file-scope-sources.ts';
 import type {
   OlympusFolderScopeBrowseResult,
   OlympusMailScopeDraft,
@@ -158,7 +159,7 @@ interface ToolDefinition {
 
 const OAUTH2_REQUIRED = [{ type: 'oauth2', scopes: [] }] as const;
 const OAUTH_SOURCES = ['gmail', 'google-drive', 'dropbox'] as const;
-const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files'] as const;
+const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files', 'local.files'] as const;
 const SCOPE_SOURCE_IDS = ['gmail.email', ...FOLDER_SOURCE_IDS] as const;
 const DISCONNECT_SOURCE_IDS = ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library'] as const;
 const SYNC_SOURCE_IDS = DISCONNECT_SOURCE_IDS;
@@ -740,6 +741,7 @@ function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocat
           ...(sizeBytes !== undefined ? { size_bytes: sizeBytes } : {}),
           ...(fileCount !== undefined ? { file_count: fileCount } : {}),
           ...(node.access ? { access: { ...node.access } } : {}),
+          ...(node.is_disk === true ? { is_disk: true as const } : {}),
         };
       }),
     ...(browse.next_cursor ? { next_cursor: browse.next_cursor } : {}),
@@ -748,6 +750,7 @@ function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocat
       .filter((selection) => !isSecretFolder(secrets, selection.key, selection.ancestor_keys))
       .map((selection) => ({ ...selection })),
     whole_account_selected: browse.whole_account_selected,
+    ...(getFileScopeSource(browse.source_id)?.wholeScopeWords ? { whole_words: { ...getFileScopeSource(browse.source_id)!.wholeScopeWords! } } : {}),
   };
 }
 
