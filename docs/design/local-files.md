@@ -1,8 +1,9 @@
 # Local files
 
-Status: owner direction 2026-10-21. The spine landed in #439. The connector
-(delivery step 2) is built; the signed helper for guarded Mac folders (step 3)
-is not. Where this page and
+Status: owner direction 2026-10-21. The spine landed in #439 and the connector
+in #440. The helper for guarded Mac folders (step 3) is built and proven on a
+real Mac with a development signature (2026-10-22); public releases do not ship
+it until it is signed and notarized under the organization account. Where this page and
 the code differ, the code is current.
 
 ## Outcome
@@ -181,7 +182,7 @@ Facts:
      is.
 2. **Ask per folder, not for the whole disk.**
    - When the user ticks Desktop, Documents, Downloads or iCloud Drive in the
-     picker, the engine touches that folder, and macOS shows "Olympus would
+     picker, the engine touches that folder, and macOS shows "Olympus Engine would
      like to access files in your Documents folder". That's one click and no
      trip to System Settings.
    - This is narrower than Full Disk Access and fits where Apple is heading.
@@ -200,6 +201,14 @@ development and test builds only, owner 2026-10-21, while the organization
 enrolment is pending). This is the case the 2026-10-11 signing ruling named for
 revisiting. Until the helper ships, unguarded folders work on Mac, and
 everything works on Linux.
+
+### Spike results (2026-10-22, development-signed helper)
+
+1. The prompt and Files & Folders name "Olympus Engine" (macOS uses the
+   bundle's file name), never bun. The grant survived a rebuilt engine entry
+   and a re-sign with the same identity.
+2. Changes inside Documents reached search about two seconds after the grant.
+3. Full Disk Access re-add: not yet exercised.
 
 ### Spike before building the helper
 
