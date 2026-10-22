@@ -20,6 +20,7 @@ import { parseOlympusOpenUrl } from '../../src/core/open-targets.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as COPY } from '../../src/workers/dashboard/vocabulary.ts';
 import { describeLeaks, findLeaks, type LeakMarker } from './leak.ts';
 import type { CheckResult } from './report.ts';
+import type { StepTrace } from './journey.ts';
 
 // ---------------------------------------------------------------------------
 // The agent's side: the note and its link
@@ -205,6 +206,8 @@ export interface InboxObservation {
   refusals: { venice: number | null };
   egress: EgressView;
   shots: ShotView[];
+  /** Each browser-driven step, with a picture after it (trace-NN.jpg beside the screenshots). */
+  trace?: StepTrace[];
 }
 
 export interface InboxContext {

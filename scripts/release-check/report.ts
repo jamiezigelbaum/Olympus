@@ -6,6 +6,8 @@
  */
 import { findLeaks, type LeakFinding, type LeakMarker } from './leak.ts';
 import type { Difference } from './upgrade.ts';
+import type { JourneyTrace } from './journey.ts';
+import type { VisualResult } from './visual.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -98,6 +100,10 @@ export interface MachineReport {
   agents: AgentReport[];
   screenshots: ReportFile[];
   logs: ReportFile[];
+  /** Step-by-step traces of the browser-driven parts (journeys and the Inbox leg), with a picture after each step. */
+  traces?: JourneyTrace[];
+  /** The screens compared with the approved pictures. */
+  visual?: VisualResult[];
   upgrade?: UpgradeReport;
 }
 
@@ -286,6 +292,48 @@ function usageTotals(machine: MachineReport): string {
   return `<p class="muted">Agent usage, both stages together: ${[...totals.values()].map((row) => `${escapeHtml(row.label)}: ${row.invocations} invocation(s), ${row.modelCalls} model call(s), ${row.toolCalls} tool call(s), ${row.input} in / ${row.output} out tokens`).join(' · ')}</p>`;
 }
 
+/** The traces, one block per journey: each step with what was done, what was expected, what happened, and the picture after it. */
+export function traceSections(traces: readonly JourneyTrace[] | undefined): string {
+  if (!traces || traces.length === 0) return '';
+  const step = (journey: JourneyTrace, trace: JourneyTrace['steps'][number]): string => {
+    const problems = [
+      ...trace.consoleErrors.map((line) => `console error: ${line}`),
+      ...trace.failedRequests.map((line) => `failed request: ${line}`),
+      ...trace.findings,
+    ];
+    const picture = trace.screenshot ? `<a href="traces/${safeRelative(trace.screenshot)}"><img loading="lazy" src="traces/${safeRelative(trace.screenshot)}" alt="${escapeHtml(`${journey.id} step ${trace.n}`)}"></a>` : '<span class="muted">no picture</span>';
+    return `<li class="step ${trace.ok ? 'pass' : 'fail'}"><div class="stepbody"><strong>${trace.n}. ${escapeHtml(trace.name)}</strong> <span class="badge ${trace.ok ? 'pass' : 'fail'}">${trace.ok ? 'PASS' : 'FAIL'}</span> <span class="muted">${seconds(trace.ms)}${trace.at ? ` · ${escapeHtml(trace.at)}` : ''}</span>`
+      + `<dl><dt>Did</dt><dd>${escapeHtml(trace.action)}</dd><dt>Expected</dt><dd>${escapeHtml(trace.expected)}</dd><dt>Got</dt><dd>${escapeHtml(trace.actual)}</dd>`
+      + (problems.length > 0 ? `<dt>Problems</dt><dd>${problems.map(escapeHtml).join('<br>')}</dd>` : '')
+      + (trace.inventory ? `<dt>On the page</dt><dd class="muted">${escapeHtml(trace.inventory.text)}<br>${escapeHtml(trace.inventory.controls.join(' | '))}</dd>` : '')
+      + `</dl></div><div class="stepshot">${picture}</div></li>`;
+  };
+  return `<h3>Step-by-step traces</h3>${traces.map((journey) => (
+    `<details class="journey"${journey.ok ? '' : ' open'}><summary><span class="badge ${journey.ok ? 'pass' : 'fail'}">${journey.ok ? 'PASS' : 'FAIL'}</span> ${escapeHtml(journey.title)} <span class="muted">(${escapeHtml(journey.source)} · ${journey.steps.length} step(s) · ${seconds(journey.ms)})</span></summary>`
+    + (journey.error ? `<p class="muted">${escapeHtml(journey.error)}</p>` : '')
+    + `<ol class="steps">${journey.steps.map((trace) => step(journey, trace)).join('')}</ol></details>`
+  )).join('')}`;
+}
+
+/** The screens against their approved pictures: the approved one, this run's, and what differs. */
+export function visualSection(results: readonly VisualResult[] | undefined): string {
+  if (!results || results.length === 0) return '';
+  const cell = (path: string | undefined, label: string): string => (path
+    ? `<figure><a href="${safeRelative(path)}"><img loading="lazy" src="${safeRelative(path)}" alt="${escapeHtml(label)}"></a><figcaption>${escapeHtml(label)}</figcaption></figure>`
+    : `<figure><p class="muted">${escapeHtml(label)}: none</p></figure>`);
+  const rows = results.map((result) => {
+    const c = result.comparison;
+    const state = result.updated ? 'candidate written' : c.status === 'match' ? 'matches' : c.status === 'missing' ? 'no approved picture' : c.status === 'size' ? 'size changed' : c.status === 'unreadable' ? 'unreadable' : 'differs';
+    const bad = !result.updated && c.status !== 'match';
+    const open = bad ? ' open' : '';
+    const body = bad || result.updated
+      ? `<div class="trio">${cell(result.baseline, 'Approved')}${cell(result.actual, 'This run')}${cell(result.diff, 'Difference')}</div>`
+      : `<div class="trio">${cell(result.actual, 'This run')}</div>`;
+    return `<details${open}><summary><span class="badge ${bad ? 'fail' : result.updated ? 'warn' : 'pass'}">${escapeHtml(state.toUpperCase())}</span> ${escapeHtml(result.title)} · ${result.width} px · ${escapeHtml(result.theme)} <span class="muted">${(c.diffRatio * 100).toFixed(3)}% of pixels differ</span></summary>${body}</details>`;
+  });
+  return `<h3>Visual baselines</h3>${rows.join('')}`;
+}
+
 function machineSection(machine: MachineReport): string {
   const head = `<section class="machine"><h2>${escapeHtml(machine.label)}</h2>`
     + `<p class="muted">${escapeHtml(machine.os)} · driver ${escapeHtml(machine.driver)}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`;
@@ -296,6 +344,7 @@ function machineSection(machine: MachineReport): string {
       + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
       + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
       + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
+      + traceSections(machine.traces) + visualSection(machine.visual)
       + `<h3>Logs</h3>${fileLinks(machine.logs)}</section>`;
   }
   const { from, step } = machine.upgrade;
@@ -316,6 +365,7 @@ function machineSection(machine: MachineReport): string {
     + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
     + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
     + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
+    + traceSections(machine.traces) + visualSection(machine.visual)
     + `<h3>Logs</h3>${fileLinks(from.logs)}${fileLinks(machine.logs)}</section>`;
 }
 
@@ -337,6 +387,12 @@ tr.fail td{background:color-mix(in srgb,var(--fail) 10%,transparent)}
 .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
 figure{margin:0}figure img{width:100%;border:1px solid var(--line);border-radius:6px;background:var(--card)}
 figcaption{font-size:.8rem;color:var(--muted)}
+.step{list-style:none;display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}.steps{padding:0}
+.stepbody{flex:1;min-width:0}.stepshot{width:240px;flex:none}.stepshot img{width:100%;border:1px solid var(--line);border-radius:6px}
+dl{margin:.3rem 0;display:grid;grid-template-columns:max-content 1fr;gap:2px 10px}dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
+details.journey,details{margin:.4rem 0}summary{cursor:pointer}
+.trio{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+@media (max-width:640px){.step{flex-direction:column}.stepshot{width:100%}}
 .errors{border:1px solid var(--fail);padding:8px 14px;border-radius:6px}
 `;
 

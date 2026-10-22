@@ -786,6 +786,7 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     refusals: { venice: null },
     egress: { samples: 0, intervalMs: 0, baseline: 0, fresh: [], pageRequests: 0, pageOutside: [] },
     shots: [],
+    trace: [],
   };
 
   // This agent holds the engine's bearer. The Inbox route is for an unlocked browser on this computer only, so a bearer-minted
@@ -854,6 +855,50 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       await metrics(1280);
     };
 
+    // The trace: for each browser-driven step, what was done, what was expected, what happened, a picture after it, and what the page
+    // logged or failed to load meanwhile. The harness brings the pictures back and renders them step by step in the report.
+    const pageConsole: string[] = [];
+    const pageFailed: string[] = [];
+    const urlOf = new Map<string, string>();
+    await cdp.send('Runtime.enable');
+    cdp.on('Runtime.consoleAPICalled', (params) => { if (params?.type === 'error') pageConsole.push(String((params.args ?? []).map((a: any) => a?.value ?? a?.description ?? '').join(' ')).slice(0, 200)); });
+    cdp.on('Runtime.exceptionThrown', (params) => { pageConsole.push(`uncaught: ${String(params?.exceptionDetails?.exception?.description ?? params?.exceptionDetails?.text ?? '').slice(0, 200)}`); });
+    cdp.on('Network.requestWillBeSent', (params) => { urlOf.set(String(params?.requestId), String(params?.request?.url ?? '')); });
+    cdp.on('Network.loadingFailed', (params) => {
+      const url = urlOf.get(String(params?.requestId)) ?? '';
+      if (params?.canceled !== true && !/favicon\.ico/.test(url)) pageFailed.push(`${url.replace(/[?#].*$/, '')} (${String(params?.errorText ?? 'failed')})`);
+    });
+    cdp.on('Network.responseReceived', (params) => {
+      const status = Number(params?.response?.status ?? 0);
+      const url = String(params?.response?.url ?? '');
+      if (status >= 400 && !/favicon\.ico/.test(url)) pageFailed.push(`${url.replace(/[?#].*$/, '')} -> ${status}`);
+    });
+    const step = async <T>(name: string, action: string, expected: string, work: () => Promise<T>, actual: (value: T) => { text: string; ok: boolean }): Promise<T> => {
+      const started = Date.now();
+      pageConsole.length = 0;
+      pageFailed.length = 0;
+      let value: T | undefined;
+      let error: unknown;
+      try { value = await work(); } catch (caught) { error = caught; }
+      const n = (observation.trace ?? []).length + 1;
+      const file = `trace-${String(n).padStart(2, '0')}.jpg`;
+      let screenshot: string | undefined;
+      try {
+        const shot = await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 60 });
+        writeFileSync(join(outDir, file), Buffer.from(shot.data as string, 'base64'));
+        screenshot = file;
+      } catch { /* the picture is a courtesy */ }
+      let at = '';
+      try { at = String(await evalIn(`location.pathname + location.search + location.hash`)).replace(/token=[^&#]*/g, 'token=...'); } catch { /* the page is changing */ }
+      const result = error === undefined ? actual(value as T) : { text: `failed: ${error instanceof Error ? error.message : String(error)}`, ok: false };
+      (observation.trace ??= []).push({
+        n, name, action, expected, actual: result.text, ok: result.ok, ms: Date.now() - started, at,
+        ...(screenshot ? { screenshot } : {}), consoleErrors: [...new Set(pageConsole)].slice(0, 5), failedRequests: [...new Set(pageFailed)].slice(0, 5), findings: [],
+      });
+      if (error !== undefined) throw error;
+      return value as T;
+    };
+
     let origin = '';
     /** The owner's own way in: a one-time opening link for the place, then Unlock on the page. */
     const openTarget = async (target: string): Promise<{ state: any; unlockOffered: boolean; unlocked: boolean }> => {
@@ -916,27 +961,40 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     };
 
     // 1. The Ask page, opened by the owner's link and unlocked.
-    const first = await openTarget('private');
-    observation.ownerPath.unlockOffered = first.unlockOffered;
-    observation.ownerPath.unlocked = first.unlocked;
-    if (!first.unlocked) throw new Error(`the Private answers page did not open its controls (Unlock ${first.unlockOffered ? 'was pressed' : 'was not offered'})`);
-    const ready = await untilComputerReady(first.state, 300_000);
+    const ready = await step(
+      'Open the Ask page', 'open the owner\'s link, press Unlock, wait for the local model to be ready',
+      'the controls unlock and the destination cards show',
+      async () => {
+        const first = await openTarget('private');
+        observation.ownerPath.unlockOffered = first.unlockOffered;
+        observation.ownerPath.unlocked = first.unlocked;
+        if (!first.unlocked) throw new Error(`the Private answers page did not open its controls (Unlock ${first.unlockOffered ? 'was pressed' : 'was not offered'})`);
+        return await untilComputerReady(first.state, 300_000);
+      },
+      (state) => ({ text: `unlocked; local model ${String(state.cards?.computer?.state ?? 'not shown')}`, ok: true }),
+    );
     for (const key of ['computer', 'anonymous', 'venice'] as DestinationId[]) {
       if (ready.cards?.[key]) observation.destinations[key] = ready.cards[key] as CardView;
     }
-    await shoot('ask-page-1280.png', 'The Ask page, 1280 px wide (the owner\'s unlocked browser)', 1280);
-    await shoot('ask-page-390.png', 'The Ask page, 390 px wide (the owner\'s unlocked browser)', 390);
+    await step('Look at the Ask page at both widths', 'resize to 1280 and 390 px and capture', 'both pictures are taken',
+      async () => { await shoot('ask-page-1280.png', 'The Ask page, 1280 px wide (the owner\'s unlocked browser)', 1280); await shoot('ask-page-390.png', 'The Ask page, 390 px wide (the owner\'s unlocked browser)', 390); },
+      () => ({ text: 'captured', ok: true }));
 
     // 2. The agent's entry, by the id its link names: the route, waiting for the local model's answer.
     const agentSpec = { question: inbox.agent.text, facts: inbox.agent.facts, citedTitle: inbox.agent.citedTitle };
-    if (primary) observation.entries.push(await viewEntry(primary, { ...agentSpec, waitUntil: Date.now() + waitS * 1000 }));
+    if (primary) {
+      observation.entries.push(await step('Read the agent\'s entry by its link id', 'ask the Inbox route for the entry, waiting for the local model\'s answer', 'the entry is listed and answered',
+        () => viewEntry(primary, { ...agentSpec, waitUntil: Date.now() + waitS * 1000 }),
+        (view) => ({ text: `${view.listed ? 'listed' : 'not listed'}; ${view.status ?? 'no status'}; ${view.factsStated.length} fact(s) stated; ${view.citations} source(s)`, ok: view.listed && view.status === 'answered' })));
+    }
     for (const id of otherIds) {
       if (id !== primary && !observation.entries.some((entry) => entry.id === id)) observation.entries.push(await viewEntry(id, { question: null, facts: [], citedTitle: '', waitUntil: null }));
     }
 
     // The address an Open link names, opened by the owner: the Inbox lands on that entry and opens it.
     const openByAddress = async (addressId: string, pageId: string, spec: { facts: string[]; citedTitle: string }, shotLabel: string): Promise<PageView> => {
-      const view = await openTarget(`private/${addressId}`);
+      const view = await step('Open the entry\'s address', 'open the one-time link for the entry, press Unlock', 'the Inbox lands on the entry and opens it',
+        () => openTarget(`private/${addressId}`), (opened2) => ({ text: opened2.unlocked ? 'unlocked' : 'stayed locked', ok: opened2.unlocked }));
       observation.ownerPath.unlocked = observation.ownerPath.unlocked && view.unlocked;
       let row: any = { found: false };
       const until = Date.now() + 90_000;
@@ -968,13 +1026,17 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     if (primary) await openByAddress(primary, primary, { facts: inbox.agent.facts, citedTitle: inbox.agent.citedTitle }, 'from the agent\'s link');
 
     // 4. Ask the local model: typed into the page and pressed, on a clean Ask page.
-    const second = await openTarget('private');
-    observation.ownerPath.unlocked = observation.ownerPath.unlocked && second.unlocked;
-    const secondReady = await untilComputerReady(second.state, 120_000);
+    const secondReady = await step('Open a clean Ask page', 'open the owner\'s link again, press Unlock, wait for the local model', 'the controls unlock and the local model is ready',
+      async () => {
+        const second = await openTarget('private');
+        observation.ownerPath.unlocked = observation.ownerPath.unlocked && second.unlocked;
+        return await untilComputerReady(second.state, 120_000);
+      },
+      (state) => ({ text: `local model ${String(state.cards?.computer?.state ?? 'not shown')}`, ok: true }));
     const knownRows = new Set<string>((secondReady.rows ?? []).map((row: any) => String(row.id)));
     const ask: AskView = { pressed: false, answered: false, message: '', factsStated: [], citations: 0, citesExpected: false, ms: 0, entry: null };
     observation.ask = ask;
-    if ((await evalIn(FOCUS_QUESTION)) === true && secondReady.cards?.computer?.state === 'ready') {
+    if ((await evalIn(FOCUS_QUESTION)) === true && secondReady.cards?.computer?.state === 'ready') await step('Ask the local model', 'type the question into the page and press "Ask the local model"', 'an answer with its sources appears and a new Inbox entry is kept', async () => {
       await cdp.send('Input.insertText', { text: inbox.ask.text });
       const started = Date.now();
       ask.pressed = await click('form[data-pa-ask] button[data-pa-destination="computer"]');
@@ -1008,7 +1070,7 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
           await shoot('ask-answered-1280.png', 'The Ask page after "Ask the local model": the answer, its sources, and the new Inbox entry', 1280);
         }
       }
-    }
+    }, () => ({ text: ask.pressed ? (ask.answered ? `answered in ${Math.round(ask.ms / 1000)} s; ${ask.citations} source(s)` : `no answer: ${ask.message}`) : 'the button could not be pressed', ok: ask.pressed && ask.answered }));
 
     // 5. Destinations that are not set up: Venice's ask is refused by the route; the way to fix each is a link that lands on the right Models section.
     const venice = secondReady.cards?.venice;
@@ -1016,7 +1078,8 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       const refused = await api({ action: 'ask_venice', question: 'Release check: Venice is not set up, so this must be refused.' });
       observation.refusals.venice = refused.status;
     }
-    const followFix = async (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => {
+    const followFix = (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => step(`Follow the way to fix ${key === 'venice' ? 'Venice' : 'the anonymous route'}`, `press the fix link on the ${key} card`, `the link lands on the ${anchor} section of Models`, () => followFixNow(key, anchor), (fix) => ({ text: fix.clicked ? `landed at ${fix.landedAt}; section ${fix.anchorShown ? 'shown' : 'NOT shown'}` : 'no fix link to press', ok: fix.clicked && fix.anchorShown }));
+    const followFixNow = async (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => {
       const clicked = await click(`[data-pa-card="${key}"] .paaction a`);
       if (!clicked) return { clicked: false, landedAt: '', anchorShown: false };
       const shown = await waitFor(anchorPresent(anchor), 30_000);

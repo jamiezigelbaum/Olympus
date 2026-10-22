@@ -129,6 +129,8 @@ export const PROBE_SOURCE = String.raw`(() => {
 
   window.__rc = {
     clean,
+    /** The first match itself (for the tests' DOM, which has no mouse). */
+    element: (target) => pick(target),
     count: (target) => all(target).length,
     find: (target) => { const el = pick(target); return el ? infoOf(el) : null; },
     list: (target, limit) => all(target).slice(0, limit || 50).map((el) => ({ role: roleOf(el), name: nameOf(el), text: clean(el.textContent).slice(0, 160) })),
