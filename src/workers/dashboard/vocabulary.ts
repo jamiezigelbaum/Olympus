@@ -13,6 +13,7 @@ import type {
   DashboardSourceCard,
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
+import type { DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
@@ -1142,27 +1143,36 @@ export function dashboardManualSyncFailedLine(
   failure?: SourceFailureKind,
   ref?: string,
   when = 'just now',
+  name?: DashboardSyncName,
 ): string {
-  if (!failure) return `Couldn't check ${label} ${when} — Olympus will try again on its own`;
-  return `Couldn't check ${label} ${when}: ${dashboardSourceFailureSentence(failure, label, ref)} Olympus will try again on its own.`;
+  const mid = name?.mid ?? label;
+  if (!failure) return `Couldn't check ${mid} ${when} — Olympus will try again on its own`;
+  return `Couldn't check ${mid} ${when}: ${dashboardSourceFailureSentence(failure, label, ref)} Olympus will try again on its own.`;
 }
 
 /** While a Sync now press is outstanding: "Checking Dropbox…". */
-export function dashboardManualSyncPendingLine(label: string): string {
-  return `Checking ${label}…`;
+export function dashboardManualSyncPendingLine(label: string | DashboardSyncName): string {
+  return `Checking ${syncMid(label)}…`;
+}
+
+/** A source's name in the Sync now copy: its declared phrases, else its label. */
+function syncMid(name: string | DashboardSyncName): string {
+  return typeof name === 'string' ? name : name.mid;
 }
 
 /** A Sync now press that found a sync of this source already running, so started nothing new. */
-export function dashboardManualSyncBusyLine(label: string): string {
-  return `Already checking ${label}`;
+export function dashboardManualSyncBusyLine(label: string | DashboardSyncName): string {
+  return `Already checking ${syncMid(label)}`;
 }
 
 /**
  * A Sync now pressed again within a minute of the last one (2026-10-09): the
  * press starts nothing, and says why.
  */
-export function dashboardManualSyncTooSoonLine(label: string): string {
-  return `${label} was checked a moment ago — try again in a minute`;
+export function dashboardManualSyncTooSoonLine(label: string | DashboardSyncName): string {
+  const start = typeof label === 'string' ? label : label.start;
+  const verb = typeof label !== 'string' && label.plural === true ? 'were' : 'was';
+  return `${start} ${verb} checked a moment ago — try again in a minute`;
 }
 
 /**
@@ -1172,9 +1182,10 @@ export function dashboardManualSyncTooSoonLine(label: string): string {
  * still runs: "Checking Dropbox…". Never provider text.
  */
 export function dashboardManualSyncLine(
-  source: Pick<DashboardSourceCard, 'label' | 'family' | 'last_manual_sync'>,
+  source: Pick<DashboardSourceCard, 'label' | 'family' | 'last_manual_sync'> & { sync_name?: DashboardSyncName },
   now: Date,
 ): string | undefined {
+  const name = source.sync_name ?? source.label;
   const sync = source.last_manual_sync;
   if (!sync) return undefined;
   const at = Date.parse(sync.at);
@@ -1183,11 +1194,11 @@ export function dashboardManualSyncLine(
   const when = elapsed < 60_000 ? 'just now' : dashboardRelativeFromMs(elapsed);
   switch (sync.outcome) {
     case 'checking':
-      return dashboardManualSyncPendingLine(source.label);
+      return dashboardManualSyncPendingLine(name);
     case 'busy':
-      return dashboardManualSyncBusyLine(source.label);
+      return dashboardManualSyncBusyLine(name);
     case 'failed':
-      return dashboardManualSyncFailedLine(source.label, sync.failure_kind, sync.failure_kind === 'unknown' ? sync.failure_ref : undefined, when);
+      return dashboardManualSyncFailedLine(source.label, sync.failure_kind, sync.failure_kind === 'unknown' ? sync.failure_ref : undefined, when, source.sync_name);
     case 'checked': {
       const found = sync.new_items;
       if (found === undefined) return `Checked ${when}`;

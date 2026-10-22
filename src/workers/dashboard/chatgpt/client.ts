@@ -1008,7 +1008,7 @@ export function chatgptDashboardClient(
       const expires = linkExpiry(source.connecting.expiresAt);
       if (expires) meta.push(expires);
     } else if (checking) {
-      meta.push(fill(P.syncCheckingLine, { source: String(source.label || '') }));
+      meta.push(fill(P.syncCheckingLine, { source: String(source.syncNoun || source.label || '') }));
     } else if (manual) {
       meta.push(capitalise(detail));
     } else if (progress) {
@@ -1461,7 +1461,11 @@ export function chatgptDashboardClient(
   /** No total known yet: every stage still counting from zero. */
   function totalUnknown(progress: Any): boolean {
     const stages = Array.isArray(progress.details) ? progress.details : [];
-    return stages.length > 0 && stages.every((stage: Any) => !(Number(stage && stage.total) > 0));
+    if (stages.length === 0) return false;
+    if (stages.every((stage: Any) => !(Number(stage && stage.total) > 0))) return true;
+    // Another source is still on its first walk (listing leads the details and
+    // has no total): the page-wide line has no percent, so it says what was found.
+    return progress.percent === undefined && progress.itemsLeft === undefined && !(Number(stages[0] && stages[0].total) > 0);
   }
 
   /** Nothing left and nothing stuck: the line has nothing to say. */

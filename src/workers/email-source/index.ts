@@ -2132,7 +2132,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const schedulerSourceId = dashboardSchedulerSourceId(source);
           const key = schedulerSourceId ?? source;
           const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === schedulerSourceId);
-          const label = definition?.label ?? 'this source';
+          const label = definition?.sync_name ?? definition?.label ?? 'this source';
           const answer = (status: 'checking' | 'busy' | 'too_soon', statusMessage: string, lastManualSync?: DashboardManualSync) => json({
             ok: true,
             source,

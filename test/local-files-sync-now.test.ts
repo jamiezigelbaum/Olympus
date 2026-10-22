@@ -90,7 +90,7 @@ describe('the Files on this computer row', () => {
     const checking: DashboardManualSync = { at: NOW.toISOString(), outcome: 'checking' };
     const view = localView('local-files-reading', { sync_now_available: true }, checking);
     const card = view.sources.find((source) => source.source_id === 'local.files')!;
-    expect(dashboardManualSyncLine(card, NOW)).toBe('Checking Files on this computer…');
+    expect(dashboardManualSyncLine(card, NOW)).toBe('Checking your files…');
     expect(localRow(view).lastManualSync).toEqual({ at: NOW.toISOString(), outcome: 'checking' });
 
     for (const [sync, line] of [
@@ -218,7 +218,7 @@ describe('/dashboard/sync-now for Files on this computer', () => {
     const response = await f.worker.fetch(post('/dashboard/sync-now', { source: 'local.files' }));
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      ok: true, source: 'local.files', status: 'checking', status_message: 'Checking Files on this computer…',
+      ok: true, source: 'local.files', status: 'checking', status_message: 'Checking your files…',
     });
     await until(() => f.passes() === 1);
     expect(f.operatorRuns).toEqual(['operator']);
@@ -226,7 +226,7 @@ describe('/dashboard/sync-now for Files on this computer', () => {
 
     // A second press while the pass runs starts nothing.
     const busy = await (await f.worker.fetch(post('/dashboard/sync-now', { source: 'local.files' }))).json();
-    expect(busy).toMatchObject({ status: 'busy', status_message: 'Already checking Files on this computer' });
+    expect(busy).toMatchObject({ status: 'busy', status_message: 'Already checking your files' });
     expect(f.passes()).toBe(1);
 
     f.release({ status: 'idle', counts: { items_changed: 4 } });
@@ -234,7 +234,7 @@ describe('/dashboard/sync-now for Files on this computer', () => {
     expect((await card(f)).last_manual_sync).toMatchObject({ outcome: 'checked', new_items: 4 });
 
     const soon = await (await f.worker.fetch(post('/dashboard/sync-now', { source: 'local.files' }))).json();
-    expect(soon).toMatchObject({ status: 'too_soon' });
+    expect(soon).toMatchObject({ status: 'too_soon', status_message: 'Your files were checked a moment ago — try again in a minute' });
     expect(f.passes()).toBe(1);
   });
 
@@ -289,7 +289,7 @@ describe('olympus_sync_source for Files on this computer', () => {
     const result = await callSetupTool(SYNC_SOURCE_TOOL_NAME, { source_id: 'local.files' }, backend);
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toEqual({ status: 'checking', source_id: 'local.files' });
-    expect(JSON.stringify(result.content)).toContain('Checking Files on this computer…');
+    expect(JSON.stringify(result.content)).toContain('Checking your files…');
     await until(() => f.passes() === 1);
     const again = await callSetupTool(SYNC_SOURCE_TOOL_NAME, { source_id: 'local.files' }, backend);
     expect(again.structuredContent).toEqual({ status: 'busy', source_id: 'local.files' });
@@ -325,5 +325,14 @@ describe('Disconnect for Files on this computer from the panel', () => {
     expect(custody()).toMatchObject({ ready: true, observed: 'disconnected' });
     // Disconnecting again says it is not connected.
     await expect(callSetupTool(DISCONNECT_SOURCE_TOOL_NAME, { source_id: 'local.files' }, backend)).rejects.toBeDefined();
+  });
+});
+
+describe('a source names itself in Sync now copy through its definition, not a branch', () => {
+  test('plural phrases and the label fallback', async () => {
+    const { dashboardManualSyncTooSoonLine, dashboardManualSyncPendingLine } = await import('../src/workers/dashboard/vocabulary.ts');
+    expect(dashboardManualSyncTooSoonLine({ mid: 'your files', start: 'Your files', plural: true })).toBe('Your files were checked a moment ago — try again in a minute');
+    expect(dashboardManualSyncTooSoonLine({ mid: 'your notes', start: 'Your notes' })).toBe('Your notes was checked a moment ago — try again in a minute');
+    expect(dashboardManualSyncPendingLine('Dropbox')).toBe('Checking Dropbox…');
   });
 });

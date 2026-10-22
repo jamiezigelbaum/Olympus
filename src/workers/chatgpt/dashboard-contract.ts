@@ -131,6 +131,8 @@ export interface SourceProgress {
 export interface DashboardSource {
   id: string;
   label: string;
+  /** How a sentence names this source ("your files"); absent: the label. */
+  syncNoun?: string;
   group: 'local' | 'cloud';
   status: DashboardStatus;
   detail?: string;

@@ -39,3 +39,14 @@ describe('progress while the first walk is counting', () => {
     expect(row.progress?.percent).toBeGreaterThan(0);
   });
 });
+
+describe('the page-wide line while any source is still on its first walk', () => {
+  test('has no percent and no items left, only what was found so far', () => {
+    const { model } = rowFor('local-files-finding-page');
+    expect(model.sources.filter((source) => source.status === 'Working').length).toBeGreaterThanOrEqual(2);
+    expect(model.progress).toBeDefined();
+    expect('percent' in model.progress!).toBe(false);
+    expect('itemsLeft' in model.progress!).toBe(false);
+    expect(model.progress!.details[0]).toMatchObject({ done: 16_400, total: 0 });
+  });
+});

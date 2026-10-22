@@ -435,6 +435,7 @@ function sourceEntry(
   return {
     id: definition.source_id,
     label: definition.label,
+    ...(definition.sync_name ? { syncNoun: definition.sync_name.mid } : {}),
     group: sourceGroup(definition),
     status,
     ...(detail ? { detail } : {}),
@@ -1030,6 +1031,9 @@ function overallProgress(
   const units = new Set(open.map((row) => row.progress.unit));
   const unit: Unit = units.size === 1 ? [...units][0]! : 'items';
   const listing = { done: 0, any: false };
+  // A source still on its first listing walk with no sized total: the whole
+  // page has no honest percentage yet (metric ruling), so it shows found-so-far.
+  let firstWalk = false;
   const reading = { done: 0, total: 0, any: false };
   const indexing = { done: 0, total: 0, any: false };
   const searchable = { done: 0, total: 0 };
@@ -1039,6 +1043,7 @@ function overallProgress(
     if (progress.stage === 'listing') {
       listing.any = true;
       listing.done += counts.found;
+      if (progress.total <= 0) firstWalk = true;
     }
     if (counts.reading) {
       reading.any = true;
@@ -1072,7 +1077,7 @@ function overallProgress(
     phase: initial ? 'initial' : 'refresh',
     // No total known yet (every source still counting what it has): no
     // percentage and no items left, rather than 0% over an empty bar.
-    ...(open.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
+    ...(firstWalk || open.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
       percent: clampPercent((Math.min(done, total) / total) * 100),
       itemsLeft: Math.max(0, total - done),
     }),
@@ -1217,6 +1222,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
     ...(card.unreadable_files
       ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } }
       : {}),
+    ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
     ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
       && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
       ? {

@@ -288,6 +288,7 @@ function copySource(source: DashboardSource): DashboardSource {
   const out: DashboardSource = {
     id: identifier(source.id),
     label: text(source.label),
+    ...(source.syncNoun ? { syncNoun: text(source.syncNoun) } : {}),
     group: source.group === 'local' ? 'local' : 'cloud',
     status: STATUSES.has(source.status) ? source.status : 'Waiting',
   };
@@ -1033,7 +1034,7 @@ export function syncSourceToolResult(result: SyncSourceResult): ChatGptToolResul
   const sourceId = SYNC_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
   if (!sourceId) return errorToolResult(new ChatGptSurfaceError('internal'));
   const status: SyncSourceResult['status'] = result.status === 'busy' || result.status === 'too_soon' ? result.status : 'checking';
-  const label = SOURCE_LABELS[sourceId]!;
+  const label = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === sourceId)?.sync_name ?? SOURCE_LABELS[sourceId]!;
   const text = status === 'busy'
     ? `${dashboardManualSyncBusyLine(label)}.`
     : status === 'too_soon'
