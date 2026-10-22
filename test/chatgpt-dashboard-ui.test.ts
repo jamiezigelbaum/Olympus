@@ -599,12 +599,17 @@ describe('ready page', () => {
     expect(Array.from(dropbox.children).map((node) => node.className)).toEqual(['source-main', 'source-actions', 'menu']);
     expect(dropbox.querySelector('.source-actions details')).toBeNull();
     expect(row('Notes').className).toBe('row source');
-    // ⋯ is pinned to the last column of the first row; only the actions span the row when narrow.
+    // ⋯ is pinned to the last column of the first row; the actions keep the right column when narrow.
     expect(CHATGPT_DASHBOARD_CSS).toContain('.row.source>.menu{grid-column:-2/-1;grid-row:1}');
     expect(CHATGPT_DASHBOARD_CSS).toContain('.row.source>.menu[open]>summary{position:absolute;top:0.75rem;right:0}');
     const narrow = CHATGPT_DASHBOARD_CSS.slice(CHATGPT_DASHBOARD_CSS.indexOf('@media (max-width:30rem)'));
-    expect(narrow).toContain('.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}');
-    expect(narrow).toContain('.row.source>.source-actions{grid-column:1/-1');
+    // Narrow: a row with only an action keeps it in the right column; a row with
+    // an action and the ⋯ menu moves the action to its own second row, still
+    // right-aligned, so the name and status keep the width.
+    expect(narrow).not.toContain('.row.source.has-actions{');
+    expect(narrow).toContain('.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}');
+    expect(narrow).not.toContain('justify-content:flex-start}.row');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}');
     expect(narrow.slice(0, narrow.indexOf('}}'))).not.toContain('width:100%');
   });
 

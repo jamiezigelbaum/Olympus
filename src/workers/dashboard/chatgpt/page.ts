@@ -143,6 +143,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .row-text{flex:1 1 14rem;min-width:0}
 .row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start;gap:0 0.75rem}
 .need-body{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1rem;min-width:0}
+.need-body>:not(.row-text){margin-left:auto}
 .need .row-text{padding-top:max(0px,calc((2.25rem - 1.45em) / 2))}
 .need .dot{margin-top:calc((2.25rem - 0.625rem) / 2)}
 .row.source{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;position:relative}
@@ -312,7 +313,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 
