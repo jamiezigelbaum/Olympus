@@ -13425,7 +13425,10 @@ var init_answer_ready_coverage = __esm(() => {
 
 // src/workers/dashboard/vocabulary.ts
 function dashboardManualSyncPendingLine(label) {
-  return `Checking ${label}…`;
+  return `Checking ${syncMid(label)}…`;
+}
+function syncMid(name) {
+  return typeof name === "string" ? name : name.mid;
 }
 var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
@@ -13593,6 +13596,7 @@ var init_vocabulary = __esm(() => {
     },
     sourceStages: { listing: "Finding items", reading: "Reading", indexing: "Indexing" },
     findingItems: "Finding items",
+    findingFound: "Finding {unit} · {done} found so far",
     sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
     stalledSources: "{sources} paused",
     stalledAnd: "{first} and {last}",
@@ -13956,6 +13960,7 @@ var init_vocabulary = __esm(() => {
     units: DASHBOARD_CHATGPT_PAGE_COPY.units,
     sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
     findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+    findingFound: DASHBOARD_CHATGPT_PAGE_COPY.findingFound,
     sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
     stalledReasons: {
       waiting_for_credentials: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.waiting_for_credentials,

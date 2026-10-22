@@ -649,4 +649,84 @@ describe('a source with no credential', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  test('deleting local files removes every local.files store and leaves another source intact', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-local-files-'));
+    const homeDir = join(dir, 'home');
+    try {
+      const specs = lifecycleSourceSpecs();
+      const local = specs.find((entry) => entry.sourceId === 'local.files')!;
+      const dropbox = specs.find((entry) => entry.sourceId === 'dropbox.files')!;
+      const localStores = local.connectorStorePaths!({ homeDir });
+      const dropboxStore = dropbox.connectorStorePaths!({ homeDir })[0]!;
+      // One store per tier, each holding a row, as the indexed corpus does.
+      const withRow = (path: string, text: string): void => {
+        mkdirSync(dirname(path), { recursive: true });
+        createMarkedSqliteStore(path, 'connector-store');
+        const db = new Database(path);
+        try {
+          db.exec('CREATE TABLE IF NOT EXISTS probe_items (text TEXT)');
+          db.query('INSERT INTO probe_items (text) VALUES (?)').run(text);
+        } finally {
+          db.close();
+        }
+      };
+      expect(localStores.length).toBe(3);
+      localStores.forEach((path, index) => withRow(path, `local ${index}`));
+      withRow(dropboxStore, 'dropbox');
+      // The change snapshots the watcher keeps for approved folders.
+      const [watchDir] = local.rawStatePaths!({ homeDir });
+      mkdirSync(watchDir!, { recursive: true });
+      writeFileSync(join(watchDir!, 'snapshot-1'), 'snapshot');
+
+      const connectedRegistry = { version: 1 as const, handles: [] };
+      const preview = deleteOlympusDataWithCustody({
+        sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: [], dryRun: true,
+      });
+      expect(preview.dryRun).toBe(true);
+      expect(preview.removed).toEqual(expect.arrayContaining([...localStores, watchDir!]));
+      expect(preview.removed).not.toContain(dropboxStore);
+      for (const path of [...localStores, dropboxStore, watchDir!]) expect(existsSync(path)).toBe(true);
+
+      const deleted = deleteOlympusDataWithCustody({
+        sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: [],
+      });
+      expect(deleted.removed).toEqual(expect.arrayContaining([...localStores, watchDir!]));
+      for (const path of [...localStores, `${localStores[0]}-wal`, watchDir!]) expect(existsSync(path)).toBe(false);
+      expect(existsSync(dropboxStore)).toBe(true);
+      const survivor = new Database(dropboxStore, { readonly: true });
+      try {
+        expect(survivor.query('SELECT text FROM probe_items').all()).toEqual([{ text: 'dropbox' }]);
+      } finally {
+        survivor.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('deleting local files while connected is refused with a Disconnect first message and removes nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-local-files-connected-'));
+    const homeDir = join(dir, 'home');
+    try {
+      const local = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'local.files')!;
+      const stores = local.connectorStorePaths!({ homeDir });
+      for (const path of stores) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, 'local');
+      }
+      const connectedRegistry = { version: 1 as const, handles: [] };
+      expect(() => deleteOlympusDataWithCustody({
+        sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: ['local.files'],
+      })).toThrow(/Disconnect local\.files before deleting/);
+      // A preview is still allowed, and says why a delete would be refused.
+      const preview = deleteOlympusDataWithCustody({
+        sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: ['local.files'], dryRun: true,
+      });
+      expect(preview.custody).toMatchObject({ ready: false, observed: 'connected' });
+      expect(preview.removed).toEqual(expect.arrayContaining(stores));
+      for (const path of stores) expect(existsSync(path)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

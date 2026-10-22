@@ -74,7 +74,27 @@ import {
   type V04PublicSourceId,
 } from '../core/public-source-capabilities.ts';
 
+/**
+ * How Sync now copy names a source in a sentence, when its label does not read
+ * naturally there ("Checking your files…", "Your files were checked…").
+ * `mid` follows a verb, `start` opens a sentence, `plural` picks was/were.
+ * Declared on the definition; absent means the label is used as is.
+ */
+export interface DashboardSyncName {
+  mid: string;
+  start: string;
+  plural?: boolean;
+}
+
 export type DashboardConnectSource = 'google' | 'gmail' | 'google-drive' | 'dropbox' | 'x' | 'venice' | 'readwise';
+/**
+ * A source that needs no account ("this computer"), by the id its Connect
+ * action names (`connect_action.kind === 'this_computer'`). Derived from the
+ * definitions so a second such source joins here by being declared once.
+ */
+export type DashboardThisComputerSource = Extract<DashboardSourceAction, { kind: 'this_computer' }>['source'];
+/** What Sync now can run for: an account source by its connect name, a this-computer source by its id. */
+export type DashboardSyncSource = DashboardConnectSource | DashboardThisComputerSource;
 export type DashboardApiKeySource = 'venice' | 'readwise';
 export type DashboardOAuthSource = Exclude<DashboardConnectSource, DashboardApiKeySource>;
 export type DashboardSourceConnectKind = 'oauth' | 'api_token' | 'pairing' | 'local';
@@ -1029,6 +1049,8 @@ export interface DashboardSourceCard {
    * declaration and hidden work is the one outcome this must not produce.
    */
   content_arrives_extracted?: boolean;
+  /** The Sync now copy's own name for this source; see DashboardSyncName. */
+  sync_name?: DashboardSyncName;
   /**
    * False when Sync now cannot be run for this source right now, so nothing on
    * the page offers the control or advises pressing it.
@@ -1347,7 +1369,7 @@ export interface SourceDashboardBuildOptions {
    * source worker does not support Sync now for google-drive"). Absent means
    * unknown, and unknown keeps today's behaviour of offering the control.
    */
-  syncNowAvailable?: (source: DashboardConnectSource) => boolean;
+  syncNowAvailable?: (source: DashboardSyncSource) => boolean;
   /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
   fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
   fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
@@ -1419,6 +1441,8 @@ export interface DashboardSupportedSourceDefinition {
    * declaration that turns out to be wrong shows the bar rather than hiding it.
    */
   content_arrives_extracted?: boolean;
+  /** How Sync now copy names this source; absent: its label. */
+  sync_name?: DashboardSyncName;
   connect_action:
     | { kind: 'oauth'; source: DashboardOAuthSource }
     | { kind: 'api_key'; source: DashboardApiKeySource }
@@ -1692,6 +1716,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     family: 'file',
     trust_domain: 'secure_local',
     connect_kind: 'local',
+    sync_name: { mid: 'your files', start: 'Your files', plural: true },
     connect_action: { kind: 'this_computer', source: 'local.files' },
   },
   {
@@ -2209,7 +2234,9 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
     // to sync is a fact about the card.
-    const syncSource = definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key'
+    const syncSource: DashboardSyncSource | undefined = definition.connect_action.kind === 'oauth'
+      || definition.connect_action.kind === 'api_key'
+      || definition.connect_action.kind === 'this_computer'
       ? definition.connect_action.source
       : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined) return card;
@@ -2630,6 +2657,7 @@ function sourceCardFromDefinition(
     ...(ingestionLedgerRow?.attention.length ? { attention_reasons: [...ingestionLedgerRow.attention] } : {}),
     ...(metadataSync ? { metadata_sync: metadataSync } : {}),
     ...(definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {}),
+    ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
   };
   card.setup = dashboardSourceSetupStatus(card);
   return card;

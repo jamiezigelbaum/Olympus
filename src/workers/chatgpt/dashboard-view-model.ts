@@ -120,7 +120,7 @@ const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox
 const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
 const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
 /** Sources Sync now runs for from ChatGPT (olympus_sync_source). */
-const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
+const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files']);
 
 /** The only connection labels the engine writes; anything else becomes ''. */
 const KNOWN_CONNECTION_LABELS = new Set([
@@ -423,7 +423,8 @@ function sourceEntry(
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);
   }
-  if (status !== 'Off' && DISCONNECT_SOURCE_IDS.has(definition.source_id)) {
+  // A source on this computer has no sign-in; Disconnect only stops reading it.
+  if (status !== 'Off' && (DISCONNECT_SOURCE_IDS.has(definition.source_id) || definition.connect_action.kind === 'this_computer')) {
     menu.push({
       label: CHATGPT_SETUP_LABELS.disconnect,
       tool: DISCONNECT_SOURCE_TOOL_NAME,
@@ -434,6 +435,7 @@ function sourceEntry(
   return {
     id: definition.source_id,
     label: definition.label,
+    ...(definition.sync_name ? { syncNoun: definition.sync_name.mid } : {}),
     group: sourceGroup(definition),
     status,
     ...(detail ? { detail } : {}),
@@ -727,7 +729,10 @@ function measuredSourceProgress(
   let percent: number | undefined = 0;
   if (open.id === 'metadata_sync') {
     // Listing counts the source's own items found so far; a folder walk's
-    // share, when the walk is sized, is the only percentage it has.
+    // share, when the walk is sized, is the only percentage it has. Until
+    // then there is no percentage at all (the dashboard metric ruling: never a
+    // fake one): the row says how many were found and the bar is indeterminate.
+    percent = undefined;
     done = found;
     if (measure.kind === 'ratio' && open.unit !== 'folders') total = measure.total;
     if (measure.kind === 'ratio' && measure.total > 0) percent = clampPercent((measure.done / measure.total) * 100);
@@ -1026,6 +1031,9 @@ function overallProgress(
   const units = new Set(open.map((row) => row.progress.unit));
   const unit: Unit = units.size === 1 ? [...units][0]! : 'items';
   const listing = { done: 0, any: false };
+  // A source still on its first listing walk with no sized total: the whole
+  // page has no honest percentage yet (metric ruling), so it shows found-so-far.
+  let firstWalk = false;
   const reading = { done: 0, total: 0, any: false };
   const indexing = { done: 0, total: 0, any: false };
   const searchable = { done: 0, total: 0 };
@@ -1035,6 +1043,7 @@ function overallProgress(
     if (progress.stage === 'listing') {
       listing.any = true;
       listing.done += counts.found;
+      if (progress.total <= 0) firstWalk = true;
     }
     if (counts.reading) {
       reading.any = true;
@@ -1066,8 +1075,10 @@ function overallProgress(
   return {
     unit,
     phase: initial ? 'initial' : 'refresh',
-    ...(open.some((row) => row.counts.searchableUnknown) ? {} : {
-      percent: total > 0 ? clampPercent((Math.min(done, total) / total) * 100) : 0,
+    // No total known yet (every source still counting what it has): no
+    // percentage and no items left, rather than 0% over an empty bar.
+    ...(firstWalk || open.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
+      percent: clampPercent((Math.min(done, total) / total) * 100),
       itemsLeft: Math.max(0, total - done),
     }),
     ...(eta !== undefined ? { etaSeconds: eta } : {}),
@@ -1211,6 +1222,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
     ...(card.unreadable_files
       ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } }
       : {}),
+    ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
     ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
       && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
       ? {
