@@ -133719,11 +133719,26 @@ function createEmailSourceWorker(options = {}) {
               if (record5.acknowledge !== true) {
                 throw new EmailSourceWorkerError(400, "disconnect_confirmation_required", "Confirm that Disconnect keeps the files already indexed and only stops Olympus reading this computer.");
               }
-              const wasConnected = disconnectThisComputerSource(sourceDashboard.registryPath ?? defaultHandleRegistryPath(), "local.files");
+              if (sourceScheduler && !sourceDashboard.refreshSchedulerSources) {
+                throw new EmailSourceWorkerError(501, "disconnect_scheduler_refresh_not_supported", "Disconnect cannot safely refresh the active scheduler in this worker.");
+              }
+              const localFilesBusy = () => dashboardManualSyncRuns.has("local.files") || sourceScheduler !== undefined && dashboardDisconnectHasRunningRead(sourceScheduler.status(), new Set(["local.files"]));
+              const busyError = () => new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
+              if (localFilesBusy())
+                throw busyError();
+              const registryPath2 = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
+              const wasConnected = disconnectThisComputerSource(registryPath2, "local.files");
               if (!wasConnected) {
                 throw new EmailSourceWorkerError(409, "source_not_connected", "This source is not connected.");
               }
-              await refreshDashboardSchedulerSources();
+              if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
+                const nextSources = await sourceDashboard.refreshSchedulerSources();
+                if (localFilesBusy()) {
+                  connectThisComputerSource(registryPath2, "local.files");
+                  throw busyError();
+                }
+                sourceScheduler.updateSources(nextSources);
+              }
               return json({
                 ok: true,
                 source_id: "local.files",

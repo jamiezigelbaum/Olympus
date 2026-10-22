@@ -153,6 +153,9 @@ function fixture(options: { approved?: boolean; connected?: boolean } = {}): Fix
       sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
       registryPath,
       registryAdoptionIntervalMs: 0,
+      // The real wiring rebuilds from the record: no source once disconnected.
+      refreshSchedulerSources: async () =>
+        readThisComputerHandles(registryPath).length > 0 ? [source] : [],
       fileSourceScopes: {
         summaries: () => [{
           source_id: 'local.files',
@@ -265,6 +268,21 @@ describe('/dashboard/sync-now for Files on this computer', () => {
     const notApproved = await pending.worker.fetch(post('/dashboard/sync-now', { source: 'local.files' }));
     expect(notApproved.status).toBeGreaterThanOrEqual(400);
     expect(pending.passes()).toBe(0);
+  });
+
+  test('Disconnect is refused while a read runs, and the connection stays until it ends', async () => {
+    const f = fixture();
+    const scheduled = f.scheduler.runSource('local.files');
+    await until(() => f.passes() === 1);
+    const refused = await f.worker.fetch(post('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true }));
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error.code).toBe('disconnect_source_busy');
+    expect(readThisComputerHandles(f.registryPath).map((handle) => handle.handle)).toContain('local.files.this_computer');
+    f.release();
+    await scheduled;
+    const done = await f.worker.fetch(post('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true }));
+    expect(done.status).toBe(200);
+    expect(readThisComputerHandles(f.registryPath).map((handle) => handle.handle)).not.toContain('local.files.this_computer');
   });
 
   test('a source on this computer that is not declared is not accepted', async () => {

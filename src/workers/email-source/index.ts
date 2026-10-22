@@ -2237,14 +2237,41 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 'Confirm that Disconnect keeps the files already indexed and only stops Olympus reading this computer.',
               );
             }
-            const wasConnected = disconnectThisComputerSource(
-              sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
-              'local.files',
+            if (sourceScheduler && !sourceDashboard.refreshSchedulerSources) {
+              throw new EmailSourceWorkerError(
+                501,
+                'disconnect_scheduler_refresh_not_supported',
+                'Disconnect cannot safely refresh the active scheduler in this worker.',
+              );
+            }
+            // The same refusal as the account sources: an in-flight read is not
+            // cancelled by a scheduler refresh, so Disconnect (and the delete
+            // custody check that trusts it) waits until the read has ended.
+            const localFilesBusy = () => dashboardManualSyncRuns.has('local.files')
+              || (sourceScheduler !== undefined
+                && dashboardDisconnectHasRunningRead(sourceScheduler.status(), new Set(['local.files'] as V04PublicSourceId[])));
+            const busyError = () => new EmailSourceWorkerError(
+              409,
+              'disconnect_source_busy',
+              'This source is finishing a read. Retry Disconnect after the current read completes.',
             );
+            if (localFilesBusy()) throw busyError();
+            const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
+            const wasConnected = disconnectThisComputerSource(registryPath, 'local.files');
             if (!wasConnected) {
               throw new EmailSourceWorkerError(409, 'source_not_connected', 'This source is not connected.');
             }
-            await refreshDashboardSchedulerSources();
+            if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
+              const nextSources = await sourceDashboard.refreshSchedulerSources();
+              // A read that started while the rebuild was awaited: put the
+              // connection back (folder choices live with the machine id, which
+              // Disconnect keeps) and refuse, as above.
+              if (localFilesBusy()) {
+                connectThisComputerSource(registryPath, 'local.files');
+                throw busyError();
+              }
+              sourceScheduler.updateSources(nextSources);
+            }
             return json({
               ok: true,
               source_id: 'local.files',
