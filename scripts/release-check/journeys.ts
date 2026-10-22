@@ -290,6 +290,12 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Press Save',
         do: { click: { role: 'button', name: PRIVACY.save }, frame: 'panel' },
+        // A new description changes what Olympus keeps private, so the page asks first (found on the first Mac run).
+        expect: [{ text: PRIVACY.confirmDescription, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.confirm }, frame: 'panel' }],
+      },
+      {
+        name: 'Confirm the change',
+        do: { click: { role: 'button', name: PRIVACY.confirm }, frame: 'panel' },
         timeoutMs: 60_000,
         expect: [{ text: PRIVACY.saved, frame: 'panel' }, { noText: PRIVACY.saveFailed, frame: 'panel' }],
       },
