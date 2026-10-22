@@ -47,6 +47,7 @@ export const DYNAMIC_TEXT_RULES: ReadonlyArray<{ what: string; pattern: RegExp; 
   { what: 'progress: "42% done", "3 of 12 files", "Downloading 61%"', pattern: /\b\d+(?:\.\d+)?%/g, replacement: '0%' },
   { what: 'a count of a total', pattern: /\b\d[\d,]*\s+of\s+\d[\d,]*\b/g, replacement: '0 of 0' },
   { what: 'a size: "1.2 GB", "340 MB"', pattern: /\b\d+(?:\.\d+)?\s?(?:KB|MB|GB|TB)\b/g, replacement: '0 MB' },
+  { what: 'the Needs you line about answers waiting: "1 unread private answer", "3 unread private answers"', pattern: /\b\d+\s+unread\s+private\s+answers?\b/gi, replacement: '0 unread private answers' },
   { what: 'a number of items, files, messages or answers', pattern: /\b\d[\d,]*\s+(?:items?|files?|messages?|answers?|questions?|documents?|emails?)\b/gi, replacement: '0 items' },
 ];
 

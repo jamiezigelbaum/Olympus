@@ -276,8 +276,8 @@ describe('visual baselines', () => {
   });
 
   test('the mask makes the parts that vary between runs the same text, in the page and in plain strings', () => {
-    expect(normaliseDynamicText('Updated 106 days ago, 3 min ago, in 14 min, 42% done, 3 of 12 files, 1.2 GB, Oct 22, 2026 at 14:05'))
-      .toBe(normaliseDynamicText('Updated 2 days ago, 9 min ago, in 2 min, 7% done, 5 of 12 files, 340 MB, Nov 3, 2026 at 09:50'));
+    expect(normaliseDynamicText('Updated 106 days ago, 3 min ago, in 14 min, 42% done, 1 unread private answer, 3 of 12 files, 1.2 GB, Oct 22, 2026 at 14:05'))
+      .toBe(normaliseDynamicText('Updated 2 days ago, 9 min ago, in 2 min, 7% done, 4 unread private answers, 5 of 12 files, 340 MB, Nov 3, 2026 at 09:50'));
     const window = new Window({ url: 'http://127.0.0.1/' });
     window.document.body.innerHTML = '<p>Updated 5 min ago</p><section class="pasection" aria-labelledby="waiting"><h3 id="waiting">Inbox</h3><ul><li>row</li></ul></section>';
     evalIn(window, maskScript());
