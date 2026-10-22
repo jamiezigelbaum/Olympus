@@ -4637,6 +4637,7 @@ export async function main(): Promise<void> {
         status: before.status,
         nodes: page.nodes,
         ...(page.nextCursor ? { next_cursor: page.nextCursor } : {}),
+        ...(page.access ? { access: page.access } : {}),
         selections: before.selections.map((selection) => ({
           key: selection.key,
           state: selection.state,
@@ -4668,6 +4669,10 @@ export async function main(): Promise<void> {
         wholeAccount: input.wholeAccount,
         explicitWholeAccountConfirmation: input.explicitWholeAccountConfirmation,
       });
+      if (approval.replayed !== true && browser.afterApproval) {
+        // Best effort: the choice is saved either way.
+        try { await browser.afterApproval({ wholeAccount: input.wholeAccount }); } catch { /* nothing to undo */ }
+      }
       let invalidatedJobs = 0;
       // A replayed save (the same request delivered twice) changed nothing:
       // re-invalidating would cancel the jobs its first delivery just queued.

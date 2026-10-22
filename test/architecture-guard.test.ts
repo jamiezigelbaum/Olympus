@@ -437,7 +437,7 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
  * `test-results/` and a developer's checkout does not.
  */
 const REPO_CONTENT_DIRECTORIES = [
-  '.claude', '.github', 'assets', 'bin', 'chatgpt-plugin', 'config', 'connect-relay', 'dist', 'docs', 'eval', 'exchange',
+  '.claude', '.github', 'assets', 'bin', 'chatgpt-plugin', 'config', 'connect-relay', 'dist', 'docs', 'eval', 'exchange', 'native',
   'grok-bot-plugin', 'integrations', 'relay', 'scripts', 'site', 'skills', 'src', 'test', 'tools',
 ];
 

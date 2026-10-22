@@ -7,7 +7,8 @@
 import { lstatSync, readdirSync, realpathSync, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { OlympusFolderScopeNode } from '../../control-ui-contract.ts';
+import type { OlympusFolderAccess, OlympusFolderScopeNode } from '../../control-ui-contract.ts';
+import { olympusDataDir } from '../../core/remote-access.ts';
 import {
   decodeCursor,
   effectiveSelections,
@@ -17,6 +18,7 @@ import {
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
 import { realPathOfScopePath, scopePathOfRealPath } from './locations.ts';
+import { MacPermissions } from './mac-permissions.ts';
 import {
   DEFAULT_EXCLUSION_LABELS,
   defaultExclusionContext,
@@ -28,6 +30,7 @@ import {
 } from './paths.ts';
 import { LOCAL_FILES_SOURCE_ID } from './scope.ts';
 import { VolumeResolver } from './volume-identity.ts';
+import { revealHelperAndOpenFullDiskAccess } from './mac-settings.ts';
 
 const BROWSE_PAGE_SIZE = 100;
 
@@ -38,6 +41,15 @@ export interface LocalFilesFolderScopeBrowserOptions {
   readDirectory?: (realPath: string) => Dirent[];
   /** Test seam: the real path of the home folder. */
   home?: string;
+  /** The Mac's permission rules for guarded folders (mac-permissions.ts). */
+  permissions?: MacPermissions;
+  /** Test seam: what to do when the person saves the whole computer without Full Disk Access. */
+  openFullDiskAccess?: () => void;
+}
+
+/** Thrown inside a listing when the Mac refused the read: the level reports it, it is not an error. */
+class AccessRefused extends Error {
+  constructor(readonly access: OlympusFolderAccess) { super(access.message); }
 }
 
 function safeRealpath(path: string): string {
@@ -64,8 +76,17 @@ export function createLocalFilesFolderScopeBrowser(
   const context = options.context ?? { ...defaultExclusionContext(), home };
   const readDirectory = options.readDirectory
     ?? ((realPath: string) => readdirSync(realPath, { withFileTypes: true }));
+  const permissions = options.permissions ?? new MacPermissions({
+    home,
+    memoryPath: join(olympusDataDir(), 'local-files', 'folder-access.json'),
+  });
 
-  const node = (scopePath: string, name: string, parentKey: string | undefined): OlympusFolderScopeNode => {
+  const node = (
+    scopePath: string,
+    name: string,
+    parentKey: string | undefined,
+    access?: OlympusFolderAccess,
+  ): OlympusFolderScopeNode => {
     const reason = defaultExclusionForFolder(scopePath, context);
     return {
       key: scopePath,
@@ -76,6 +97,7 @@ export function createLocalFilesFolderScopeBrowser(
       has_children: true,
       selectable: true,
       ...(reason ? { excluded_by_default: true, default_exclusion_reason: DEFAULT_EXCLUSION_LABELS[reason] } : {}),
+      ...(access ? { access } : {}),
     };
   };
 
@@ -86,14 +108,23 @@ export function createLocalFilesFolderScopeBrowser(
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'EACCES' || code === 'EPERM') {
-        throw new Error('Olympus is not allowed to read this folder. Allow it in the computer\'s privacy settings, then update folders.');
+        const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
+        // A guarded folder the Mac said no to: say how to turn it back on.
+        if (guard) throw new AccessRefused(permissions.noteDenied(guard));
+        throw new Error('Your computer does not let Olympus open this folder. Check who may open it in Finder (Get Info, then Sharing & Permissions), then try again.');
       }
       throw new Error('This folder could not be read. It may have moved or its disk may be unmounted.');
     }
     return entries
       // A link is never followed, so it is not offered; a file is not a folder.
       .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
-      .map((entry) => node(scopePathOfRealPath(volumes, join(realPath, entry.name)), entry.name, parentKey))
+      .map((entry) => {
+        const childReal = join(realPath, entry.name);
+        const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
+        // Only the top of a guarded place is labelled; inside it the answer already holds.
+        const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
+        return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
+      })
       .sort((a, b) => {
         const aHidden = a.name.startsWith('.');
         const bHidden = b.name.startsWith('.');
@@ -111,29 +142,48 @@ export function createLocalFilesFolderScopeBrowser(
       if (!Number.isInteger(offset) || offset < 0) throw new Error('Folder browse cursor is invalid.');
 
       let all: OlympusFolderScopeNode[];
+      let access: OlympusFolderAccess | undefined;
       if (parent === undefined) {
         // The home folder's folders, then the disks mounted now.
         volumes.refresh();
         all = [
           ...childFolders(home, undefined),
-          ...volumes.locations().map((volume) => ({
-            key: scopePathFor('/', volume.id),
-            name: volume.label,
-            kind: 'folder' as const,
-            has_children: true,
-            selectable: true,
-          })),
+          ...volumes.locations().map((volume) => {
+            const guard = permissions.guardOf(volume.mountPoint, volume);
+            const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
+            return {
+              key: scopePathFor('/', volume.id),
+              name: volume.label,
+              kind: 'folder' as const,
+              has_children: true,
+              selectable: true,
+              ...(diskAccess ? { access: diskAccess } : {}),
+            };
+          }),
         ];
+        // Searching the whole computer needs Full Disk Access; say so up front.
+        access = permissions.fullDiskAccessNote();
       } else {
         const real = realPathOfScopePath(volumes, parent);
         if (!real) throw new Error('That disk is not connected right now.');
-        all = childFolders(real, parent);
+        // Opening a guarded folder is the ask: the Mac's question appears (in
+        // the helper's name) and this level answers with what came of it.
+        const guard = permissions.guardOf(real, volumes.volumeOf(real));
+        const refused = guard ? await permissions.open(guard) : undefined;
+        if (refused) return { nodes: [], access: refused };
+        try {
+          all = childFolders(real, parent);
+        } catch (error) {
+          if (error instanceof AccessRefused) return { nodes: [], access: error.access };
+          throw error;
+        }
       }
       const page = all.slice(offset, offset + BROWSE_PAGE_SIZE);
       const next = offset + BROWSE_PAGE_SIZE;
       return {
         nodes: page,
         ...(next < all.length ? { nextCursor: encodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? '', String(next)) } : {}),
+        ...(access ? { access } : {}),
       };
     },
     async validateSelections(selections) {
@@ -159,6 +209,13 @@ export function createLocalFilesFolderScopeBrowser(
         }
       }
       return effectiveSelections(normalized, (key) => ancestorScopePaths(key));
+    },
+    async afterApproval({ wholeAccount }) {
+      // Saving the whole computer without Full Disk Access: open the page where
+      // the person switches it on, with the helper app shown in Finder to drag in.
+      if (wholeAccount && permissions.active && !permissions.hasFullDiskAccess()) {
+        (options.openFullDiskAccess ?? revealHelperAndOpenFullDiskAccess)();
+      }
     },
   };
 }

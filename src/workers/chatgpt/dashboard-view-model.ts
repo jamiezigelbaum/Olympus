@@ -662,6 +662,9 @@ function measuredSourceProgress(
   // no line at all).
   const credentialsMissing = signIn;
   const found = count(scrubbed.coverage.indexed_items);
+  if (scrubbed.schedule?.degraded_reason === 'scope_root_permission_needed') {
+    return { progress: { stage: 'listing', unit, done: found, total: 0, percent: 0, stalled: true, stalledReason: 'scope_root_permission_needed' }, counts: { found } };
+  }
   if (missingScope(scrubbed)) {
     return { progress: { stage: 'listing', unit, done: found, total: 0, percent: 0, stalled: true, stalledReason: 'scope_root_missing' }, counts: { found } };
   }

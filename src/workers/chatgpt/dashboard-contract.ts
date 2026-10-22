@@ -72,6 +72,8 @@ export type SourceStalledReason =
   | 'scope_pending'
   /** A chosen root is gone; choose folders again. */
   | 'scope_root_missing'
+  /** The computer will not let Olympus open a chosen folder (a Mac privacy switch); it checks again soon. */
+  | 'scope_root_permission_needed'
   /** The provider keeps failing or refusing reads; it retries on its own. */
   | 'provider_unavailable'
   /** Indexing waits for the built-in search model to finish downloading. */
@@ -617,6 +619,15 @@ export interface ScopeFolderNode {
    */
   size_bytes?: number;
   file_count?: number;
+  /** The computer asks the person before this folder opens (control-ui-contract.ts OlympusFolderAccess). */
+  access?: ScopeFolderAccess;
+}
+
+/** Where the computer's own privacy rules stand for a folder, in the words the picker shows. */
+export interface ScopeFolderAccess {
+  state: 'needs_permission' | 'waiting' | 'denied' | 'needs_helper' | 'needs_full_disk_access';
+  message: string;
+  settings_url?: string;
 }
 
 /**
@@ -641,6 +652,8 @@ export interface FolderScopeList {
    * only the folders that were read.
    */
   truncated?: true;
+  /** Why this level lists no folders, or what the whole computer needs (top level). */
+  access?: ScopeFolderAccess;
   selections: ScopeSelection[];
   whole_account_selected: boolean;
 }

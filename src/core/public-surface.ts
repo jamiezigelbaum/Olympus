@@ -143,6 +143,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'worker uninstall',
   'worker run',
   'engine install',
+  'engine install-helper',
   'engine uninstall',
   'engine status',
   'engine restart',

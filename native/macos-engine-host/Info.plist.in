@@ -5,9 +5,9 @@
   <key>CFBundleIdentifier</key>
   <string>ai.olympusplugin.engine-host</string>
   <key>CFBundleName</key>
-  <string>Olympus</string>
+  <string>Olympus Engine</string>
   <key>CFBundleDisplayName</key>
-  <string>Olympus</string>
+  <string>Olympus Engine</string>
   <key>CFBundleExecutable</key>
   <string>OlympusEngineHost</string>
   <key>CFBundlePackageType</key>
@@ -23,14 +23,14 @@
   <key>LSUIElement</key>
   <true/>
   <key>NSDesktopFolderUsageDescription</key>
-  <string>So you can search the folders you choose, Olympus reads files on your Desktop.</string>
+  <string>So you can search the folders you choose, Olympus Engine reads files on your Desktop.</string>
   <key>NSDocumentsFolderUsageDescription</key>
-  <string>So you can search the folders you choose, Olympus reads files in your Documents folder.</string>
+  <string>So you can search the folders you choose, Olympus Engine reads files in your Documents folder.</string>
   <key>NSDownloadsFolderUsageDescription</key>
-  <string>So you can search the folders you choose, Olympus reads files in your Downloads folder.</string>
+  <string>So you can search the folders you choose, Olympus Engine reads files in your Downloads folder.</string>
   <key>NSRemovableVolumesUsageDescription</key>
-  <string>So you can search the folders you choose, Olympus reads files on USB drives and memory cards.</string>
+  <string>So you can search the folders you choose, Olympus Engine reads files on USB drives and memory cards.</string>
   <key>NSNetworkVolumesUsageDescription</key>
-  <string>So you can search the folders you choose, Olympus reads files on network drives.</string>
+  <string>So you can search the folders you choose, Olympus Engine reads files on network drives.</string>
 </dict>
 </plist>

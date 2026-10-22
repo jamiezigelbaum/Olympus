@@ -366,6 +366,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
       // Per level ('' is the root): how many more folders follow ("N more"), and levels Olympus could not list in full.
       remaining: new Map(), truncated: new Set(),
+      // Per level: why the computer would not list it (or, at the root, what the whole computer needs).
+      access: new Map(),
       ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false,
       path: [], lastSeg: '',
       // mail
@@ -477,12 +479,18 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     // whatever order the provider lists them in.
     const nodes = previous.concat(fresh).sort((a: Any, b: Any) =>
       String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
+    const levelAccess = page.access && typeof page.access.message === 'string' && page.access.message ? page.access : null;
+    if (levelAccess) p.access.set(parentKey, levelAccess);
+    else p.access.delete(parentKey);
     const next = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : '';
     const more = typeof page.remaining === 'number' && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
     if (next && more) p.remaining.set(parentKey, more);
     else p.remaining.delete(parentKey);
     if (page.truncated === true) p.truncated.add(parentKey);
-    if (parentKey) {
+    if (parentKey && blockedByComputer(levelAccess)) {
+      // Not listed: leave it unloaded, so opening it again asks again.
+      p.branches.delete(parentKey);
+    } else if (parentKey) {
       p.branches.set(parentKey, nodes);
       if (next) p.cursors.set(parentKey, next);
       else p.cursors.delete(parentKey);
@@ -493,6 +501,28 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     p.loading = '';
     if (after) after();
     else kit.render(focus);
+  }
+
+  /** The computer would not list this level (not a note about something else). */
+  function blockedByComputer(access: Any): boolean {
+    return !!access && access.state !== 'needs_full_disk_access';
+  }
+
+  /** The computer's own words about a folder or the whole computer, with a way to its privacy page. */
+  function accessNote(access: Any, retry: (() => void) | null): HTMLElement {
+    const note = el('div', 'banner');
+    note.setAttribute('role', 'status');
+    const body = add(el('div', 'banner-body'), el('p', '', access.message));
+    const actions = el('div', 'actions');
+    if (typeof access.settings_url === 'string' && access.settings_url.indexOf('x-apple.systempreferences:') === 0) {
+      const link = el('a', 'btn', Q.openPrivacySettings) as HTMLAnchorElement;
+      link.href = access.settings_url;
+      link.setAttribute('data-key', 'picker:access:settings');
+      add(actions, link);
+    }
+    if (retry) add(actions, kit.button(Q.tryAgain, 'picker:access:retry', p.loading || p.saving ? null : retry, 'plain'));
+    if (actions.childNodes.length) add(body, actions);
+    return add(note, body);
   }
 
   function trailOf(key: string): string[] {
@@ -964,6 +994,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       tag.title = fill(Q.mixedSome, { state: (Q.statesLower as Any)[differs] });
       add(main, tag);
     }
+    // The computer asks before this folder opens (or cannot yet): say so beside its name.
+    if (node && node.access && (node.access.state === 'needs_permission' || node.access.state === 'needs_helper')) {
+      const ask = el('span', 'ftag', Q.needsPermission);
+      ask.title = String(node.access.message || '');
+      add(main, ask);
+    }
     add(target, main);
     if (node) {
       const [bytes, files] = nodeMeta(node);
@@ -1076,6 +1112,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
     add(body, topRow(fill(Q.accountRow, { source: p.label }), accountControl()));
     if (p.whole && !p.wholeConfirmed) add(body, wholeConfirm());
+    // Searching the whole computer needs a switch only the person can turn on.
+    if (p.whole && p.access.get('') && p.access.get('').state !== 'denied') add(body, accessNote(p.access.get(''), null));
     const rules = exceptions();
     if (rules.length) add(body, exceptionList(rules));
     const folders = add(el('section', 'fsection'), el('h2', '', Q.foldersHeading));
@@ -1107,7 +1145,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(body, here);
     } else add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
     add(body, loadingLine());
-    add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
+    const refused = p.access.get(key);
+    if (blockedByComputer(refused) && !p.loading) add(body, accessNote(refused, () => list(key, false)));
+    else add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
   }
 
   /** A quiet line (the connect hello, or why the view was refreshed) and a load error with Try again. */

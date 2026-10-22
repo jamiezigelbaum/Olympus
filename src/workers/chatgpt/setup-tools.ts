@@ -739,9 +739,11 @@ function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocat
           selectable: node.selectable,
           ...(sizeBytes !== undefined ? { size_bytes: sizeBytes } : {}),
           ...(fileCount !== undefined ? { file_count: fileCount } : {}),
+          ...(node.access ? { access: { ...node.access } } : {}),
         };
       }),
     ...(browse.next_cursor ? { next_cursor: browse.next_cursor } : {}),
+    ...(browse.access ? { access: { ...browse.access } } : {}),
     selections: browse.selections
       .filter((selection) => !isSecretFolder(secrets, selection.key, selection.ancestor_keys))
       .map((selection) => ({ ...selection })),

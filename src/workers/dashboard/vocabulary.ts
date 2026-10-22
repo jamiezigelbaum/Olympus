@@ -27,6 +27,7 @@ export const DASHBOARD_UPDATE_COPY = {
 };
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
+export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Your Mac is not letting Olympus Engine open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
 
@@ -423,6 +424,7 @@ export function dashboardAttentionLine(
     default:
       break;
   }
+  if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return DASHBOARD_FOLDER_NEEDS_PERMISSION;
   if (source.schedule?.degraded_reason === 'scope_root_missing' || (source.schedule?.missing_folders?.length ?? 0) > 0) return DASHBOARD_MISSING_FOLDER;
   // "Paused" is said only of a real pause — Olympus parked the lane on a budget
   // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
@@ -1616,6 +1618,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     waiting_for_credentials: 'Paused: Olympus needs you to sign in to {source} again',
     scope_pending: 'Paused until you choose folders',
     scope_root_missing: DASHBOARD_MISSING_FOLDER,
+    scope_root_permission_needed: DASHBOARD_FOLDER_NEEDS_PERMISSION,
     provider_unavailable: 'Paused: {source} isn\'t responding; Olympus will retry',
     model_downloading: 'Waiting for the search model to finish downloading',
   },
@@ -1785,6 +1788,9 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   goToModels: 'Go to Models',
   connected: '{source} is connected.',
   foldersTitle: 'Choose folders',
+  /** Beside a folder your Mac asks about before Olympus may open it. */
+  needsPermission: 'Needs permission',
+  openPrivacySettings: 'Open privacy settings',
   foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',
   mailTitle: 'Choose mail',
   mailIntro: 'Choose which {source} mail Olympus may read. Nothing starts until you save.',

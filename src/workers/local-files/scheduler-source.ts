@@ -29,6 +29,8 @@ import type { VolumeResolver } from './volume-identity.ts';
 import { ignoreGlobsForRoot, type WatchHub } from './watch-hub.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** A folder the computer would not open is checked again soon: the person may have just allowed it. */
+const PERMISSION_RETRY_MS = 10 * 60 * 1000;
 
 export interface LocalFilesSchedulerSourceInput {
   /** The base policy with one root per approved folder (`fileSourceScopeLocalFilesPolicy`). */
@@ -47,13 +49,13 @@ export interface LocalFilesSchedulerSourceInput {
   watch?: { hub: WatchHub; volumes: VolumeResolver; ignore: readonly string[] };
 }
 
-function retryTomorrow(context: SourceSchedulerTaskRunContext | undefined, reason: string): {
+function retryTomorrow(context: SourceSchedulerTaskRunContext | undefined, reason: string, afterMs: number = DAY_MS): {
   at: string;
   effectiveIntervalMs: number;
   degradedReason: string;
 } {
   const attempted = Date.parse(context?.attemptedAt ?? new Date().toISOString());
-  return { at: new Date(attempted + DAY_MS).toISOString(), effectiveIntervalMs: DAY_MS, degradedReason: reason };
+  return { at: new Date(attempted + afterMs).toISOString(), effectiveIntervalMs: afterMs, degradedReason: reason };
 }
 
 export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSourceInput): SourceSchedulerSource | undefined {
@@ -91,7 +93,7 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
           if (error instanceof LocalFilesRootPermissionError) {
             throw new SourceSchedulerTaskFailure('Olympus is not allowed to read a chosen folder.', {
               errorKind: 'scope_root_permission_needed',
-              retryAt: retryTomorrow(context, 'scope_root_permission_needed'),
+              retryAt: retryTomorrow(context, 'scope_root_permission_needed', PERMISSION_RETRY_MS),
             });
           }
           throw error;

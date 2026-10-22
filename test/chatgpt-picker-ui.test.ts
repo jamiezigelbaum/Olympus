@@ -865,6 +865,87 @@ describe('folder picker', () => {
   });
 });
 
+describe('folder picker: folders the computer asks about', () => {
+  const doc = (host: Host) => host.win.document;
+  const DENIED = { state: 'denied', message: 'Your Mac said no to your Documents. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on Documents Folder under Olympus Engine. Then choose Try again.', settings_url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders' };
+  const ASK = { state: 'needs_permission', message: 'Your Mac will ask before Olympus opens this folder.' };
+
+  function serverFor(answers: Array<Record<string, unknown>>): Serve {
+    let asked = 0;
+    return (args) => {
+      if (args.parent_key === 'k-docs') {
+        const answer = answers[Math.min(asked, answers.length - 1)]!;
+        asked += 1;
+        return browse(answer.nodes as unknown[] ?? [], answer.access ? { access: answer.access } : {});
+      }
+      return browse([node('k-docs', 'Documents', { has_children: true, access: ASK }), node('k-code', 'Code', { has_children: true })]);
+    };
+  }
+  async function open(answers: Array<Record<string, unknown>>, rootExtra: Record<string, unknown> = {}): Promise<Host> {
+    const serve = serverFor(answers);
+    const host = mount({ serve: { [T.scopeList]: (args) => (args.parent_key ? serve(args) : browse([node('k-docs', 'Documents', { has_children: true, access: ASK }), node('k-code', 'Code', { has_children: true })], rootExtra)), olympus_dashboard: () => ({ structuredContent: pendingDropbox }) } });
+    host.push({ structuredContent: pendingDropbox });
+    host.button('Choose folders').click();
+    await host.settle();
+    return host;
+  }
+  const rowText = (host: Host, name: string) => Array.from(doc(host).querySelectorAll('li.seg-row'))
+    .find((row) => row.querySelector('.fname-text')!.textContent === name)!.textContent ?? '';
+
+  test('a guarded folder says Needs permission; an ordinary one does not', async () => {
+    const host = await open([{ nodes: [] }]);
+    expect(rowText(host, 'Documents')).toContain(Q.needsPermission);
+    expect(rowText(host, 'Code')).not.toContain(Q.needsPermission);
+    expectNoJargon(host);
+  });
+
+  test('a denied folder says how to turn it back on, links to the privacy page, and Try again asks again', async () => {
+    const host = await open([{ access: DENIED }, { nodes: [node('k-d1', 'Taxes')] }]);
+    (doc(host).querySelector('button[data-key="picker:open:k-docs"]') as unknown as HTMLButtonElement).click();
+    await host.settle();
+    const text = host.text();
+    expect(text).toContain('Files & Folders');
+    expect(text).toContain('Documents Folder under Olympus Engine');
+    // Never an empty list standing in for the answer.
+    expect(text).not.toContain(Q.noFolders);
+    const link = doc(host).querySelector('a[data-key="picker:access:settings"]') as unknown as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe(DENIED.settings_url);
+    expect(link.textContent).toBe(Q.openPrivacySettings);
+    expectNoJargon(host);
+    host.button(Q.tryAgain).click();
+    await host.settle();
+    expect(host.toolCalls(T.scopeList).filter((args) => args.parent_key === 'k-docs')).toHaveLength(2);
+    expect(host.text()).toContain('Taxes');
+    expect(doc(host).querySelector('a[data-key="picker:access:settings"]')).toBeNull();
+  });
+
+  test('a question still on screen says to answer on the Mac, and nothing is cached as empty', async () => {
+    const host = await open([{ access: { state: 'waiting', message: 'Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.' } }, { nodes: [node('k-d1', 'Taxes')] }]);
+    (doc(host).querySelector('button[data-key="picker:open:k-docs"]') as unknown as HTMLButtonElement).click();
+    await host.settle();
+    expect(host.text()).toContain('Answer on your Mac');
+    host.button(Q.tryAgain).click();
+    await host.settle();
+    expect(host.text()).toContain('Taxes');
+  });
+
+  test('searching the whole computer without Full Disk Access says what to switch on, once Everything is chosen', async () => {
+    const fda = { state: 'needs_full_disk_access', message: 'To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus.', settings_url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles' };
+    const host = await open([{ nodes: [] }], { access: fda });
+    expect(host.text()).not.toContain('Full Disk Access');
+    (doc(host).querySelector('.this-row .seg-opt[data-key$=":ingest"]') as unknown as HTMLButtonElement).click();
+    expect(host.text()).toContain('Full Disk Access');
+    expect(doc(host).querySelector('a[data-key="picker:access:settings"]')!.getAttribute('href')).toBe(fda.settings_url);
+  });
+
+  test('a link to anything but the Mac\'s privacy pages is not drawn', async () => {
+    const host = await open([{ access: { ...DENIED, settings_url: 'https://evil.example/' } }]);
+    (doc(host).querySelector('button[data-key="picker:open:k-docs"]') as unknown as HTMLButtonElement).click();
+    await host.settle();
+    expect(doc(host).querySelector('a[data-key="picker:access:settings"]')).toBeNull();
+  });
+});
+
 describe('folder picker: a real first run (45 folders, nothing chosen)', () => {
   const firstRunServer: Serve = (args) => browse(args.parent_key === FIRST_RUN_RESOURCES_KEY ? FIRST_RUN_RESOURCES : args.parent_key ? [] : FIRST_RUN_ROOT);
   const open = async () => {

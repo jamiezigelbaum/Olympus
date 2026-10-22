@@ -248,6 +248,9 @@ interface FakeBackendState {
   pages?: string[][];
   /** Folder measurements the fake provider reports, by name (absent: none reported). */
   measures?: Record<string, { size_bytes?: number; file_count?: number }>;
+  /** What the computer says about folders it asks the person about, by name; and about the level itself. */
+  access?: Record<string, Record<string, unknown>>;
+  levelAccess?: Record<string, unknown>;
   /** A worker code startOAuth / disconnect fail with. */
   startError?: string;
   disconnectError?: string;
@@ -304,8 +307,9 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
         account_generation: 'gen-1',
         scope_revision: state.revision,
         status: 'scope_pending',
-        nodes: names.map((name) => ({ key: `k-${name}`, name, kind: 'folder' as const, has_children: false, selectable: true, ...state.measures?.[name] })),
+        nodes: names.map((name) => ({ key: `k-${name}`, name, kind: 'folder' as const, has_children: false, selectable: true, ...state.measures?.[name], ...(state.access?.[name] ? { access: state.access[name] } : {}) } as unknown as OlympusFolderScopeBrowseResult['nodes'][number])),
         ...(index + 1 < state.pages.length ? { next_cursor: `p${index + 1}` } : {}),
+        ...(state.levelAccess ? { access: state.levelAccess } as unknown as Partial<OlympusFolderScopeBrowseResult> : {}),
         selections: [],
         whole_account_selected: false,
       };
@@ -727,6 +731,27 @@ describe('setup tools over the remote handler', () => {
       ]);
       // Measurements stay out of what the model reads.
       expect(JSON.stringify(result.structuredContent)).not.toContain('2048');
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_scope_list forwards what the computer says about a folder and a level, and drops anything unexpected', async () => {
+    backendState.pages = [['Documents', 'Code']];
+    backendState.access = {
+      Documents: { state: 'needs_permission', message: 'Your Mac will ask before Olympus opens this folder.' },
+      Code: { state: 'surprise', message: 'x' },
+    };
+    backendState.levelAccess = { state: 'denied', message: 'Your Mac said no.', settings_url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders' };
+    const client = await connectClient();
+    try {
+      const result = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs' });
+      const ui = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<Record<string, unknown>>; access?: Record<string, unknown> };
+      expect(ui.nodes.find((node) => node.name === 'Documents')?.access).toEqual({ state: 'needs_permission', message: 'Your Mac will ask before Olympus opens this folder.' });
+      expect(ui.nodes.find((node) => node.name === 'Code')?.access).toBeUndefined();
+      expect(ui.access).toEqual({ state: 'denied', message: 'Your Mac said no.', settings_url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders' });
+      // Only the picker reads it, never the model.
+      expect(JSON.stringify(result.structuredContent)).not.toContain('Your Mac');
     } finally {
       await client.close();
     }
