@@ -31855,6 +31855,12 @@ function isWithinScopePath(path, root) {
     return true;
   return path === root || path.startsWith(`${root}/`);
 }
+function scopePathsIgnoreCase(context2) {
+  return (context2.platform ?? process.platform) === "darwin";
+}
+function foldScopePath(value, context2) {
+  return scopePathsIgnoreCase(context2) ? value.toLowerCase() : value;
+}
 function scopeParentPath(path) {
   if (path === "/")
     return;
@@ -31910,7 +31916,7 @@ function defaultExclusionForFolder(scopePath, context2) {
   if (volumeId)
     return;
   const platform2 = context2.platform ?? process.platform;
-  const fold = (value) => platform2 === "darwin" ? value.toLowerCase() : value;
+  const fold = (value) => foldScopePath(value, context2);
   const here = fold(path);
   const at = (suffix) => fold(`${context2.home}${suffix}`);
   if (platform2 === "darwin" && here === at("/Library"))

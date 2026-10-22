@@ -48312,6 +48312,12 @@ function isWithinScopePath(path, root) {
     return true;
   return path === root || path.startsWith(`${root}/`);
 }
+function scopePathsIgnoreCase(context2) {
+  return (context2.platform ?? process.platform) === "darwin";
+}
+function foldScopePath(value, context2) {
+  return scopePathsIgnoreCase(context2) ? value.toLowerCase() : value;
+}
 function scopePathDepth(path) {
   return path === "/" ? 0 : path.split("/").length - 1;
 }
@@ -48370,7 +48376,7 @@ function defaultExclusionForFolder(scopePath, context2) {
   if (volumeId)
     return;
   const platform2 = context2.platform ?? process.platform;
-  const fold = (value) => platform2 === "darwin" ? value.toLowerCase() : value;
+  const fold = (value) => foldScopePath(value, context2);
   const here = fold(path);
   const at = (suffix) => fold(`${context2.home}${suffix}`);
   if (platform2 === "darwin" && here === at("/Library"))
@@ -48443,7 +48449,7 @@ var init_paths = __esm(() => {
 // src/workers/local-files/scope.ts
 function decideLocalFilesPath(approval, scopePath, context2) {
   const path = normalizeScopePath(scopePath);
-  const selected = approval.selections.map((selection) => ({ key: safeKey(selection.key), state: selection.state })).filter((selection) => selection.key !== undefined && isWithinScopePath(path, selection.key));
+  const selected = approval.selections.map((selection) => ({ key: safeKey(selection.key), state: selection.state })).filter((selection) => selection.key !== undefined && isWithinScopePath(foldScopePath(path, context2), foldScopePath(selection.key, context2)));
   const defaultOff = deepestDefaultExclusion(path, context2);
   if (defaultOff) {
     const governing = selected.reduce((depth, selection) => Math.max(depth, scopePathDepth(selection.key)), -1);
