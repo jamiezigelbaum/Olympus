@@ -13593,6 +13593,7 @@ var init_vocabulary = __esm(() => {
     },
     sourceStages: { listing: "Finding items", reading: "Reading", indexing: "Indexing" },
     findingItems: "Finding items",
+    findingFound: "Finding {unit} · {done} found so far",
     sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
     stalledSources: "{sources} paused",
     stalledAnd: "{first} and {last}",
@@ -13956,6 +13957,7 @@ var init_vocabulary = __esm(() => {
     units: DASHBOARD_CHATGPT_PAGE_COPY.units,
     sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
     findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+    findingFound: DASHBOARD_CHATGPT_PAGE_COPY.findingFound,
     sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
     stalledReasons: {
       waiting_for_credentials: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.waiting_for_credentials,
