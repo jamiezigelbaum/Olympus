@@ -512,6 +512,13 @@ export class SourceScheduler {
   private readonly allowedSourceIds: ReadonlySet<string> | undefined;
   private missingSelectedSourceIds: string[] = [];
   private states: SchedulerTaskState[];
+  /**
+   * Every task executing right now, including one a refresh dropped from the
+   * roster (a revised folder scope gives the replacement task a new id). Its
+   * promise still runs and can still write, so busy checks read this set,
+   * not `status()`, which only shows the current roster.
+   */
+  private readonly executingStates = new Set<SchedulerTaskState>();
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly setIntervalImpl: typeof setInterval;
@@ -815,6 +822,14 @@ export class SourceScheduler {
     return this.status(this.now());
   }
 
+  /** Whether any task of these sources (by source or corpus id) is executing, roster or not. */
+  hasExecutingTask(sourceIds: ReadonlySet<string>): boolean {
+    for (const state of this.executingStates) {
+      if (sourceIds.has(state.source.sourceId) || sourceIds.has(state.source.corpusId)) return true;
+    }
+    return false;
+  }
+
   status(now: Date = this.now()): SourceSchedulerStatus {
     return {
       kind: 'source_scheduler_status',
@@ -878,10 +893,12 @@ export class SourceScheduler {
         for (const state of group) {
           if (state.running) continue;
           state.running = true;
+          this.executingStates.add(state);
           try {
             await this.runTask(state, dueAt, provenance);
           } finally {
             state.running = false;
+            this.executingStates.delete(state);
           }
         }
         // Work this group made due while it held the key (a backlog
@@ -899,10 +916,12 @@ export class SourceScheduler {
           for (const state of due) {
             if (state.running) continue;
             state.running = true;
+            this.executingStates.add(state);
             try {
               await this.runTask(state, state.nextRunAt, provenance);
             } finally {
               state.running = false;
+              this.executingStates.delete(state);
             }
           }
         }

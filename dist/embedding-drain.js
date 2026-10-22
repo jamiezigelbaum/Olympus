@@ -42447,6 +42447,7 @@ class SourceScheduler {
   allowedSourceIds;
   missingSelectedSourceIds = [];
   states;
+  executingStates = new Set;
   now;
   sleep;
   setIntervalImpl;
@@ -42700,6 +42701,13 @@ class SourceScheduler {
     await this.runStates(states.filter((state) => !state.running), now.getTime(), provenance);
     return this.status(this.now());
   }
+  hasExecutingTask(sourceIds) {
+    for (const state of this.executingStates) {
+      if (sourceIds.has(state.source.sourceId) || sourceIds.has(state.source.corpusId))
+        return true;
+    }
+    return false;
+  }
   status(now = this.now()) {
     return {
       kind: "source_scheduler_status",
@@ -42756,10 +42764,12 @@ class SourceScheduler {
           if (state.running)
             continue;
           state.running = true;
+          this.executingStates.add(state);
           try {
             await this.runTask(state, dueAt, provenance);
           } finally {
             state.running = false;
+            this.executingStates.delete(state);
           }
         }
         if (provenance === "scheduled") {
@@ -42770,10 +42780,12 @@ class SourceScheduler {
             if (state.running)
               continue;
             state.running = true;
+            this.executingStates.add(state);
             try {
               await this.runTask(state, state.nextRunAt, provenance);
             } finally {
               state.running = false;
+              this.executingStates.delete(state);
             }
           }
         }
