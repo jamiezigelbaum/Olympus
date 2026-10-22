@@ -162,9 +162,8 @@ describe('dashboard view-model producer', () => {
     expect(vm.progress).toEqual({
       unit: 'files',
       phase: 'initial',
-      // Searchable (indexed) items, not items read: 20 of 200.
-      percent: 10,
-      itemsLeft: 180,
+      // The first listing is still running: no percent and no items left
+      // (metric ruling); the page says how many were found so far.
       etaSeconds: 5400,
       stalled: false,
       details: [
