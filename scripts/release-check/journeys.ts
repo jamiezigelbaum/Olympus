@@ -303,7 +303,8 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Open the privacy settings again',
         do: { click: { role: 'button', name: new RegExp(`^(${PRIVACY.edit}|${PRIVACY.editLabel})$`) }, frame: 'panel' },
-        expect: [{ value: { role: 'textbox', name: PRIVACY.descriptionLabel }, equals: 'my medical records and my tax papers', frame: 'panel' }],
+        // The saved description keeps what was typed and gains the answers to the quick questions after it (found on the second Linux run).
+        expect: [{ value: { role: 'textbox', name: PRIVACY.descriptionLabel }, equals: /^my medical records and my tax papers/, frame: 'panel' }],
       },
     ],
   },
