@@ -79,6 +79,8 @@ export interface OlympusFolderScopeNode {
   default_exclusion_reason?: string;
   /** Set on a folder the computer asks the person about; see OlympusFolderAccess. */
   access?: OlympusFolderAccess;
+  /** A mounted disk, listed beside the home folders: the picker tags it so it does not read as a folder. */
+  is_disk?: true;
 }
 
 export type OlympusSourceScopeStatus = 'scope_pending' | 'approved';

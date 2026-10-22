@@ -368,6 +368,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       remaining: new Map(), truncated: new Set(),
       // Per level: why the computer would not list it (or, at the root, what the whole computer needs).
       access: new Map(),
+      wholeWords: null,
       ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false,
       path: [], lastSeg: '',
       // mail
@@ -456,6 +457,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       p.generation = page.account_generation;
       p.revision = page.scope_revision;
       p.whole = page.whole_account_selected === true;
+      // A source with no account (this computer) names "everything" in its own words.
+      p.wholeWords = page.whole_words && typeof page.whole_words === 'object' ? page.whole_words : null;
       p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page.selections) ? page.selections : [];
       for (const selection of saved) {
@@ -478,6 +481,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     // Alphabetical, numbers in numeric order ("2 Areas" before "10 Notes"),
     // whatever order the provider lists them in.
     const nodes = previous.concat(fresh).sort((a: Any, b: Any) =>
+      (a.is_disk === true ? 1 : 0) - (b.is_disk === true ? 1 : 0) ||
       String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
     const levelAccess = page.access && typeof page.access.message === 'string' && page.access.message ? page.access : null;
     if (levelAccess) p.access.set(parentKey, levelAccess);
@@ -615,7 +619,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function sourceName(from: string): string {
-    return from === ACCOUNT ? fill(Q.accountRow, { source: p.label }) : nameOf(from);
+    return from === ACCOUNT ? wholeWord('row') : nameOf(from);
   }
 
   function size(bytes: number): string {
@@ -762,7 +766,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       }
       parts.push(part);
     }
-    if (p.whole) lines.push(fill(Q.summaryWhole, { source: p.label }));
+    if (p.whole) lines.push(wholeWord('summary'));
     if (parts.length) {
       const bytes = indexedBytes();
       lines.push(parts.join(', ') + (bytes > 0 ? ' · ' + fill(Q.summarySize, { size: size(bytes) }) : ''));
@@ -831,11 +835,24 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     });
   }
 
+  /** The words for choosing everything: the source's own, else the account wording. */
+  function wholeWord(kind: 'row' | 'prompt' | 'confirm' | 'summary' | 'onlyFull' | 'needConfirm'): string {
+    const own = p.wholeWords && typeof p.wholeWords[kind] === 'string' ? String(p.wholeWords[kind]) : '';
+    if (own) return own;
+    const values = { source: p.label };
+    return kind === 'row' ? fill(Q.accountRow, values)
+      : kind === 'prompt' ? fill(Q.wholePrompt, values)
+        : kind === 'confirm' ? Q.wholeConfirm
+          : kind === 'onlyFull' ? Q.wholeOnlyFull
+            : kind === 'needConfirm' ? Q.needConfirm
+              : fill(Q.summaryWhole, values);
+  }
+
   function wholeConfirm(): HTMLElement {
     const confirm = el('div', 'confirm-box');
     confirm.setAttribute('role', 'alert');
-    add(confirm, el('p', 'strong', fill(Q.wholePrompt, { source: p.label })), add(el('div', 'actions'),
-      kit.button(Q.wholeConfirm, 'picker:whole:yes', p.saving ? null : () => {
+    add(confirm, el('p', 'strong', wholeWord('prompt')), add(el('div', 'actions'),
+      kit.button(wholeWord('confirm'), 'picker:whole:yes', p.saving ? null : () => {
         p.wholeConfirmed = true;
         kit.render('picker:seg:' + ACCOUNT + ':ingest');
       }, 'danger'),
@@ -943,10 +960,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   /** The whole account is on or off in the contract: Full is the only choice it can carry. */
   function accountControl(): HTMLElement {
-    return segControl(fill(Q.accountRow, { source: p.label }), 'picker:seg:' + ACCOUNT + ':', {
+    return segControl(wholeWord('row'), 'picker:seg:' + ACCOUNT + ':', {
       pressed: p.whole ? 'ingest' : '',
       inherited: '',
-      blocked: (state) => (state === 'ingest' ? '' : Q.wholeOnlyFull),
+      blocked: (state) => (state === 'ingest' ? '' : wholeWord('onlyFull')),
       note: () => '',
       pick: (state) => choose(ACCOUNT, p.whole ? '' : state, 'picker:seg:' + ACCOUNT + ':' + state),
     });
@@ -1000,6 +1017,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       ask.title = String(node.access.message || '');
       add(main, ask);
     }
+    if (node && node.is_disk === true) add(main, el('span', 'ftag', Q.disk));
     add(target, main);
     if (node) {
       const [bytes, files] = nodeMeta(node);
@@ -1110,7 +1128,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(body, only);
       return;
     }
-    add(body, topRow(fill(Q.accountRow, { source: p.label }), accountControl()));
+    add(body, topRow(wholeWord('row'), accountControl()));
     if (p.whole && !p.wholeConfirmed) add(body, wholeConfirm());
     // Searching the whole computer needs a switch only the person can turn on.
     if (p.whole && p.access.get('') && p.access.get('').state !== 'denied') add(body, accessNote(p.access.get(''), null));
@@ -1175,7 +1193,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     if (p.own.size >= MAX_RULES) add(summary, el('p', 'reason strong', fill(Q.capReached, { max: kit.count(MAX_RULES) })));
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders,
-      p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ''));
+      p.whole && !p.wholeConfirmed ? wholeWord('needConfirm') : !anyChosen() && !p.edited ? Q.needChoice : ''));
     return footer;
   }
 
@@ -1492,7 +1510,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       ? kit.button(Q.up, 'picker:up', escape, 'plain')
       : kit.button(p.pick ? p.pick.words.back : Q.back, 'picker:back', escape, 'plain');
     if (deep) {
-      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : fill(Q.accountRow, { source: p.label });
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : wholeWord('row');
       backButton.setAttribute('aria-label', fill(Q.upTo, { name: above }));
     }
     backButton.className = 'btn back';

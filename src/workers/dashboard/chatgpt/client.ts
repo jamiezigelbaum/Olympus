@@ -1322,6 +1322,15 @@ export function chatgptDashboardClient(
     if (progress.stalled) {
       const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== 'done';
       if (stalledWords) add(box, el('p', 'stall-line', stalledWords));
+      // A Mac that will not open a chosen folder: the page that turns it on (the computer's own pages only).
+      const fixes = progress.stalledReason === 'scope_root_permission_needed' && onComputer() && state.computerMeta && Array.isArray(state.computerMeta.permissionSettings)
+        ? state.computerMeta.permissionSettings.filter((entry: Any) => entry && entry.sourceId === source.id && typeof entry.url === 'string' && entry.url.indexOf('x-apple.systempreferences:') === 0) : [];
+      if (fixes.length) {
+        const link = el('a', 'btn', config.picker.copy.openPrivacySettings) as HTMLAnchorElement;
+        link.href = String(fixes[0].url);
+        link.setAttribute('data-key', 'source:' + String(source.id) + ':privacy-settings');
+        add(box, add(el('div', 'actions'), link));
+      }
       if (real) add(box, progressBar(progress.percent, name + ': ' + (stalledWords || sourceProgressLabel(progress))));
       return box;
     }

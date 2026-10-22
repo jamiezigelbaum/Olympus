@@ -160,6 +160,7 @@ export function createLocalFilesFolderScopeBrowser(
               kind: 'folder' as const,
               has_children: true,
               selectable: true,
+              is_disk: true as const,
               ...(diskAccess ? { access: diskAccess } : {}),
             };
           }),
