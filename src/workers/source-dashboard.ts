@@ -75,6 +75,14 @@ import {
 } from '../core/public-source-capabilities.ts';
 
 export type DashboardConnectSource = 'google' | 'gmail' | 'google-drive' | 'dropbox' | 'x' | 'venice' | 'readwise';
+/**
+ * A source that needs no account ("this computer"), by the id its Connect
+ * action names (`connect_action.kind === 'this_computer'`). Derived from the
+ * definitions so a second such source joins here by being declared once.
+ */
+export type DashboardThisComputerSource = Extract<DashboardSourceAction, { kind: 'this_computer' }>['source'];
+/** What Sync now can run for: an account source by its connect name, a this-computer source by its id. */
+export type DashboardSyncSource = DashboardConnectSource | DashboardThisComputerSource;
 export type DashboardApiKeySource = 'venice' | 'readwise';
 export type DashboardOAuthSource = Exclude<DashboardConnectSource, DashboardApiKeySource>;
 export type DashboardSourceConnectKind = 'oauth' | 'api_token' | 'pairing' | 'local';
@@ -1347,7 +1355,7 @@ export interface SourceDashboardBuildOptions {
    * source worker does not support Sync now for google-drive"). Absent means
    * unknown, and unknown keeps today's behaviour of offering the control.
    */
-  syncNowAvailable?: (source: DashboardConnectSource) => boolean;
+  syncNowAvailable?: (source: DashboardSyncSource) => boolean;
   /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
   fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
   fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
@@ -2209,7 +2217,9 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
     // to sync is a fact about the card.
-    const syncSource = definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key'
+    const syncSource: DashboardSyncSource | undefined = definition.connect_action.kind === 'oauth'
+      || definition.connect_action.kind === 'api_key'
+      || definition.connect_action.kind === 'this_computer'
       ? definition.connect_action.source
       : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined) return card;

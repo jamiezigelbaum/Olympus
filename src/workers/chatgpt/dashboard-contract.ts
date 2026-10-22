@@ -732,7 +732,7 @@ export type ScopeSetResult =
   | { status: 'conflict'; source_id: ChatGptScopeSourceId; current: ScopeSummary };
 
 /** Sources Sync now can run for from ChatGPT. */
-export type ChatGptSyncSourceId = ChatGptDisconnectSourceId;
+export type ChatGptSyncSourceId = ChatGptDisconnectSourceId | 'local.files';
 
 /**
  * `olympus_sync_source {source_id}` → structuredContent. `checking`: a sync

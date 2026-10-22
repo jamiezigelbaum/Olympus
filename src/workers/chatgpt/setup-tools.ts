@@ -162,7 +162,7 @@ const OAUTH_SOURCES = ['gmail', 'google-drive', 'dropbox'] as const;
 const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files', 'local.files'] as const;
 const SCOPE_SOURCE_IDS = ['gmail.email', ...FOLDER_SOURCE_IDS] as const;
 const DISCONNECT_SOURCE_IDS = ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library'] as const;
-const SYNC_SOURCE_IDS = DISCONNECT_SOURCE_IDS;
+const SYNC_SOURCE_IDS = [...DISCONNECT_SOURCE_IDS, 'local.files'] as const;
 
 /** The widget may call these; the model may too. */
 const WIDGET_AND_MODEL = { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true } as const;

@@ -120,7 +120,7 @@ const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox
 const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
 const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
 /** Sources Sync now runs for from ChatGPT (olympus_sync_source). */
-const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
+const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files']);
 
 /** The only connection labels the engine writes; anything else becomes ''. */
 const KNOWN_CONNECTION_LABELS = new Set([
