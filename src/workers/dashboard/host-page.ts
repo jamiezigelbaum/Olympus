@@ -132,7 +132,7 @@ const HOST_CSS = `
 @media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
 *{box-sizing:border-box}
 html,body{height:100%}
-body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:0.9375rem;line-height:1.45}
 .update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
 .update p{margin:0 0 0.5rem}
 .update code{overflow-wrap:anywhere;white-space:pre-wrap}

@@ -209,7 +209,7 @@ const ROOT_BLOCK = [
 /** The full stylesheet, already wrapped in nothing: callers put it in <style>. */
 export const DASHBOARD_THEME_CSS: string = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
+body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
 /* Text can wrap inside the window; intrinsic grid/flex minima must not
    widen a page for a filename, URL, or diagnostic. */
@@ -346,16 +346,16 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .bigstrip i { width: 14px; height: 30px; border-radius: 2.5px; display: block; }
 .stripcap { display: flex; justify-content: space-between; color: var(--t3); font-size: var(--fs-caption); margin-bottom: 4px; }
 .tip { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 10px 0 4px; max-width: 640px; }
-.tip .h { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 4px; }
+.tip .h { color: var(--t3); font-size: var(--fs-caption); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; font-weight: 600; margin-bottom: 4px; }
 /* The consequence line under a failing check: plain language, in the page's own
    font, so the mechanical row above it stays the evidence and this stays the
    meaning. */
-.tip .cq { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: var(--fs-caption); color: var(--t3); margin: 2px 0 8px 15px; }
+.tip .cq { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; font-size: var(--fs-caption); color: var(--t3); margin: 2px 0 8px 15px; }
 .tip > .cq:last-child { margin-bottom: 0; }
 /* Passing checks, collapsed. A page whose header reports a fault opens with the
    fault; the green rows are evidence a reader may unfold. */
 .evidence { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 6px 0 4px; max-width: 640px; }
-.evidence > summary { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; cursor: pointer; }
+.evidence > summary { color: var(--t3); font-size: var(--fs-caption); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; font-weight: 600; cursor: pointer; }
 .evidence > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .evidence[open] > summary { margin-bottom: 4px; }
 .ok { color: var(--good); }

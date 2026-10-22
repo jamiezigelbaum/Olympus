@@ -120,7 +120,7 @@ export const CHATGPT_DASHBOARD_CSS = `
 :root[data-theme=light]{color-scheme:light}
 :root[data-theme=dark]{color-scheme:dark}
 *{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:100%;line-height:1.45}
 body{margin:0;background:var(--bg);color:var(--text);font-size:0.9375rem;overflow-wrap:anywhere}
 p{margin:0}
 h1{font-size:1.25rem;font-weight:600;margin:0 0 1rem}

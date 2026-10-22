@@ -160,7 +160,7 @@ function confirmation(): Response {
 // disposable owner-check popup. Keep its opening state across the origin hop.
 function openingView(): string {
   return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
-html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px system-ui,sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
+html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
 </style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
 }
 function proofPage(): Response {

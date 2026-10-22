@@ -157,7 +157,10 @@ describe('page source', () => {
     expect(CHATGPT_DASHBOARD_CSS).not.toContain('overflow:scroll');
     expect(CHATGPT_DASHBOARD_CSS).not.toContain('overflow-y');
     expect(CHATGPT_DASHBOARD_CSS).toContain(':focus-visible');
-    expect(CHATGPT_DASHBOARD_CSS).toContain('font-family:system-ui');
+    // Named sans fonts come before system-ui: on some Linux setups system-ui
+    // resolves to a monospace font (release check, 2026-10-22).
+    expect(CHATGPT_DASHBOARD_CSS).toContain('font-family:-apple-system');
+    expect(CHATGPT_DASHBOARD_CSS).toMatch(/"Liberation Sans".*system-ui, sans-serif/);
   });
 
   test('every text pair clears WCAG AA in light and dark', () => {
