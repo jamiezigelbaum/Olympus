@@ -50,7 +50,7 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
 .agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
 .agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
 #agents { margin-top: 26px; }
-[data-remote-access] > .rowform { flex: 0 0 auto; margin-left: 8px; }
+[data-remote-access] > .rowform { flex: 0 0 auto; }
 .remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
 .remoteterms[hidden] { display: none; }
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
