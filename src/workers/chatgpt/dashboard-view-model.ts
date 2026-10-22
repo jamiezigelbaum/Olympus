@@ -423,7 +423,8 @@ function sourceEntry(
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);
   }
-  if (status !== 'Off' && DISCONNECT_SOURCE_IDS.has(definition.source_id)) {
+  // A source on this computer has no sign-in; Disconnect only stops reading it.
+  if (status !== 'Off' && (DISCONNECT_SOURCE_IDS.has(definition.source_id) || definition.connect_action.kind === 'this_computer')) {
     menu.push({
       label: CHATGPT_SETUP_LABELS.disconnect,
       tool: DISCONNECT_SOURCE_TOOL_NAME,

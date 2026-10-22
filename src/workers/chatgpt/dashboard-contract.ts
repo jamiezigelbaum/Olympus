@@ -585,7 +585,8 @@ export type ChatGptDisconnectSourceId =
   | 'google_drive.docs'
   | 'dropbox.files'
   | 'x.bookmarks'
-  | 'readwise.library';
+  | 'readwise.library'
+  | 'local.files';
 
 /**
  * `olympus_connect_source {source}` → structuredContent. The provider's sign-in
@@ -732,7 +733,7 @@ export type ScopeSetResult =
   | { status: 'conflict'; source_id: ChatGptScopeSourceId; current: ScopeSummary };
 
 /** Sources Sync now can run for from ChatGPT. */
-export type ChatGptSyncSourceId = ChatGptDisconnectSourceId | 'local.files';
+export type ChatGptSyncSourceId = ChatGptDisconnectSourceId;
 
 /**
  * `olympus_sync_source {source_id}` → structuredContent. `checking`: a sync

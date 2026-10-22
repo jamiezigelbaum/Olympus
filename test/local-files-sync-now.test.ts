@@ -11,13 +11,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-import { connectThisComputerSource, disconnectThisComputerSource } from '../src/core/this-computer.ts';
+import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../src/core/this-computer.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { dashboardManualSyncLine } from '../src/workers/dashboard/vocabulary.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
 import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
+import { deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
+import { DISCONNECT_SOURCE_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { SYNC_SOURCE_TOOL, callSetupTool } from '../src/workers/chatgpt/setup-tools.ts';
 import { SYNC_SOURCE_TOOL_NAME, type DashboardFix } from '../src/workers/chatgpt/dashboard-contract.ts';
 import {
@@ -56,12 +58,13 @@ describe('the Files on this computer row', () => {
   test('a connected source with folders chosen has Sync now first in its ⋯ menu, like Dropbox', () => {
     const row = localRow(localView('local-files-reading', { sync_now_available: true }));
     expect(row.menu?.[0]).toEqual(SYNC_LOCAL);
-    expect(row.menu?.map((fix) => fix.label)).toEqual(['Sync now', 'Choose folders']);
+    expect(row.menu?.map((fix) => fix.label)).toEqual(['Sync now', 'Choose folders', 'Disconnect']);
+    expect(row.menu?.[2]).toMatchObject({ tool: 'olympus_disconnect_source', args: { source_id: 'local.files' }, destructive: true });
   });
 
   test('no Sync now where the worker has no lane, before folders are chosen, or when not connected', () => {
     expect(localRow(localView('local-files-reading', { sync_now_available: false })).menu?.map((fix) => fix.label))
-      .toEqual(['Choose folders']);
+      .toEqual(['Choose folders', 'Disconnect']);
     expect(JSON.stringify(localRow(localView('local-files-connected', { sync_now_available: true }))))
       .not.toContain('olympus_sync_source');
     expect(localRow(localView('local-files-off', { sync_now_available: true })).menu).toBeUndefined();
@@ -291,5 +294,36 @@ describe('olympus_sync_source for Files on this computer', () => {
     const again = await callSetupTool(SYNC_SOURCE_TOOL_NAME, { source_id: 'local.files' }, backend);
     expect(again.structuredContent).toEqual({ status: 'busy', source_id: 'local.files' });
     expect(f.passes()).toBe(1);
+  });
+});
+
+describe('Disconnect for Files on this computer from the panel', () => {
+  test('the panel tool disconnects it, the record drops it, and data delete is then allowed', async () => {
+    const f = fixture();
+    const backend = createChatGptSetupBackend({
+      workerFetch: f.worker.fetch,
+      handoffs: createChatGptHandoffs(),
+      publicUrls: () => undefined,
+      sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'inline' },
+      credentialPresent: () => false,
+      requestReload: () => false,
+    });
+    const home = mkdtempSync(join(tmpdir(), 'olympus-local-disconnect-home-'));
+    cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+    const connected = () => readThisComputerHandles(f.registryPath).map((h) => h.handle.replace(/\.this_computer$/, ''));
+    const custody = () => deleteOlympusDataWithCustody({
+      sourceId: 'local.files', homeDir: home, dryRun: true,
+      connectedRegistry: { version: 1, handles: [] }, thisComputerSources: connected(),
+    }).custody;
+    expect(connected()).toEqual(['local.files']);
+    expect(custody()).toMatchObject({ ready: false, observed: 'connected' });
+
+    const result = await callSetupTool(DISCONNECT_SOURCE_TOOL_NAME, { source_id: 'local.files' }, backend);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({ status: 'disconnected', source_id: 'local.files' });
+    expect(connected()).toEqual([]);
+    expect(custody()).toMatchObject({ ready: true, observed: 'disconnected' });
+    // Disconnecting again says it is not connected.
+    await expect(callSetupTool(DISCONNECT_SOURCE_TOOL_NAME, { source_id: 'local.files' }, backend)).rejects.toBeDefined();
   });
 });
