@@ -123059,8 +123059,12 @@ input, select, textarea { max-width: 100%; min-width: 0; }
 .attncard.error { background: var(--err-bg); border-color: var(--err-line); }
 .attncard.error::before { background: var(--bad); }
 .attncard.plain { background: var(--panel); border-color: var(--line); }
-.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before { display: none; }
+.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before, .attncard.plain[data-dashboard-control-gate]::before { display: none; }
 .attncard .grow { flex: 1; }
+/* One rule for a row's actions: they sit on the row's right edge, and when a
+   narrow row wraps them under the text they stay on that right edge. */
+.attncard > :not(.grow) { margin-left: auto; }
+.attncard > .rowform { justify-content: flex-end; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
    an agent-prompt button squeezed a whole paragraph into a ~30-character column
@@ -123175,7 +123179,7 @@ table { table-layout: fixed; border-collapse: collapse; width: 100%; font-size: 
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
 /* A not-connected source: one flat list row, like the source rows above it. */
-.setrow { display: grid; grid-template-columns: 20px minmax(0, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
+.setrow { display: grid; grid-template-columns: 20px minmax(0, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 16px; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
 .setrow.noblurb { grid-template-columns: 20px minmax(0, 1fr) auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
@@ -128843,6 +128847,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .row-text{flex:1 1 14rem;min-width:0}
 .row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start;gap:0 0.75rem}
 .need-body{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1rem;min-width:0}
+.need-body>:not(.row-text){margin-left:auto}
 .need .row-text{padding-top:max(0px,calc((2.25rem - 1.45em) / 2))}
 .need .dot{margin-top:calc((2.25rem - 0.625rem) / 2)}
 .row.source{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;position:relative}
@@ -129012,7 +129017,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 });
@@ -130053,7 +130058,7 @@ var LOCAL_PAGE_CSS = `
 .agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
 .agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
 #agents { margin-top: 26px; }
-[data-remote-access] > .rowform { flex: 0 0 auto; margin-left: 8px; }
+[data-remote-access] > .rowform { flex: 0 0 auto; }
 .remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
 .remoteterms[hidden] { display: none; }
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
