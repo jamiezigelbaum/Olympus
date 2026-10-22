@@ -43179,6 +43179,11 @@ var MAC_ACCESS_COPY = {
   denied: (kind) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under Olympus Engine. Then choose Try again.`,
   fullDiskAccess: "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save."
 };
+function permissionHostPresent(env) {
+  if (env[ENGINE_HELPER_ENV])
+    return true;
+  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1";
+}
 
 class MacPermissions {
   platform;
@@ -43194,7 +43199,7 @@ class MacPermissions {
   constructor(options) {
     this.platform = options.platform ?? process.platform;
     this.home = options.home;
-    this.helperPresent = options.helperPresent ?? (() => Boolean(process.env[ENGINE_HELPER_ENV]));
+    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8000;
     this.list = options.list ?? (async (path) => {

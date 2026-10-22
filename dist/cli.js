@@ -140361,6 +140361,11 @@ var init_source_scheduler = __esm(() => {
 import { existsSync as existsSync66, mkdirSync as mkdirSync49, opendirSync, readFileSync as readFileSync68 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname75, join as join107 } from "node:path";
+function permissionHostPresent(env) {
+  if (env[ENGINE_HELPER_ENV])
+    return true;
+  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1";
+}
 
 class MacPermissions {
   platform;
@@ -140376,7 +140381,7 @@ class MacPermissions {
   constructor(options) {
     this.platform = options.platform ?? process.platform;
     this.home = options.home;
-    this.helperPresent = options.helperPresent ?? (() => Boolean(process.env[ENGINE_HELPER_ENV]));
+    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8000;
     this.list = options.list ?? (async (path) => {

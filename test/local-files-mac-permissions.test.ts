@@ -6,7 +6,9 @@ import {
   FILES_AND_FOLDERS_URL,
   FULL_DISK_ACCESS_URL,
   MAC_ACCESS_COPY,
+  ENGINE_HELPER_ENV,
   MacPermissions,
+  permissionHostPresent,
 } from '../src/workers/local-files/mac-permissions.ts';
 import { revealHelperAndOpenFullDiskAccess } from '../src/workers/local-files/mac-settings.ts';
 import { createLocalFilesSchedulerSource } from '../src/workers/local-files/scheduler-source.ts';
@@ -286,4 +288,11 @@ describe('Full Disk Access for the whole computer', () => {
     revealHelperAndOpenFullDiskAccess({ run: (command, args) => { ran.push([command, ...args]); }, exists: () => false, helperApp: '/h/x.app' });
     expect(ran).toEqual([['/usr/bin/open', FULL_DISK_ACCESS_URL]]);
   });
+});
+
+test('only the standalone engine without the helper lacks an app for macOS to name', () => {
+  expect(permissionHostPresent({ OLYMPUS_ENGINE_HOST: '1' })).toBe(false);
+  expect(permissionHostPresent({ OLYMPUS_STANDALONE: '1' })).toBe(false);
+  expect(permissionHostPresent({ OLYMPUS_ENGINE_HOST: '1', [ENGINE_HELPER_ENV]: '1' })).toBe(true);
+  expect(permissionHostPresent({})).toBe(true);
 });

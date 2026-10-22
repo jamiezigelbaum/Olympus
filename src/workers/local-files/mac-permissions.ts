@@ -86,6 +86,17 @@ export const MAC_ACCESS_COPY = {
   fullDiskAccess: 'To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save.',
 } as const;
 
+/**
+ * Whether a signed app stands behind this process when macOS asks about a
+ * guarded folder. The standalone engine runs bun under launchd, so only the
+ * helper app gives it one. Any other host (OpenClaw, a terminal during
+ * development) is itself the app macOS names.
+ */
+export function permissionHostPresent(env: Record<string, string | undefined>): boolean {
+  if (env[ENGINE_HELPER_ENV]) return true;
+  return env.OLYMPUS_ENGINE_HOST !== '1' && env.OLYMPUS_STANDALONE !== '1';
+}
+
 export class MacPermissions {
   private readonly platform: NodeJS.Platform;
   private readonly home: string;
@@ -101,7 +112,7 @@ export class MacPermissions {
   constructor(options: MacPermissionsOptions) {
     this.platform = options.platform ?? process.platform;
     this.home = options.home;
-    this.helperPresent = options.helperPresent ?? (() => Boolean(process.env[ENGINE_HELPER_ENV]));
+    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8_000;
     this.list = options.list ?? (async (path) => {
