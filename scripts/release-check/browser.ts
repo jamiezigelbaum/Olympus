@@ -74,6 +74,8 @@ export async function openBrowser(browser: string, profileName: string, debugPor
   mkdirSync(profile, { recursive: true });
   const chrome = spawn(browser, [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
+    // The dashboard's panel is a sandboxed iframe; kept in the page's own process, DevTools reaches it through its execution context.
+    '--disable-features=IsolateSandboxedIframes',
     // A throwaway profile must not ask the desktop session's keychain for a browser-storage key.
     ...(process.platform === 'darwin' ? ['--use-mock-keychain', '--password-store=basic'] : []),
     // The Inbox check watches the machine's connections, so the browser must make none of its own: no background services, and no

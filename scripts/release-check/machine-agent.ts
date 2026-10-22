@@ -32,6 +32,9 @@ import {
   anchorPresent, ASK_VIEW, centerOf, factsIn, FOCUS_QUESTION, PAGE_STATE, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED, pageApi, rowView, sourceNames,
 } from './inbox-page.ts';
 import { findBrowser, openBrowser, type Cdp, type OpenedBrowser } from './browser.ts';
+import { captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey-driver.ts';
+import { runJourney, type JourneyTrace } from './journey.ts';
+import { selectJourneys } from './journeys.ts';
 
 export { ISOLATED_BROWSER_FLAGS } from './browser.ts';
 import type { AskView, CardView, DestinationId, EgressView, EntryView, FixView, InboxObservation, PageView, ShotView } from './inbox.ts';
@@ -1045,6 +1048,69 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
 }
 
 // ---------------------------------------------------------------------------
+// Journeys and the screens for the visual baselines
+
+const JOURNEY_DEBUG_PORT = 9335;
+
+/**
+ * Walks the journeys in the owner's browser (journeys.ts) and takes the screens the visual baselines compare (visual.ts). Everything
+ * goes into one folder, which is archived for the harness to fetch in one transfer: the screens, and a trace for each journey with
+ * a screenshot after each step. The screens are taken first, while the install is as the run left it; the journeys that change the
+ * install run last.
+ */
+async function journeysCommand(outDir: string, only: string[], skipScreens: boolean): Promise<never> {
+  const browser = findBrowser();
+  if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  let stopBridge: () => void = () => undefined;
+  let bridgeStarted = false;
+  let opened: OpenedBrowser | undefined;
+  const traces: JourneyTrace[] = [];
+  let screens: CapturedScreen[] = [];
+  let failure: string | undefined;
+  try {
+    opened = await openBrowser(browser!, 'chrome-profile-journeys', JOURNEY_DEBUG_PORT, true);
+    const driver = new CdpJourneyDriver({
+      cdp: opened.cdp,
+      debugPort: JOURNEY_DEBUG_PORT,
+      outDir,
+      mintLink: async (place) => {
+        const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
+        const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
+        if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
+        return url;
+      },
+      onOrigin: (origin) => {
+        if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
+      },
+    });
+    await driver.start();
+    if (!skipScreens) {
+      try { screens = await captureScreens(driver, outDir); } catch (error) { failure = `the screens could not be captured: ${error instanceof Error ? error.message : String(error)}`; }
+    }
+    for (const journey of selectJourneys(only)) {
+      try {
+        traces.push(await runJourney(driver, journey));
+      } catch (error) {
+        traces.push({ id: journey.id, title: journey.title, source: journey.source, ok: false, steps: [], ms: 0, error: error instanceof Error ? error.message : String(error) });
+      }
+      say(`journey ${journey.id}: ${traces[traces.length - 1]!.ok ? 'ok' : 'FAILED'}`);
+    }
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  } finally {
+    opened?.close();
+    stopBridge();
+  }
+  writeFileSync(join(outDir, 'traces.json'), JSON.stringify(traces));
+  const archive = join(WORKDIR, 'journeys.tgz');
+  const packed = spawnSync('tar', ['-czf', archive, '-C', outDir, '.'], { encoding: 'utf8' });
+  if (packed.status !== 0) emit({ ok: false, detail: `the journey files could not be archived: ${packed.stderr.slice(0, 160)}` });
+  emit({ ok: failure === undefined, ...(failure === undefined ? {} : { detail: failure }), traces, screens, archive });
+}
+
+// ---------------------------------------------------------------------------
 // Logs
 
 function collectLogs(outDir: string): never {
@@ -1255,6 +1321,7 @@ async function main(): Promise<void> {
     }
     case 'screenshots': return await screenshots(flag('--out'));
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
+    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'));
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();
@@ -1262,7 +1329,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
       process.exit(2);
   }
 }
