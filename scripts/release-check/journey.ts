@@ -367,10 +367,11 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
   const steps: StepTrace[] = [];
   let error: string | undefined;
 
+  // Events are drained once, here; what arrives between steps (while a picture is taken) belongs to the next step's verdict.
+  driver.drainEvents();
   for (const [index, step] of journey.steps.entries()) {
     const stepStarted = now();
     const context = contextFor(driver, vars);
-    driver.drainEvents();
     const state = { pagesBefore: 0, initialUrl: '', counts: {} as Record<string, number> };
     let actionResult: { ok: boolean; detail: string };
     try {

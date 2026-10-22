@@ -83,6 +83,10 @@ export interface VisualRun {
  * writes what the report shows (the picture, the reference and the difference) under `outDir/visual`. With `update`, the pictures
  * become the candidate references in `baselinesDir`.
  */
+function isReadablePng(bytes: Buffer): boolean {
+  try { PNG.sync.read(bytes); return true; } catch { return false; }
+}
+
 export function compareScreens(input: { actualDir: string; baselinesDir: string; outDir: string; update: boolean; names: readonly { name: string; screen: Screen; width: number; theme: string }[]; tolerance?: { maxDiffRatio: number; pixelThreshold: number } }): VisualRun {
   const visualDir = join(input.outDir, 'visual');
   mkdirSync(visualDir, { recursive: true });
@@ -109,7 +113,8 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
       writeFileSync(join(input.outDir, diffCopy), diffPng);
       result.diff = diffCopy;
     }
-    if (input.update) {
+    // A candidate that cannot be read as a PNG never replaces an approved picture (the check then fails, below).
+    if (input.update && isReadablePng(actual)) {
       writeFileSync(baselinePath, actual);
       result.updated = true;
     }

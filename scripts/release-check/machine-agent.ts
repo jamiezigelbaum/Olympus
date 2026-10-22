@@ -891,9 +891,13 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       let at = '';
       try { at = String(await evalIn(`location.pathname + location.search + location.hash`)).replace(/token=[^&#]*/g, 'token=...'); } catch { /* the page is changing */ }
       const result = error === undefined ? actual(value as T) : { text: `failed: ${error instanceof Error ? error.message : String(error)}`, ok: false };
+      // The page's own errors during the step fail it, as in the journeys (a failed request also logs "Failed to load resource": reported once).
+      const consoleErrors = [...new Set(pageConsole)].filter((message) => !(/Failed to load resource/.test(message) && pageFailed.length > 0));
+      const failedRequests = [...new Set(pageFailed)];
+      const findings = [...consoleErrors.map((message) => `console error: ${message}`), ...failedRequests.map((request) => `failed request: ${request}`)];
       (observation.trace ??= []).push({
-        n, name, action, expected, actual: result.text, ok: result.ok, ms: Date.now() - started, at,
-        ...(screenshot ? { screenshot } : {}), consoleErrors: [...new Set(pageConsole)].slice(0, 5), failedRequests: [...new Set(pageFailed)].slice(0, 5), findings: [],
+        n, name, action, expected, actual: result.text, ok: result.ok && findings.length === 0, ms: Date.now() - started, at,
+        ...(screenshot ? { screenshot } : {}), consoleErrors: consoleErrors.slice(0, 5), failedRequests: failedRequests.slice(0, 5), findings: findings.slice(0, 10),
       });
       if (error !== undefined) throw error;
       return value as T;

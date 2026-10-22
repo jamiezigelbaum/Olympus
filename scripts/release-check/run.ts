@@ -850,6 +850,10 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
     }
     (run.stage.traces ??= []).push({ id: 'inbox-check', title: 'The Ask page and the Inbox, in the owner\'s browser', source: 'the Inbox leg', ok: steps.every((step) => step.ok) && observation.ok, steps, ms: steps.reduce((sum, step) => sum + step.ms, 0), ...(observation.ok ? {} : { error: observation.detail ?? 'the leg did not finish' }) });
   }
+  const stepFindings = (observation.trace ?? []).flatMap((traced) => (traced.findings ?? []).map((finding) => `${traced.name}: ${finding}`));
+  if (observation.trace && observation.trace.length > 0) {
+    run.add({ id: 'inbox.browser-errors', title: 'The Ask page and Inbox steps ran without console errors or failed requests', status: stepFindings.length === 0 ? 'pass' : 'fail', detail: stepFindings.length === 0 ? `${observation.trace.length} steps, no browser errors` : stepFindings.slice(0, 5).join('; ') });
+  }
   const missing = INBOX_SHOTS.filter((name) => !fetched.includes(name));
   run.add({
     id: 'inbox.screenshots',

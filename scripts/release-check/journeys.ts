@@ -194,7 +194,9 @@ export const JOURNEYS: readonly Journey[] = [
               const heading = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"],div,section')).find((n) => __rc.clean(n.textContent) === 'Needs you');
               if (!heading) return { rows: 0, bare: 0 };
               const section = heading.parentElement;
-              const rows = Array.from(section.children).filter((n) => n !== heading && __rc.clean(n.textContent) !== '');
+              // The rows are the list items (the section holds one list); a section without a list falls back to its children.
+              const items = Array.from(section.querySelectorAll('li'));
+              const rows = (items.length > 0 ? items : Array.from(section.children).filter((n) => n !== heading)).filter((n) => __rc.clean(n.textContent) !== '');
               return { rows: rows.length, bare: rows.filter((n) => !n.querySelector('button, a[href]')).length };
             })()`) as { rows: number; bare: number };
             return { ok: result.bare === 0, expected: 'each problem under Needs you has a control (a button or a link)', actual: result.rows === 0 ? 'nothing is under Needs you' : `${result.rows} row(s), ${result.bare} without a control` };
@@ -314,6 +316,8 @@ export const journeyIds = (): string[] => JOURNEYS.map((journey) => journey.id);
 
 /** The journeys for a run, in order: those that leave the install as it was first, then those that change it. */
 export function selectJourneys(only?: readonly string[]): Journey[] {
+  const unknown = (only ?? []).filter((id) => !JOURNEYS.some((journey) => journey.id === id));
+  if (unknown.length > 0) throw new Error(`unknown journey id(s): ${unknown.join(', ')}; known: ${journeyIds().join(', ')}`);
   const chosen = only === undefined || only.length === 0 ? [...JOURNEYS] : JOURNEYS.filter((journey) => only.includes(journey.id));
   return [...chosen.filter((journey) => journey.mutates !== true), ...chosen.filter((journey) => journey.mutates === true)];
 }

@@ -131,20 +131,31 @@ export class CdpJourneyDriver implements JourneyDriver {
     await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
   }
 
-  async click(frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null> {
-    const info = await this.probe(frame, `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
+  /**
+   * Finds the control, scrolls it into view (`__rc.find` does), then reads its place again together with the frame's, so the press
+   * lands where the control is after every scroll (the panel's own and the page's) has settled.
+   */
+  private async locate(frame: 'host' | 'panel', target: WireTarget): Promise<{ info: ElementInfo; x: number; y: number } | null> {
+    let info = await this.probe(frame, `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
     if (!info) return null;
-    if (info.disabled) return info;
+    const again = await this.probe(frame, `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
+    if (again) info = again;
     const offset = await this.offset(frame);
-    await this.press(info.x + offset.x, info.y + offset.y);
-    return info;
+    return { info, x: info.x + offset.x, y: info.y + offset.y };
+  }
+
+  async click(frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null> {
+    const at = await this.locate(frame, target);
+    if (!at) return null;
+    if (at.info.disabled) return at.info;
+    await this.press(at.x, at.y);
+    return at.info;
   }
 
   async type(frame: 'host' | 'panel', target: WireTarget, text: string): Promise<boolean> {
-    const info = await this.probe(frame, `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
-    if (!info || info.disabled) return false;
-    const offset = await this.offset(frame);
-    await this.press(info.x + offset.x, info.y + offset.y);
+    const at = await this.locate(frame, target);
+    if (!at || at.info.disabled) return false;
+    await this.press(at.x, at.y);
     // The press focused the frame; the field is selected so the text replaces what it held.
     await this.probe(frame, `__rc.focus(${JSON.stringify(target)})`);
     await this.cdp.send('Input.insertText', { text });

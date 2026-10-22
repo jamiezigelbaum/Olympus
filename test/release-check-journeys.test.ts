@@ -275,6 +275,44 @@ describe('visual baselines', () => {
     }
   });
 
+  test('an unreadable candidate never replaces an approved picture, even with --update-baselines, and its check fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-visual-'));
+    try {
+      const actualDir = join(dir, 'actual');
+      const baselinesDir = join(dir, 'baselines');
+      const outDir = join(dir, 'out');
+      for (const folder of [actualDir, baselinesDir, outDir]) mkdirSync(folder, { recursive: true });
+      const screen = SCREENS[0]!;
+      const name = screenName(screen.id, 1280, 'light');
+      const names = [{ name, screen, width: 1280, theme: 'light' }];
+      writeFileSync(join(actualDir, `${name}.png`), base.subarray(0, 40));
+      writeFileSync(join(baselinesDir, `${name}.png`), base);
+      const run = compareScreens({ actualDir, baselinesDir, outDir, update: true, names });
+      expect(visualChecks(run)[0]).toMatchObject({ status: 'fail' });
+      expect(readFileSync(join(baselinesDir, `${name}.png`)).equals(base)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('the Inbox mask hides what varies with the run and keeps the intro paragraph', () => {
+    const window = new Window({ url: 'http://127.0.0.1/' });
+    window.document.body.innerHTML = '<section class="pasection" aria-labelledby="waiting"><h3 id="waiting">Inbox</h3><p class="pnote" data-pa-none>none</p><p class="pnote" id="intro">Intro</p><ul data-pa-list><li>row</li></ul><div class="pbuttons"><button>Delete all</button></div><p data-pa-older-removed>older</p></section>';
+    evalIn(window, maskScript());
+    const css = window.document.getElementById('rc-visual-mask')!.textContent!;
+    for (const selector of ['[data-pa-none]', '[data-pa-list]', '.pbuttons', '[data-pa-older-removed]']) expect(css).toContain(selector);
+    expect(css).not.toContain(':not(h3)');
+    expect(window.document.querySelector('#waiting + p[data-pa-none]')).not.toBeNull();
+    expect(window.document.querySelector('section.pasection[aria-labelledby="waiting"] > #intro')).not.toBeNull();
+    expect(css).not.toMatch(/waiting"\] > p/);
+  });
+
+  test('selectJourneys refuses ids it does not know', () => {
+    expect(() => selectJourneys(['no-such-journey'])).toThrow(/no-such-journey/);
+    expect(() => selectJourneys([JOURNEYS[0]!.id, 'typo'])).toThrow(/typo/);
+    expect(selectJourneys([JOURNEYS[0]!.id]).length).toBe(1);
+  });
+
   test('the mask makes the parts that vary between runs the same text, in the page and in plain strings', () => {
     expect(normaliseDynamicText('Updated 106 days ago, 3 min ago, in 14 min, 42% done, 1 unread private answer, 3 of 12 files, 1.2 GB, Oct 22, 2026 at 14:05'))
       .toBe(normaliseDynamicText('Updated 2 days ago, 9 min ago, in 2 min, 7% done, 4 unread private answers, 5 of 12 files, 340 MB, Nov 3, 2026 at 09:50'));

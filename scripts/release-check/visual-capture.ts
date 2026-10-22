@@ -54,9 +54,12 @@ export const DYNAMIC_TEXT_RULES: ReadonlyArray<{ what: string; pattern: RegExp; 
 
 /** Elements left out of the picture because how many there are depends on what the run did (display:none, so the page closes up). */
 export const MASK_SELECTORS_HIDDEN: readonly string[] = [
-  // The Inbox: one row per question the run has asked (the agents' and the Ask page's). Its heading stays; what is under it
-  // (the rows, the empty-inbox line, Delete all, the older-answers note) depends on how many questions this run asked.
-  'section.pasection[aria-labelledby="waiting"] > :not(h3)',
+  // The Inbox: one row per question the run has asked (the agents' and the Ask page's). Only what depends on how many questions this
+  // run asked is hidden (the rows, the empty-inbox line, Delete all, the older-answers note); the heading and the intro paragraph stay.
+  'section.pasection[aria-labelledby="waiting"] > [data-pa-none]',
+  'section.pasection[aria-labelledby="waiting"] > [data-pa-list]',
+  'section.pasection[aria-labelledby="waiting"] > .pbuttons',
+  'section.pasection[aria-labelledby="waiting"] > [data-pa-older-removed]',
 ];
 
 /**
