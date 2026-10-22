@@ -1308,6 +1308,7 @@ function printHelp(): void {
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
   console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
+  console.log(`  ${ENGINE_CLI_USAGE['engine install-helper']}`);
   console.log('  olympus engine uninstall|status [--brief]|start|stop|restart|rollback|logs');
   console.log('  olympus dashboard [--read-only] [--no-open] [--target <place>]');
   console.log('  olympus dashboard token');
