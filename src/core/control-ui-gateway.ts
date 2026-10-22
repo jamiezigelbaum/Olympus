@@ -574,7 +574,7 @@ function writeCallbackPage(response: ServerResponse, ok: boolean, status: number
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
-  response.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px system-ui,sans-serif;max-width:36rem;margin:12vh auto;padding:0 1.5rem;color:#202124}h1{font-size:1.35rem}</style></head><body><h1>${title}</h1><p>${detail}</p></body></html>`);
+  response.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;max-width:36rem;margin:12vh auto;padding:0 1.5rem;color:#202124}h1{font-size:1.35rem}</style></head><body><h1>${title}</h1><p>${detail}</p></body></html>`);
 }
 
 function writeCallbackRedirect(response: ServerResponse, location: string): void {

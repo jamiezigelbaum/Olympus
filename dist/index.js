@@ -19377,7 +19377,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
     <meta name="referrer" content="no-referrer">
     <title>Olympus</title>
     <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
       main { max-width: 32rem; margin: 0 auto; }
       h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
       p { margin: 0; color: #a9a4ae; }
@@ -22915,7 +22915,7 @@ function confirmation() {
 }
 function openingView() {
   return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
-html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px system-ui,sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
+html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
 </style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
 }
 function proofPage() {
@@ -30247,7 +30247,7 @@ function writeCallbackPage(response, ok, status) {
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
-  response.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px system-ui,sans-serif;max-width:36rem;margin:12vh auto;padding:0 1.5rem;color:#202124}h1{font-size:1.35rem}</style></head><body><h1>${title}</h1><p>${detail}</p></body></html>`);
+  response.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;max-width:36rem;margin:12vh auto;padding:0 1.5rem;color:#202124}h1{font-size:1.35rem}</style></head><body><h1>${title}</h1><p>${detail}</p></body></html>`);
 }
 function writeCallbackRedirect(response, location) {
   response.statusCode = 303;

@@ -31,6 +31,12 @@ import { freshEgress, normalizeIp, outboundFromLsof, outboundFromProcNet, reques
 import {
   anchorPresent, ASK_VIEW, centerOf, factsIn, FOCUS_QUESTION, PAGE_STATE, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED, pageApi, rowView, sourceNames,
 } from './inbox-page.ts';
+import { findBrowser, openBrowser, type Cdp, type OpenedBrowser } from './browser.ts';
+import { captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey-driver.ts';
+import { runJourney, type JourneyTrace } from './journey.ts';
+import { selectJourneys } from './journeys.ts';
+
+export { ISOLATED_BROWSER_FLAGS } from './browser.ts';
 import type { AskView, CardView, DestinationId, EgressView, EntryView, FixView, InboxObservation, PageView, ShotView } from './inbox.ts';
 
 // ---------------------------------------------------------------------------
@@ -601,95 +607,6 @@ async function smoke(questionsFile: string): Promise<never> {
 // ---------------------------------------------------------------------------
 // Dashboard screenshots (390 and 1280 wide, light and dark) over the owner bridge
 
-interface Cdp {
-  send(method: string, params?: Record<string, unknown>): Promise<any>;
-  /** Calls `handler` with the parameters of each event of this method the browser sends. */
-  on(method: string, handler: (params: any) => void): void;
-  close(): void;
-}
-
-async function cdpConnect(wsUrl: string): Promise<Cdp> {
-  const ws = new WebSocket(wsUrl);
-  await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = () => reject(new Error('cdp connect failed')); });
-  let nextId = 1;
-  const pending = new Map<number, { resolve(v: any): void; reject(e: Error): void }>();
-  const listeners = new Map<string, Array<(params: any) => void>>();
-  ws.onmessage = (event) => {
-    const message = JSON.parse(String(event.data)) as { id?: number; result?: any; error?: { message: string }; method?: string; params?: any };
-    if (message.id === undefined) {
-      if (message.method) for (const handler of listeners.get(message.method) ?? []) handler(message.params);
-      return;
-    }
-    const waiter = pending.get(message.id);
-    if (!waiter) return;
-    pending.delete(message.id);
-    if (message.error) waiter.reject(new Error(message.error.message)); else waiter.resolve(message.result);
-  };
-  return {
-    send: (method, params = {}) => new Promise((resolve, reject) => {
-      const id = nextId++;
-      pending.set(id, { resolve, reject });
-      ws.send(JSON.stringify({ id, method, params }));
-    }),
-    on: (method, handler) => { listeners.set(method, [...(listeners.get(method) ?? []), handler]); },
-    close: () => ws.close(),
-  };
-}
-
-function findBrowser(): string | undefined {
-  if (process.platform === 'darwin') {
-    const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-    return existsSync(chrome) ? chrome : undefined;
-  }
-  for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
-    const found = spawnSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' });
-    if (found.status === 0 && found.stdout.trim()) return found.stdout.trim();
-  }
-  return undefined;
-}
-
-/**
- * What keeps the browser from opening connections of its own. The rule "MAP * ~NOTFOUND" rewrites every host the browser is asked for,
- * IP literals included, so the loopback addresses the dashboard is served on must be excluded by name or the page itself would not load.
- */
-export const ISOLATED_BROWSER_FLAGS: readonly string[] = [
-  '--disable-background-networking', '--disable-sync', '--disable-component-update', '--disable-default-apps', '--no-pings', '--disable-domain-reliability',
-  '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]',
-];
-
-interface OpenedBrowser { cdp: Cdp; pid: number | undefined; close(): void }
-
-/** A headless browser on a throwaway profile, and a debugging connection to its one page. */
-async function openBrowser(browser: string, profileName: string, debugPort: number, isolated = false): Promise<OpenedBrowser> {
-  const profile = join(WORKDIR, profileName);
-  mkdirSync(profile, { recursive: true });
-  const chrome = spawn(browser, [
-    '--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
-    // A throwaway profile must not ask the desktop session's keychain for a browser-storage key.
-    ...(process.platform === 'darwin' ? ['--use-mock-keychain', '--password-store=basic'] : []),
-    // The Inbox check watches the machine's connections, so the browser must make none of its own: no background services, and no
-    // name but this machine's can be resolved (the dashboard is an address, not a name).
-    ...(isolated ? ISOLATED_BROWSER_FLAGS : []),
-    `--user-data-dir=${profile}`, `--remote-debugging-port=${debugPort}`, '--remote-allow-origins=*', 'about:blank',
-  ], { stdio: 'ignore' });
-  try {
-    let wsUrl: string | undefined;
-    for (let i = 0; i < 60 && !wsUrl; i += 1) {
-      try {
-        const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json() as Array<{ type: string; webSocketDebuggerUrl: string }>;
-        wsUrl = targets.find((t) => t.type === 'page')?.webSocketDebuggerUrl;
-      } catch { /* browser starting */ }
-      if (!wsUrl) await sleep(500);
-    }
-    if (!wsUrl) throw new Error('the browser did not open a debugging page');
-    const cdp = await cdpConnect(wsUrl);
-    return { cdp, pid: chrome.pid, close: () => { cdp.close(); chrome.kill('SIGKILL'); } };
-  } catch (error) {
-    chrome.kill('SIGKILL');
-    throw error;
-  }
-}
-
 async function screenshots(outDir: string): Promise<void> {
   const config = readConfig();
   const browser = findBrowser();
@@ -869,6 +786,7 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     refusals: { venice: null },
     egress: { samples: 0, intervalMs: 0, baseline: 0, fresh: [], pageRequests: 0, pageOutside: [] },
     shots: [],
+    trace: [],
   };
 
   // This agent holds the engine's bearer. The Inbox route is for an unlocked browser on this computer only, so a bearer-minted
@@ -937,6 +855,54 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       await metrics(1280);
     };
 
+    // The trace: for each browser-driven step, what was done, what was expected, what happened, a picture after it, and what the page
+    // logged or failed to load meanwhile. The harness brings the pictures back and renders them step by step in the report.
+    const pageConsole: string[] = [];
+    const pageFailed: string[] = [];
+    const urlOf = new Map<string, string>();
+    await cdp.send('Runtime.enable');
+    cdp.on('Runtime.consoleAPICalled', (params) => { if (params?.type === 'error') pageConsole.push(String((params.args ?? []).map((a: any) => a?.value ?? a?.description ?? '').join(' ')).slice(0, 200)); });
+    cdp.on('Runtime.exceptionThrown', (params) => { pageConsole.push(`uncaught: ${String(params?.exceptionDetails?.exception?.description ?? params?.exceptionDetails?.text ?? '').slice(0, 200)}`); });
+    cdp.on('Network.requestWillBeSent', (params) => { urlOf.set(String(params?.requestId), String(params?.request?.url ?? '')); });
+    cdp.on('Network.loadingFailed', (params) => {
+      const url = urlOf.get(String(params?.requestId)) ?? '';
+      if (params?.canceled !== true && !/favicon\.ico/.test(url)) pageFailed.push(`${url.replace(/[?#].*$/, '')} (${String(params?.errorText ?? 'failed')})`);
+    });
+    cdp.on('Network.responseReceived', (params) => {
+      const status = Number(params?.response?.status ?? 0);
+      const url = String(params?.response?.url ?? '');
+      if (status >= 400 && !/favicon\.ico/.test(url)) pageFailed.push(`${url.replace(/[?#].*$/, '')} -> ${status}`);
+    });
+    const step = async <T>(name: string, action: string, expected: string, work: () => Promise<T>, actual: (value: T) => { text: string; ok: boolean }): Promise<T> => {
+      const started = Date.now();
+      pageConsole.length = 0;
+      pageFailed.length = 0;
+      let value: T | undefined;
+      let error: unknown;
+      try { value = await work(); } catch (caught) { error = caught; }
+      const n = (observation.trace ?? []).length + 1;
+      const file = `trace-${String(n).padStart(2, '0')}.jpg`;
+      let screenshot: string | undefined;
+      try {
+        const shot = await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 60 });
+        writeFileSync(join(outDir, file), Buffer.from(shot.data as string, 'base64'));
+        screenshot = file;
+      } catch { /* the picture is a courtesy */ }
+      let at = '';
+      try { at = String(await evalIn(`location.pathname + location.search + location.hash`)).replace(/token=[^&#]*/g, 'token=...'); } catch { /* the page is changing */ }
+      const result = error === undefined ? actual(value as T) : { text: `failed: ${error instanceof Error ? error.message : String(error)}`, ok: false };
+      // The page's own errors during the step fail it, as in the journeys (a failed request also logs "Failed to load resource": reported once).
+      const consoleErrors = [...new Set(pageConsole)].filter((message) => !(/Failed to load resource/.test(message) && pageFailed.length > 0));
+      const failedRequests = [...new Set(pageFailed)];
+      const findings = [...consoleErrors.map((message) => `console error: ${message}`), ...failedRequests.map((request) => `failed request: ${request}`)];
+      (observation.trace ??= []).push({
+        n, name, action, expected, actual: result.text, ok: result.ok && findings.length === 0, ms: Date.now() - started, at,
+        ...(screenshot ? { screenshot } : {}), consoleErrors: consoleErrors.slice(0, 5), failedRequests: failedRequests.slice(0, 5), findings: findings.slice(0, 10),
+      });
+      if (error !== undefined) throw error;
+      return value as T;
+    };
+
     let origin = '';
     /** The owner's own way in: a one-time opening link for the place, then Unlock on the page. */
     const openTarget = async (target: string): Promise<{ state: any; unlockOffered: boolean; unlocked: boolean }> => {
@@ -999,27 +965,40 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     };
 
     // 1. The Ask page, opened by the owner's link and unlocked.
-    const first = await openTarget('private');
-    observation.ownerPath.unlockOffered = first.unlockOffered;
-    observation.ownerPath.unlocked = first.unlocked;
-    if (!first.unlocked) throw new Error(`the Private answers page did not open its controls (Unlock ${first.unlockOffered ? 'was pressed' : 'was not offered'})`);
-    const ready = await untilComputerReady(first.state, 300_000);
+    const ready = await step(
+      'Open the Ask page', 'open the owner\'s link, press Unlock, wait for the local model to be ready',
+      'the controls unlock and the destination cards show',
+      async () => {
+        const first = await openTarget('private');
+        observation.ownerPath.unlockOffered = first.unlockOffered;
+        observation.ownerPath.unlocked = first.unlocked;
+        if (!first.unlocked) throw new Error(`the Private answers page did not open its controls (Unlock ${first.unlockOffered ? 'was pressed' : 'was not offered'})`);
+        return await untilComputerReady(first.state, 300_000);
+      },
+      (state) => ({ text: `unlocked; local model ${String(state.cards?.computer?.state ?? 'not shown')}`, ok: true }),
+    );
     for (const key of ['computer', 'anonymous', 'venice'] as DestinationId[]) {
       if (ready.cards?.[key]) observation.destinations[key] = ready.cards[key] as CardView;
     }
-    await shoot('ask-page-1280.png', 'The Ask page, 1280 px wide (the owner\'s unlocked browser)', 1280);
-    await shoot('ask-page-390.png', 'The Ask page, 390 px wide (the owner\'s unlocked browser)', 390);
+    await step('Look at the Ask page at both widths', 'resize to 1280 and 390 px and capture', 'both pictures are taken',
+      async () => { await shoot('ask-page-1280.png', 'The Ask page, 1280 px wide (the owner\'s unlocked browser)', 1280); await shoot('ask-page-390.png', 'The Ask page, 390 px wide (the owner\'s unlocked browser)', 390); },
+      () => ({ text: 'captured', ok: true }));
 
     // 2. The agent's entry, by the id its link names: the route, waiting for the local model's answer.
     const agentSpec = { question: inbox.agent.text, facts: inbox.agent.facts, citedTitle: inbox.agent.citedTitle };
-    if (primary) observation.entries.push(await viewEntry(primary, { ...agentSpec, waitUntil: Date.now() + waitS * 1000 }));
+    if (primary) {
+      observation.entries.push(await step('Read the agent\'s entry by its link id', 'ask the Inbox route for the entry, waiting for the local model\'s answer', 'the entry is listed and answered',
+        () => viewEntry(primary, { ...agentSpec, waitUntil: Date.now() + waitS * 1000 }),
+        (view) => ({ text: `${view.listed ? 'listed' : 'not listed'}; ${view.status ?? 'no status'}; ${view.factsStated.length} fact(s) stated; ${view.citations} source(s)`, ok: view.listed && view.status === 'answered' })));
+    }
     for (const id of otherIds) {
       if (id !== primary && !observation.entries.some((entry) => entry.id === id)) observation.entries.push(await viewEntry(id, { question: null, facts: [], citedTitle: '', waitUntil: null }));
     }
 
     // The address an Open link names, opened by the owner: the Inbox lands on that entry and opens it.
     const openByAddress = async (addressId: string, pageId: string, spec: { facts: string[]; citedTitle: string }, shotLabel: string): Promise<PageView> => {
-      const view = await openTarget(`private/${addressId}`);
+      const view = await step('Open the entry\'s address', 'open the one-time link for the entry, press Unlock', 'the Inbox lands on the entry and opens it',
+        () => openTarget(`private/${addressId}`), (opened2) => ({ text: opened2.unlocked ? 'unlocked' : 'stayed locked', ok: opened2.unlocked }));
       observation.ownerPath.unlocked = observation.ownerPath.unlocked && view.unlocked;
       let row: any = { found: false };
       const until = Date.now() + 90_000;
@@ -1051,13 +1030,17 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     if (primary) await openByAddress(primary, primary, { facts: inbox.agent.facts, citedTitle: inbox.agent.citedTitle }, 'from the agent\'s link');
 
     // 4. Ask the local model: typed into the page and pressed, on a clean Ask page.
-    const second = await openTarget('private');
-    observation.ownerPath.unlocked = observation.ownerPath.unlocked && second.unlocked;
-    const secondReady = await untilComputerReady(second.state, 120_000);
+    const secondReady = await step('Open a clean Ask page', 'open the owner\'s link again, press Unlock, wait for the local model', 'the controls unlock and the local model is ready',
+      async () => {
+        const second = await openTarget('private');
+        observation.ownerPath.unlocked = observation.ownerPath.unlocked && second.unlocked;
+        return await untilComputerReady(second.state, 120_000);
+      },
+      (state) => ({ text: `local model ${String(state.cards?.computer?.state ?? 'not shown')}`, ok: true }));
     const knownRows = new Set<string>((secondReady.rows ?? []).map((row: any) => String(row.id)));
     const ask: AskView = { pressed: false, answered: false, message: '', factsStated: [], citations: 0, citesExpected: false, ms: 0, entry: null };
     observation.ask = ask;
-    if ((await evalIn(FOCUS_QUESTION)) === true && secondReady.cards?.computer?.state === 'ready') {
+    if ((await evalIn(FOCUS_QUESTION)) === true && secondReady.cards?.computer?.state === 'ready') await step('Ask the local model', 'type the question into the page and press "Ask the local model"', 'an answer with its sources appears and a new Inbox entry is kept', async () => {
       await cdp.send('Input.insertText', { text: inbox.ask.text });
       const started = Date.now();
       ask.pressed = await click('form[data-pa-ask] button[data-pa-destination="computer"]');
@@ -1091,7 +1074,7 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
           await shoot('ask-answered-1280.png', 'The Ask page after "Ask the local model": the answer, its sources, and the new Inbox entry', 1280);
         }
       }
-    }
+    }, () => ({ text: ask.pressed ? (ask.answered ? `answered in ${Math.round(ask.ms / 1000)} s; ${ask.citations} source(s)` : `no answer: ${ask.message}`) : 'the button could not be pressed', ok: ask.pressed && ask.answered }));
 
     // 5. Destinations that are not set up: Venice's ask is refused by the route; the way to fix each is a link that lands on the right Models section.
     const venice = secondReady.cards?.venice;
@@ -1099,7 +1082,8 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       const refused = await api({ action: 'ask_venice', question: 'Release check: Venice is not set up, so this must be refused.' });
       observation.refusals.venice = refused.status;
     }
-    const followFix = async (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => {
+    const followFix = (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => step(`Follow the way to fix ${key === 'venice' ? 'Venice' : 'the anonymous route'}`, `press the fix link on the ${key} card`, `the link lands on the ${anchor} section of Models`, () => followFixNow(key, anchor), (fix) => ({ text: fix.clicked ? `landed at ${fix.landedAt}; section ${fix.anchorShown ? 'shown' : 'NOT shown'}` : 'no fix link to press', ok: fix.clicked && fix.anchorShown }));
+    const followFixNow = async (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => {
       const clicked = await click(`[data-pa-card="${key}"] .paaction a`);
       if (!clicked) return { clicked: false, landedAt: '', anchorShown: false };
       const shown = await waitFor(anchorPresent(anchor), 30_000);
@@ -1128,6 +1112,69 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
   observation.egress = { ...(egress ?? observation.egress), pageRequests: requests.length, pageOutside: requestsOutsideMachine(requests) };
   if (failure !== undefined) { observation.ok = false; observation.detail = failure; } else { observation.ok = true; }
   emit({ ...observation });
+}
+
+// ---------------------------------------------------------------------------
+// Journeys and the screens for the visual baselines
+
+const JOURNEY_DEBUG_PORT = 9335;
+
+/**
+ * Walks the journeys in the owner's browser (journeys.ts) and takes the screens the visual baselines compare (visual.ts). Everything
+ * goes into one folder, which is archived for the harness to fetch in one transfer: the screens, and a trace for each journey with
+ * a screenshot after each step. The screens are taken first, while the install is as the run left it; the journeys that change the
+ * install run last.
+ */
+async function journeysCommand(outDir: string, only: string[], skipScreens: boolean): Promise<never> {
+  const browser = findBrowser();
+  if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  let stopBridge: () => void = () => undefined;
+  let bridgeStarted = false;
+  let opened: OpenedBrowser | undefined;
+  const traces: JourneyTrace[] = [];
+  let screens: CapturedScreen[] = [];
+  let failure: string | undefined;
+  try {
+    opened = await openBrowser(browser!, 'chrome-profile-journeys', JOURNEY_DEBUG_PORT, true);
+    const driver = new CdpJourneyDriver({
+      cdp: opened.cdp,
+      debugPort: JOURNEY_DEBUG_PORT,
+      outDir,
+      mintLink: async (place) => {
+        const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
+        const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
+        if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
+        return url;
+      },
+      onOrigin: (origin) => {
+        if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
+      },
+    });
+    await driver.start();
+    if (!skipScreens) {
+      try { screens = await captureScreens(driver, outDir); } catch (error) { failure = `the screens could not be captured: ${error instanceof Error ? error.message : String(error)}`; }
+    }
+    for (const journey of selectJourneys(only)) {
+      try {
+        traces.push(await runJourney(driver, journey));
+      } catch (error) {
+        traces.push({ id: journey.id, title: journey.title, source: journey.source, ok: false, steps: [], ms: 0, error: error instanceof Error ? error.message : String(error) });
+      }
+      say(`journey ${journey.id}: ${traces[traces.length - 1]!.ok ? 'ok' : 'FAILED'}`);
+    }
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  } finally {
+    opened?.close();
+    stopBridge();
+  }
+  writeFileSync(join(outDir, 'traces.json'), JSON.stringify(traces));
+  const archive = join(WORKDIR, 'journeys.tgz');
+  const packed = spawnSync('tar', ['-czf', archive, '-C', outDir, '.'], { encoding: 'utf8' });
+  if (packed.status !== 0) emit({ ok: false, detail: `the journey files could not be archived: ${packed.stderr.slice(0, 160)}` });
+  emit({ ok: failure === undefined, ...(failure === undefined ? {} : { detail: failure }), traces, screens, archive });
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1388,7 @@ async function main(): Promise<void> {
     }
     case 'screenshots': return await screenshots(flag('--out'));
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
+    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'));
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();
@@ -1348,7 +1396,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
       process.exit(2);
   }
 }

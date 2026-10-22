@@ -35,7 +35,8 @@
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -63,6 +64,8 @@ import { SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS } from '
 import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
+import { journeyChecks, type JourneyTrace } from './journey.ts';
+import { SCREENS, compareScreens, visualChecks, type VisualResult } from './visual.ts';
 
 export interface RunConfigFile {
   driver: string[];
@@ -104,6 +107,14 @@ export interface RunOptions {
   inboxSelftest?: InboxSelftest;
   /** Leave out the Ask page and Inbox leg (1.1.0). For a candidate earlier than 1.1.0, which has none. */
   skipInbox?: boolean;
+  /** Leave out the journeys and the screens for the visual baselines. */
+  skipJourneys?: boolean;
+  /** Run only these journeys (by id); omitted runs them all. */
+  onlyJourneys?: string[];
+  /** Where the approved pictures are (one folder per platform, `<screen>-<width>-<theme>.png`). Omitted, the screens are not compared. */
+  baselinesDir?: string;
+  /** Write this run's screens into `baselinesDir` as candidate pictures. They are never approved by the run; the owner approves by merging. */
+  updateBaselines?: boolean;
   /** Throw after the machine exists, to prove teardown on failure. */
   failAfterProvision?: boolean;
   /** Debugging only: leave the machine running. The run is reported as failed so it can never pass for release evidence. */
@@ -152,6 +163,10 @@ interface Stage {
   agents: AgentReport[];
   screenshots: ReportFile[];
   logs: ReportFile[];
+  /** Step-by-step traces of the browser-driven parts: the journeys and the Ask page and Inbox leg. */
+  traces?: JourneyTrace[];
+  /** The screens compared with the approved pictures. */
+  visual?: VisualResult[];
 }
 
 const newStage = (id: string, label: string): Stage => ({ id, label, timings: {}, checks: [], agents: [], screenshots: [], logs: [] });
@@ -187,6 +202,8 @@ class Run {
     this.stage = this.stages.get(id)!;
   }
 
+  /** The Open-link checks are judged on the candidate: not on the earlier release of an upgrade run (its "before" stage). */
+  get linksJudged(): boolean { return this.stage.id !== 'before'; }
   get timings(): Record<string, number> { return this.stage.timings; }
   get checks(): CheckResult[] { return this.stage.checks; }
   get agents(): AgentReport[] { return this.stage.agents; }
@@ -566,8 +583,9 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
     await run.phase(`agent-${spec.id}`, async () => {
       for (const question of SUITE_QUESTIONS) {
         const { observation, answer } = await ask!(question);
-        agent.checks.push(...evaluateObservation(observation, run.markers));
-        for (const id of privateLinkIdsIn(observation.privateNoteText ?? '')) run.agentLinks.push({ agent: spec.id, id });
+        agent.checks.push(...evaluateObservation(observation, run.markers, { judgeLinks: run.linksJudged }));
+        // Only the candidate's links reach the Inbox leg: an earlier release's ids name entries the update may not carry.
+        if (run.linksJudged) for (const id of privateLinkIdsIn(observation.privateNoteText ?? '')) run.agentLinks.push({ agent: spec.id, id });
         // The judge sees an answer only when nothing leaked into it.
         const leaked = agent.checks.some((c) => c.id === `${question.id}.no-leak` && c.status === 'fail');
         const judged = leaked ? undefined : await judgeAnswer(judge, question, answer);
@@ -816,6 +834,26 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
       if (shot.bytes > 4_000) fetched.push(name);
     } catch { run.log(`could not fetch screenshot ${name}`); }
   }
+  if (observation.trace && observation.trace.length > 0) {
+    const steps = [];
+    for (const traced of observation.trace) {
+      let screenshot: string | undefined;
+      if (traced.screenshot) {
+        try {
+          mkdirSync(join(outDir, 'traces', 'inbox-check'), { recursive: true });
+          await run.machine!.get(`${remoteDir}/${traced.screenshot}`, join(outDir, 'traces', 'inbox-check', traced.screenshot));
+          screenshot = `inbox-check/${traced.screenshot}`;
+        } catch { run.log(`could not fetch trace picture ${traced.screenshot}`); }
+      }
+      const { screenshot: _remote, ...rest } = traced;
+      steps.push({ ...rest, ...(screenshot ? { screenshot } : {}) });
+    }
+    (run.stage.traces ??= []).push({ id: 'inbox-check', title: 'The Ask page and the Inbox, in the owner\'s browser', source: 'the Inbox leg', ok: steps.every((step) => step.ok) && observation.ok, steps, ms: steps.reduce((sum, step) => sum + step.ms, 0), ...(observation.ok ? {} : { error: observation.detail ?? 'the leg did not finish' }) });
+  }
+  const stepFindings = (observation.trace ?? []).flatMap((traced) => (traced.findings ?? []).map((finding) => `${traced.name}: ${finding}`));
+  if (observation.trace && observation.trace.length > 0) {
+    run.add({ id: 'inbox.browser-errors', title: 'The Ask page and Inbox steps ran without console errors or failed requests', status: stepFindings.length === 0 ? 'pass' : 'fail', detail: stepFindings.length === 0 ? `${observation.trace.length} steps, no browser errors` : stepFindings.slice(0, 5).join('; ') });
+  }
   const missing = INBOX_SHOTS.filter((name) => !fetched.includes(name));
   run.add({
     id: 'inbox.screenshots',
@@ -823,6 +861,53 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
     status: observation.ok && missing.length === 0 ? 'pass' : 'fail',
     detail: missing.length === 0 ? `${fetched.length} screenshots (they show the synthetic test life's Private answer, as the owner's own browser does)` : `missing: ${missing.join(', ')}`,
   });
+}
+
+/**
+ * The journeys and the screens, in the owner's browser on the machine (journeys.ts, visual.ts). The machine takes the screens and walks
+ * the journeys; one archive comes back with a trace (and a picture after each step) per journey and the screens. The screens are
+ * compared with the approved pictures where `--baselines` names them; `--update-baselines` writes them as candidates instead.
+ */
+async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
+  const options = run.options;
+  if (options.skipJourneys) return;
+  const only = options.onlyJourneys?.length ? ` --only ${sh(options.onlyJourneys.join(','))}` : '';
+  const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}`, 2_400_000));
+  const result = done.result;
+  if (!result || !Array.isArray(result.traces)) {
+    run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
+    return;
+  }
+  if (result.ok !== true) run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: String(result.detail ?? 'the machine reported a problem') });
+  const scratch = join(outDir, '_journeys');
+  rmSync(scratch, { recursive: true, force: true });
+  mkdirSync(scratch, { recursive: true });
+  try {
+    await run.machine!.get(String(result.archive), join(scratch, 'journeys.tgz'));
+    const unpacked = spawnSync('tar', ['-xzf', join(scratch, 'journeys.tgz'), '-C', scratch], { encoding: 'utf8' });
+    if (unpacked.status !== 0) throw new Error(`tar: ${unpacked.stderr.slice(0, 120)}`);
+  } catch (error) {
+    run.add({ id: 'journeys.fetch', title: 'The journey traces and screens were brought back', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+    rmSync(scratch, { recursive: true, force: true });
+    return;
+  }
+  if (existsSync(join(scratch, 'traces'))) cpSync(join(scratch, 'traces'), join(outDir, 'traces'), { recursive: true });
+  const traces = result.traces as JourneyTrace[];
+  (run.stage.traces ??= []).push(...traces);
+  for (const check of journeyChecks(traces)) run.add(check);
+
+  const screens = (Array.isArray(result.screens) ? result.screens : []) as Array<{ name: string; screen: string; width: number; theme: string }>;
+  if (options.baselinesDir) {
+    const names = screens.flatMap((item) => { const screen = SCREENS.find((candidate) => candidate.id === item.screen); return screen ? [{ name: item.name, screen, width: item.width, theme: item.theme }] : []; });
+    const compared = compareScreens({ actualDir: join(scratch, 'screens'), baselinesDir: options.baselinesDir, outDir, update: options.updateBaselines === true, names });
+    run.stage.visual = compared.results;
+    for (const check of visualChecks(compared)) run.add(check);
+    const expected = SCREENS.length * 4;
+    if (compared.results.length < expected) run.add({ id: 'visual.complete', title: 'Every screen was captured for the comparison', status: 'fail', detail: `${compared.results.length} of ${expected} pictures came back` });
+  } else {
+    run.add({ id: 'visual.baselines', title: 'The screens were compared with the approved pictures', status: 'skip', detail: 'no --baselines folder was given' });
+  }
+  rmSync(scratch, { recursive: true, force: true });
 }
 
 /** The agent suite against the engine: the connection, every model agent, then the ChatGPT-protocol pass. */
@@ -931,6 +1016,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   await runSuite(run, workDir, judge, { mintToken: false });
   await captureScreenshots(run, options.outDir);
   if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
+  if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
   await collectEvidence(run, options.outDir);
 }
 
@@ -972,6 +1058,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       if (ready) {
         await captureScreenshots(run, options.outDir);
         if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
+        if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
       }
       await collectEvidence(run, options.outDir);
     }
@@ -1016,6 +1103,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     agents: last.agents,
     screenshots: last.screenshots,
     logs: last.logs,
+    ...(last.traces ? { traces: last.traces } : {}),
+    ...(last.visual ? { visual: last.visual } : {}),
     ...(upgrading ? {
       upgrade: {
         from: toPhase(run.stages.get('before')!),
@@ -1075,7 +1164,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1096,6 +1185,11 @@ export function parseCli(argv: readonly string[]): RunOptions {
     if (mistier !== undefined || upgradeSelftest !== undefined) throw new Error('--inbox-selftest is a separate self-test from --mistier and --upgrade-selftest; use one');
     if (has('--skip-inbox')) throw new Error('--inbox-selftest needs the Inbox leg; drop --skip-inbox');
   }
+  const baselines = get('--baselines');
+  if (baselines !== undefined && baselines.startsWith('--')) throw new Error('--baselines is the folder of approved pictures');
+  if (has('--update-baselines') && baselines === undefined) throw new Error('--update-baselines needs --baselines <dir> to write into');
+  if (has('--update-baselines') && has('--skip-journeys')) throw new Error('--update-baselines needs the screens; drop --skip-journeys');
+  const onlyJourneys = get('--only-journeys');
   const runId = get('--run-id') ?? newRunId();
   const harnessCommit = get('--harness-commit');
   if (harnessCommit !== undefined) {
@@ -1116,6 +1210,10 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(upgradeSelftest ? { upgradeSelftest: upgradeSelftest as UpgradeSelftest } : {}),
     ...(inboxSelftest ? { inboxSelftest: inboxSelftest as InboxSelftest } : {}),
     skipInbox: has('--skip-inbox'),
+    skipJourneys: has('--skip-journeys'),
+    ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
+    ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
+    updateBaselines: has('--update-baselines'),
     ...(only ? { onlyAgents: only.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     failAfterProvision: has('--fail-after-provision'),
     keepMachine: has('--keep-machine'),

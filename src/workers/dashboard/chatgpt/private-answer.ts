@@ -1042,7 +1042,7 @@ export const CHATGPT_PRIVATE_ANSWER_CSS = `
 :root[data-theme=dark]{${vars(CHATGPT_DASHBOARD_DARK, CARD_DARK)};color-scheme:dark}
 :root[data-theme=light]{color-scheme:light}
 *{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:100%;line-height:1.45}
 html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent;color:var(--text);overflow:hidden}
 body{font-size:0.9375rem;overflow-wrap:anywhere}
 p,h2{margin:0}

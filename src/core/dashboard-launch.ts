@@ -201,7 +201,7 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
     <meta name="referrer" content="no-referrer">
     <title>Olympus</title>
     <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
       main { max-width: 32rem; margin: 0 auto; }
       h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
       p { margin: 0; color: #a9a4ae; }

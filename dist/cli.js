@@ -7998,7 +7998,7 @@ function confirmation() {
 }
 function openingView() {
   return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
-html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px system-ui,sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
+html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
 </style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
 }
 function proofPage() {
@@ -15663,7 +15663,7 @@ var init_dashboard_launch = __esm(() => {
     <meta name="referrer" content="no-referrer">
     <title>Olympus</title>
     <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
       main { max-width: 32rem; margin: 0 auto; }
       h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
       p { margin: 0; color: #a9a4ae; }
@@ -123031,7 +123031,7 @@ var init_theme = __esm(() => {
 `);
   DASHBOARD_THEME_CSS = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
+body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
 /* Text can wrap inside the window; intrinsic grid/flex minima must not
    widen a page for a filename, URL, or diagnostic. */
@@ -123172,16 +123172,16 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .bigstrip i { width: 14px; height: 30px; border-radius: 2.5px; display: block; }
 .stripcap { display: flex; justify-content: space-between; color: var(--t3); font-size: var(--fs-caption); margin-bottom: 4px; }
 .tip { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 10px 0 4px; max-width: 640px; }
-.tip .h { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 4px; }
+.tip .h { color: var(--t3); font-size: var(--fs-caption); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; font-weight: 600; margin-bottom: 4px; }
 /* The consequence line under a failing check: plain language, in the page's own
    font, so the mechanical row above it stays the evidence and this stays the
    meaning. */
-.tip .cq { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: var(--fs-caption); color: var(--t3); margin: 2px 0 8px 15px; }
+.tip .cq { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; font-size: var(--fs-caption); color: var(--t3); margin: 2px 0 8px 15px; }
 .tip > .cq:last-child { margin-bottom: 0; }
 /* Passing checks, collapsed. A page whose header reports a fault opens with the
    fault; the green rows are evidence a reader may unfold. */
 .evidence { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: var(--fs-caption); color: var(--t2); margin: 6px 0 4px; max-width: 640px; }
-.evidence > summary { color: var(--t3); font-size: var(--fs-caption); font-family: system-ui, sans-serif; font-weight: 600; cursor: pointer; }
+.evidence > summary { color: var(--t3); font-size: var(--fs-caption); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; font-weight: 600; cursor: pointer; }
 .evidence > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .evidence[open] > summary { margin-bottom: 4px; }
 .ok { color: var(--good); }
@@ -128858,7 +128858,7 @@ var init_page = __esm(() => {
 :root[data-theme=light]{color-scheme:light}
 :root[data-theme=dark]{color-scheme:dark}
 *{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:100%;line-height:1.45}
 body{margin:0;background:var(--bg);color:var(--text);font-size:0.9375rem;overflow-wrap:anywhere}
 p{margin:0}
 h1{font-size:1.25rem;font-weight:600;margin:0 0 1rem}
@@ -129484,7 +129484,7 @@ var init_host_page = __esm(() => {
 @media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
 *{box-sizing:border-box}
 html,body{height:100%}
-body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:0.9375rem;line-height:1.45}
 .update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
 .update p{margin:0 0 0.5rem}
 .update code{overflow-wrap:anywhere;white-space:pre-wrap}
@@ -146168,7 +146168,7 @@ var init_private_answer2 = __esm(() => {
 :root[data-theme=dark]{${vars2(CHATGPT_DASHBOARD_DARK, CARD_DARK)};color-scheme:dark}
 :root[data-theme=light]{color-scheme:light}
 *{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:100%;line-height:1.45}
 html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent;color:var(--text);overflow:hidden}
 body{font-size:0.9375rem;overflow-wrap:anywhere}
 p,h2{margin:0}
