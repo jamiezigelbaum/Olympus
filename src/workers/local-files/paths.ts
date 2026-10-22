@@ -70,6 +70,21 @@ export function isWithinScopePath(path: string, root: string): boolean {
   return path === root || path.startsWith(`${root}/`);
 }
 
+/**
+ * Whether paths of this computer's file system ignore case. The volume list
+ * does not say how each volume is formatted, so this follows the platform:
+ * macOS volumes ignore case by default, Linux ones do not. One place, used by
+ * both the default-off folders and the person's saved selections.
+ */
+export function scopePathsIgnoreCase(context: Pick<DefaultExclusionContext, 'platform'>): boolean {
+  return (context.platform ?? process.platform) === 'darwin';
+}
+
+/** `value` as compared on this file system: lower-cased where case is ignored. */
+export function foldScopePath(value: string, context: Pick<DefaultExclusionContext, 'platform'>): string {
+  return scopePathsIgnoreCase(context) ? value.toLowerCase() : value;
+}
+
 export function scopePathDepth(path: string): number {
   return path === '/' ? 0 : path.split('/').length - 1;
 }
@@ -175,7 +190,7 @@ export function defaultExclusionForFolder(
   if (volumeId) return undefined;
   const platform = context.platform ?? process.platform;
   // macOS volumes ignore case: `~/library` is `~/Library`.
-  const fold = (value: string): string => (platform === 'darwin' ? value.toLowerCase() : value);
+  const fold = (value: string): string => foldScopePath(value, context);
   const here = fold(path);
   const at = (suffix: string): string => fold(`${context.home}${suffix}`);
   if (platform === 'darwin' && here === at('/Library')) return 'system_library';

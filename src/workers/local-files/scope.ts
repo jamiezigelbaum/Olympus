@@ -19,6 +19,7 @@ import type { FileSourceScopeApprovalSnapshot } from '../../core/source-scope-ap
 import type { FileSourceScopeAuthority, FileSourceScopePolicyRef } from '../source-scope-runtime.ts';
 import {
   deepestDefaultExclusion,
+  foldScopePath,
   isWithinScopePath,
   normalizeScopePath,
   scopePathDepth,
@@ -58,7 +59,9 @@ export function decideLocalFilesPath(
   const selected = approval.selections
     .map((selection) => ({ key: safeKey(selection.key), state: selection.state }))
     .filter((selection): selection is { key: string; state: typeof approval.selections[number]['state'] } =>
-      selection.key !== undefined && isWithinScopePath(path, selection.key));
+      // Saved keys carry the spelling the folder had when it was chosen; a
+      // later rename in Finder (`Private` -> `private`) must not undo them.
+      selection.key !== undefined && isWithinScopePath(foldScopePath(path, context), foldScopePath(selection.key, context)));
 
   const defaultOff = deepestDefaultExclusion(path, context);
   if (defaultOff) {

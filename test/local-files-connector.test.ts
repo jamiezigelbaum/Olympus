@@ -112,6 +112,34 @@ describe('scope decisions', () => {
     expect(decideLocalFilesPath({ selections: [], wholeAccount: false }, '/Users/jo/Code/a.txt', context)).toBe('denied');
   });
 
+  test('a folder renamed in Finder keeps its saved choice where the file system ignores case', () => {
+    const linux: DefaultExclusionContext = { ...context, platform: 'linux' };
+    const skip = { selections: [sel('/Users/jo/Code'), sel('/Users/jo/Code/Private', 'exclude')], wholeAccount: false };
+    expect(decideLocalFilesPath(skip, '/Users/jo/Code/private/a.txt', context)).toBe('denied');
+    expect(decideLocalFilesPath(skip, '/Users/jo/code/PRIVATE/a.txt', context)).toBe('denied');
+    expect(decideLocalFilesPath(skip, '/Users/jo/Code/other/a.txt', context)).toBe('content');
+    // Case-sensitive file system: `private` is a different folder.
+    expect(decideLocalFilesPath(skip, '/Users/jo/Code/private/a.txt', linux)).toBe('content');
+    expect(decideLocalFilesPath(skip, '/Users/jo/Code/Private/a.txt', linux)).toBe('denied');
+    // Names-only survives a rename too.
+    const names = { selections: [sel('/Users/jo/Code'), sel('/Users/jo/Code/Notes', 'metadata_only')], wholeAccount: false };
+    expect(decideLocalFilesPath(names, '/Users/jo/Code/notes/a.txt', context)).toBe('metadata');
+    expect(decideLocalFilesPath(names, '/Users/jo/Code/notes/a.txt', linux)).toBe('content');
+  });
+
+  test('the most specific choice still wins when the case differs', () => {
+    const approval = {
+      selections: [sel('/Users/jo/Code', 'metadata_only'), sel('/Users/jo/Code/Docs', 'ingest'), sel('/Users/jo/Code/Docs/Secret', 'exclude')],
+      wholeAccount: false,
+    };
+    expect(decideLocalFilesPath(approval, '/Users/jo/Code/docs/a.txt', context)).toBe('metadata');
+    expect(decideLocalFilesPath(approval, '/Users/jo/Code/docs/secret/a.txt', context)).toBe('denied');
+    // A default-off folder is still turned on only by a selection at or below it.
+    const lib = { selections: [sel('/Users/jo/Library/Mobile Documents')], wholeAccount: false };
+    expect(decideLocalFilesPath(lib, '/Users/jo/library/mobile documents/a.txt', context)).toBe('content');
+    expect(decideLocalFilesPath(lib, '/Users/jo/library/Mail/a.txt', context)).toBe('denied');
+  });
+
   test('a selected folder covers what is under it; the nearest exclude wins', () => {
     const approval = { selections: [sel('/Users/jo/Code'), sel('/Users/jo/Code/private', 'exclude')], wholeAccount: false };
     expect(decideLocalFilesPath(approval, '/Users/jo/Code/a.txt', context)).toBe('content');
