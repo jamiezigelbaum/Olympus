@@ -112,6 +112,20 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
     const card = await until(async () => { const now = await ctx.cardOf('local_files'); return now && !connected(now) ? now : undefined; }, 60_000);
     return card ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as disconnected: ${summary(await ctx.cardOf('local_files'))}` };
   };
+  const emptyState = async (): Promise<StateResult> => {
+    let card = await ctx.cardOf('local_files');
+    if (connected(card)) {
+      const done = await disconnect();
+      if (!done.ok) return done;
+    }
+    card = await ctx.cardOf('local_files');
+    if (items(card) > 0) {
+      const reply = await ask('/dashboard/delete-source-data', { source_id: 'local.files', acknowledge: true });
+      if (reply.status !== 200) return { ok: false, detail: `delete-source-data answered ${reply.status}: ${flat(reply.text)}` };
+      card = await until(async () => { const now = await ctx.cardOf('local_files'); return items(now) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
+    }
+    return card && items(card) === 0 ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as empty: ${summary(await ctx.cardOf('local_files'))}` };
+  };
   return {
     label: 'Files on this computer',
     states: {
@@ -129,24 +143,13 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
         return card ? { ok: true, detail: `Files on this computer, folder gone: ${summary(card)}` } : { ok: false, detail: `Files on this computer: with its folder moved away the card never reported a missing folder (${summary(await ctx.cardOf('local_files'))})` };
       },
       disconnected: async () => {
-        // Only the disconnect matters here, so a card still reporting a folder that came back does not stop it.
-        const first = await populated(false);
+        // After the failed state the source keeps its failed tasks (the product retries them a day later even once the folder is back), so this state starts from a clean source: nothing connected, nothing indexed, then connected and indexed again.
+        const wipe = await emptyState();
+        if (!wipe.ok) return wipe;
+        const first = await populated();
         return first.ok ? await disconnect() : first;
       },
-      empty: async () => {
-        let card = await ctx.cardOf('local_files');
-        if (connected(card)) {
-          const done = await disconnect();
-          if (!done.ok) return done;
-        }
-        card = await ctx.cardOf('local_files');
-        if (items(card) > 0) {
-          const reply = await ask('/dashboard/delete-source-data', { source_id: 'local.files', acknowledge: true });
-          if (reply.status !== 200) return { ok: false, detail: `delete-source-data answered ${reply.status}: ${flat(reply.text)}` };
-          card = await until(async () => { const now = await ctx.cardOf('local_files'); return items(now) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
-        }
-        return card && items(card) === 0 ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as empty: ${summary(await ctx.cardOf('local_files'))}` };
-      },
+      empty: emptyState,
     },
   };
 }
