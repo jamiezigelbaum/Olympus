@@ -458,6 +458,13 @@ const SOURCE_DEFINITIONS: Record<string, LedgerSourceDefinition> = {
     family: 'file',
     corpusSourceIds: ['local.files'],
   },
+  archive_imports: {
+    label: 'Archives',
+    // Mail is the first format; every family's archive stores share the row.
+    primaryCorpusId: archiveCorpusId('secure_local', 'email'),
+    family: 'email',
+    corpusSourceIds: ['archive.imports'],
+  },
 };
 
 export function buildSourceIngestionLedgerSnapshot(

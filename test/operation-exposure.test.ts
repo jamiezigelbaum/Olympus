@@ -25,6 +25,7 @@ describe('operation exposure policy', () => {
       'source_watch_cancel',
       'olympus_doctor',
       'ask_anonymously',
+      'archive_import',
       'olympus_open_remote',
     ]);
   });

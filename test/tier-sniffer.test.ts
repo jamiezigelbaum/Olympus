@@ -34,6 +34,7 @@ import {
 import { SnifferCallBudget, runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { BUILT_IN_SNIFFER_LANE, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { archivePrivateModelFromSniffer } from '../src/workers/archive-import/dashboard.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { classifyItemTiers, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
@@ -686,6 +687,97 @@ describe('bounds and the owner-approval gate', () => {
       expect(await reasons.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1 } });
       expect(reasons.status().waiting).toBeUndefined();
       reasons.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a model that stops answering is named as such, though every failed dispatch counted as a call; answering again clears it', async () => {
+    // Source-neutral: any store's queue (an imported archive's held mail, a
+    // Dropbox folder's files) reads the same reason off the same service.
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-not-answering-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      for (let n = 1; n <= 3; n += 1) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `lab results ${n}`);
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      const lines: string[] = [];
+      let down = true;
+      const answering = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'medical', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: { complete: (request) => (down ? Promise.reject(new Error('connection refused')) : answering.complete(request)) },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        log: (line) => lines.push(line),
+      });
+      const failed = await service.runOnce();
+      expect(failed).toMatchObject({ state: 'ran', report: { stoppedBy: 'transport_failures' } });
+      if (failed.state !== 'ran') throw new Error('expected a pass');
+      expect(failed.report.calls).toBeGreaterThan(0);
+      expect(failed.report.failedCalls).toBe(failed.report.calls);
+      expect(service.status().waiting).toMatchObject({ reason: 'model_not_answering', label: 'the private model is not answering' });
+      expect(service.backlog().waiting?.reason).toBe('model_not_answering');
+      expect(service.backlog().summary).toContain('Nothing asked now: the private model is not answering.');
+      expect(lines).toContain('Olympus tier sniffer: questions are waiting, nothing asked: the private model is not answering.');
+      // The Archives row reads the same status: held mail waits, never "ready".
+      expect(archivePrivateModelFromSniffer(service)).toBe('waiting');
+
+      down = false;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { verdictsApplied: 3 } });
+      expect(service.status().waiting).toBeUndefined();
+      expect(lines).toContain('Olympus tier sniffer: asking again.');
+      expect(archivePrivateModelFromSniffer(service)).toBe('ready');
+      expect(archivePrivateModelFromSniffer(undefined)).toBe('off');
+      service.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('one question left and one failed call: the model reads as not answering, though the pass never reached its failure stop', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-one-failed-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 1, 'lab results 1');
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      let down = true;
+      const answering = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'medical', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: { complete: (request) => (down ? Promise.reject(new Error('connection refused')) : answering.complete(request)) },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+      });
+      const failed = await service.runOnce();
+      if (failed.state !== 'ran') throw new Error('expected a pass');
+      expect(failed.report).toMatchObject({ calls: 1, failedCalls: 1 });
+      expect(failed.report.stoppedBy).toBeUndefined();
+      expect(service.status().waiting).toMatchObject({ reason: 'model_not_answering' });
+      expect(archivePrivateModelFromSniffer(service)).toBe('waiting');
+
+      down = false;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { verdictsApplied: 1 } });
+      expect(service.status().waiting).toBeUndefined();
+      expect(archivePrivateModelFromSniffer(service)).toBe('ready');
+      service.stop();
     } finally {
       installed.close();
       ledger.close();

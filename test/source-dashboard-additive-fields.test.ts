@@ -331,7 +331,7 @@ describe('dashboard view model additive facts', () => {
       host_names_returned: false,
     });
     expect(view.summary).toEqual({
-      configured_sources: 8,
+      configured_sources: 9,
       connected_sources: 1,
       answer_ready_sources: 1,
       needs_attention_sources: 0,

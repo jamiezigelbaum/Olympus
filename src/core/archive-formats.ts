@@ -41,6 +41,8 @@ export interface ArchiveFormatDefinition {
   family: SourceFamily;
   /** The provider name every item of this format carries. */
   provider: string;
+  /** How an answer's citation names this format's items ("Imported mail"); absent: the family's word. */
+  citationLabel?: string;
   /**
    * The files to read, relative to the chosen path and in reading order, when
    * the probe is this format; undefined when it is not.
@@ -70,6 +72,7 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   label: 'Mail (mbox)',
   family: 'email',
   provider: 'mbox',
+  citationLabel: 'Imported mail',
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return startsWithFromLine(probe.chosen.head) ? [''] : undefined;
     if (!probe.chosen.name.toLowerCase().endsWith('.mbox')) return undefined;
@@ -83,6 +86,11 @@ export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
+}
+
+/** The format whose items carry this provider name, if any. */
+export function archiveFormatForProvider(provider: string): ArchiveFormatDefinition | undefined {
+  return ARCHIVE_FORMATS.find((format) => format.provider === provider);
 }
 
 /** The source families archive imports store, one store set per family. */
@@ -148,6 +156,12 @@ export interface ArchiveConnectorInput {
   report(finding: ArchiveImportFinding): void;
   /** Read before each item: false stops the listing (the archive is being removed). */
   shouldContinue(): boolean;
+  /**
+   * Where the next page starts (a file of `files` and a byte offset in it),
+   * told before each page goes out. Progress only: the resume point is the
+   * page's cursor, never this.
+   */
+  reportPosition?(position: { fileIndex: number; offset: number }): void;
   /** Bytes read per listing before it pauses with a resume point. */
   maxBytesPerListing?: number;
   pageSize?: number;

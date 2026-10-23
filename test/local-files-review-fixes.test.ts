@@ -4,7 +4,8 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  chmodSync, existsSync, readdirSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+  accessSync, chmodSync, constants, existsSync, readdirSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync,
+  symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,8 +44,25 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!();
 });
 
-function fixture(select: (home: string) => string, platform: NodeJS.Platform = 'darwin') {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'local-files-fix-')));
+/**
+ * A writable temporary folder on the same disk as `/`, so a walk of the whole
+ * computer (which never crosses into another mount) reaches it: the system
+ * temporary folder, or /var/tmp where /tmp is a RAM disk (tmpfs, as on
+ * Ubuntu 26.04). Undefined when neither is (a read-only build container).
+ */
+function onRootDisk(): string | undefined {
+  for (const parent of [tmpdir(), '/var/tmp']) {
+    if (!existsSync(parent)) continue;
+    const real = realpathSync(parent);
+    try { accessSync(real, constants.W_OK); } catch { continue; }
+    // On a Mac `/` reaches the data volume through its firmlinks.
+    if (process.platform === 'darwin' || statSync(real).dev === statSync('/').dev) return real;
+  }
+  return undefined;
+}
+
+function fixture(select: (home: string) => string, platform: NodeJS.Platform = 'darwin', parent: string = tmpdir()) {
+  const base = realpathSync(mkdtempSync(join(parent, 'local-files-fix-')));
   const home = join(base, 'home');
   const chosen = select(home);
   mkdirSync(chosen, { recursive: true });
@@ -145,8 +163,8 @@ describe('one unreadable corner does not stop deletions elsewhere', () => {
     expect(titles(f.store, 'sealed')).toEqual(['sealed.txt']);
   });
 
-  test('a walk of the whole computer still removes what vanished', async () => {
-    const f = fixture((home) => join(home, 'proj'));
+  test.skipIf(onRootDisk() === undefined)('a walk of the whole computer still removes what vanished', async () => {
+    const f = fixture((home) => join(home, 'proj'), 'darwin', onRootDisk());
     writeFileSync(join(f.chosen, 'stays.txt'), 'a');
     writeFileSync(join(f.chosen, 'vanishes.txt'), 'b');
     const handler = f.handler({ useHub: false });
@@ -295,8 +313,8 @@ describe('replay', () => {
     return items;
   }
 
-  test('a watcher event is not dropped when the whole computer is the root', async () => {
-    const f = fixture((home) => join(home, 'proj'));
+  test.skipIf(onRootDisk() === undefined)('a watcher event is not dropped when the whole computer is the root', async () => {
+    const f = fixture((home) => join(home, 'proj'), 'darwin', onRootDisk());
     writeFileSync(join(f.chosen, 'fresh.txt'), 'new');
     const hub = fakeHub(() => [{ type: 'create', path: join(f.chosen, 'fresh.txt') }]);
     cleanups.push(() => hub.close());

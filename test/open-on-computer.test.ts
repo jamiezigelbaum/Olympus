@@ -61,6 +61,7 @@ describe('olympus:// targets', () => {
       'connect/x', 'connect/readwise', 'connect/telegram', 'connect/whatsapp',
       'fix/connect', 'fix/reconnect', 'fix/answers', 'fix/search', 'fix/models',
       'unreadable/dropbox', 'unreadable/drive', 'unreadable/whatsapp',
+      'archives',
     ]);
     for (const target of allOpenTargets()) {
       expect(parseOlympusOpenUrl(olympusOpenUrl(target))).toEqual(target);
@@ -109,10 +110,20 @@ describe('olympus:// targets', () => {
       'unreadable.dropbox': 'dropbox.files',
       'unreadable.drive': 'google_drive.docs',
       'unreadable.whatsapp': 'whatsapp.personal.messages',
+      archives: 'archive.imports',
     });
     for (const [source, { sourceId }] of Object.entries(OPEN_UNREADABLE_SOURCES)) expect(openUnreadableSourceFor(sourceId)).toBe(source as never);
     expect(openUnreadableSourceFor('gmail.email')).toBeUndefined();
     expect(parseOlympusOpenUrl('olympus://open/unreadable/gmail')).toEqual({ kind: 'dashboard', fallback: true });
+  });
+
+  test('the Archives row round-trips: olympus:// link, token, source id; the link names no archive', () => {
+    const target = { kind: 'archives' } as const;
+    expect(olympusOpenUrl(target)).toBe('olympus://open/archives');
+    expect(parseOlympusOpenUrl('olympus://open/archives/')).toEqual(target);
+    expect(openTargetToken(target)).toBe('archives');
+    expect(openPageUrl(target)).toBe('https://olympusplugin.ai/open/archives/');
+    expect(parseOlympusOpenUrl('olympus://open/archives/6a1f0e2d')).toEqual({ kind: 'dashboard', fallback: true });
   });
 
   test('olympus dashboard --target takes a place on the same closed list, and nothing else', () => {

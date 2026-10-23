@@ -118,7 +118,7 @@ export const OLYMPUS_SOURCE_FAMILY_POSTURES: SourceFamilyPosture[] = [
     label: 'Imported archives',
     family: 'email',
     provider: 'mbox',
-    status: 'planned',
+    status: 'working',
     ingestMode: 'archive_import',
     defaultTrustDomain: 'secure_local',
     defaultTrustTier: 'S4',

@@ -44,12 +44,20 @@ export const OPEN_UNREADABLE_SOURCES = {
 
 export type OpenUnreadableSource = keyof typeof OPEN_UNREADABLE_SOURCES;
 
+/**
+ * The dashboard source `archives` opens on: the Archives row, where each
+ * imported archive and each import asked for says what it needs, with its
+ * own controls. The link names no archive: it only shows the row.
+ */
+export const OPEN_ARCHIVES_SOURCE_ID = 'archive.imports';
+
 export type OpenTarget =
   | { kind: 'dashboard' }
   | { kind: 'private_answers'; answerId?: string }
   | { kind: 'connect'; source: OpenConnectSource }
   | { kind: 'fix'; section: OpenFixSection }
-  | { kind: 'unreadable'; source: OpenUnreadableSource };
+  | { kind: 'unreadable'; source: OpenUnreadableSource }
+  | { kind: 'archives' };
 
 /** The longest link the handler reads at all; anything longer is ignored. */
 export const OPEN_URL_MAX_LENGTH = 128;
@@ -62,6 +70,7 @@ export function allOpenTargets(): OpenTarget[] {
     ...(Object.keys(OPEN_CONNECT_SOURCES) as OpenConnectSource[]).map((source) => ({ kind: 'connect' as const, source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: 'fix' as const, section })),
     ...(Object.keys(OPEN_UNREADABLE_SOURCES) as OpenUnreadableSource[]).map((source) => ({ kind: 'unreadable' as const, source })),
+    { kind: 'archives' },
   ];
 }
 
@@ -72,6 +81,7 @@ export function openTargetPath(target: OpenTarget): string {
   if (target.kind === 'connect') return `connect/${target.source}`;
   if (target.kind === 'fix') return `fix/${target.section}`;
   if (target.kind === 'unreadable') return `unreadable/${target.source}`;
+  if (target.kind === 'archives') return 'archives';
   return 'dashboard';
 }
 
@@ -131,6 +141,7 @@ export function openTargetToken(target: OpenTarget): string | undefined {
   if (target.kind === 'connect') return `connect.${target.source}`;
   if (target.kind === 'fix') return `fix.${target.section}`;
   if (target.kind === 'unreadable') return `unreadable.${target.source}`;
+  if (target.kind === 'archives') return 'archives';
   return undefined;
 }
 
@@ -169,7 +180,7 @@ export function privateAnswersOpenTargetTokenPattern(): string {
  * panel where to land.
  */
 export function isPanelOpenTarget(target: OpenTarget): boolean {
-  return target.kind === 'unreadable';
+  return target.kind === 'unreadable' || target.kind === 'archives';
 }
 
 /** The panel targets' tokens, as one anchored pattern source (see openTargetTokenPattern). */
@@ -182,8 +193,8 @@ export function panelOpenTargetTokenPattern(): string {
 export function panelOpenTargetSources(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const target of allOpenTargets()) {
-    if (target.kind !== 'unreadable') continue;
-    out[openTargetToken(target)!] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
+    if (target.kind === 'unreadable') out[openTargetToken(target)!] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
+    if (target.kind === 'archives') out[openTargetToken(target)!] = OPEN_ARCHIVES_SOURCE_ID;
   }
   return out;
 }

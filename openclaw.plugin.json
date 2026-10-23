@@ -450,6 +450,7 @@
                     "google_drive.docs",
                     "dropbox.files",
                     "local.files",
+                    "archive.imports",
                     "x.bookmarks",
                     "telegram.messages",
                     "whatsapp.personal.messages",
@@ -898,6 +899,7 @@
                         "google_drive.docs",
                         "dropbox.files",
                         "local.files",
+                        "archive.imports",
                         "x.bookmarks",
                         "telegram.messages",
                         "whatsapp.personal.messages",
@@ -1607,6 +1609,7 @@
                     "google_drive.docs",
                     "dropbox.files",
                     "local.files",
+                    "archive.imports",
                     "x.bookmarks",
                     "telegram.messages",
                     "whatsapp.personal.messages",
@@ -2793,12 +2796,14 @@
       "source_watch_cancel",
       "olympus_doctor",
       "ask_anonymously",
+      "archive_import",
       "olympus_open_remote"
     ]
   },
   "skills": [
     "skills/ask-argus",
-    "skills/ask-sources"
+    "skills/ask-sources",
+    "skills/import-archive"
   ],
   "controlUi": {
     "entry": "./dist/control-ui/index.js"

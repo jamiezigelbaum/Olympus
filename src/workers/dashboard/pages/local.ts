@@ -311,6 +311,7 @@ function setupBlurb(source: DashboardSourceCard): string {
   if (action.kind === 'guided_session') return action.instructions[0] ?? source.connection.label;
   if (action.kind === 'api_key') return action.instructions.plain_intro;
   if (action.kind === 'this_computer') return 'Choose the folders on this computer Olympus may read. Nothing is read until you choose.';
+  if (action.kind === 'archive_import') return 'Import a mail export from this computer on the dashboard. Olympus reads it where it is and never changes it.';
   return '';
 }
 

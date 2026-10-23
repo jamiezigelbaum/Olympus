@@ -66,9 +66,12 @@ export interface OlympusFolderScopeNode {
   key: string;
   parent_key?: string;
   name: string;
-  kind: 'folder';
+  /** A file only in the archive picker (local-files/scope-browser.ts archive mode); every other listing offers folders. */
+  kind: 'folder' | 'file';
   has_children: boolean;
   selectable: boolean;
+  /** A file's size, where the listing reports it. */
+  size_bytes?: number;
   /**
    * Set when the folder is off unless the person turns it on (system data,
    * caches, version control, build output, another source's folder): the
