@@ -6,12 +6,12 @@
  * Every path lives under a throwaway root; every child gets an explicit HOME.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { Database } from 'bun:sqlite';
-import { StoreCustodyBusyError, holdStoreCustodyShared, releaseHeldStoreCustodyForTests, storeCustodyLockPath, tryHoldStoreCustodyExclusive } from '../src/core/store-custody.ts';
+import { StoreCustodyBusyError, StoreCustodyUnavailableError, ensureStoreCustodyDirectory, holdStoreCustodyShared, storeCustodyDirectory, releaseHeldStoreCustodyForTests, storeCustodyLockPath, tryHoldStoreCustodyExclusive } from '../src/core/store-custody.ts';
 import { tryKernelLockAt } from '../src/core/file-lease.ts';
 
 const roots: string[] = [];
@@ -275,4 +275,59 @@ describe('real entry points', () => {
       taken.release();
     }, 10_000);
   }
+});
+
+describe('the lock folder is validated before it is trusted', () => {
+  test('a missing folder is created private (0700), and the lock works', () => {
+    const l = lab();
+    const lock = tryHoldStoreCustodyExclusive({ homeDir: l.home })!;
+    expect(lock).toBeDefined();
+    expect(statSync(storeCustodyDirectory(l.home)).mode & 0o777).toBe(0o700);
+    lock.release();
+  });
+
+  test('a symbolic link at the folder is refused with the reason', () => {
+    const l = lab();
+    const real = join(l.root, 'elsewhere');
+    mkdirSync(real);
+    symlinkSync(real, join(l.home, '.olympus-locks'));
+    expect(() => holdStoreCustodyShared({ homeDir: l.home })).toThrow(StoreCustodyUnavailableError);
+    expect(() => holdStoreCustodyShared({ homeDir: l.home })).toThrow(/symbolic link/);
+    expect(() => tryHoldStoreCustodyExclusive({ homeDir: l.home })).toThrow(/symbolic link/);
+  });
+
+  test('a symbolic link in a component above the lock file (a linked lock file) is refused', () => {
+    const l = lab();
+    const directory = ensureStoreCustodyDirectory(l.home);
+    const real = join(l.root, 'real.lock');
+    writeFileSync(real, '');
+    symlinkSync(real, join(directory, 'store-lifecycle.lock.db'));
+    expect(() => holdStoreCustodyShared({ homeDir: l.home })).toThrow(StoreCustodyUnavailableError);
+  });
+
+  test('a folder writable by group or others is refused', () => {
+    const l = lab();
+    const directory = ensureStoreCustodyDirectory(l.home);
+    chmodSync(directory, 0o770);
+    expect(() => holdStoreCustodyShared({ homeDir: l.home })).toThrow(/other users can write/);
+    chmodSync(directory, 0o700);
+    expect(() => holdStoreCustodyShared({ homeDir: l.home })).not.toThrow();
+  });
+
+  test('a folder we cannot write to is refused with the reason, not a generic lock failure', () => {
+    const l = lab();
+    const directory = ensureStoreCustodyDirectory(l.home);
+    chmodSync(directory, 0o500);
+    try {
+      expect(() => holdStoreCustodyShared({ homeDir: l.home })).toThrow(/not writable/);
+    } finally {
+      chmodSync(directory, 0o700);
+    }
+  });
+
+  test('a regular file where the folder should be is refused', () => {
+    const l = lab();
+    writeFileSync(join(l.home, '.olympus-locks'), 'x');
+    expect(() => holdStoreCustodyShared({ homeDir: l.home })).toThrow(StoreCustodyUnavailableError);
+  });
 });

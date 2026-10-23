@@ -177,6 +177,21 @@ main() {
     rm -f "$LAUNCHER"
     step "Deleted the olympus command ($LAUNCHER)."
   fi
+  # The store lock folder (a lock file and, if a delete did not finish, its
+  # fence). It sits in the home folder so deleting data cannot remove the lock
+  # the delete itself holds; nothing runs now, so remove it, unless it is a link
+  # or someone else's (then leave it and say so).
+  LOCKS="$HOME/.olympus-locks"
+  if [ -L "$LOCKS" ]; then
+    step "Left $LOCKS alone: it is a link."
+  elif [ -d "$LOCKS" ]; then
+    if [ -O "$LOCKS" ]; then
+      rm -rf "$LOCKS"
+      step "Deleted $LOCKS."
+    else
+      step "Left $LOCKS alone: it is not yours."
+    fi
+  fi
   remove_marked_line "$HOME/.zprofile"
   remove_marked_line "$HOME/.bash_profile"
 

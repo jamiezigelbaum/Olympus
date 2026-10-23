@@ -1481,7 +1481,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               connectedHandleRegistry: registry,
               ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
               ...(thisComputerStateUnreadableSafe(sourceDashboard.registryPath) ? { thisComputerStateUnreadable: true } : {}),
-              sourceDeleteStates: sourceDeleteStates(sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
+              sourceDeleteStates: sourceDeleteStates(sourceDashboard.registryPath ?? defaultHandleRegistryPath(), sourceDashboard.dataLifecyclePathContext?.homeDir),
               ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
               unpairedSources: dashboardUnpairedSourceStates(
                 dashboardUnpairedSources,

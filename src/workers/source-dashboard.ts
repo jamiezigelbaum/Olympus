@@ -133,18 +133,34 @@ export const DASHBOARD_UNPAIR_INCOMPLETE_LABEL = 'Unpair incomplete — manual c
  * anything. Until it reports the data gone, the card says so; if the restart's
  * re-check refused, the card says that and what to do.
  */
-export type DashboardDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed' | 'holders_running' | 'connection_changed';
+export type DashboardDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed' | 'holders_running' | 'connection_changed' | 'record_unreadable';
 export const DASHBOARD_DELETE_REFUSAL_CODES: ReadonlySet<string> = new Set<DashboardDeleteRefusal>([
-  'settings_changed', 'protected_path', 'not_disconnected', 'failed', 'holders_running', 'connection_changed',
+  'settings_changed', 'protected_path', 'not_disconnected', 'failed', 'holders_running', 'connection_changed', 'record_unreadable',
 ]);
 export const DASHBOARD_DELETING_LABEL = 'Deleting indexed data…';
 export const DASHBOARD_DELETE_NOT_DONE_LABEL = 'Delete didn\'t run — check settings, then delete again';
+/**
+ * A delete that began and did not finish (owner, 2026-10-23): some of the
+ * source's indexed data is gone, its stores stay closed, and every start
+ * (or Try again) runs the delete again. A Needs you item with a plain reason.
+ */
+export const DASHBOARD_DELETE_UNFINISHED_LABEL = 'Delete didn\'t finish';
+export const DASHBOARD_DELETE_UNFINISHED_REASONS: Readonly<Record<DashboardDeleteRefusal, string>> = {
+  failed: 'Delete didn\'t finish: a file or database could not be removed. This source is paused and Olympus will try again at the next start. Choose Delete indexed data to try now.',
+  holders_running: 'Delete didn\'t finish: another part of Olympus still had this source\'s data open. This source is paused. Choose Delete indexed data to try again.',
+  settings_changed: 'Delete didn\'t finish: the folder settings changed after you asked. This source is paused. Check the settings, then choose Delete indexed data to try again.',
+  protected_path: 'Delete didn\'t finish: one of the places to remove is protected. This source is paused. Check the data-location settings, then choose Delete indexed data to try again.',
+  not_disconnected: 'Delete didn\'t finish: the source was connected again. This source is paused. Disconnect it, then choose Delete indexed data to try again.',
+  connection_changed: 'Delete didn\'t finish: the connection changed. This source is paused. Choose Delete indexed data to try again.',
+  record_unreadable: 'Delete didn\'t finish and Olympus could not read its note of what was left. This source is paused. Choose Delete indexed data to try again.',
+};
 export const DASHBOARD_UNSETTLED_CUSTODY_LABELS: ReadonlySet<string> = new Set([
   DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
   DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
   DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
   DASHBOARD_DELETING_LABEL,
   DASHBOARD_DELETE_NOT_DONE_LABEL,
+  DASHBOARD_DELETE_UNFINISHED_LABEL,
 ]);
 
 export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync';
@@ -829,7 +845,7 @@ export interface DashboardSourceCard {
    * restarted engine has applied it, `refused` when its re-check did not.
    * The reason is a closed code, never a path.
    */
-  delete_state?: { state: 'pending' | 'refused'; reason?: DashboardDeleteRefusal };
+  delete_state?: { state: 'pending' | 'refused' | 'unfinished'; reason?: DashboardDeleteRefusal };
   configured: boolean;
   freshness: {
     label: string;
@@ -1341,7 +1357,7 @@ export interface SourceDashboardBuildOptions {
    */
   thisComputerStateUnreadable?: boolean;
   /** Deletions recorded for the next start, by source id (pending-source-deletes.ts). */
-  sourceDeleteStates?: Readonly<Record<string, { state: 'pending' | 'refused'; reason?: DashboardDeleteRefusal }>>;
+  sourceDeleteStates?: Readonly<Record<string, { state: 'pending' | 'refused' | 'unfinished'; reason?: DashboardDeleteRefusal }>>;
   /**
    * Paired-session sources this worker has itself unpaired, and whether the
    * removal finished.
@@ -2347,7 +2363,8 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
         card.connection = {
           ...card.connection,
           state: 'not_connected',
-          label: deleteState.state === 'pending' ? DASHBOARD_DELETING_LABEL : DASHBOARD_DELETE_NOT_DONE_LABEL,
+          label: deleteState.state === 'pending' ? DASHBOARD_DELETING_LABEL
+            : deleteState.state === 'unfinished' ? DASHBOARD_DELETE_UNFINISHED_LABEL : DASHBOARD_DELETE_NOT_DONE_LABEL,
         };
       }
     }

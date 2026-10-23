@@ -10,6 +10,10 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { ensureStoreCustodyDirectory } from '../src/core/store-custody.ts';
+import { openStoreDatabase } from '../src/core/store-open.ts';
+import { deleteFencePath, isStorePathFenced, readDeleteFence } from '../src/core/delete-fence.ts';
+import { releaseHeldStoreCustodyForTests, storeCustodyDirectory } from '../src/core/store-custody.ts';
 import { effectiveWorkerEnvironment } from '../src/core/worker-effective-env.ts';
 import { startEngineHost } from '../src/core/engine-host.ts';
 import { engineChildrenPath } from '../src/core/engine-children.ts';
@@ -21,8 +25,10 @@ import {
   pendingSourceDeletesPath,
   readSourceDeleteIntents,
   recordSourceDeleteIntent,
+  sourceDeleteCustodyInput,
   sourceDeleteStates,
 } from '../src/pending-source-deletes.ts';
+import { changedBinding, deleteOlympusDataWithCustody, planSourceDelete } from '../src/data-lifecycle.ts';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { withConnectedHandleGrantCustody, readConnectedHandleGrantEpoch } from '../src/workers/credential-broker/connected-handles.ts';
 import { writeConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
@@ -30,6 +36,7 @@ import { writeConnectedHandleRegistry } from '../src/workers/credential-broker/c
 const roots: string[] = [];
 afterEach(() => {
   setNativeProcessChildObserver(undefined);
+  releaseHeldStoreCustodyForTests();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -397,46 +404,164 @@ describe('a delete that has begun is retried, never abandoned', () => {
     expect(readSourceDeleteIntents(l.registryPath).intents).toEqual([]);
   }, 10_000);
 
-  test('the engine starts no service while a started delete is unfinished, and exits to be retried', async () => {
+  test('the engine still starts while a started delete is unfinished, the stores stay fenced, and the next start finishes it', async () => {
     const l = lab();
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     const dataDir = dirname(l.store);
     hostConfig(l);
     const started: string[] = [];
     const exits: number[] = [];
-    chmodSync(dataDir, 0o500);
-    try {
-      await startEngineHost({
-        moduleUrl: 'file:///x/dist/cli.js',
-        env: { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath },
-        homeDir: l.home, platform: 'darwin',
-        services: () => [{ id: 'olympus-worker', reload: { configPrefixes: [] }, async start() { started.push('worker'); }, async stop() {} }],
-        reap: { listProcesses: () => [], kill: () => undefined, sleep: () => undefined, selfPid: 1 },
-        log: () => undefined,
-        exit: (code: number) => { exits.push(code); },
-        installSignalHandlers: false,
-      });
-    } finally {
-      chmodSync(dataDir, 0o700);
-    }
-    expect(started).toEqual([]);
-    expect(exits).toEqual([1]);
-    expect(readSourceDeleteIntents(l.registryPath).intents.map((entry) => entry.state)).toEqual(['applying']);
-    // The retry finishes it, and only then does a service start.
-    const handle = await startEngineHost({
+    const hostOptions = () => ({
       moduleUrl: 'file:///x/dist/cli.js',
       env: { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath },
-      homeDir: l.home, platform: 'darwin',
+      homeDir: l.home, platform: 'darwin' as const,
       services: () => [{ id: 'olympus-worker', reload: { configPrefixes: [] }, async start() { started.push('worker'); }, async stop() {} }],
       reap: { listProcesses: () => [], kill: () => undefined, sleep: () => undefined, selfPid: 1 },
       log: () => undefined,
-      exit: () => { throw new Error('must not exit'); },
+      exit: (code: number) => { exits.push(code); },
       installSignalHandlers: false,
     });
+    chmodSync(dataDir, 0o500);
+    let handle;
+    try {
+      handle = await startEngineHost(hostOptions());
+    } finally {
+      chmodSync(dataDir, 0o700);
+    }
+    // No crash loop: the engine is up and every service started.
+    expect(started).toEqual(['worker']);
+    expect(exits).toEqual([]);
+    expect(readSourceDeleteIntents(l.registryPath).intents.map((entry) => entry.state)).toEqual(['applying']);
+    expect(isStorePathFenced(l.store, l.home)).toBe(true);
+    expect(sourceDeleteStates(l.registryPath, l.home)).toEqual({ 'dropbox.files': { state: 'unfinished', reason: 'failed' } });
+    await handle!.stop();
+    // The next start finishes it and lifts the fence.
+    started.length = 0;
+    const again = await startEngineHost(hostOptions());
     expect(started).toEqual(['worker']);
     expect(existsSync(l.store)).toBe(false);
-    await handle!.stop();
+    expect(isStorePathFenced(l.store, l.home)).toBe(false);
+    expect(sourceDeleteStates(l.registryPath, l.home)).toEqual({});
+    await again!.stop();
   }, 10_000 * 3);
+});
+
+/** Make the dropbox delete begin, then fail on every unlink (a read-only folder). */
+async function beginThenFail(l: ReturnType<typeof lab>) {
+  recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+  const dataDir = dirname(l.store);
+  chmodSync(dataDir, 0o500);
+  try {
+    return await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+  } finally {
+    chmodSync(dataDir, 0o700);
+  }
+}
+
+describe('a started delete that cannot finish fences its source, not the engine', () => {
+  test('a persistent unlink failure leaves the source fenced and the other sources and stores working', async () => {
+    const l = lab();
+    const otherStore = join(l.root, 'elsewhere', 'other.sqlite');
+    mkdirSync(dirname(otherStore), { recursive: true });
+    writeFileSync(otherStore, 'other source');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = attempt === 0 ? await beginThenFail(l) : await beginThenFail(l);
+      expect(result).toEqual({ applied: [], incomplete: ['dropbox.files'], refused: [] });
+      expect(isStorePathFenced(l.store, l.home)).toBe(true);
+      expect(isStorePathFenced(`${l.store}-wal`, l.home)).toBe(true);
+      expect(isStorePathFenced(otherStore, l.home)).toBe(false);
+      expect(sourceDeleteStates(l.registryPath, l.home)['dropbox.files']).toEqual({ state: 'unfinished', reason: 'failed' });
+    }
+    expect(readFileSync(otherStore, 'utf8')).toBe('other source');
+    // It finishes when the unlink works again.
+    expect((await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).applied).toEqual(['dropbox.files']);
+    expect(isStorePathFenced(l.store, l.home)).toBe(false);
+  }, 10_000);
+
+  test('a delete refused after it started (settings changed since) stays unfinished and fenced, never a plain refusal', async () => {
+    const l = lab();
+    await beginThenFail(l);
+    const moved = join(dirname(l.store), 'other-dropbox.sqlite');
+    createMarkedSqliteStore(moved);
+    const changed = { homeDir: l.home, env: { ...l.context.env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: moved } };
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: changed });
+    expect(result).toEqual({ applied: [], incomplete: ['dropbox.files'], refused: [] });
+    expect(readSourceDeleteIntents(l.registryPath).intents.map((entry) => [entry.state, entry.reason])).toEqual([['applying', 'settings_changed']]);
+    expect(isStorePathFenced(l.store, l.home)).toBe(true);
+    expect(existsSync(moved)).toBe(true);
+    expect(sourceDeleteStates(l.registryPath, l.home)['dropbox.files']).toEqual({ state: 'unfinished', reason: 'settings_changed' });
+    // Try again with the settings as they are: re-records and finishes.
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    expect((await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).applied).toEqual(['dropbox.files']);
+    expect(isStorePathFenced(l.store, l.home)).toBe(false);
+  }, 10_000);
+
+  test('an unreadable intent file deletes nothing, keeps the fence closed with a reason, and Try again heals it', async () => {
+    const l = lab();
+    await beginThenFail(l);
+    writeFileSync(pendingSourceDeletesPath(l.registryPath), '{ not json');
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    expect(result).toEqual({ applied: [], incomplete: ['dropbox.files'], refused: [] });
+    expect(existsSync(l.store)).toBe(true);
+    expect(isStorePathFenced(l.store, l.home)).toBe(true);
+    // A lost record never hides a half-deleted source.
+    expect(sourceDeleteStates(l.registryPath, l.home)).toEqual({ 'dropbox.files': { state: 'unfinished', reason: 'record_unreadable' } });
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    expect((await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).applied).toEqual(['dropbox.files']);
+    expect(existsSync(l.store)).toBe(false);
+    expect(isStorePathFenced(l.store, l.home)).toBe(false);
+  }, 10_000);
+
+  test('a preparation failure before the delete starts is a plain refusal: nothing deleted, nothing fenced', async () => {
+    const l = lab();
+    // Looks like SQLite, reads as garbage: the picture-reference read fails.
+    writeFileSync(l.store, Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(4096, 0xff)]));
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    expect(result).toEqual({ applied: [], incomplete: [], refused: [{ sourceId: 'dropbox.files', reason: 'failed' }] });
+    expect(existsSync(l.store)).toBe(true);
+    expect(existsSync(`${l.store}-wal`)).toBe(true);
+    expect(isStorePathFenced(l.store, l.home)).toBe(false);
+    expect(readDeleteFence(l.home).entries).toEqual([]);
+    expect(sourceDeleteStates(l.registryPath, l.home)).toEqual({ 'dropbox.files': { state: 'refused', reason: 'failed' } });
+  }, 10_000);
+
+  test('the store-open boundary hands a fenced store back as an empty placeholder, never the partial file', async () => {
+    const l = lab();
+    rmSync(l.store); rmSync(`${l.store}-wal`);
+    createMarkedSqliteStore(l.store);
+    const before = new Database(l.store);
+    before.exec('CREATE TABLE IF NOT EXISTS t (x)'); before.exec('INSERT INTO t VALUES (1)'); before.close();
+    await beginThenFail(l);
+    const savedHome = process.env.HOME;
+    process.env.HOME = l.home;
+    try {
+      const errors = console.error; console.error = () => undefined;
+      try {
+        const fenced = openStoreDatabase(l.store);
+        expect(fenced.query("SELECT name FROM sqlite_master WHERE name = 't'").all()).toEqual([]);
+        fenced.close();
+      } finally { console.error = errors; }
+      const other = join(l.root, 'free.sqlite');
+      const free = openStoreDatabase(other);
+      free.exec('CREATE TABLE t (x)'); free.close();
+      expect(existsSync(other)).toBe(true);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    }
+    // The partial file itself was not touched by the placeholder.
+    const check = new Database(l.store, { readonly: true });
+    expect(check.query("SELECT x FROM t").all()).toEqual([{ x: 1 }]);
+    check.close();
+  }, 10_000);
+
+  test('an unreadable fence file fails closed for every store', () => {
+    const l = lab();
+    mkdirSync(storeCustodyDirectory(l.home), { recursive: true, mode: 0o700 });
+    writeFileSync(deleteFencePath(l.home), 'garbage');
+    expect(isStorePathFenced(l.store, l.home)).toBe(true);
+    expect(isStorePathFenced(join(l.root, 'anything.sqlite'), l.home)).toBe(true);
+  });
 });
 
 describe('grant custody and connection generation', () => {
@@ -488,5 +613,62 @@ describe('an external SQLite family finishes after its primary is gone', () => {
     const ctx = { homeDir: l.home, env: { ...l.context.env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: stray } };
     expect(() => recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: ctx })).toThrow();
     expect(existsSync(`${stray}-wal`)).toBe(true);
+  });
+});
+
+describe('the store lock cannot be reached through a delete target', () => {
+  test('a target that is a link to the lock file, or lives in a link to the lock folder, is refused', () => {
+    const l = lab();
+    const directory = ensureStoreCustodyDirectory(l.home);
+    const lock = join(directory, 'store-lifecycle.lock.db');
+    writeFileSync(lock, '');
+    const viaFile = join(l.root, 'file-link.sqlite');
+    symlinkSync(lock, viaFile);
+    const viaFolder = join(l.root, 'folder-link');
+    symlinkSync(directory, viaFolder);
+    for (const configured of [viaFile, join(viaFolder, 'store-lifecycle.lock.db'), viaFolder]) {
+      const env = { ...l.context.env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: configured };
+      expect(() => recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: { homeDir: l.home, env } })).toThrow();
+    }
+    expect(existsSync(lock)).toBe(true);
+  });
+});
+
+describe('every removal re-checks the approved places', () => {
+  test('bindings record the device as well as the inode', async () => {
+    const l = lab();
+    const intent = recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    expect(intent.bindings?.length).toBeGreaterThan(0);
+    for (const binding of intent.bindings!) {
+      expect(typeof binding.anchor_dev).toBe('number');
+      expect(binding.anchor_dev).toBeGreaterThanOrEqual(0);
+    }
+    // A device that is not the one recorded refuses, though the names and inode match.
+    const forged = intent.bindings!.map((binding) => ({ ...binding, anchor_dev: binding.anchor_dev! + 1 }));
+    const plan = planSourceDelete({ sourceId: 'dropbox.files', ...l.context, registryPath: l.registryPath });
+    expect(changedBinding(forged, plan.bindings)).toBeDefined();
+    expect(changedBinding(intent.bindings!, plan.bindings)).toBeUndefined();
+  });
+
+  test('a folder swapped after the delete began stops the next removal, and the source stays fenced', () => {
+    const l = lab();
+    const intent = recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    const dataDir = dirname(l.store);
+    expect(() => deleteOlympusDataWithCustody({
+      ...sourceDeleteCustodyInput('dropbox.files', l.registryPath),
+      ...l.context,
+      registryPath: l.registryPath,
+      sourceId: 'dropbox.files',
+      verifiedPrimaries: intent.verified_primaries ?? [],
+      expectedBindings: intent.bindings!,
+      // Runs after the last pre-mutation check, as the delete begins.
+      onBegin: () => {
+        renameSync(dataDir, join(l.root, 'swapped-away'));
+        mkdirSync(dataDir, { recursive: true });
+        writeFileSync(l.store, 'someone else');
+      },
+    })).toThrow(/not where it was/);
+    expect(readFileSync(l.store, 'utf8')).toBe('someone else');
+    expect(isStorePathFenced(l.store, l.home)).toBe(true);
   });
 });

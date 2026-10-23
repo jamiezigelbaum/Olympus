@@ -30,7 +30,7 @@
  * account blocks a delete, which is what the delete needs. Another account, or
  * another HOME, has a different lock and never interferes.
  */
-import { mkdirSync, realpathSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { sleepSync, tryKernelLockAt, type KernelLock } from './file-lease.ts';
@@ -38,6 +38,13 @@ import { sleepSync, tryKernelLockAt, type KernelLock } from './file-lease.ts';
 const LOCK_DIRECTORY = '.olympus-locks';
 const LOCK_FILE_NAME = 'store-lifecycle.lock.db';
 const POLL_MS = 50;
+
+/** The lock folder cannot be made safe to use; the message says exactly why. */
+export class StoreCustodyUnavailableError extends Error {
+  constructor(readonly directory: string, why: string) {
+    super(`Olympus cannot use its store lock folder ${directory}: ${why}.`);
+  }
+}
 
 export class StoreCustodyBusyError extends Error {
   readonly retryable = true;
@@ -51,6 +58,49 @@ function canonicalHome(homeDir: string | undefined): string {
   try { return realpathSync(home); } catch { return home; }
 }
 
+/** The folder that holds the lock (and the delete fence) for the account at `homeDir`. */
+export function storeCustodyDirectory(homeDir?: string): string {
+  return join(canonicalHome(homeDir), LOCK_DIRECTORY);
+}
+
+/**
+ * The lock folder, created if missing, and refused unless it is a real folder
+ * (never a symbolic link: a link could lead the lock into a tree a delete
+ * removes) owned by this user, not writable by group or others, and writable
+ * by us. Every refusal names the reason.
+ */
+export function ensureStoreCustodyDirectory(homeDir?: string): string {
+  const directory = storeCustodyDirectory(homeDir);
+  if (!existsSync(directory) && lstatOrUndefined(directory) === undefined) {
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+    } catch (error) {
+      throw new StoreCustodyUnavailableError(directory, `it does not exist and could not be created (${(error as NodeJS.ErrnoException).code ?? 'error'})`);
+    }
+  }
+  const info = lstatSync(directory);
+  if (info.isSymbolicLink()) throw new StoreCustodyUnavailableError(directory, 'it is a symbolic link');
+  if (!info.isDirectory()) throw new StoreCustodyUnavailableError(directory, 'it is not a folder');
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new StoreCustodyUnavailableError(directory, 'it is owned by another user');
+  }
+  if ((info.mode & 0o022) !== 0) {
+    throw new StoreCustodyUnavailableError(directory, 'other users can write to it (it must be mode 700)');
+  }
+  try {
+    accessSync(directory, constants.W_OK);
+  } catch {
+    throw new StoreCustodyUnavailableError(directory, 'it is not writable');
+  }
+  const lock = lstatOrUndefined(join(directory, LOCK_FILE_NAME));
+  if (lock?.isSymbolicLink()) throw new StoreCustodyUnavailableError(directory, 'the lock file in it is a symbolic link');
+  return directory;
+}
+
+function lstatOrUndefined(path: string) {
+  try { return lstatSync(path); } catch { return undefined; }
+}
+
 /** The lock file for the account at `homeDir` (default: this process's HOME). */
 export function storeCustodyLockPath(homeDir?: string): string {
   return join(canonicalHome(homeDir), LOCK_DIRECTORY, LOCK_FILE_NAME);
@@ -60,8 +110,8 @@ const heldShared = new Map<string, KernelLock>();
 /** Lock files this process holds exclusively right now (a delete in progress). */
 const heldExclusiveHere = new Set<string>();
 
-function takeShared(lockPath: string, deadline: number): void {
-  mkdirSync(join(lockPath, '..'), { recursive: true, mode: 0o700 });
+function takeShared(lockPath: string, deadline: number, homeDir?: string): void {
+  ensureStoreCustodyDirectory(homeDir);
   for (;;) {
     const lock = tryKernelLockAt(lockPath, 'shared');
     if (lock) { heldShared.set(lockPath, lock); return; }
@@ -80,7 +130,7 @@ export function holdStoreCustodyShared(options: { timeoutMs?: number; homeDir?: 
   // This process is itself the deleter holding the lock exclusively: the
   // stores it opens meanwhile (to read references, clear rows) are its own.
   if (heldShared.has(lockPath) || heldExclusiveHere.has(lockPath)) return;
-  takeShared(lockPath, Date.now() + (options.timeoutMs ?? 20_000));
+  takeShared(lockPath, Date.now() + (options.timeoutMs ?? 20_000), options.homeDir);
 }
 
 export interface ExclusiveStoreCustody {
@@ -97,12 +147,12 @@ export function tryHoldStoreCustodyExclusive(
   options: { timeoutMs?: number; homeDir?: string } = {},
 ): ExclusiveStoreCustody | undefined {
   const lockPath = storeCustodyLockPath(options.homeDir);
-  mkdirSync(join(lockPath, '..'), { recursive: true, mode: 0o700 });
+  ensureStoreCustodyDirectory(options.homeDir);
   const deadline = Date.now() + (options.timeoutMs ?? 1_500);
   const ownShared = heldShared.get(lockPath);
   if (ownShared) { ownShared.release(); heldShared.delete(lockPath); }
   const restoreShared = () => {
-    if (ownShared) { try { takeShared(lockPath, Date.now() + 1_000); } catch { /* the next opener re-takes it */ } }
+    if (ownShared) { try { takeShared(lockPath, Date.now() + 1_000, options.homeDir); } catch { /* the next opener re-takes it */ } }
   };
   for (;;) {
     const lock = tryKernelLockAt(lockPath, 'exclusive');

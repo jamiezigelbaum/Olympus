@@ -24,7 +24,8 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { removeFileDurablySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import { configFromPluginConfig } from './config.ts';
-import { applyPendingSourceDeletes, readSourceDeleteIntents } from '../pending-source-deletes.ts';
+import { holdStoreCustodyShared } from './store-custody.ts';
+import { applyPendingSourceDeletes } from '../pending-source-deletes.ts';
 import { handleRegistryPathFromEnv } from '../workers/credential-broker/connected-handles.ts';
 import {
   engineChildrenPath,
@@ -50,8 +51,6 @@ import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket } fr
 export const ENGINE_STATUS_SCHEMA = 'olympus.engine.status.v1';
 /** EX_CONFIG: launchd's throttle keeps a misconfigured engine from spinning. */
 const EXIT_CONFIG = 78;
-/** Ordinary failure: the supervisor restarts the engine, which retries. */
-const EXIT_RETRY = 1;
 const STOP_DEADLINE_MS = 15_000;
 
 export interface EngineServiceHealth {
@@ -177,25 +176,25 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   // The worker's effective environment, worker.env included: the registry and
   // every store path resolve the way the worker resolves them, or the worker
   // would record an intent this host never reads.
-  let deleteBlocksStart = false;
+  // A delete that began and did not finish does not stop the engine: it fences
+  // that source's stores (core/delete-fence.ts), the dashboard says so, and the
+  // next start retries. Everything else runs normally.
   try {
     const workerEnv = effectiveWorkerEnvironment({ env: dataEnv, homeDir, platform: options.platform ?? process.platform, pluginConfig });
     const registryPath = options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(workerEnv, true)!;
     const applied = await applyPendingSourceDeletes({ registryPath, context: { homeDir, env: workerEnv }, log });
-    // A delete that has begun and not finished leaves stores half removed: no
-    // service may open them until a later start completes it.
-    deleteBlocksStart = applied.incomplete.length > 0;
+    if (applied.incomplete.length > 0) log(`engine: ${applied.incomplete.length} Delete indexed data did not finish; those stores stay fenced and the next start retries.`);
   } catch (error) {
     log(`engine: pending deletes could not be applied: ${error instanceof Error ? error.message : 'unknown error'}`);
-    try {
-      const workerEnv = effectiveWorkerEnvironment({ env: dataEnv, homeDir, platform: options.platform ?? process.platform, pluginConfig });
-      const registryPath = options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(workerEnv, true)!;
-      deleteBlocksStart = readSourceDeleteIntents(registryPath).intents.some((entry) => entry.state === 'applying');
-    } catch { /* unknown: the apply itself failed before touching anything */ }
   }
-  if (deleteBlocksStart) {
-    log('engine: a started Delete indexed data is not finished; not starting any service. The next start retries it.');
-    exit(EXIT_RETRY);
+  // Every service and child below (the worker, the Telegram reader, the
+  // WhatsApp bridge, the embedding drain) is this process's child. Holding
+  // store custody for the host's whole life means no delete can take the
+  // stores exclusively while any of them runs, even if the worker itself
+  // is down for a moment. The kernel drops the hold if the host dies.
+  try { holdStoreCustodyShared({ ...(homeDir ? { homeDir } : {}) }); } catch (error) {
+    log(`engine: store custody could not be taken: ${error instanceof Error ? error.message : 'unknown error'}`);
+    exit(EXIT_CONFIG);
     return undefined;
   }
 

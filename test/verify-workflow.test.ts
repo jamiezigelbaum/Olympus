@@ -88,10 +88,10 @@ describe('verification contract', () => {
     );
     expect(exchangeSection).toContain('name: exchange tests');
     expect(exchangeSection).toContain('run: bun run test:exchange');
-    expect(pkg.scripts['test:connect-relay']).toBe('bun test --parallel --timeout=15000 ./connect-relay/test');
+    expect(pkg.scripts['test:connect-relay']).toBe('HOME="$(mktemp -d)" bun test --parallel --timeout=15000 ./connect-relay/test');
     expect(existsSync(join(ROOT, 'connect-relay/test/relay-e2e.test.ts'))).toBe(true);
     // Directory discovery includes new exchange tests, including nested tests.
-    expect(pkg.scripts['test:exchange']).toBe('bun test ./exchange/test');
+    expect(pkg.scripts['test:exchange']).toBe('HOME="$(mktemp -d)" bun test ./exchange/test');
     expect(existsSync(join(ROOT, 'exchange/test/google-exchange.test.ts'))).toBe(true);
   });
 });

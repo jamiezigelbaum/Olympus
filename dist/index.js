@@ -5066,9 +5066,18 @@ var init_store_custody = __esm(() => {
   heldExclusiveHere = new Set;
 });
 
-// src/core/store-open.ts
-var init_store_open = __esm(() => {
+// src/core/delete-fence.ts
+var init_delete_fence = __esm(() => {
+  init_atomic_file();
   init_store_custody();
+});
+
+// src/core/store-open.ts
+var warned;
+var init_store_open = __esm(() => {
+  init_delete_fence();
+  init_store_custody();
+  warned = new Set;
 });
 
 // src/core/sqlite-migrations.ts
@@ -18222,7 +18231,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir16(), ".local", "share");
   return join35(standaloneLinuxDataDir(env) ?? join35(dataHome, "openclaw", "olympus"), "source-dashboard.sqlite");
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETE_REFUSAL_CODES, DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETE_REFUSAL_CODES, DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_DELETE_UNFINISHED_LABEL = "Delete didn't finish", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_store_open();
   init_linux_engine_layout();
@@ -18248,14 +18257,16 @@ var init_source_dashboard = __esm(() => {
     "not_disconnected",
     "failed",
     "holders_running",
-    "connection_changed"
+    "connection_changed",
+    "record_unreadable"
   ]);
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
     DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
     DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
     DASHBOARD_DELETING_LABEL,
-    DASHBOARD_DELETE_NOT_DONE_LABEL
+    DASHBOARD_DELETE_NOT_DONE_LABEL,
+    DASHBOARD_DELETE_UNFINISHED_LABEL
   ]);
   DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
     "credential_refresh_busy",

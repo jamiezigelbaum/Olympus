@@ -12,14 +12,19 @@
  *
  * Crash safety: an intent is removed only after the delete finished, and the
  * delete is idempotent, so a crash part-way resumes on the next start. An intent
- * the re-check refuses (settings changed, custody no longer met) deletes
- * nothing and stays as a visible `refused` record until the owner asks again.
+ * the re-check refuses BEFORE the delete began (settings changed, custody no
+ * longer met, a preparation read failed) deletes nothing and stays as a visible
+ * `refused` record until the owner asks again. A delete that began and did not
+ * finish (for any reason, an unreadable intent file included) does not stop the
+ * engine: its stores are fenced at the store-open boundary, the dashboard says
+ * "Delete didn't finish", and every start (or Try again) re-runs it.
  */
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
+import { clearDeleteFenceEntry, readDeleteFence, setAllDeleteFenceReasons, setDeleteFenceReason } from './core/delete-fence.ts';
 import { tryHoldStoreCustodyExclusive } from './core/store-custody.ts';
 import { readThisComputerHandles, thisComputerStateUnreadable } from './core/this-computer.ts';
 import {
@@ -38,7 +43,7 @@ import {
 } from './workers/credential-broker/connected-handles.ts';
 import { readReconciledUnpairedSources } from './workers/credential-broker/unpaired-sources.ts';
 
-export type SourceDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed' | 'holders_running' | 'connection_changed';
+export type SourceDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed' | 'holders_running' | 'connection_changed' | 'record_unreadable';
 
 export interface SourceDeleteIntent {
   id: string;
@@ -62,7 +67,9 @@ export interface SourceDeleteIntent {
   created_at: string;
   /**
    * `applying`: the delete has begun (some store may already be gone). It is
-   * retried until it completes; it is never turned into a refusal.
+   * retried at every start until it completes; it is never turned into a
+   * refusal. Its stores stay fenced (core/delete-fence.ts) meanwhile; a
+   * `reason` says why the last attempt did not finish.
    */
   state: 'pending' | 'applying' | 'refused';
   /** Present when refused: a reason code only, never a path. */
@@ -129,7 +136,14 @@ export function recordSourceDeleteIntent(input: {
   registryPath: string;
   context: LifecyclePathContext;
 }): SourceDeleteIntent {
-  const plan = planSourceDelete({ sourceId: input.sourceId, ...input.context, registryPath: input.registryPath });
+  // A retry of a delete that began carries the stores an earlier attempt proved.
+  const earlier = readDeleteFence(input.context.homeDir).entries.find((entry) => entry.source_id === input.sourceId);
+  const plan = planSourceDelete({
+    sourceId: input.sourceId,
+    ...input.context,
+    registryPath: input.registryPath,
+    ...(earlier?.verified_primaries.length ? { verifiedPrimaries: earlier.verified_primaries } : {}),
+  });
   const { intents } = readSourceDeleteIntents(input.registryPath);
   const intent: SourceDeleteIntent = {
     id: randomUUID(),
@@ -183,25 +197,38 @@ export async function applyPendingSourceDeletes(input: {
 }): Promise<AppliedSourceDeletes> {
   const log = input.log ?? (() => undefined);
   const result: AppliedSourceDeletes = { applied: [], incomplete: [], refused: [] };
-  const read = readSourceDeleteIntents(input.registryPath);
-  if (read.unreadable) {
-    log('pending source deletes: the intent record is unreadable; nothing was deleted.');
-    return result;
-  }
-  if (read.intents.every((entry) => entry.state === 'refused')) return result;
+  const home = input.context.homeDir;
+  const markUnfinished = (sourceId: string, reason: SourceDeleteRefusal) => {
+    try { setDeleteFenceReason(sourceId, reason, home); } catch { /* the fence itself stays */ }
+  };
 
   const refuseAll = (reason: SourceDeleteRefusal) => {
     const now = new Date().toISOString();
     const fresh = readSourceDeleteIntents(input.registryPath).intents;
     writeIntents(input.registryPath, fresh.map((entry) => entry.state === 'pending'
       ? { ...entry, state: 'refused' as const, reason, refused_at: now }
-      : entry));
+      : entry.state === 'applying' ? { ...entry, reason } : entry));
     for (const entry of fresh.filter((candidate) => candidate.state === 'pending')) {
       result.refused.push({ sourceId: entry.source_id, reason });
       log(`pending source deletes: ${entry.source_id} not deleted (${reason}).`);
     }
-    for (const entry of fresh.filter((candidate) => candidate.state === 'applying')) result.incomplete.push(entry.source_id);
+    for (const entry of fresh.filter((candidate) => candidate.state === 'applying')) {
+      result.incomplete.push(entry.source_id);
+      markUnfinished(entry.source_id, reason);
+    }
   };
+
+  const read = readSourceDeleteIntents(input.registryPath);
+  if (read.unreadable) {
+    // Which delete had begun is unknown. Whatever the fence already closes stays
+    // closed (and says why); nothing is deleted; the engine runs.
+    log('pending source deletes: the intent record is unreadable; nothing was deleted.');
+    const fenced = readDeleteFence(home).entries;
+    try { setAllDeleteFenceReasons('record_unreadable', home); } catch { /* fence stays */ }
+    for (const entry of fenced) result.incomplete.push(entry.source_id);
+    return result;
+  }
+  if (read.intents.every((entry) => entry.state === 'refused')) return result;
 
   try {
     await withConnectedHandleGrantCustody(input.registryPath, {}, () => {
@@ -235,7 +262,7 @@ export async function applyPendingSourceDeletes(input: {
               // nothing. Kept through the delete and the completion write, so
               // no opener can start between the check and the unlink.
               hold = tryHoldStoreCustodyExclusive({
-                ...(input.context.homeDir ? { homeDir: input.context.homeDir } : {}),
+                ...(home ? { homeDir: home } : {}),
                 ...(input.custodyTimeoutMs !== undefined ? { timeoutMs: input.custodyTimeoutMs } : {}),
               });
               if (!hold) {
@@ -244,19 +271,22 @@ export async function applyPendingSourceDeletes(input: {
                 const custody = dataDeleteCustody({ ...sourceDeleteCustodyInput(intent.source_id, input.registryPath), ...input.context });
                 if (!custody.ready && !resumed) refusal = 'not_disconnected';
                 else {
-                  if (!resumed) {
-                    // From here some store may be gone: the record says so, durably,
-                    // before the first unlink, and is never downgraded to a refusal.
-                    intents = intents.map((entry) => entry.id === intent.id ? { ...entry, state: 'applying' as const } : entry);
-                    writeIntents(input.registryPath, intents);
-                    begun = true;
-                  }
                   deleteOlympusDataWithCustody({
                     ...sourceDeleteCustodyInput(intent.source_id, input.registryPath),
                     ...input.context,
                     registryPath: input.registryPath,
                     verifiedPrimaries: intent.verified_primaries ?? [],
                     ...(intent.bindings ? { expectedBindings: intent.bindings } : {}),
+                    // After every non-mutating preparation succeeded, before the
+                    // first mutation: the record says the delete has begun,
+                    // durably (the fence is written just before this call).
+                    onBegin: () => {
+                      if (!resumed) {
+                        intents = intents.map((entry) => entry.id === intent.id ? { ...entry, state: 'applying' as const } : entry);
+                        writeIntents(input.registryPath, intents);
+                      }
+                      begun = true;
+                    },
                   });
                 }
               }
@@ -270,14 +300,17 @@ export async function applyPendingSourceDeletes(input: {
           log(`pending source deletes: ${intent.source_id}: ${message}`);
         }
         try {
-          // A delete that has begun is retried, not refused, unless a preflight
-          // now says the recorded targets are no longer safe to touch.
-          const unfinished = refusal !== undefined && begun
-            && (refusal === 'failed' || refusal === 'holders_running');
-          if (unfinished) {
+          if (refusal !== undefined && begun) {
+            // A delete that has begun is never turned into a refusal: it stays
+            // `applying` with the reason, its stores stay fenced, and the next
+            // start (or Try again) runs it again.
+            intents = intents.map((entry) => entry.id === intent.id ? { ...entry, state: 'applying' as const, reason: refusal } : entry);
+            writeIntents(input.registryPath, intents);
+            markUnfinished(intent.source_id, refusal);
             result.incomplete.push(intent.source_id);
-            log(`pending source deletes: ${intent.source_id} is only partly deleted (${refusal}); it will be retried and the engine will not start meanwhile.`);
+            log(`pending source deletes: ${intent.source_id} did not finish (${refusal}); its stores stay closed and it will be retried.`);
           } else if (refusal) {
+            // Nothing was deleted and nothing is fenced.
             intents = intents.map((entry) => entry.id === intent.id
               ? { ...entry, state: 'refused' as const, reason: refusal, refused_at: new Date().toISOString() }
               : entry);
@@ -289,6 +322,7 @@ export async function applyPendingSourceDeletes(input: {
             result.applied.push(intent.source_id);
             log(`pending source deletes: ${intent.source_id} deleted.`);
             writeIntents(input.registryPath, intents);
+            clearDeleteFenceEntry(intent.source_id, home);
           }
         } finally {
           hold?.release();
@@ -304,13 +338,28 @@ export async function applyPendingSourceDeletes(input: {
   return result;
 }
 
-/** Per source, for the dashboard: deleting now, or the delete did not run. */
-export function sourceDeleteStates(registryPath: string): Record<string, { state: 'pending' | 'refused'; reason?: SourceDeleteRefusal }> {
-  const out: Record<string, { state: 'pending' | 'refused'; reason?: SourceDeleteRefusal }> = {};
+/**
+ * Per source, for the dashboard: deleting now (`pending`), the delete did not
+ * run (`refused`, nothing deleted), or it began and did not finish
+ * (`unfinished`: some of it is gone, the source's stores are closed until a
+ * retry finishes). A fence entry with no readable intent still shows
+ * `unfinished`, so a lost record never hides a half-deleted source.
+ */
+export type SourceDeleteState = { state: 'pending' | 'refused' | 'unfinished'; reason?: SourceDeleteRefusal };
+
+export function sourceDeleteStates(registryPath: string, homeDir?: string): Record<string, SourceDeleteState> {
+  const out: Record<string, SourceDeleteState> = {};
   try {
     for (const intent of readSourceDeleteIntents(registryPath).intents) {
-      out[intent.source_id] = { state: intent.state === 'applying' ? 'pending' : intent.state, ...(intent.reason ? { reason: intent.reason } : {}) };
+      const state = intent.state === 'applying' ? (intent.reason ? 'unfinished' : 'pending') : intent.state;
+      out[intent.source_id] = { state, ...(intent.reason ? { reason: intent.reason } : {}) };
     }
   } catch { /* the dashboard shows no delete state rather than fail to render */ }
+  try {
+    for (const entry of readDeleteFence(homeDir).entries) {
+      if (out[entry.source_id]?.state === 'unfinished' || out[entry.source_id]?.state === 'pending') continue;
+      out[entry.source_id] = { state: 'unfinished', reason: (entry.reason as SourceDeleteRefusal | undefined) ?? 'failed' };
+    }
+  } catch { /* as above */ }
   return out;
 }

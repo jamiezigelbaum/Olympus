@@ -44,6 +44,8 @@ import {
   DASHBOARD_SUPPORTED_SOURCES,
   DASHBOARD_DELETE_NOT_DONE_LABEL,
   DASHBOARD_DELETE_REFUSAL_CODES,
+  DASHBOARD_DELETE_UNFINISHED_LABEL,
+  DASHBOARD_DELETE_UNFINISHED_REASONS,
   DASHBOARD_DELETING_LABEL,
   DASHBOARD_UNPAIRED_LABEL,
   type DashboardImportAttention,
@@ -154,6 +156,7 @@ const KNOWN_CONNECTION_LABELS = new Set([
   'Unpair incomplete — manual cleanup required',
   DASHBOARD_DELETING_LABEL,
   DASHBOARD_DELETE_NOT_DONE_LABEL,
+  DASHBOARD_DELETE_UNFINISHED_LABEL,
   'synced',
   DASHBOARD_NO_ARCHIVES_LABEL,
   DASHBOARD_ARCHIVES_IMPORTING_LABEL,
@@ -245,7 +248,7 @@ export function buildChatGptDashboardViewModel(
     // A credential problem (a provider refusal, a degraded or expired sign-in)
     // is Needs you whatever the progress or indexing state: its fix is the
     // owner's, never the engine's.
-    let status: DashboardStatus = connecting || credentials || missingScope(scrubbed) ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
+    let status: DashboardStatus = connecting || credentials || missingScope(scrubbed) || scrubbed.delete_state?.state === 'unfinished' ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
     // A source working normally (a stage unfinished, nothing stalled) offers
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
@@ -434,7 +437,12 @@ function sourceEntry(
   // sign-in on the computer (owner, 2026-10-13): only on a quiet row, where
   // nothing more pressing holds the button or the line.
   const signinMoved = card.connection.google_signin_moved === true && status === 'Fresh' && !connecting && !inFlight;
-  const detail = manualLine && !(ownDetail ?? '').startsWith(manualLine)
+  // A delete that began and did not finish is the row's first word: what
+  // happened, in plain words, and that the source is paused (Needs you).
+  const unfinishedDetail = card.delete_state?.state === 'unfinished'
+    ? DASHBOARD_DELETE_UNFINISHED_REASONS[card.delete_state.reason && DASHBOARD_DELETE_REFUSAL_CODES.has(card.delete_state.reason) ? card.delete_state.reason : 'failed']
+    : undefined;
+  const detail = unfinishedDetail ? unfinishedDetail : manualLine && !(ownDetail ?? '').startsWith(manualLine)
     ? manualLine
     : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
@@ -485,11 +493,12 @@ function sourceEntry(
   // Unpair (the card's `unpaired` label, never an incomplete or unreadable
   // one), and the engine re-checks the durable record and the disk.
   const cleanlyUnpaired = definition.connect_action.kind === 'guided_session'
-    && (card.connection.label === DASHBOARD_UNPAIRED_LABEL || card.delete_state?.state === 'refused');
+    && (card.connection.label === DASHBOARD_UNPAIRED_LABEL || card.delete_state?.state === 'refused' || card.delete_state?.state === 'unfinished');
   // While a delete is waiting for the restart there is nothing to offer; a
   // delete that did not run can be asked for again.
   if (notConnected && card.delete_state?.state !== 'pending'
-    && (disconnectable || cleanlyUnpaired) && card.coverage.indexed_items > 0) {
+    && (disconnectable || cleanlyUnpaired)
+    && (card.coverage.indexed_items > 0 || card.delete_state?.state === 'unfinished')) {
     menu.push({
       label: CHATGPT_SETUP_LABELS.deleteData,
       tool: DELETE_SOURCE_DATA_TOOL_NAME,
@@ -1238,11 +1247,11 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
     family: definition.family,
     trust_domain: definition.trust_domain,
     configured: card.configured === true,
-    ...(card.delete_state && (card.delete_state.state === 'pending' || card.delete_state.state === 'refused')
+    ...(card.delete_state && (card.delete_state.state === 'pending' || card.delete_state.state === 'refused' || card.delete_state.state === 'unfinished')
       ? {
           delete_state: {
             state: card.delete_state.state,
-            ...(card.delete_state.state === 'refused' && card.delete_state.reason && DASHBOARD_DELETE_REFUSAL_CODES.has(card.delete_state.reason)
+            ...(card.delete_state.state !== 'pending' && card.delete_state.reason && DASHBOARD_DELETE_REFUSAL_CODES.has(card.delete_state.reason)
               ? { reason: card.delete_state.reason }
               : {}),
           },

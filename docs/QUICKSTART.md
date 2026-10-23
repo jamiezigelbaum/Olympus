@@ -568,7 +568,11 @@ Olympus process that opens these stores holds a lock on them for as long as it
 lives, and the delete needs that lock to itself: if any process still holds it
 (a worker, the OpenClaw Gateway, the embedding step or another command), the
 engine deletes nothing and the card says the delete did not run. A process
-that starts during the delete waits for it. From a terminal, quit every Olympus
+that starts during the delete waits for it. If a delete begins and then cannot
+finish, Olympus keeps running and the other sources keep working; only that
+source is paused (its stores stay closed), the card says "Delete didn't
+finish" with the reason and sits in Needs you, and every restart (or choosing
+**Delete indexed data** again) tries again. From a terminal, quit every Olympus
 process first (the engine, the OpenClaw Gateway, any worker and the embedding
 step; the command checks and refuses otherwise), preview the custody boundary, then
 execute it:
@@ -638,12 +642,16 @@ olympus data export --output ~/olympus-export    # your data, out (secrets exclu
 olympus data delete --all   # complete removal: indexes, embeddings, configs, tokens
 ```
 
-Olympus owns seven directories, and `data delete --all` covers all of them:
-`~/.olympus`, `~/.config/olympus`, `~/.local/share/olympus`,
-`~/.local/share/openclaw/olympus`, `~/.local/state/olympus`, `~/.cache/olympus`
-(the Venice model-catalog cache), and `~/Library/Logs/Olympus` on macOS. If you
-are checking a machine for a previous install, those are the places to look —
-not just `~/.olympus`.
+Olympus owns eight directories: `~/.olympus`, `~/.config/olympus`,
+`~/.local/share/olympus`, `~/.local/share/openclaw/olympus`,
+`~/.local/state/olympus`, `~/.cache/olympus` (the Venice model-catalog cache),
+`~/Library/Logs/Olympus` on macOS, and `~/.olympus-locks`. `data delete --all`
+covers the first seven. `~/.olympus-locks` holds only the lock that keeps
+other parts of Olympus from opening a store while it is deleted (and, if a
+Delete indexed data did not finish, a note of which stores stay closed); it
+sits outside the others so a delete cannot remove the lock it is holding, and
+the uninstaller removes it. If you are checking a machine for a previous
+install, those are the places to look — not just `~/.olympus`.
 
 ---
 

@@ -44,6 +44,8 @@ const IMPORT_ALLOWLIST = new Set([
   '../../core/source-index/types.ts',
   '../../core/sqlite-migrations.ts',
   '../../core/sqlite-store.ts',
+  // The one boundary every store open goes through (takes store custody, then opens). Source-neutral: it sees a path, never a source.
+  '../../core/store-open.ts',
   '../classification/engine.ts',
   '../classification/tier-classifier.ts',
   '../classification/tier-ledger.ts',

@@ -6,7 +6,7 @@ import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../src/workers/source-dashboard.ts';
-import { scrubCard } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { buildChatGptDashboardViewModel, scrubCard } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { applyPendingSourceDeletes, readSourceDeleteIntents } from '../src/pending-source-deletes.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
@@ -183,6 +183,31 @@ describe('dashboard Delete indexed data route', () => {
       rmSync(f.root, { recursive: true, force: true });
     }
   });
+
+  test('a delete that began and did not finish reads Needs you with a plain reason, and still offers Delete again', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      const view = await (await f.worker.fetch(new Request('http://worker.test/dashboard.json'))).json() as {
+        sources: Array<{ source_id: string; coverage: { indexed_items: number }; delete_state?: unknown }>;
+      };
+      const card = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+      card.delete_state = { state: 'unfinished', reason: 'failed' };
+      // Everything may already be gone: the retry must not depend on items left.
+      card.coverage.indexed_items = 0;
+      const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === 'dropbox.files')!;
+      expect(scrubCard(definition, card as never).delete_state).toEqual({ state: 'unfinished', reason: 'failed' });
+      expect(scrubCard(definition, { ...card, delete_state: { state: 'unfinished', reason: '/home/me/secret' } } as never).delete_state).toEqual({ state: 'unfinished' });
+      const model = buildChatGptDashboardViewModel(view as never);
+      const row = model.sources.find((source) => source.id === 'dropbox.files')!;
+      expect(row.status).toBe('Needs you');
+      expect(row.detail).toContain("Delete didn't finish");
+      expect(row.menu?.some((item) => item.tool === 'olympus_delete_source_data')).toBe(true);
+      expect(JSON.stringify(row)).not.toContain(f.root);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 10_000);
 
   test('both delete states survive the ChatGPT sanitization as explicit fields with a closed reason', async () => {
     const f = fixture();
