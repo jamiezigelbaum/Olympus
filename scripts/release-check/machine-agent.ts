@@ -1209,9 +1209,16 @@ async function startFakeWith(config: AgentConfig, token: string): Promise<void> 
   throw new Error('the Readwise stand-in did not start');
 }
 
+/** The Readwise card; the engine can be briefly unreachable right after a delete or a restart, so a failed read is tried again. */
 async function readwiseCard(): Promise<any> {
-  const dash = await dashboardJson();
-  return (dash.json?.sources ?? []).find((card: any) => card.provider === 'readwise');
+  let last: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const dash = await dashboardJson();
+      return (dash.json?.sources ?? []).find((card: any) => card.provider === 'readwise');
+    } catch (error) { last = error; await sleep(3_000); }
+  }
+  throw last;
 }
 
 async function until<T>(read: () => Promise<T | undefined>, timeoutMs: number, everyMs = 2_000): Promise<T | undefined> {
@@ -1254,13 +1261,21 @@ function exploreSeeds(config: AgentConfig): Seed[] {
         if (!first.ok) return first;
         // The stored key stops being accepted: the next sync is refused, and the page owes the owner a way to fix it.
         await startFakeWith(config, WRONG_TOKEN);
-        const session = await ownerSession();
-        await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
-        const card = await until(async () => {
+        const refused = async (): Promise<any> => {
           const now = await readwiseCard();
           return now?.connection?.provider_refusal || now?.connection?.state === 'reauth_required' || now?.answer_readiness?.state === 'needs_attention' ? now : undefined;
-        }, 90_000);
-        return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `a sync with a rejected key did not leave the source needing attention: ${cardSummary(await readwiseCard())}` };
+        };
+        const session = await ownerSession();
+        const sync = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
+        let card = await until(refused, 60_000);
+        // A key the provider no longer accepts, entered again, is the other way a source ends up needing the owner.
+        let entered = 0;
+        if (!card) {
+          const again = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: WRONG_TOKEN });
+          entered = again.status;
+          card = await until(refused, 30_000);
+        }
+        return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `a sync with a rejected key (sync answered ${sync.status}${entered ? `, a rejected key entered again answered ${entered}` : ''}) did not leave the source needing attention: ${cardSummary(await readwiseCard())}` };
       },
       resetAfter: ['confirm', 'sync'],
     },
