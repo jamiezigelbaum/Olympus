@@ -5,8 +5,9 @@ and the code differ, the code is current.
 
 ## Outcome
 
-A new user can point Olympus at an old export (a mail export, a Reflect or
-Roam export; chat exports later) and search it like any other source. There
+A new user can point Olympus at an old export (a mail export, a WhatsApp or
+Telegram chat export, a Reflect or Roam export) and search it like any other
+source. There
 is one way to do it: **Import an archive** in the dashboard. Agents call the
 same operation, so "have your AI do it" and "click the button" import the
 same way, with the same privacy and the same status.
@@ -23,8 +24,9 @@ same way, with the same privacy and the same status.
 - **Reviewed** by Astra (Codex, high) on 2026-10-23. Its five findings are
   folded in: per-archive identity and removal, bounded streaming reads,
   file-version-bound cursors, collision-safe mail identity, and the
-  Reflect/Roam privacy-default conflict. WhatsApp and Telegram exports move
-  out of this plan.
+  Reflect/Roam privacy-default conflict.
+- **WhatsApp and Telegram exports are in scope** (owner, 2026-10-23), after
+  mail.
 
 ## Where things stand
 
@@ -98,17 +100,27 @@ Their privacy defaults disagree today: the family postures say `internal`/S3
 per item from privacy settings plus the judge either way; the prior before
 judging stays Private, and the postures are corrected to match.
 
-## Later, not in this plan
+### WhatsApp and Telegram exports
 
-- **WhatsApp chat export.** Its connector cannot join as is: it reads every
-  `.txt` and `.zip` in a folder (`whatsapp/connector.ts:321`), so a chat's
-  parent folder would import neighbouring chats, and its plain reads bypass
-  the scope-safe reader. It needs explicit selected-file inputs and safe reads
-  first.
-- **Telegram Desktop export** (`result.json`): a new connector.
-- Both would import as snapshots alongside live capture, with the dashboard
-  keeping "imported archive" and "live capture" apart, as the release plan
-  requires. They wait until mail import, resume and removal work.
+Both are in scope. They come after mail because they reuse the same spine
+(identity, resume, removal), not because they are optional.
+
+- **WhatsApp chat export** (`_chat.txt`, or the zip WhatsApp shares). The
+  existing parser (`parseWhatsAppChatExport`) is reused, but the connector
+  cannot join as is: it reads every `.txt` and `.zip` in a folder
+  (`whatsapp/connector.ts:321`), so pointing it at one chat's parent folder
+  would import neighbouring chats, and its plain reads bypass the scope-safe
+  reader. It changes to read exactly the selected files through the
+  scope-safe reader. Picking a folder of exports imports each chat in it, as
+  the user chose.
+- **Telegram Desktop export** ("Export chat history", JSON format,
+  `result.json` plus media folders). A new thin connector: one item per
+  message, chats as threads, media named as gaps at first, like mail
+  attachments.
+- Both import as snapshots alongside any live capture of the same account.
+  The dashboard keeps "imported archive" and "live capture" apart, as the
+  release plan requires. Overlap between an export and live capture is the
+  same open question as Takeout mail versus live Gmail.
 
 ## Order
 
@@ -118,6 +130,8 @@ judging stays Private, and the postures are corrected to match.
    spine without new parsing).
 2. Mail (mbox), with the streaming reader and file-selecting picker.
 3. Roam onto the registry; all Reflect and Roam allowlist entries removed.
+4. WhatsApp chat export, with the selected-file, scope-safe reads.
+5. Telegram Desktop export.
 
 Each step is one PR with focused tests on synthetic fixtures (never real
 exports), plus the held-out eval where the step changes the source pipeline.
@@ -134,6 +148,6 @@ exports), plus the held-out eval where the step changes the source pipeline.
 
 ## Done when
 
-A fresh install on Mac and on Linux can import a synthetic mbox, Reflect and
-Roam export through the dashboard and through the agent tool, see each as a
+A fresh install on Mac and on Linux can import a synthetic mbox, Reflect,
+Roam, WhatsApp and Telegram export through the dashboard and through the agent tool, see each as a
 snapshot with counts and gaps, find cited answers from it, and remove it.
