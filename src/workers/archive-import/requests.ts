@@ -20,7 +20,8 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
-import { ArchiveRecordFormError, isArchiveId } from './state.ts';
+import { archiveManifestSha256 } from './manifest.ts';
+import { ArchiveRecordFormError, isArchiveId, type NewArchiveImportRecord } from './state.ts';
 
 /**
  * Requests an agent may leave waiting at once; one more is refused until the person answers.
@@ -61,9 +62,9 @@ export interface ArchiveImportRequest {
    */
   code?: string;
   /**
-   * checking: exactly what the person approved (the folder's identity and
-   * the files' versions), so a check a restart interrupted resumes against
-   * that approval and never against files replaced meanwhile.
+   * checking: exactly what the person approved (the folder's identity, each
+   * file's path and version), so a check a restart interrupted resumes
+   * against that approval, reading nothing before it matches.
    */
   approved?: ArchiveImportApproval;
   created_at: string;
@@ -71,12 +72,9 @@ export interface ArchiveImportRequest {
 }
 
 /**
- * What one approval pinned: the chosen folder's identity and the manifest's digest.
+ * What one approval pinned: the import exactly as it would be recorded.
  */
-export interface ArchiveImportApproval {
-  root_identity: { dev: string; ino: string };
-  manifest_sha256: string;
-}
+export type ArchiveImportApproval = NewArchiveImportRecord;
 
 interface PersistedRequests {
   version: 1;
@@ -87,17 +85,38 @@ export function archiveImportRequestsPath(statePath: string): string {
   return join(dirname(statePath), 'archive-import-requests.json');
 }
 
+/**
+ * The one exclusion an approval holds while it moves between these requests
+ * and the archive record (a check's commit, an import recorded at once), and
+ * the CLI delete holds across its custody check and its delete: no delete
+ * runs between those two writes, and no commit lands after a delete.
+ */
+export function withArchiveImportApprovals<T>(statePath: string, run: () => T): T {
+  return withFileLeaseSync(join(dirname(statePath), 'archive-import-approvals'), () => run());
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 const STATUSES: ReadonlySet<string> = new Set(['pending', 'checking', 'already_imported', 'failed']);
 
+function validApprovedFile(value: unknown): boolean {
+  return isRecord(value) && typeof value.rel_path === 'string'
+    && typeof value.dev === 'string' && typeof value.ino === 'string'
+    && Number.isSafeInteger(value.size) && typeof value.mtime_ms === 'number' && Number.isFinite(value.mtime_ms)
+    && isRecord(value.fingerprint)
+    && typeof value.fingerprint.head_sha256 === 'string' && typeof value.fingerprint.tail_sha256 === 'string';
+}
+
 function validApproval(value: unknown): value is ArchiveImportApproval {
-  if (!isRecord(value) || !isRecord(value.root_identity)) return false;
-  const identity = value.root_identity;
-  return typeof identity.dev === 'string' && typeof identity.ino === 'string'
-    && typeof value.manifest_sha256 === 'string' && value.manifest_sha256.length === 64;
+  if (!isRecord(value) || !isRecord(value.root_identity) || !Array.isArray(value.files) || value.files.length === 0) return false;
+  return typeof value.format === 'string' && typeof value.provider === 'string' && typeof value.family === 'string'
+    && typeof value.label === 'string' && typeof value.root_path === 'string' && value.root_path.startsWith('/')
+    && typeof value.root_identity.dev === 'string' && typeof value.root_identity.ino === 'string'
+    && typeof value.chosen_rel_path === 'string'
+    && value.files.every(validApprovedFile)
+    && value.manifest_sha256 === archiveManifestSha256(value.files as ArchiveImportApproval['files']);
 }
 
 function validRequest(value: unknown): value is ArchiveImportRequest {

@@ -19,7 +19,7 @@
 import { homedir } from 'node:os';
 import { posix } from 'node:path';
 import { getArchiveFormat } from '../../core/archive-formats.ts';
-import { ScopeSafeError } from '../../core/scope-safe-fs.ts';
+import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
 import type {
   ArchiveBrowseList,
   ComputerArchiveEntry,
@@ -28,7 +28,7 @@ import type {
 } from '../chatgpt/dashboard-contract.ts';
 import type { LocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
-import { archiveFileDigestSteps } from './manifest.ts';
+import { archiveFileDigestSteps, findProbableCopies, verifyArchiveManifest } from './manifest.ts';
 import { requestArchiveRemoval } from './removal.ts';
 import type { ArchiveImportRuntime } from './runtime.ts';
 import {
@@ -46,6 +46,7 @@ import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, type ArchiveImportRe
 import {
   ArchiveImportRequestStore,
   archiveImportRequestsPath,
+  withArchiveImportApprovals,
   type ArchiveImportApproval,
   type ArchiveImportRequest,
 } from './requests.ts';
@@ -71,7 +72,7 @@ export function archivePrivateModelFromSniffer(
 
 /**
  * Whether the scheduler runs archive imports: `on`, or the setting that
- * stops it (background reading off, or its source list leaving archives out).
+ * stops it (background syncing off, or its source list leaving archives out).
  */
 export type ArchiveSchedulingState = 'on' | NonNullable<ComputerArchivesMeta['notRunning']>;
 
@@ -153,8 +154,8 @@ export interface ArchiveImportDashboardOptions {
  * Plain words for every refusal an approval can meet; the codes are the contract.
  */
 export const ARCHIVE_APPROVE_COPY = {
-  unsupported: 'Olympus can’t import this. It imports {formats}.',
-  ambiguous: 'Olympus can’t tell which kind of export this is.',
+  unsupported: "Olympus can't import this. It imports {formats}.",
+  ambiguous: "Olympus can't tell which kind of export this is.",
   changed: 'This changed while Olympus was reading it. Choose it again once it has finished changing.',
   not_found: 'This file or folder is no longer there. Choose it again.',
   permission_denied: 'Your user account is not allowed to open this. Check who may open it, then try again.',
@@ -170,8 +171,8 @@ export const ARCHIVE_APPROVE_COPY = {
  * setting that stops it, and what to change.
  */
 export const ARCHIVE_NOT_RUNNING_COPY = {
-  disabled: 'Olympus’s background reading is turned off (the worker.scheduler.enabled setting), so imports and removals never run. Turn it on, restart Olympus, then try again.',
-  not_selected: 'Olympus’s background reading leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals never run. Add archive.imports to it, or empty it, restart Olympus, then try again.',
+  disabled: "Background syncing is turned off in Olympus's settings, so imports and removals can't run. The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it.",
+  not_selected: "Background syncing in Olympus's settings leaves out archives, so imports and removals can't run. The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it.",
 } as const;
 
 function fill(template: string, values: Record<string, string>): string {
@@ -229,6 +230,17 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const running = new Set<string>();
   // Checks the person cancelled: each stops at its next slice and records nothing.
   const cancelled = new Set<string>();
+  const exclusive = <T>(run: () => T): T => withArchiveImportApprovals(state.path, run);
+  // Whether a check may still record its import: not cancelled, and its
+  // request still there and checking (a list that cannot be read: no).
+  const stillChecking = (requestId: string): boolean => {
+    if (cancelled.has(requestId)) return false;
+    try {
+      return requests.get(requestId)?.status === 'checking';
+    } catch {
+      return false;
+    }
+  };
   const scheduling = (): ArchiveSchedulingState => {
     try {
       return options.scheduling?.() ?? 'on';
@@ -276,6 +288,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     running.add(requestId);
     checks = checks.then(async () => {
       try {
+        // Cancelled, or its request gone, while it waited its turn: nothing is read.
+        if (closed || !stillChecking(requestId)) return;
         const digests: string[] = [];
         for (const file of prepared.record.files) {
           const steps = archiveFileDigestSteps(prepared.root, file);
@@ -292,17 +306,13 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
             await pause();
           }
         }
-        if (closed || cancelled.has(requestId)) return;
-        // Recorded only while its request still stands: cancelled, removed
+        if (closed) return;
+        // Recorded only while its request still stands, read again under
+        // the approvals' exclusion: cancelled, removed, deleted by the CLI
         // (or a list that cannot be read) records nothing.
-        let current: ArchiveImportRequest | undefined;
-        try {
-          current = requests.get(requestId);
-        } catch {
-          return;
-        }
-        if (!current || current.status !== 'checking') return;
-        outcome(requestId, commitArchiveImport(state, prepared, digests));
+        exclusive(() => {
+          if (stillChecking(requestId)) outcome(requestId, commitArchiveImport(state, prepared, digests));
+        });
       } catch (error) {
         if (closed) return;
         const code = error instanceof ScopeSafeError ? unreadableCode(error.code) : 'unreadable';
@@ -319,23 +329,75 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     });
   };
 
-  const approvalOf = (prepared: PreparedArchiveImport): ArchiveImportApproval => ({
-    root_identity: { dev: prepared.record.root_identity.dev, ino: prepared.record.root_identity.ino },
-    manifest_sha256: prepared.record.manifest_sha256,
-  });
-  const sameApproval = (approved: ArchiveImportApproval | undefined, prepared: PreparedArchiveImport): boolean =>
-    approved !== undefined
-    && approved.root_identity.dev === prepared.record.root_identity.dev
-    && approved.root_identity.ino === prepared.record.root_identity.ino
-    && approved.manifest_sha256 === prepared.record.manifest_sha256;
+  /**
+   * The approved import, reopened after a restart without reading anything
+   * of it first: the folder must be the approved one, then each file must
+   * still be at its approved version (opened, never read); only then is it
+   * read whole, through readers held to those versions.
+   */
+  const reopenApproved = (approved: ArchiveImportApproval): PreparedArchiveImport | { kind: 'failed'; code: string } => {
+    let root: ScopeRoot;
+    try {
+      root = ScopeRoot.open(approved.root_path);
+    } catch (error) {
+      return { kind: 'failed', code: error instanceof ScopeSafeError && error.code === 'not_found' ? 'not_found' : 'replaced' };
+    }
+    let handed = false;
+    try {
+      if (root.identity.dev !== approved.root_identity.dev || root.identity.ino !== approved.root_identity.ino) {
+        return { kind: 'failed', code: 'replaced' };
+      }
+      const current = verifyArchiveManifest(root, approved.files);
+      if (!current.ok) return { kind: 'failed', code: current.code === 'file_missing' ? 'not_found' : current.code === 'file_changed' ? 'replaced' : 'unreadable' };
+      const copies = findProbableCopies(state.list(), approved.files);
+      handed = true;
+      return { kind: 'ready', root, record: approved, copies };
+    } catch {
+      return { kind: 'failed', code: 'unreadable' };
+    } finally {
+      if (!handed) root.close();
+    }
+  };
+
+  /**
+   * One check a restart interrupted, against what the person approved; a
+   * cancelled or removed one is left alone.
+   */
+  const resumeOne = (requestId: string): void => {
+    const live = requests.get(requestId);
+    if (closed || !live || live.status !== 'checking' || running.has(requestId) || cancelled.has(requestId)) return;
+    const reopened = live.approved ? reopenApproved(live.approved) : { kind: 'failed' as const, code: 'replaced' };
+    if (reopened.kind !== 'ready') {
+      requests.settle(requestId, { status: 'failed', code: reopened.code });
+      return;
+    }
+    if (reopened.copies.length > 0) {
+      check(requestId, reopened);
+      return;
+    }
+    try {
+      exclusive(() => {
+        if (stillChecking(requestId)) outcome(requestId, commitArchiveImport(state, reopened));
+      });
+    } finally {
+      reopened.root.close();
+    }
+  };
 
   /**
    * The approval of one resolved path: answered at once, the slow part (a
-   * possible copy, read whole) in the background. `requestId` is an agent's
-   * request being approved.
+   * possible copy, read whole) in the background. `from` is the request
+   * being answered: an agent's (pending), or a check that ended without
+   * importing (failed, Try again); either must still stand, as it was, once
+   * its path is resolved.
    */
-  const approvePath = (path: string, requestId?: string): ArchiveApproveResult => {
+  const approvePath = (path: string, from?: { requestId: string; status: 'pending' | 'failed' }): ArchiveApproveResult => {
     const name = posix.basename(path);
+    // An agent's request becomes the import or its check; Try again starts afresh.
+    const requestId = from?.status === 'pending' ? from.requestId : undefined;
+    const answered = (): void => {
+      if (from) requests.remove(from.requestId);
+    };
     const prepared = prepareArchiveImport({ state, path });
     if (prepared.kind === 'unsupported') {
       return refusal('unsupported', fill(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(', ') }));
@@ -346,43 +408,43 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       return refusal(code, ARCHIVE_APPROVE_COPY[code as keyof typeof ARCHIVE_APPROVE_COPY] ?? ARCHIVE_APPROVE_COPY.unreadable);
     }
     if (prepared.kind === 'already_imported') {
-      if (requestId) requests.remove(requestId);
+      answered();
       return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: prepared.archive.label };
     }
-    if (prepared.copies.length === 0) {
-      let result: ArchiveImportStart;
-      try {
-        result = commitArchiveImport(state, prepared);
-      } finally {
-        prepared.root.close();
-      }
-      if (result.kind === 'started') {
-        if (requestId) requests.remove(requestId);
-        refresh();
-        return { ok: true, status: 'started', archive_id: result.archive.archive_id, name };
-      }
-      if (result.kind === 'already_imported') {
-        if (requestId) requests.remove(requestId);
-        return { ok: true, status: 'already_imported', archive_id: result.archive.archive_id, name, archive_name: result.archive.label };
-      }
-      const code = result.kind === 'unreadable' ? unreadableCode(result.code) : result.kind;
-      return refusal(code, ARCHIVE_APPROVE_COPY[code as keyof typeof ARCHIVE_APPROVE_COPY] ?? ARCHIVE_APPROVE_COPY.unreadable);
-    }
-    let entry: ArchiveImportRequest | undefined;
+    // From here the approval moves into the record or the checks, under the
+    // approvals' exclusion; the root is closed or handed to its check.
+    let handed = false;
     try {
-      entry = requestId ? requests.startChecking(requestId, approvalOf(prepared)) : requests.addChecking(path, approvalOf(prepared));
-    } catch (error) {
-      prepared.root.close();
-      throw error;
+      return exclusive((): ArchiveApproveResult => {
+        // Declined or dismissed while its path was resolved: not imported.
+        if (from && requests.get(from.requestId)?.status !== from.status) return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
+        if (prepared.copies.length === 0) {
+          const result = commitArchiveImport(state, prepared);
+          if (result.kind === 'started') {
+            answered();
+            refresh();
+            return { ok: true, status: 'started', archive_id: result.archive.archive_id, name };
+          }
+          if (result.kind === 'already_imported') {
+            answered();
+            return { ok: true, status: 'already_imported', archive_id: result.archive.archive_id, name, archive_name: result.archive.label };
+          }
+          const code = result.kind === 'unreadable' ? unreadableCode(result.code) : result.kind;
+          return refusal(code, ARCHIVE_APPROVE_COPY[code as keyof typeof ARCHIVE_APPROVE_COPY] ?? ARCHIVE_APPROVE_COPY.unreadable);
+        }
+        const entry = requestId ? requests.startChecking(requestId, prepared.record) : requests.addChecking(path, prepared.record);
+        if (!entry) return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
+        if (!requestId) answered();
+        // A second press while the first is checking: one check is enough.
+        if (!running.has(entry.request_id)) {
+          check(entry.request_id, prepared);
+          handed = true;
+        }
+        return { ok: true, status: 'checking', request_id: entry.request_id, name };
+      });
+    } finally {
+      if (!handed) prepared.root.close();
     }
-    if (!entry) {
-      prepared.root.close();
-      return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
-    }
-    // A second press while the first is checking: one check is enough.
-    if (running.has(entry.request_id)) prepared.root.close();
-    else check(entry.request_id, prepared);
-    return { ok: true, status: 'checking', request_id: entry.request_id, name };
   };
 
   /**
@@ -516,14 +578,12 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           // approval of the same path, the old outcome kept until it starts.
           const resolved = await options.browser.resolvePath(waiting.path);
           if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
-          const again = approvePath(resolved.path);
-          if (again.ok) requests.remove(waiting.request_id);
-          return again;
+          return approvePath(resolved.path, { requestId: waiting.request_id, status: 'failed' });
         }
         if (!waiting || waiting.status !== 'pending') return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
         const resolved = await options.browser.resolvePath(waiting.path);
         if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
-        return approvePath(resolved.path, waiting.request_id);
+        return approvePath(resolved.path, { requestId: waiting.request_id, status: 'pending' });
       }
       const resolved = await options.browser.resolve(request.key);
       if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
@@ -533,8 +593,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     decline(requestId) {
       const request = requests.get(requestId);
       if (!request) return { ok: false, code: 'not_waiting', message: ARCHIVE_APPROVE_COPY.not_waiting };
-      // Cancel a check: it stops at its next slice and records nothing.
-      if (request.status === 'checking' && running.has(requestId)) cancelled.add(requestId);
+      // Cancel a check, running or not yet resumed: it records nothing.
+      if (request.status === 'checking') cancelled.add(requestId);
       requests.remove(requestId);
       return { ok: true };
     },
@@ -579,7 +639,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         ...base,
         archives: records.map(entryOf),
         requests: asked.map((request) => requestOf(request, records)),
-        ...(setting !== 'on' && stuck(records) ? { notRunning: setting } : {}),
+        // Any archive here: its import or removal would not run, and neither would Remove.
+        ...(setting !== 'on' && records.length > 0 ? { notRunning: setting } : {}),
       };
     },
 
@@ -627,7 +688,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       }
       return {
         archives: records.length,
-        importing: records.some((record) => record.status === 'importing' || record.status === 'removing'),
+        // Nothing reads as importing while this computer's settings keep it from running.
+        importing: setting === 'on' && records.some((record) => record.status === 'importing' || record.status === 'removing'),
         ...(attention.length > 0 ? { attention } : {}),
       };
     },
@@ -640,36 +702,11 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         return;
       }
       for (const request of waiting) {
-        void options.browser.resolvePath(request.path).then((resolved) => {
-          if (closed || running.has(request.request_id)) return;
-          if (!resolved.ok) {
-            requests.settle(request.request_id, { status: 'failed', code: resolved.code === 'not_found' ? 'not_found' : 'unreadable' });
-            return;
-          }
-          const prepared = prepareArchiveImport({ state, path: resolved.path });
-          if (prepared.kind !== 'ready') {
-            outcome(request.request_id, prepared);
-            return;
-          }
-          // Only what the person approved resumes: a folder or a file
-          // replaced while Olympus was stopped is asked about again.
-          if (!sameApproval(request.approved, prepared)) {
-            prepared.root.close();
-            requests.settle(request.request_id, { status: 'failed', code: 'replaced' });
-            return;
-          }
-          if (prepared.copies.length === 0) {
-            try {
-              outcome(request.request_id, commitArchiveImport(state, prepared));
-            } finally {
-              prepared.root.close();
-            }
-            return;
-          }
-          check(request.request_id, prepared);
-        }).catch(() => {
+        try {
+          resumeOne(request.request_id);
+        } catch {
           // Left as it is: the next start tries again.
-        });
+        }
       }
     },
 

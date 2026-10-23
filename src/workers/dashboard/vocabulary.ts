@@ -1805,7 +1805,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
     chooseAnother: 'Choose another',
   },
   listLabel: 'Imported archives',
-  status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing' },
+  status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },
   dates: '{earliest} to {latest}',
   items: { one: '1 message', many: '{n} messages' },
   importingLine: '{percent}% read · {items} so far',
@@ -1813,6 +1813,10 @@ export const DASHBOARD_ARCHIVE_COPY = {
   importedLine: '{items} · imported {when}',
   importedLineNoTime: '{items}',
   removingLine: 'Removing everything Olympus made from this archive. The file itself stays where it is.',
+  /** An import or a removal this computer's settings keep from running: no progress bar, nothing moving. */
+  notRunningLine: '{percent}% read · {items} so far. It goes on from there once imports can run.',
+  notRunningLineUncounted: '{percent}% read. It goes on from there once imports can run.',
+  removingNotRunningLine: 'It is removed once removals can run. The file itself stays where it is.',
   judgedLine: '{judged} judged · {held} waiting for the private model',
   heldWhy: {
     ready: 'Until the private model judges them, they stay Private.',
@@ -1822,22 +1826,27 @@ export const DASHBOARD_ARCHIVE_COPY = {
   setUpPrivateModel: 'Set up the private model',
   /** An archive whose index cannot be opened now: never shown as empty. */
   countsUnavailable: {
-    why: 'Olympus can’t count the messages in this archive right now: its index could not be opened.',
+    why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
     fix: 'Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support.',
   },
   /**
-   * See why under the Archives row while an import or a removal is waiting
-   * for background reading this computer's settings keep from running.
+   * See why under the Archives row while this computer's settings keep
+   * imports and removals from running: the plain reason, then the setting.
    */
   notRunning: {
     why: {
-      disabled: 'Background reading is turned off on this computer (the worker.scheduler.enabled setting), so imports and removals do not run.',
-      not_selected: 'Background reading on this computer leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals do not run.',
+      disabled: "Background syncing is turned off in Olympus's settings, so imports can't run.",
+      not_selected: "Background syncing in Olympus's settings leaves out archives, so imports can't run.",
     },
     fix: {
-      disabled: 'Turn it on, then restart Olympus. Each import and removal goes on from where it is.',
-      not_selected: 'Add archive.imports to that setting, or empty it, then restart Olympus. Each import and removal goes on from where it is.',
+      disabled: 'The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it. Each import and removal goes on from where it is.',
+      not_selected: 'The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it. Each import and removal goes on from where it is.',
     },
+  },
+  /** Beside Remove, shown but not pressable, while removals cannot run. */
+  removeNotRunning: {
+    disabled: "Remove can't run while background syncing is turned off.",
+    not_selected: "Remove can't run while background syncing leaves out archives.",
   },
   stopped: {
     file_changed: { why: '{file} changed after the import started.', fix: 'Remove this archive, then import the file again once it has stopped changing.' },
@@ -1877,13 +1886,13 @@ export const DASHBOARD_ARCHIVE_COPY = {
   alreadyLineUnnamed: '{name} is already imported.',
   failedLine: '{name} was not imported: {reason}',
   failed: {
-    not_found: 'it is no longer there. Choose it again.',
+    not_found: 'it is no longer there.',
     permission_denied: 'your user account is not allowed to open it.',
-    changed: 'it changed while Olympus was reading it. Import it again once it has stopped changing.',
+    changed: 'it changed while Olympus was reading it.',
     unreadable: 'Olympus could not read it.',
     unsupported: 'Olympus does not import this kind of file.',
     ambiguous: 'Olympus could not tell which kind of export it is.',
-    replaced: 'it was moved, replaced or changed after you chose it. Try again to import it as it is now.',
+    replaced: 'it was moved, replaced or changed after you chose it.',
   },
   /** A check that ended without importing: the same path approved again. */
   tryAgain: 'Try again',
@@ -1905,8 +1914,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
     failed: 'An import did not start: {name}',
     counts: "Olympus can't count the messages in {name}",
     scheduler: {
-      disabled: "Imports can't run: background reading is turned off",
-      not_selected: "Imports can't run: background reading leaves out archives",
+      disabled: "Imports can't run: background syncing is turned off",
+      not_selected: "Imports can't run: background syncing leaves out archives",
     },
     held: { one: '1 imported message waits for the private model', many: '{n} imported messages wait for the private model' },
     unreadable: "Olympus can't read its list of imported archives",

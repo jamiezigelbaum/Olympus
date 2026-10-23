@@ -10,9 +10,9 @@
 // held messages no model can judge, a list that cannot be read), and the
 // held count is the engine's own, before and after the private model judges.
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isV04PublicDashboardRoute } from '../src/core/public-surface.ts';
@@ -42,10 +42,12 @@ import {
   type ArchiveSchedulingState,
 } from '../src/workers/archive-import/dashboard.ts';
 import { configWithEnvironmentOverrides, defaultConfig } from '../src/core/config.ts';
-import { dataDeleteCustody } from '../src/data-lifecycle.ts';
+import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
+import { ScopeFileReader } from '../src/core/scope-safe-fs.ts';
 import { ARCHIVE_IMPORTS_STATE_PATH_ENV } from '../src/workers/archive-import/state.ts';
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
-import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
+import { ArchiveImportRequestStore, archiveImportRequestsPath, type ArchiveImportApproval } from '../src/workers/archive-import/requests.ts';
+import { archiveManifestSha256 } from '../src/workers/archive-import/manifest.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
 import { archiveConnectorStoreDbPath, withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
 import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
@@ -192,8 +194,39 @@ async function importAll(runtime: ArchiveImportRuntime, archiveId: string): Prom
   throw new Error('the import did not finish');
 }
 
+/** An approval as the store keeps it, for a request no check runs for. */
+function fakeApproval(name: string): ArchiveImportApproval {
+  const files = [{ rel_path: name, dev: '1', ino: '2', size: 10, mtime_ms: 1, fingerprint: { head_sha256: 'a'.repeat(64), tail_sha256: 'a'.repeat(64) } }];
+  return {
+    format: 'mbox', provider: 'mbox', family: 'email', label: name, root_path: '/nonexistent-archive-root',
+    root_identity: { dev: '1', ino: '2' }, chosen_rel_path: name, files, manifest_sha256: archiveManifestSha256(files),
+  };
+}
+
 async function approveKey(f: ReturnType<typeof fixture>, path: string) {
   return f.dashboard.approve({ key: path });
+}
+
+const REQUESTS_MODULE = join(import.meta.dir, '..', 'src', 'workers', 'archive-import', 'requests.ts');
+
+// Another process (the CLI delete, or a second Olympus) holding the
+// approvals' exclusion for `holdMs`, running `then` just before it lets go.
+function holdApprovals(statePath: string, marker: string, holdMs: number, then: string, env: Record<string, string> = {}) {
+  const script = [
+    "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+    `import * as requests from ${JSON.stringify(REQUESTS_MODULE)};`,
+    'const statePath = process.env.HOLD_STATE_PATH;',
+    'requests.withArchiveImportApprovals(statePath, () => {',
+    "  writeFileSync(process.env.HOLD_MARKER, 'held');",
+    '  Bun.sleepSync(Number(process.env.HOLD_MS));',
+    `  ${then}`,
+    '});',
+  ].join('\n');
+  return Bun.spawn([process.execPath, '-e', script], {
+    env: { ...process.env, ...env, HOLD_STATE_PATH: statePath, HOLD_MARKER: marker, HOLD_MS: String(holdMs) },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
 }
 
 describe('the archive picker', () => {
@@ -408,7 +441,7 @@ describe('what the imports need from the person', () => {
     expect(f.dashboard.present().attention).toEqual([{ kind: 'request', id: asked.request_id, name: 'Other.mbox' }]);
     // The person's own approval while it is checked is not waiting on them.
     expect(f.dashboard.decline(asked.request_id)).toEqual({ ok: true });
-    requests.addChecking(f.write('Mine.mbox', mbox([mail(2)])), { root_identity: { dev: '1', ino: '2' }, manifest_sha256: 'a'.repeat(64) });
+    requests.addChecking(f.write('Mine.mbox', mbox([mail(2)])), fakeApproval('Mine.mbox'));
     expect(f.dashboard.present()).toEqual({ archives: 1, importing: false });
   });
 
@@ -544,7 +577,7 @@ describe('a check of a possible copy', () => {
     });
     expect(custody()).toMatchObject({ ready: true });
     const requests = new ArchiveImportRequestStore({ path: archiveImportRequestsPath(f.runtime.state.path) });
-    const checking = requests.addChecking(f.write('Mine.mbox', mbox([mail(0)])), { root_identity: { dev: '1', ino: '2' }, manifest_sha256: 'a'.repeat(64) });
+    const checking = requests.addChecking(f.write('Mine.mbox', mbox([mail(0)])), fakeApproval('Mine.mbox'));
     // Approved and still being checked: its import could land after the delete.
     expect(custody()).toMatchObject({ ready: false, observed: 'connected', next_action: expect.stringContaining('cancel any import still being checked') });
     writeFileSync(requests.path, '{ not json');
@@ -574,9 +607,149 @@ describe('a check of a possible copy', () => {
   });
 });
 
+describe('Cancel and Dismiss while a path is still being found', () => {
+  test('a check a restart left, cancelled as it resumes, reads and imports nothing', async () => {
+    const f = fixture();
+    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const first = await approveKey(f, f.write('Big.mbox', text));
+    if (!first.ok || first.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, first.archive_id);
+    const middle = Math.floor(text.length / 2);
+    const twin = f.write('Twin.mbox', `${text.slice(0, middle)}y${text.slice(middle + 1)}`);
+    f.holdChecks();
+    const checking = await approveKey(f, twin);
+    if (!checking.ok || checking.status !== 'checking') throw new Error('expected a check');
+    f.dashboard.close();
+    f.releaseChecks();
+    await f.dashboard.idle();
+
+    const restarted = f.reopen();
+    const resumed = restarted.resume();
+    expect(restarted.decline(checking.request_id)).toEqual({ ok: true });
+    await resumed;
+    await restarted.idle();
+    expect(restarted.view().requests).toEqual([]);
+    expect(f.runtime.state.list().map((record) => record.label)).toEqual(['Big.mbox']);
+  });
+
+  test('an agent\'s request declined while its file is found is not imported', async () => {
+    const f = fixture();
+    const requests = new ArchiveImportRequestStore({ path: archiveImportRequestsPath(f.runtime.state.path) });
+    const asked = requests.addPending(f.write('Takeout.mbox', mbox([mail(0)])))!;
+    const approving = f.dashboard.approve({ requestId: asked.request_id });
+    expect(f.dashboard.decline(asked.request_id)).toEqual({ ok: true });
+    expect(await approving).toMatchObject({ ok: false, code: 'not_waiting' });
+    expect(f.runtime.state.list()).toEqual([]);
+    expect(f.dashboard.view().requests).toEqual([]);
+  });
+
+  test('Try again on a failed check, dismissed while its file is found, is not imported', async () => {
+    const f = fixture();
+    const requests = new ArchiveImportRequestStore({ path: archiveImportRequestsPath(f.runtime.state.path) });
+    const failed = requests.addChecking(f.write('Mine.mbox', mbox([mail(0)])), fakeApproval('Mine.mbox'));
+    requests.settle(failed.request_id, { status: 'failed', code: 'changed' });
+    const again = f.dashboard.approve({ requestId: failed.request_id });
+    expect(f.dashboard.decline(failed.request_id)).toEqual({ ok: true });
+    expect(await again).toMatchObject({ ok: false, code: 'not_waiting' });
+    expect(f.runtime.state.list()).toEqual([]);
+    expect(f.dashboard.view().requests).toEqual([]);
+    // Not dismissed, Try again imports the file as it is now.
+    const kept = requests.addChecking(join(f.exports, 'Mine.mbox'), fakeApproval('Mine.mbox'));
+    requests.settle(kept.request_id, { status: 'failed', code: 'changed' });
+    expect(await f.dashboard.approve({ requestId: kept.request_id })).toMatchObject({ ok: true, status: 'started', name: 'Mine.mbox' });
+    expect(f.dashboard.view().requests).toEqual([]);
+  });
+});
+
+describe('a check resumed after a restart', () => {
+  test('reads nothing of a folder or a file replaced since the approval: each goes under Needs you as replaced', async () => {
+    const f = fixture();
+    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const first = await approveKey(f, f.write('Big.mbox', text));
+    if (!first.ok || first.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, first.archive_id);
+    const desktop = join(f.home, 'Desktop');
+    mkdirSync(desktop);
+    const inFolder = join(desktop, 'Big copy.mbox');
+    copyFileSync(join(f.exports, 'Big.mbox'), inFolder);
+    const inPlace = join(f.exports, 'Big again.mbox');
+    copyFileSync(join(f.exports, 'Big.mbox'), inPlace);
+    f.holdChecks();
+    const folderCheck = await approveKey(f, inFolder);
+    const fileCheck = await approveKey(f, inPlace);
+    if (!folderCheck.ok || folderCheck.status !== 'checking' || !fileCheck.ok || fileCheck.status !== 'checking') throw new Error('expected two checks');
+    f.dashboard.close();
+    f.releaseChecks();
+    await f.dashboard.idle();
+
+    // Meanwhile the folder is swapped for another of the same name holding
+    // the same file, and the file beside the export for a same-named copy.
+    renameSync(desktop, join(f.home, 'Desktop before'));
+    mkdirSync(desktop);
+    copyFileSync(join(f.exports, 'Big.mbox'), inFolder);
+    copyFileSync(inPlace, join(f.exports, 'swap'));
+    renameSync(join(f.exports, 'swap'), inPlace);
+
+    const reads = spyOn(ScopeFileReader.prototype, 'readAt');
+    try {
+      const restarted = f.reopen();
+      await restarted.resume();
+      await until(() => restarted.view().requests.every((request) => request.status !== 'checking'));
+      await restarted.idle();
+      expect(restarted.view().requests).toEqual([
+        expect.objectContaining({ id: folderCheck.request_id, status: 'failed', code: 'replaced' }),
+        expect.objectContaining({ id: fileCheck.request_id, status: 'failed', code: 'replaced' }),
+      ]);
+      expect(reads).not.toHaveBeenCalled();
+    } finally {
+      reads.mockRestore();
+    }
+    expect(f.runtime.state.list().map((record) => record.label)).toEqual(['Big.mbox']);
+  });
+});
+
+describe('one exclusion for approvals and the CLI delete of imported archives', () => {
+  test('an approval waits while the CLI delete holds it, and is recorded only after', async () => {
+    const f = fixture();
+    const path = f.write('Takeout.mbox', mbox([mail(0)]));
+    const marker = join(f.base, 'held');
+    const cli = holdApprovals(f.runtime.state.path, marker, 1500,
+      "console.log(existsSync(statePath) && readFileSync(statePath, 'utf8').includes('Takeout.mbox') ? 'recorded' : 'not recorded');");
+    await until(() => existsSync(marker));
+    const started = Date.now();
+    expect(await approveKey(f, path)).toMatchObject({ ok: true, status: 'started' });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+    expect(await cli.exited).toBe(0);
+    // While the CLI held it, the import had not been recorded.
+    expect(await new Response(cli.stdout).text()).toBe('not recorded\n');
+    expect(f.runtime.state.list().map((record) => record.label)).toEqual(['Takeout.mbox']);
+  });
+
+  test('the CLI delete waits for an approval moving into the checks, then refuses', async () => {
+    const f = fixture();
+    const marker = join(f.base, 'held');
+    const env = { ...f.env, [ARCHIVE_IMPORTS_STATE_PATH_ENV]: f.runtime.state.path };
+    const worker = holdApprovals(f.runtime.state.path, marker, 1500,
+      'new requests.ArchiveImportRequestStore({ path: requests.archiveImportRequestsPath(statePath) }).addChecking(process.env.HOLD_PATH, JSON.parse(process.env.HOLD_APPROVAL));',
+      { HOLD_PATH: f.write('Mine.mbox', mbox([mail(0)])), HOLD_APPROVAL: JSON.stringify(fakeApproval('Mine.mbox')) });
+    await until(() => existsSync(marker));
+    const started = Date.now();
+    expect(() => deleteOlympusDataWithCustody({
+      sourceId: 'archive.imports',
+      homeDir: f.home,
+      env,
+      connectedRegistry: { version: 1, handles: [] },
+    })).toThrow();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+    expect(await worker.exited).toBe(0);
+    // The check the worker started is still there to finish or cancel.
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ name: 'Mine.mbox', status: 'checking' })]);
+  });
+});
+
 describe('when this computer\'s settings keep imports from running', () => {
   for (const setting of ['disabled', 'not_selected'] as const) {
-    test(`background reading ${setting === 'disabled' ? 'off' : 'leaving out archives'}: Import and Remove are refused, naming the setting, and an import already waiting is under Needs you`, async () => {
+    test(`background syncing ${setting === 'disabled' ? 'off' : 'leaving out archives'}: Import and Remove are refused, naming the setting, and an import already waiting is under Needs you`, async () => {
       const f = fixture();
       const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0)])));
       if (!started.ok || started.status !== 'started') throw new Error('expected a start');
@@ -588,11 +761,16 @@ describe('when this computer\'s settings keep imports from running', () => {
       expect(f.dashboard.remove(started.archive_id)).toMatchObject({ ok: false, code: 'imports_not_running', message: expect.stringContaining(named) });
       expect(f.runtime.state.list().map((record) => record.status)).toEqual(['importing']);
       expect(f.dashboard.view().notRunning).toBe(setting);
-      expect(f.dashboard.present().attention).toEqual([{ kind: 'scheduler', setting }]);
-      // Nothing left for the scheduler to run: nothing to say.
+      // Not running is never importing: the card does not say it is.
+      expect(f.dashboard.present()).toEqual({ archives: 1, importing: false, attention: [{ kind: 'scheduler', setting }] });
+      // Nothing left waiting: nothing under Needs you, though Remove still
+      // cannot run, so the row still says why.
       await importAll(f.runtime, started.archive_id);
-      expect(f.dashboard.view().notRunning).toBeUndefined();
+      expect(f.dashboard.view().notRunning).toBe(setting);
       expect(f.dashboard.present()).toEqual({ archives: 1, importing: false });
+      // Once imports can run, nothing is said at all.
+      f.setScheduling('on');
+      expect(f.dashboard.view().notRunning).toBeUndefined();
     });
   }
 
@@ -649,6 +827,10 @@ describe('the dashboard routes', () => {
     const viewToken = dashboardQueryTokenFromWorkerAuthToken('worker-secret')!;
     expect((await post(`/dashboard/archive-import/approve?token=${viewToken}`, { key })).status).toBe(401);
     expect(f.dashboard.view().archives).toEqual([]);
+    // The worker bearer alone (an agent holds it) cannot list this computer's folders either.
+    const bearerBrowse = await post('/dashboard/archive-import/browse', { parent_key: f.exports }, { Authorization: 'Bearer worker-secret' });
+    expect(bearerBrowse.status).toBe(403);
+    expect(JSON.stringify(await bearerBrowse.json())).not.toContain('Takeout.mbox');
 
     // This computer's own session (the local unlock; archive-import-local-session.test.ts
     // has the refusals of every other kind).

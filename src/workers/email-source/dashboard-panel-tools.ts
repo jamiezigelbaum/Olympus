@@ -127,7 +127,7 @@ export interface DashboardPanelToolsOptions {
 }
 
 /** Why an archive control did nothing for a session that is not this computer's own. */
-const ARCHIVE_LOCAL_SESSION_REFUSAL = 'Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.';
+const ARCHIVE_LOCAL_SESSION_REFUSAL = 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.';
 
 function refused(text: string, code: string): ChatGptToolResult {
   return { content: [{ type: 'text', text }], structuredContent: { error: code }, isError: true };
@@ -229,18 +229,19 @@ async function archiveRoute(
   body: Record<string, unknown>,
   context: DashboardPanelCallContext,
 ): Promise<{ ok: true; parsed: Record<string, unknown> } | { ok: false; result: ChatGptToolResult }> {
-  // Approve, Decline and Remove are the person's at this computer's own
-  // dashboard: a local-grade session, never the bearer (the OpenClaw tab's
-  // gateway method holds it) nor a session a bearer minted. The grade rides
-  // to the route only from here, so the route refuses everything else too.
-  if (route !== 'browse' && context.localSession !== true) {
+  // Browse, Approve, Decline and Remove are the person's at this computer's
+  // own dashboard: a local-grade session, never the bearer (the OpenClaw
+  // tab's gateway method holds it) nor a session a bearer minted. Browse too:
+  // it lists this computer's folders. The grade rides to the route only from
+  // here, so the route refuses everything else too.
+  if (context.localSession !== true) {
     return { ok: false, result: refused(ARCHIVE_LOCAL_SESSION_REFUSAL, 'mac_dashboard_only') };
   }
   const response = await options.workerFetch(new Request(`http://olympus-worker.internal/dashboard/archive-import/${route}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(route !== 'browse' ? { [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: 'local' } : {}),
+      [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: 'local',
     },
     body: JSON.stringify(body),
   }));

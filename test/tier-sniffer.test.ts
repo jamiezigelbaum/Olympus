@@ -745,6 +745,46 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('one question left and one failed call: the model reads as not answering, though the pass never reached its failure stop', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-one-failed-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 1, 'lab results 1');
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      let down = true;
+      const answering = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'medical', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: { complete: (request) => (down ? Promise.reject(new Error('connection refused')) : answering.complete(request)) },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+      });
+      const failed = await service.runOnce();
+      if (failed.state !== 'ran') throw new Error('expected a pass');
+      expect(failed.report).toMatchObject({ calls: 1, failedCalls: 1 });
+      expect(failed.report.stoppedBy).toBeUndefined();
+      expect(service.status().waiting).toMatchObject({ reason: 'model_not_answering' });
+      expect(archivePrivateModelFromSniffer(service)).toBe('waiting');
+
+      down = false;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { verdictsApplied: 1 } });
+      expect(service.status().waiting).toBeUndefined();
+      expect(archivePrivateModelFromSniffer(service)).toBe('ready');
+      service.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('an approval names lane, profile, model and prompt version: changing any one needs a new approval', () => {
     const base = { recorded_at: '2026-09-23T10:00:00.000Z', what: 'x', model_id: 'm', prompt_version: 'p1', lane: 'local', profile_id: 'local-a', status: 'complete' as const };
     const approved = { ...base, kind: 'classifier_model_decision' as const, approved_by: 'owner' as const };

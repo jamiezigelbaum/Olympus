@@ -698,7 +698,7 @@ function localFilesPreview(state: string) {
  *   archives-removing    Remove pressed: everything Olympus made from it is being deleted
  *   archives-unreadable  the list of imported archives cannot be read: See why, no Import
  *   archives-uncounted   an imported archive whose index cannot be opened now: never "0 messages"
- *   archives-not-running an import waiting while background reading is turned off: See why names the setting
+ *   archives-not-running an import waiting while background syncing is turned off: not running, Remove not pressable, See why names the setting
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
  * messages no private model can judge are each a Needs you line too.
@@ -742,7 +742,8 @@ function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedA
   const attention: DashboardImportAttention[] = [];
   if (meta.unreadable) attention.push({ kind: 'unreadable', reason: meta.unreadable.reason });
   for (const entry of meta.archives) if (entry.status === 'stopped') attention.push({ kind: 'stopped', id: entry.id, name: entry.name });
-  if (meta.notRunning) attention.push({ kind: 'scheduler', setting: meta.notRunning });
+  const waiting = meta.archives.some((entry) => entry.status === 'importing' || entry.status === 'removing');
+  if (meta.notRunning && waiting) attention.push({ kind: 'scheduler', setting: meta.notRunning });
   const counted = meta.archives.filter((entry) => entry.status !== 'removing');
   for (const entry of counted) if (entry.countsUnavailable) attention.push({ kind: 'counts', id: entry.id, name: entry.name });
   for (const request of meta.requests) {
@@ -753,7 +754,7 @@ function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedA
   if (meta.privateModel !== 'ready' && held > 0) attention.push({ kind: 'held', count: held, model: meta.privateModel });
   return {
     archives: meta.unreadable && meta.archives.length === 0 ? 0 : meta.archives.length,
-    importing: meta.archives.some((entry) => entry.status === 'importing' || entry.status === 'removing'),
+    importing: !meta.notRunning && waiting,
     ...(attention.length > 0 ? { attention } : {}),
   };
 }

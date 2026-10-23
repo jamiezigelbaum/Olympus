@@ -2843,12 +2843,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (!archiveImports) {
             throw new EmailSourceWorkerError(501, 'archive_import_not_supported', 'Importing archives is not set up in this engine.');
           }
-          if (url.pathname !== '/dashboard/archive-import/browse'
-            && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+          if (request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
             throw new EmailSourceWorkerError(
               403,
               'mac_dashboard_only',
-              'Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.',
+              'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.',
             );
           }
           const record = await parseObjectBody(request);
