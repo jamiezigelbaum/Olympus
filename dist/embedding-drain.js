@@ -1613,39 +1613,6 @@ var init_source_corpus_registry = __esm(() => {
       description: "Public files on this computer, routed here by per-item four-tier classification on positive public evidence."
     },
     {
-      corpusId: "secure_local.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "secure_local",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "sync", "search"],
-      createdOnDemand: true,
-      description: "Imported mail archives: Private messages, and every imported message whose content the private model has not judged yet."
-    },
-    {
-      corpusId: "internal.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "internal",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "search"],
-      createdOnDemand: true,
-      description: "Personal messages from imported mail archives, routed here by per-item four-tier classification."
-    },
-    {
-      corpusId: "public_safe.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "public_safe",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "search"],
-      createdOnDemand: true,
-      description: "Public messages from imported mail archives, routed here by per-item four-tier classification on positive public evidence."
-    },
-    {
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       sourceId: "telegram.messages",
       provider: "telegram",
@@ -39256,7 +39223,9 @@ var init_archive_formats = __esm(() => {
 // src/workers/archive-import/store.ts
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
+  init_archive_formats();
   init_linux_engine_layout();
+  init_source_corpus_registry();
   init_connector_store();
   ARCHIVE_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
@@ -44099,6 +44068,9 @@ init_archive_formats();
 var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
 
 // src/workers/archive-import/runtime.ts
+init_store2();
+
+// src/workers/email-source/server.ts
 init_store2();
 
 // src/workers/archive-import/scheduler-source.ts

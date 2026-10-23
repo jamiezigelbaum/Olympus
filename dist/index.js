@@ -707,39 +707,6 @@ var init_source_corpus_registry = __esm(() => {
       description: "Public files on this computer, routed here by per-item four-tier classification on positive public evidence."
     },
     {
-      corpusId: "secure_local.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "secure_local",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "sync", "search"],
-      createdOnDemand: true,
-      description: "Imported mail archives: Private messages, and every imported message whose content the private model has not judged yet."
-    },
-    {
-      corpusId: "internal.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "internal",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "search"],
-      createdOnDemand: true,
-      description: "Personal messages from imported mail archives, routed here by per-item four-tier classification."
-    },
-    {
-      corpusId: "public_safe.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "public_safe",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "search"],
-      createdOnDemand: true,
-      description: "Public messages from imported mail archives, routed here by per-item four-tier classification on positive public evidence."
-    },
-    {
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       sourceId: "telegram.messages",
       provider: "telegram",
@@ -789,9 +756,6 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.local.files",
       "internal.local.files",
       "public_safe.local.files",
-      "secure_local.archive.email",
-      "internal.archive.email",
-      "public_safe.archive.email",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
       "internal.whatsapp.messages"
@@ -814,9 +778,6 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.local.files",
       "internal.local.files",
       "public_safe.local.files",
-      "secure_local.archive.email",
-      "internal.archive.email",
-      "public_safe.archive.email",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
       "internal.whatsapp.messages"
@@ -830,7 +791,6 @@ var init_source_corpus_registry = __esm(() => {
       "internal.x.bookmarks",
       "secure_local.dropbox.files",
       "secure_local.local.files",
-      "secure_local.archive.email",
       "internal.telegram.messages",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
     ],
@@ -847,9 +807,6 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.local.files",
       "internal.local.files",
       "public_safe.local.files",
-      "secure_local.archive.email",
-      "internal.archive.email",
-      "public_safe.archive.email",
       "internal.x.bookmarks",
       "secure_local.x.bookmarks",
       "internal.telegram.messages",
@@ -18610,7 +18567,9 @@ var init_archive_formats = __esm(() => {
 // src/workers/archive-import/store.ts
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
+  init_archive_formats();
   init_linux_engine_layout();
+  init_source_corpus_registry();
   init_connector_store();
   ARCHIVE_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",

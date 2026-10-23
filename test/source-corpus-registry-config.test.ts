@@ -8,14 +8,12 @@ import { exposedOperations } from '../src/core/operation-exposure.ts';
 import {
   LEGACY_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-  createPublicSourceCorpusRegistry,
   createSourceCorpusRegistry,
   defaultSourceCorpusRegistryConfig,
   parsePublicSourceCorpusRegistryConfig,
   parseSourceCorpusRegistryConfig,
 } from '../src/core/source-corpus-registry.ts';
 import { listMcpTools } from '../src/mcp/tools.ts';
-import { V0_4_PUBLIC_SOURCE_IDS } from '../src/core/public-surface.ts';
 import {
   defaultDropboxIngestionPolicy,
   dropboxPolicyApprovedScopeKeys,
@@ -296,10 +294,7 @@ describe('config-driven source corpus registry', () => {
 
   test('an undeclared corpus narrows the public enum instead of taking the tool surface down', () => {
     const config = defaultConfig();
-    // What a plugin config can declare: the shipped corpora of public sources
-    // (imported archives join them when the dashboard's import ships).
-    const publicSourceIds = new Set<string>(V0_4_PUBLIC_SOURCE_IDS);
-    const corpora = defaultSourceCorpusRegistryConfig().corpora.filter((corpus) => publicSourceIds.has(corpus.sourceId));
+    const corpora = defaultSourceCorpusRegistryConfig().corpora;
     // A declared corpus whose configured capabilities reach past its
     // declaration: the public view keeps the declared ones and drops the rest.
     corpora.find((corpus) => corpus.corpusId === 'internal.readwise.library')!.capabilities
@@ -332,8 +327,7 @@ describe('config-driven source corpus registry', () => {
       operations.find((operation) => operation.name === 'source_answer')!,
       { config },
     ) as { properties: { corpus_id: { enum: string[] } } }).properties.corpus_id.enum;
-    // The shipped public corpora, exactly: the undeclared one is dropped.
-    expect(answerEnum).toEqual(createPublicSourceCorpusRegistry(defaultSourceCorpusRegistryConfig()).ids('answer'));
+    expect(answerEnum).toEqual(createSourceCorpusRegistry(defaultSourceCorpusRegistryConfig()).ids('answer'));
 
     const searchEnum = (operationToolSchema(
       operations.find((operation) => operation.name === 'source_index_search')!,
@@ -471,9 +465,6 @@ describe('config-driven source corpus registry', () => {
       'secure_local.local.files',
       'internal.local.files',
       'public_safe.local.files',
-      'secure_local.archive.email',
-      'internal.archive.email',
-      'public_safe.archive.email',
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
       'internal.whatsapp.messages',
@@ -496,9 +487,6 @@ describe('config-driven source corpus registry', () => {
       'secure_local.local.files',
       'internal.local.files',
       'public_safe.local.files',
-      'secure_local.archive.email',
-      'internal.archive.email',
-      'public_safe.archive.email',
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
       'internal.whatsapp.messages',
@@ -512,7 +500,6 @@ describe('config-driven source corpus registry', () => {
       'internal.x.bookmarks',
       'secure_local.dropbox.files',
       'secure_local.local.files',
-      'secure_local.archive.email',
       'internal.telegram.messages',
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
@@ -530,9 +517,6 @@ describe('config-driven source corpus registry', () => {
       'secure_local.local.files',
       'internal.local.files',
       'public_safe.local.files',
-      'secure_local.archive.email',
-      'internal.archive.email',
-      'public_safe.archive.email',
       'internal.x.bookmarks',
       'secure_local.x.bookmarks',
       'internal.telegram.messages',

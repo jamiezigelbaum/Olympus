@@ -548,17 +548,10 @@ describe('ledger corpus assignment', () => {
     const accountedFor = snapshot.rows.reduce((sum, row) => sum + row.items, 0)
       + snapshot.unassigned_corpora.items;
     expect(accountedFor).toBe(expectedItems);
-    // Every shipped registry corpus is declared by some ledger row today,
-    // except the imported-archive stores: their row comes with the dashboard's
-    // import (docs/design/archive-import.md), and until then their items are
-    // reported as unassigned. The assertion that matters is the one above:
-    // whatever the roster becomes, items land in a row or in `unassigned`, and
-    // never nowhere.
-    expect(snapshot.unassigned_corpora.entries.map((entry) => entry.corpus_id).sort()).toEqual([
-      'internal.archive.email',
-      'public_safe.archive.email',
-      'secure_local.archive.email',
-    ]);
+    // Every shipped registry corpus is declared by some ledger row today. The
+    // assertion that matters is the one above: whatever the roster becomes,
+    // items land in a row or in `unassigned`, and never nowhere.
+    expect(snapshot.unassigned_corpora.entries.map((entry) => entry.corpus_id)).toEqual([]);
   });
 
   test('every registry source id a ledger row declares exists in the registry', () => {

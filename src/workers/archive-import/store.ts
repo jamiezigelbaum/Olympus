@@ -15,7 +15,14 @@
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { ARCHIVE_FORMATS, archiveImportFamilies } from '../../core/archive-formats.ts';
 import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
+import {
+  defaultSourceCorpusRegistryConfig,
+  parseSourceCorpusRegistryConfig,
+  type SourceCorpusConfig,
+  type SourceCorpusRegistryConfig,
+} from '../../core/source-corpus-registry.ts';
 import type { SourceFamily, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../connector-store/index.ts';
@@ -91,4 +98,58 @@ export function createArchiveConnectorStore(
     ...(options.readOnly === true ? { readOnly: true } : {}),
     ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
   });
+}
+
+const CORPUS_ROLE: Readonly<Record<string, { capabilities: SourceCorpusConfig['capabilities']; description: string }>> = {
+  secure_local: {
+    capabilities: ['answer', 'status', 'sync', 'search'],
+    description: 'Private items, and every imported item whose content the private model has not judged yet.',
+  },
+  internal: {
+    // No sync of its own: the archive lane's tier set fills it.
+    capabilities: ['answer', 'status', 'search'],
+    description: 'Personal items, routed here by per-item four-tier classification.',
+  },
+  public_safe: {
+    capabilities: ['answer', 'status', 'search'],
+    description: 'Public items, routed here by per-item four-tier classification on positive public evidence.',
+  },
+};
+
+/**
+ * The registry entries of the archive stores: one per tier store of each
+ * family, every one created on first need.
+ *
+ * They are not shipped defaults: the shipped roster is the public plugin
+ * config's, and imported archives join it when the import is on the public
+ * surface. Until then only a runtime that holds archive stores (the source
+ * runtime, the data lifecycle) adds them, with `withArchiveImportCorpora`.
+ */
+export function archiveImportCorpora(): SourceCorpusConfig[] {
+  return archiveImportFamilies().flatMap((family) => {
+    const provider = ARCHIVE_FORMATS.find((format) => format.family === family)!.provider;
+    return (['secure_local', 'internal', 'public_safe'] as const).map((trustDomain) => ({
+      corpusId: archiveCorpusId(trustDomain, family),
+      sourceId: 'archive.imports',
+      provider,
+      family,
+      trustDomain,
+      activationMode: 'hybrid_shadow' as const,
+      capabilities: [...CORPUS_ROLE[trustDomain]!.capabilities],
+      createdOnDemand: true,
+      description: `Imported ${family} archives: ${CORPUS_ROLE[trustDomain]!.description}`,
+    }));
+  });
+}
+
+/**
+ * The registry config with the archive stores' entries added (absent ones only).
+ */
+export function withArchiveImportCorpora(rawConfig?: unknown): SourceCorpusRegistryConfig {
+  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
+  const present = new Set(config.corpora.map((corpus) => corpus.corpusId));
+  return {
+    ...config,
+    corpora: [...config.corpora, ...archiveImportCorpora().filter((corpus) => !present.has(corpus.corpusId))],
+  };
 }

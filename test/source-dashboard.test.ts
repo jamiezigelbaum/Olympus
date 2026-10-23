@@ -2806,16 +2806,10 @@ describe('dashboard misreporting where private data lives', () => {
       + view.unassigned_corpora.indexed_items;
     expect(accountedFor).toBe(expectedTotal);
     expect(view.summary.total_indexed_items).toBe(expectedTotal);
-    // Every shipped registry corpus is claimed by a card today, except the
-    // imported-archive stores: their card comes with the dashboard's import
-    // (docs/design/archive-import.md), and until then their items are reported
-    // as unassigned. The assertion that matters is the one above: whatever the
-    // roster becomes, items land on a card or in `unassigned`, and never nowhere.
-    expect(view.unassigned_corpora.entries.map((entry) => entry.corpus_id).sort()).toEqual([
-      'internal.archive.email',
-      'public_safe.archive.email',
-      'secure_local.archive.email',
-    ]);
+    // Every shipped registry corpus is claimed by a card today. The assertion
+    // that matters is the one above: whatever the roster becomes, items land on
+    // a card or in `unassigned`, and never nowhere.
+    expect(view.unassigned_corpora.entries.map((entry) => entry.corpus_id)).toEqual([]);
   });
 
   test('summary totals always equal the sum of the tier cards', () => {

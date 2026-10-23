@@ -27,7 +27,13 @@ import {
   createArchiveImportsSchedulerSource,
 } from '../src/workers/archive-import/scheduler-source.ts';
 import { archiveConnectorId } from '../src/workers/archive-import/state.ts';
-import { archiveConnectorStoreDbPath, archiveConnectorStoreDbPaths, archiveCorpusId } from '../src/workers/archive-import/store.ts';
+import {
+  archiveConnectorStoreDbPath,
+  archiveConnectorStoreDbPaths,
+  archiveCorpusId,
+  withArchiveImportCorpora,
+} from '../src/workers/archive-import/store.ts';
+import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { pullArchiveImport, type ArchiveImportPullOptions } from '../src/workers/archive-import/sync.ts';
 
 const cleanups: Array<() => void> = [];
@@ -351,6 +357,26 @@ describe('removing an archive', () => {
     // The chosen file is never touched, and a removal that finished has nothing left to do.
     expect(existsSync(join(f.exports, 'Removed.mbox'))).toBe(true);
     expect((await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: removed })).kind).toBe('not_removing');
+  });
+});
+
+describe('archive corpora in the registry', () => {
+  test('the source runtime adds the archive stores; the shipped public roster does not have them', () => {
+    const shipped = createSourceCorpusRegistry().list().map((corpus) => corpus.corpusId);
+    expect(shipped.filter((corpusId) => corpusId.includes('.archive.'))).toEqual([]);
+    const withArchives = createSourceCorpusRegistry(withArchiveImportCorpora());
+    expect(withArchives.list().map((corpus) => corpus.corpusId)).toEqual([
+      ...shipped,
+      'secure_local.archive.email',
+      'internal.archive.email',
+      'public_safe.archive.email',
+    ]);
+    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(['secure_local.archive.email']);
+    for (const corpus of withArchives.list().filter((entry) => entry.sourceId === 'archive.imports')) {
+      expect(corpus).toMatchObject({ provider: 'mbox', family: 'email', createdOnDemand: true });
+    }
+    // Added once, whatever the config already holds.
+    expect(withArchiveImportCorpora(withArchiveImportCorpora()).corpora).toHaveLength(withArchives.list().length);
   });
 });
 

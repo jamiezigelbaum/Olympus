@@ -47,7 +47,7 @@ import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-polic
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
 import { archiveImportFamilies } from './core/archive-formats.ts';
-import { archiveConnectorStoreDbPaths } from './workers/archive-import/store.ts';
+import { archiveConnectorStoreDbPaths, withArchiveImportCorpora } from './workers/archive-import/store.ts';
 import { defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
 import {
   defaultGmailConnectorStoreDbPath,
@@ -728,7 +728,7 @@ export function deleteOlympusData(options: {
     if (existsSync(inboxPath)) {
       const inbox = openWaitingPrivateQuestionStore(inboxPath);
       try {
-        const registry = createSourceCorpusRegistry().list();
+        const registry = createSourceCorpusRegistry(withArchiveImportCorpora()).list();
         const corpora = registry.filter(c => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId)).map(c => c.corpusId);
         const count = inbox.deleteForCorpora(corpora, registry.map(c => c.corpusId));
         if (count > 0) removed.push(`${inboxPath} (private answers: ${count})`);

@@ -911,39 +911,6 @@ var init_source_corpus_registry = __esm(() => {
       description: "Public files on this computer, routed here by per-item four-tier classification on positive public evidence."
     },
     {
-      corpusId: "secure_local.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "secure_local",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "sync", "search"],
-      createdOnDemand: true,
-      description: "Imported mail archives: Private messages, and every imported message whose content the private model has not judged yet."
-    },
-    {
-      corpusId: "internal.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "internal",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "search"],
-      createdOnDemand: true,
-      description: "Personal messages from imported mail archives, routed here by per-item four-tier classification."
-    },
-    {
-      corpusId: "public_safe.archive.email",
-      sourceId: "archive.imports",
-      provider: "mbox",
-      family: "email",
-      trustDomain: "public_safe",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "search"],
-      createdOnDemand: true,
-      description: "Public messages from imported mail archives, routed here by per-item four-tier classification on positive public evidence."
-    },
-    {
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       sourceId: "telegram.messages",
       provider: "telegram",
@@ -993,9 +960,6 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.local.files",
       "internal.local.files",
       "public_safe.local.files",
-      "secure_local.archive.email",
-      "internal.archive.email",
-      "public_safe.archive.email",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
       "internal.whatsapp.messages"
@@ -1018,9 +982,6 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.local.files",
       "internal.local.files",
       "public_safe.local.files",
-      "secure_local.archive.email",
-      "internal.archive.email",
-      "public_safe.archive.email",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
       "internal.whatsapp.messages"
@@ -1034,7 +995,6 @@ var init_source_corpus_registry = __esm(() => {
       "internal.x.bookmarks",
       "secure_local.dropbox.files",
       "secure_local.local.files",
-      "secure_local.archive.email",
       "internal.telegram.messages",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
     ],
@@ -1051,9 +1011,6 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.local.files",
       "internal.local.files",
       "public_safe.local.files",
-      "secure_local.archive.email",
-      "internal.archive.email",
-      "public_safe.archive.email",
       "internal.x.bookmarks",
       "secure_local.x.bookmarks",
       "internal.telegram.messages",
@@ -48914,9 +48871,35 @@ function createArchiveConnectorStore(trustDomain, family, env = process.env, opt
     ...options.tierLedger ? { tierLedger: options.tierLedger } : {}
   });
 }
-var ARCHIVE_TIER_DOMAINS, ARCHIVE_STORE_PLACEMENT, FILE_LABEL;
+function archiveImportCorpora() {
+  return archiveImportFamilies().flatMap((family) => {
+    const provider = ARCHIVE_FORMATS.find((format) => format.family === family).provider;
+    return ["secure_local", "internal", "public_safe"].map((trustDomain) => ({
+      corpusId: archiveCorpusId(trustDomain, family),
+      sourceId: "archive.imports",
+      provider,
+      family,
+      trustDomain,
+      activationMode: "hybrid_shadow",
+      capabilities: [...CORPUS_ROLE[trustDomain].capabilities],
+      createdOnDemand: true,
+      description: `Imported ${family} archives: ${CORPUS_ROLE[trustDomain].description}`
+    }));
+  });
+}
+function withArchiveImportCorpora(rawConfig) {
+  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
+  const present = new Set(config.corpora.map((corpus) => corpus.corpusId));
+  return {
+    ...config,
+    corpora: [...config.corpora, ...archiveImportCorpora().filter((corpus) => !present.has(corpus.corpusId))]
+  };
+}
+var ARCHIVE_TIER_DOMAINS, ARCHIVE_STORE_PLACEMENT, FILE_LABEL, CORPUS_ROLE;
 var init_store2 = __esm(() => {
+  init_archive_formats();
   init_linux_engine_layout();
+  init_source_corpus_registry();
   init_connector_store();
   ARCHIVE_TIER_DOMAINS = ["public_safe", "internal", "secure_local"];
   ARCHIVE_STORE_PLACEMENT = Object.freeze({
@@ -48928,6 +48911,20 @@ var init_store2 = __esm(() => {
     secure_local: "",
     internal: "-internal",
     public_safe: "-public"
+  };
+  CORPUS_ROLE = {
+    secure_local: {
+      capabilities: ["answer", "status", "sync", "search"],
+      description: "Private items, and every imported item whose content the private model has not judged yet."
+    },
+    internal: {
+      capabilities: ["answer", "status", "search"],
+      description: "Personal items, routed here by per-item four-tier classification."
+    },
+    public_safe: {
+      capabilities: ["answer", "status", "search"],
+      description: "Public items, routed here by per-item four-tier classification on positive public evidence."
+    }
   };
 });
 
@@ -62249,7 +62246,7 @@ function deleteOlympusData(options) {
     if (existsSync38(inboxPath)) {
       const inbox = openWaitingPrivateQuestionStore(inboxPath);
       try {
-        const registry = createSourceCorpusRegistry().list();
+        const registry = createSourceCorpusRegistry(withArchiveImportCorpora()).list();
         const corpora = registry.filter((c) => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId)).map((c) => c.corpusId);
         const count = inbox.deleteForCorpora(corpora, registry.map((c) => c.corpusId));
         if (count > 0)
@@ -171267,7 +171264,7 @@ async function main() {
       console.warn(`[remote] ${openClawRemote.path} could not be read or parsed; remote access and demo sign-in are off for this worker.`);
     }
   }
-  const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
+  const sourceCorpusRegistry2 = createSourceCorpusRegistry(withArchiveImportCorpora(olympusConfig.sourceIndex.corpusRegistry));
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
@@ -174683,6 +174680,7 @@ var init_server5 = __esm(async () => {
   init_scheduler_source();
   init_runtime2();
   init_lane();
+  init_store2();
   init_scheduler_source2();
   init_connector5();
   init_approved_scope_filter2();

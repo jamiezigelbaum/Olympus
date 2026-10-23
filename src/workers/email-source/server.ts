@@ -231,6 +231,7 @@ import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provide
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
 import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
 import { archiveLaneLegs } from '../archive-import/lane.ts';
+import { withArchiveImportCorpora } from '../archive-import/store.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
 import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
@@ -1983,7 +1984,9 @@ export async function main(): Promise<void> {
       console.warn(`[remote] ${openClawRemote.path} could not be read or parsed; remote access and demo sign-in are off for this worker.`);
     }
   }
-  const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
+  // Imported archives' stores are served here although they are not yet on
+  // the public plugin-config roster (archive-import/store.ts).
+  const sourceCorpusRegistry = createSourceCorpusRegistry(withArchiveImportCorpora(olympusConfig.sourceIndex.corpusRegistry));
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
