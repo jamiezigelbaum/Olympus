@@ -125595,7 +125595,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         redraw();
         return;
       }
-      if (name === config2.deleteDataTool) {
+      if (name === config2.deleteDataTool && !(result && result.isError)) {
         refresh();
         state.notice = P.deleteDataDone;
         redraw();

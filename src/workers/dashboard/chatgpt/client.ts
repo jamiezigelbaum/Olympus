@@ -430,7 +430,9 @@ export function chatgptDashboardClient(
         redraw();
         return;
       }
-      if (name === config.deleteDataTool) {
+      // A failed delete falls through to acceptResult, which shows the error;
+      // only a result that is not an error reads as deleted (PR #455 review).
+      if (name === config.deleteDataTool && !(result && result.isError)) {
         // Deleted: the row reads as a source with no data once the engine
         // has reopened its stores (it restarts; the page re-reads until it
         // answers). The brief result line stays until the next action.

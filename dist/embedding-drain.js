@@ -34658,7 +34658,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         redraw();
         return;
       }
-      if (name === config.deleteDataTool) {
+      if (name === config.deleteDataTool && !(result && result.isError)) {
         refresh();
         state.notice = P.deleteDataDone;
         redraw();

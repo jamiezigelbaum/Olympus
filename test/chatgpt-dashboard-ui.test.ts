@@ -1134,6 +1134,16 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
     expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataDone);
   });
 
+  test('an unexpected error is never reported as deleted', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+    host.button('Delete indexed data').click();
+    host.button('Yes, delete indexed data').click();
+    host.respond('tools/call', { isError: true, structuredContent: { error: { code: 'internal' } }, content: [{ type: 'text', text: 'internal' }] });
+    await sleep(0);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataDone);
+  });
+
   test('Disconnect says the indexed data stays until it is deleted', () => {
     const host = mount();
     host.push({ structuredContent: model({ sources: [{ ...dropbox([DISCONNECT]), status: 'Fresh', detail: 'synced' }] }) });
