@@ -96,6 +96,7 @@ const ALWAYS_ALLOWED_CONSOLE: RegExp[] = [/favicon/i];
 const REFUSAL_REQUESTS: RegExp[] = [/\/dashboard\/tools\/call/];
 /** The kinds of control that open a page of their own: leaving the dashboard is their outcome. Every other kind must stay and show what it did. */
 const LEAVES = new Set<ControlKind>(['connect', 'reconnect', 'scope', 'check-again', 'privacy-settings', 'other']);
+const CONFIRM_WAIT_MS = 60_000;
 const OWN_HOSTS = /^https:\/\/(www\.)?olympusplugin\.ai\//;
 
 const keyed = (key: string): { css: string } => ({ css: `[data-key="${key.replace(/"/g, '\\"')}"]` });
@@ -425,6 +426,22 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       if (left) {
         if (!LEAVES.has(kind)) findings.push(`pressing "${control.name}" left the dashboard for ${at || 'another page'}; a ${kind} control must stay on the page and show its outcome`);
         else if (!/^\/dashboard(\/|\?|#|$)/.test(at) && !OWN_HOSTS.test(at)) findings.push(`pressing "${control.name}" left the dashboard for a page that is not Olympus's own: ${at.slice(0, 80) || 'an unknown page'}`);
+      }
+      // A confirmed press can take a while to show: the engine restarts after a delete, and the page re-reads until the row settles. The outcome is
+      // waited for (up to a minute), not read once at the first quiet moment.
+      if (!left && kind === 'confirm' && parent && AFTER_CONFIRM[parent]) {
+        const waitUntil = now() + CONFIRM_WAIT_MS;
+        for (;;) {
+          const outcome = AFTER_CONFIRM[parent]!({ ...context, parent });
+          if (outcome.ok || now() >= waitUntil) break;
+          await sleep(2_000);
+          try {
+            afterControls = await panelControls(driver);
+            afterText = await panelText(driver);
+            afterOpen = await openDetails(driver);
+          } catch { break; }
+          context.after = { controls: afterControls, text: afterText, open: afterOpen, url: at };
+        }
       }
       const expectation = left ? undefined : (kind === 'confirm' && parent ? AFTER_CONFIRM[parent]?.({ ...context, parent }) : EXPECTATIONS[kind]?.(context));
       if (expectation) outcomes.push(expectation);

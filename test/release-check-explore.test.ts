@@ -50,6 +50,8 @@ interface PanelState {
   disconnectLeaves?: boolean;
   /** Connect leaves for this address (default /dashboard?connect). */
   connectAt?: string;
+  /** The page keeps showing the old row for this many reads after Disconnect is confirmed (the engine is restarting). */
+  staleReads?: number;
   /** The page logs a console error while it loads. */
   loadLogs?: boolean;
 }
@@ -101,7 +103,7 @@ class PanelDriver implements JourneyDriver {
       this.state.line = this.state.undefinedText ? 'Found undefined items' : 'Checking Readwise…';
     });
     on('menu:readwise.library:1', () => { if (this.state.disconnectLeaves) { this.at = '/dashboard?away'; this.gone = true; return; } if (this.state.noQuestion) this.state.connected = false; else this.state.confirming = true; });
-    on('menu:readwise.library:1:yes', () => { this.state.connected = false; this.state.confirming = false; });
+    on('menu:readwise.library:1:yes', () => { this.state.confirming = false; if (this.state.staleReads) { this.stale = this.state.staleReads; return; } this.state.connected = false; });
     on('menu:readwise.library:1:no', () => { this.state.confirming = false; if (this.state.cancelDisconnects) this.state.connected = false; });
     on('computer:keys', () => { this.at = '/dashboard?keys'; this.gone = true; });
     on('primary:readwise.library', () => {
@@ -112,11 +114,13 @@ class PanelDriver implements JourneyDriver {
   }
   at = '/dashboard';
   gone = false;
+  stale = 0;
   /** What window.open was called with (the page-side recorder reads this through the stubbed __rcOpened). */
   readonly opened: string[] = [];
   async hasPanel(): Promise<boolean> { return true; }
   async probe(frame: 'host' | 'panel', call: string): Promise<unknown> {
     if (frame === 'panel' && this.gone) throw new Error('the dashboard panel is not on the page');
+    if (this.stale > 0 && frame === 'panel' && call.includes('__rc.controls') && --this.stale === 0) { this.state.connected = false; this.render(); }
     if (call.includes('openedWindows')) return frame === 'panel' ? [...this.opened] : [];
     if (call.includes('watchWindows')) return 0;
     return evalIn(frame === 'host' ? this.host : this.panel, call);
@@ -360,6 +364,15 @@ describe('exploring the Sources section', () => {
     expect(entry).toMatchObject({ sourceId: 'local.files', label: '^(Open privacy settings)$' });
     expect(typeof entry!.unreachable).toBe('string');
     expect(kindOf('source:local.files:privacy-settings', 'Open privacy settings')).toBe('privacy-settings');
+  });
+
+  test('a confirmed press is given time to show its outcome: a row that settles a little late still passes, one that never does fails', async () => {
+    const late = new PanelDriver({ staleReads: 6 });
+    const result = await explore({ driver: late, seeds: [populated(late)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(result).find((entry) => entry.id === 'explore.populated')!.status).toBe('pass');
+    const never = new PanelDriver({ staleReads: 1_000_000 });
+    const stuck = await explore({ driver: never, seeds: [populated(never)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(stuck).find((entry) => entry.id === 'explore.populated')!.status).toBe('fail');
   });
 
   test('the press bound is per seed: a later seed still presses', async () => {

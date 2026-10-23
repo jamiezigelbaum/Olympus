@@ -1212,7 +1212,7 @@ async function startFakeWith(config: AgentConfig, token: string): Promise<void> 
 /** The Readwise card; the engine can be briefly unreachable right after a delete or a restart, so a failed read is tried again. */
 async function readwiseCard(): Promise<any> {
   let last: unknown;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       const dash = await dashboardJson();
       return (dash.json?.sources ?? []).find((card: any) => card.provider === 'readwise');
@@ -1277,7 +1277,12 @@ function exploreSeeds(config: AgentConfig): Seed[] {
         };
         const session = await ownerSession();
         const sync = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
-        let card = await until(refused, 240_000, 5_000);
+        // The pull that meets the refusal is the scheduler's; Sync now is asked again now and then in case a press is throttled.
+        let card: any;
+        for (let round = 0; round < 6 && !card; round += 1) {
+          card = await until(refused, 45_000, 5_000);
+          if (!card) await session.call('POST', '/dashboard/sync-now', { source: 'readwise' }).catch(() => undefined);
+        }
         // A key the provider no longer accepts, entered again, is the other way a source ends up needing the owner.
         let entered = 0;
         if (!card) {
@@ -1285,7 +1290,7 @@ function exploreSeeds(config: AgentConfig): Seed[] {
           entered = again.status;
           card = await until(refused, 60_000);
         }
-        return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `a sync with a rejected key (sync answered ${sync.status}${entered ? `, a rejected key entered again answered ${entered}` : ''}) did not leave the source needing attention: ${cardSummary(await readwiseCard())}` };
+        return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `a sync with a rejected key (sync answered ${sync.status}${entered ? `, a rejected key entered again answered ${entered}` : ''}) did not leave the source needing attention: ${cardSummary(await readwiseCard())} (connection: ${JSON.stringify((await readwiseCard())?.connection ?? null).slice(0, 300)})` };
       },
       resetAfter: ['confirm', 'sync'],
     },
@@ -1307,6 +1312,8 @@ function exploreSeeds(config: AgentConfig): Seed[] {
       id: 'empty', title: 'empty (disconnected, nothing indexed)',
       apply: async () => {
         await startFakeWith(config, config.fakeToken).catch(() => undefined);
+        // The engine restarts a moment after a delete; the card read waits for it to answer again before anything else is asked.
+        await readwiseCard();
         const session = await ownerSession();
         let card = await readwiseCard();
         if (connected(card)) {
