@@ -209,13 +209,12 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
   const queueStatus = DASHBOARD_QUEUE_HEALTH_STATUS[source.queue_health.label as DashboardQueueHealthLabel];
   if (connectionStatus === 'Needs you' || connectionStatus === 'Off') {
-    // 'Off' is only honest for a source with nothing behind it. A card whose
-    // connection state reads never-connected while its corpus holds indexed
-    // items is connected-but-broken — a revoked or deleted handle — so it
-    // reads Needs you rather than hiding behind a calm word.
-    if (connectionStatus === 'Off' && source.coverage.indexed_items > 0) {
-      return { status: 'Needs you', mappedUnknown: false };
-    }
+    // A card that reads never-connected while its corpus still holds indexed
+    // items has no grant at all (no handle, no this-computer record): the
+    // owner disconnected it and its data was kept (owner ruling, 2026-10-23).
+    // It stays Off, worded "Disconnected · indexed data kept"; a grant that
+    // is still present but expired or revoked reads reauth_required (Needs
+    // you), a degradation or a provider refusal, all decided above.
     return { status: connectionStatus, mappedUnknown: false };
   }
   if (readinessStatus === 'Needs you' || queueStatus === 'Needs you') {
@@ -291,8 +290,7 @@ export function dashboardIsConnectedSource(source: DashboardSourceCard): boolean
   // is exactly the report home exists to carry, and dropping the card because
   // the attempt never produced a handle would hide the failure on the page the
   // owner is looking at.
-  if (source.connection.provider_refusal) return true;
-  return source.coverage.indexed_items > 0;
+  return source.connection.provider_refusal !== undefined;
 }
 
 /** Cards bucketed by status, in DASHBOARD_STATUS_ORDER, empty groups dropped. */
@@ -375,8 +373,16 @@ export function dashboardSubLine(
     case 'Fresh':
       return freshLine(source, options?.now ?? new Date());
     case 'Off':
-      return source.connection.label;
+      // Not connected with indexed data left: disconnected on purpose, data
+      // kept (owner ruling, 2026-10-23), not a lost sign-in.
+      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source)
+        ? DASHBOARD_DISCONNECTED_DATA_KEPT
+        : source.connection.label;
   }
+}
+
+function dashboardIsUnconnectedState(source: DashboardSourceCard): boolean {
+  return DASHBOARD_UNCONNECTED_STATES.has(source.connection.state);
 }
 
 /**
@@ -414,14 +420,7 @@ export function dashboardAttentionLine(
     }
     case 'needs_setup':
     case 'not_connected':
-      // A source that holds data and reads not-connected has LOST its
-      // connection — a revoked or deleted handle — and the row says that,
-      // not the registry's bare word (owner note, 2026-09-01: "not connected
-      // — Set up" on a source with 4,000 files read as a demand for a source
-      // nobody asked for).
-      return source.coverage.indexed_items > 0
-        ? DASHBOARD_SIGNED_OUT
-        : source.connection.label;
+      return source.connection.label;
     default:
       break;
   }
@@ -446,6 +445,8 @@ export function dashboardAttentionLine(
 
 /** The row word for a connection the owner has to sign back into. */
 export const DASHBOARD_SIGNED_OUT = 'signed out';
+/** A source the owner disconnected whose indexed data is still on the computer. */
+export const DASHBOARD_DISCONNECTED_DATA_KEPT = 'Disconnected · indexed data kept';
 
 /**
  * The one verb for repairing a connection, everywhere on owner surfaces. The

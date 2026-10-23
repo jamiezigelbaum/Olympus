@@ -106,6 +106,14 @@ function build(input: { corpus: Corpus; sourceId: string; tasks: Array<{ id: str
   return { card, progress: dashboardSourceProgress(card, { now: NOW }) };
 }
 
+const GMAIL_HANDLES: ConnectedHandleRegistry = {
+  version: 1,
+  handles: [{
+    handle: 'gmail.personal', provider: 'gmail', accountRole: 'personal', trustDomain: 'internal',
+    allowedCapabilities: ['gmail.email.sync'], scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+    connectedAt: '2026-07-01T00:00:00.000Z',
+  }],
+};
 const X_HANDLES: ConnectedHandleRegistry = {
   version: 1,
   handles: [{
@@ -189,7 +197,7 @@ describe('sources that do report the walk keep their verdict', () => {
   const counted = (id: string, traversal: number) => ({ id, last_result: { status: 'progress' as const, counts: { items_seen: 10, traversal_complete: traversal } } });
 
   test('a newer completed pull supersedes an older incomplete reconcile on the Sources row', () => {
-    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [
       { ...counted('gmail.email_store_reconcile:scope:test', 0), role: 'maintenance', at: '2026-07-27T18:00:00.000Z' },
       { ...counted('gmail.email_store_pull:scope:test', 1), role: 'primary', at: '2026-07-28T11:30:00.000Z' },
     ] });
@@ -202,7 +210,7 @@ describe('sources that do report the walk keep their verdict', () => {
   });
 
   test('a newer genuinely incomplete pull still stalls after an hour without movement', () => {
-    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [
       { ...counted('gmail.email_store_reconcile:scope:test', 1), role: 'maintenance', at: '2026-07-26T18:00:00.000Z' },
       { ...counted('gmail.email_store_pull:scope:test', 0), role: 'primary', at: '2026-07-27T18:00:00.000Z' },
     ] });
@@ -214,7 +222,7 @@ describe('sources that do report the walk keep their verdict', () => {
   });
 
   test('a newer capped maintenance walk cannot reopen listing after a complete pull', () => {
-    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [
       { ...counted('gmail.email_store_pull:scope:test', 1), role: 'primary', at: '2026-07-28T10:30:00.000Z' },
       { ...counted('gmail.email_store_reconcile:scope:test', 0), role: 'maintenance', at: '2026-07-28T11:30:00.000Z' },
     ] });
@@ -223,7 +231,7 @@ describe('sources that do report the walk keep their verdict', () => {
   });
 
   test('a maintenance walk cannot settle a primary pull that has never reported', () => {
-    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [
       { id: 'gmail.email_store_pull:scope:test', role: 'primary' },
       { ...counted('gmail.email_store_reconcile:scope:test', 1), role: 'maintenance' },
     ] });
@@ -231,7 +239,7 @@ describe('sources that do report the walk keep their verdict', () => {
   });
 
   test('finishing listing does not forgive four unread items in a known eleven-item population', () => {
-    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [
+    const { card } = build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [
       { ...counted('gmail.email_store_pull:scope:test', 1), role: 'primary' },
       { ...counted('gmail.email_store_reconcile:scope:test', 0), role: 'maintenance' },
     ] });
@@ -248,7 +256,7 @@ describe('sources that do report the walk keep their verdict', () => {
     const fresh = gmail();
     fresh.counts = { ...fresh.counts, indexed_items: 0, chunks: 0, embedded_chunks: 0, sync_runs: 0 };
     delete fresh.last_refresh;
-    const { card } = build({ corpus: fresh, sourceId: 'gmail.email', tasks: [{ id: 'gmail.email_store_pull:scope:test', role: 'primary' }] });
+    const { card } = build({ corpus: fresh, sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [{ id: 'gmail.email_store_pull:scope:test', role: 'primary' }] });
     card.connection.state = 'waiting_for_first_sync';
     card.connection.connected_at = '2026-07-28T11:45:00.000Z';
     delete card.schedule;
@@ -258,11 +266,11 @@ describe('sources that do report the walk keep their verdict', () => {
   });
 
   test('traversal_complete 0 on any task means not finished, even beside a finished one', () => {
-    expect(build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [counted('gmail.pull', 1), counted('gmail.reconcile', 0)] }).card.last_run?.traversal_complete).toBe(false);
+    expect(build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [counted('gmail.pull', 1), counted('gmail.reconcile', 0)] }).card.last_run?.traversal_complete).toBe(false);
   });
 
   test('every task finished means finished', () => {
-    expect(build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [counted('gmail.pull', 1), counted('gmail.reconcile', 1)] }).card.last_run?.traversal_complete).toBe(true);
+    expect(build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [counted('gmail.pull', 1), counted('gmail.reconcile', 1)] }).card.last_run?.traversal_complete).toBe(true);
   });
 
   test('traversal_complete wins over the X signal when a task carries both', () => {
@@ -271,6 +279,6 @@ describe('sources that do report the walk keep their verdict', () => {
   });
 
   test('a completed provider walk is not undone by a sibling task that has never reported', () => {
-    expect(build({ corpus: gmail(), sourceId: 'gmail.email', tasks: [counted('gmail.pull', 1), { id: 'gmail.reconcile' }] }).card.last_run?.traversal_complete).toBe(true);
+    expect(build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [counted('gmail.pull', 1), { id: 'gmail.reconcile' }] }).card.last_run?.traversal_complete).toBe(true);
   });
 });

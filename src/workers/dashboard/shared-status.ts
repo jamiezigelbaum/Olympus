@@ -9,7 +9,7 @@
 import type { SourceProgress, SourceStalledReason } from '../chatgpt/dashboard-contract.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { DashboardSourceCard } from '../source-dashboard.ts';
-import { dashboardDegradationForSource, dashboardIsConnectedSource, type DashboardStatus } from './vocabulary.ts';
+import { dashboardDegradationForSource, type DashboardStatus } from './vocabulary.ts';
 
 /** Stalled reasons the owner fixes from the dashboard; the source then reads Needs you. */
 export const DASHBOARD_FIXABLE_STALLS: ReadonlySet<SourceStalledReason> = new Set<SourceStalledReason>([
@@ -45,8 +45,7 @@ export function dashboardCredentialProblem(
 ): boolean {
   return card.connection.provider_refusal !== undefined
     || dashboardDegradationForSource(card, degraded) !== undefined
-    || card.connection.state === 'reauth_required'
-    || (card.coverage.indexed_items > 0 && !dashboardIsConnectedSource(card));
+    || card.connection.state === 'reauth_required';
 }
 
 /** A refused connect on a source never connected: nothing behind it to measure, but it stays Needs you. */
