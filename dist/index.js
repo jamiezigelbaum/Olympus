@@ -2333,10 +2333,14 @@ function acquireFileLeaseSync(targetPath, options) {
 function openSqlite(path) {
   if (typeof globalThis.Bun !== "undefined") {
     const { Database } = runtimeRequire("bun:sqlite");
-    return new Database(path);
+    const connection2 = new Database(path);
+    connection2.exec("PRAGMA busy_timeout = 0");
+    return connection2;
   }
   const { DatabaseSync } = runtimeRequire("node:sqlite");
-  return new DatabaseSync(path);
+  const connection = new DatabaseSync(path);
+  connection.exec("PRAGMA busy_timeout = 0");
+  return connection;
 }
 function tryKernelLock(lockPath) {
   if (!existsSync4(lockPath)) {
@@ -2349,7 +2353,6 @@ function tryKernelLock(lockPath) {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec("PRAGMA busy_timeout = 0");
     connection.exec("BEGIN EXCLUSIVE");
   } catch (error) {
     closeQuietly(connection);

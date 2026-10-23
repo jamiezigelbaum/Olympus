@@ -229,10 +229,15 @@ interface SqliteConnection {
 function openSqlite(path: string): SqliteConnection {
   if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') {
     const { Database } = runtimeRequire('bun:sqlite') as typeof import('bun:sqlite');
-    return new Database(path);
+    const connection = new Database(path);
+    // Never wait inside SQLite: the lease loop polls to its own deadline.
+    connection.exec('PRAGMA busy_timeout = 0');
+    return connection;
   }
   const { DatabaseSync } = runtimeRequire('node:sqlite') as typeof import('node:sqlite');
-  return new DatabaseSync(path);
+  const connection = new DatabaseSync(path);
+  connection.exec('PRAGMA busy_timeout = 0');
+  return connection;
 }
 
 /**
@@ -252,7 +257,6 @@ function tryKernelLock(lockPath: string): KernelLock | undefined {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec('PRAGMA busy_timeout = 0');
     connection.exec('BEGIN EXCLUSIVE');
   } catch (error) {
     closeQuietly(connection);
