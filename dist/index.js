@@ -19196,12 +19196,6 @@ var init_source_ingestion_ledger = __esm(() => {
       primaryCorpusId: "secure_local.local.files",
       family: "file",
       corpusSourceIds: ["local.files"]
-    },
-    archives: {
-      label: "Imported archives",
-      primaryCorpusId: "secure_local.archive.email",
-      family: "email",
-      corpusSourceIds: ["archive.imports"]
     }
   };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;

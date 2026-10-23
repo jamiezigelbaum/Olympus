@@ -8,12 +8,14 @@ import { exposedOperations } from '../src/core/operation-exposure.ts';
 import {
   LEGACY_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+  createPublicSourceCorpusRegistry,
   createSourceCorpusRegistry,
   defaultSourceCorpusRegistryConfig,
   parsePublicSourceCorpusRegistryConfig,
   parseSourceCorpusRegistryConfig,
 } from '../src/core/source-corpus-registry.ts';
 import { listMcpTools } from '../src/mcp/tools.ts';
+import { V0_4_PUBLIC_SOURCE_IDS } from '../src/core/public-surface.ts';
 import {
   defaultDropboxIngestionPolicy,
   dropboxPolicyApprovedScopeKeys,
@@ -294,7 +296,10 @@ describe('config-driven source corpus registry', () => {
 
   test('an undeclared corpus narrows the public enum instead of taking the tool surface down', () => {
     const config = defaultConfig();
-    const corpora = defaultSourceCorpusRegistryConfig().corpora;
+    // What a plugin config can declare: the shipped corpora of public sources
+    // (imported archives join them when the dashboard's import ships).
+    const publicSourceIds = new Set<string>(V0_4_PUBLIC_SOURCE_IDS);
+    const corpora = defaultSourceCorpusRegistryConfig().corpora.filter((corpus) => publicSourceIds.has(corpus.sourceId));
     // A declared corpus whose configured capabilities reach past its
     // declaration: the public view keeps the declared ones and drops the rest.
     corpora.find((corpus) => corpus.corpusId === 'internal.readwise.library')!.capabilities
@@ -327,7 +332,8 @@ describe('config-driven source corpus registry', () => {
       operations.find((operation) => operation.name === 'source_answer')!,
       { config },
     ) as { properties: { corpus_id: { enum: string[] } } }).properties.corpus_id.enum;
-    expect(answerEnum).toEqual(createSourceCorpusRegistry(defaultSourceCorpusRegistryConfig()).ids('answer'));
+    // The shipped public corpora, exactly: the undeclared one is dropped.
+    expect(answerEnum).toEqual(createPublicSourceCorpusRegistry(defaultSourceCorpusRegistryConfig()).ids('answer'));
 
     const searchEnum = (operationToolSchema(
       operations.find((operation) => operation.name === 'source_index_search')!,

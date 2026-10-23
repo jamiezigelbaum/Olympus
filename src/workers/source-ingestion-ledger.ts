@@ -458,12 +458,6 @@ const SOURCE_DEFINITIONS: Record<string, LedgerSourceDefinition> = {
     family: 'file',
     corpusSourceIds: ['local.files'],
   },
-  archives: {
-    label: 'Imported archives',
-    primaryCorpusId: 'secure_local.archive.email',
-    family: 'email',
-    corpusSourceIds: ['archive.imports'],
-  },
 };
 
 export function buildSourceIngestionLedgerSnapshot(
