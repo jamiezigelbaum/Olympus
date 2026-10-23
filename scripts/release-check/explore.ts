@@ -57,6 +57,8 @@ export interface ExploreOptions {
   screenshotDir?: string;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** The browser is already signed in and unlocked (a page was opened the owner's way): pages are then reached by address. */
+  signedIn?: boolean;
   /** The most presses one seed may make (bounded exploration). */
   maxPresses?: number;
   /** Milliseconds the page may take to settle after a press. */
@@ -222,7 +224,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const unlisted = new Map<string, { key: string; label: string; rowName: string; pressed: boolean }>();
   const seedFailures = new Map<SeedId, string>();
   let presses = 0;
-  let opened = false;
+  let opened = options.signedIn === true;
 
   const idOf = (control: PanelControl): string | undefined => {
     const source = options.inventory.find((entry) => entry.sourceLabel === control.rowName)?.sourceId;
