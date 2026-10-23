@@ -326,7 +326,11 @@ export function visualSection(results: readonly VisualResult[] | undefined): str
     const state = result.approvedRefresh ? 'approved change, refreshed' : result.updated ? 'candidate written' : c.status === 'match' ? 'matches' : c.status === 'missing' ? 'no approved picture' : c.status === 'size' ? 'size changed' : c.status === 'unreadable' ? 'unreadable' : 'differs';
     const bad = !result.updated && !result.approvedRefresh && c.status !== 'match';
     const open = bad ? ' open' : '';
-    const body = bad || result.updated || result.approvedRefresh
+    const change = result.change;
+    const body = (bad || result.updated || result.approvedRefresh) && change
+      ? `<p><strong>${escapeHtml(change.caption)}</strong></p><div class="trio">${cell(change.cropBaseline, 'Approved, zoomed on the change')}${cell(change.cropActual, 'This run, zoomed on the change')}</div>`
+        + `<div class="trio">${cell(change.baselineBoxed, 'Approved (change outlined)')}${cell(change.actualBoxed, 'This run (change outlined)')}${cell(result.diff, 'Difference')}</div>`
+      : bad || result.updated || result.approvedRefresh
       ? `<div class="trio">${cell(result.baseline, 'Approved')}${cell(result.actual, 'This run')}${cell(result.diff, 'Difference')}</div>`
       : `<div class="trio">${cell(result.actual, 'This run')}</div>`;
     return `<details${open}><summary><span class="badge ${bad ? 'fail' : result.updated || result.approvedRefresh ? 'warn' : 'pass'}">${escapeHtml(state.toUpperCase())}</span> ${escapeHtml(result.title)} · ${result.width} px · ${escapeHtml(result.theme)} <span class="muted">${(c.diffRatio * 100).toFixed(3)}% of pixels differ</span></summary>${body}</details>`;

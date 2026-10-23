@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
+import { findChange, outline, zoomCrop } from './visual-boxes.ts';
 import type { CheckResult } from './report.ts';
 
 import { MASK_SELECTORS_HIDDEN, SCREENS, screenName, type Screen } from './visual-capture.ts';
@@ -71,6 +72,8 @@ export interface VisualResult {
   diff?: string;
   /** The run wrote this picture as the new candidate reference. */
   updated?: boolean;
+  /** Where old and new differ: a sentence, the pictures with the changed region outlined, and zoomed crops of it (files relative to the run's folder). */
+  change?: { caption: string; baselineBoxed: string; actualBoxed: string; cropBaseline: string; cropActual: string };
   /** The picture differed, but the owner has approved a design change since the references were taken: the reference was refreshed. */
   approvedRefresh?: boolean;
 }
@@ -117,6 +120,25 @@ if (import.meta.main) console.log(currentApprovalDigest() ?? '');
  * writes what the report shows (the picture, the reference and the difference) under `outDir/visual`. With `update`, the pictures
  * become the candidate references in `baselinesDir`.
  */
+/** Writes the outlined pictures and the zoomed crops for one screen; undefined when either picture cannot be read or nothing differs beyond the pixel tolerance. */
+function describeChange(baseline: Buffer, actual: Buffer, outDir: string, name: string): NonNullable<VisualResult['change']> | undefined {
+  try {
+    const before = PNG.sync.read(baseline);
+    const after = PNG.sync.read(actual);
+    const change = findChange(before, after);
+    if (!change) return undefined;
+    const files = {
+      baselineBoxed: `visual/${name}.baseline.boxed.png`, actualBoxed: `visual/${name}.actual.boxed.png`,
+      cropBaseline: `visual/${name}.baseline.crop.png`, cropActual: `visual/${name}.actual.crop.png`,
+    };
+    writeFileSync(join(outDir, files.baselineBoxed), PNG.sync.write(outline(before, change.oldBoxes)));
+    writeFileSync(join(outDir, files.actualBoxed), PNG.sync.write(outline(after, change.newBoxes)));
+    writeFileSync(join(outDir, files.cropBaseline), PNG.sync.write(zoomCrop(before, change.oldBoxes)));
+    writeFileSync(join(outDir, files.cropActual), PNG.sync.write(zoomCrop(after, change.newBoxes)));
+    return { caption: change.caption, ...files };
+  } catch { return undefined; }
+}
+
 function isReadablePng(bytes: Buffer): boolean {
   try { PNG.sync.read(bytes); return true; } catch { return false; }
 }
@@ -145,6 +167,8 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
       const baselineCopy = `visual/${item.name}.baseline.png`;
       writeFileSync(join(input.outDir, baselineCopy), baseline);
       result.baseline = baselineCopy;
+      const change = describeChange(baseline, actual, input.outDir, item.name);
+      if (change) result.change = change;
     }
     if (diffPng) {
       const diffCopy = `visual/${item.name}.diff.png`;
