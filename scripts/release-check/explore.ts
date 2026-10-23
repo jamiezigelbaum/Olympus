@@ -63,6 +63,8 @@ export interface ExploreOptions {
   maxPresses?: number;
   /** Milliseconds the page may take to settle after a press. */
   settleMs?: number;
+  /** The accessibility checker's own script (axe-core's axe.min.js), injected into each frame. Without it the audit is skipped, and says so. */
+  axeSource?: string;
 }
 
 export type Missed = 'unreachable' | 'not shown' | 'disabled' | 'not pressed' | 'seed';
@@ -87,8 +89,18 @@ export interface ExploreResult {
   unlisted: Array<{ key: string; label: string; rowName: string; pressed: boolean }>;
   summary: { listed: number; found: number; pressed: number; missed: number; unlisted: number; presses: number };
   /** Why there is no accessibility audit, or its result. */
-  accessibility: { status: 'skipped'; reason: string };
+  accessibility: Accessibility;
 }
+
+export type AxeImpact = 'minor' | 'moderate' | 'serious' | 'critical';
+export interface AxeNode { target: string; html: string; summary: string }
+export interface AxeViolation { rule: string; impact: AxeImpact; help: string; helpUrl: string; nodeCount: number; nodes: AxeNode[] }
+/** One audited page state in one frame: the seeded page of a state, its host page or its framed panel. */
+export interface AccessibilityState { state: string; frame: 'host' | 'panel'; violations: AxeViolation[]; error?: string }
+export type Accessibility = { status: 'skipped'; reason: string } | { status: 'ran'; version: string; states: AccessibilityState[] };
+
+/** Serious and critical violations block; the rest are reported. */
+export const BLOCKING_IMPACTS: ReadonlySet<string> = new Set(['serious', 'critical']);
 
 const ALWAYS_ALLOWED_REQUESTS: RegExp[] = [/\/favicon\.ico(\?|$)/];
 const ALWAYS_ALLOWED_CONSOLE: RegExp[] = [/favicon/i];
@@ -203,6 +215,50 @@ export async function pageFindings(driver: JourneyDriver, controls?: PanelContro
 }
 
 // ---------------------------------------------------------------------------
+// Accessibility (axe-core)
+
+/** The page-side half of one axe run: it returns only what the report shows, so a large page does not send a large answer. */
+const AXE_CALL = String.raw`(async () => {
+  const run = await window.axe.run(document, { iframes: false, resultTypes: ['violations'] });
+  return {
+    version: window.axe.version,
+    violations: run.violations.map((v) => ({
+      rule: v.id, impact: v.impact || 'minor', help: v.help, helpUrl: v.helpUrl, nodeCount: v.nodes.length,
+      nodes: v.nodes.slice(0, 6).map((n) => ({ target: n.target.map(String).join(' '), html: String(n.html || '').slice(0, 200), summary: String(n.failureSummary || '').split('\n').slice(1).join(' ').replace(/\s+/g, ' ').trim().slice(0, 300) })),
+    })),
+  };
+})()`;
+
+/**
+ * Audits the page as it stands, in the host page and in the framed panel, with axe-core. The checker's script is put into the frame
+ * once (a frame that already has it keeps it) and run over the frame's own document; the panel is a separate document, so it is
+ * audited by itself (`iframes: false`).
+ */
+export async function auditAccessibility(driver: JourneyDriver, axeSource: string, state: string): Promise<{ version: string; states: AccessibilityState[] }> {
+  const states: AccessibilityState[] = [];
+  let version = '';
+  const frames: Array<'host' | 'panel'> = (await driver.hasPanel().catch(() => false)) ? ['host', 'panel'] : ['host'];
+  for (const frame of frames) {
+    try {
+      await driver.probe(frame, `if (typeof window.axe === 'undefined') {\n${axeSource}\n}\n'loaded'`);
+      const got = await driver.probe(frame, AXE_CALL) as { version: string; violations: AxeViolation[] } | null;
+      if (!got || !Array.isArray(got.violations)) throw new Error('the checker returned nothing');
+      version = got.version || version;
+      states.push({ state, frame, violations: got.violations });
+    } catch (error) {
+      states.push({ state, frame, violations: [], error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200) });
+    }
+  }
+  return { version, states };
+}
+
+/** The violations that block, across every audited state, with where each is. */
+export function blockingViolations(accessibility: Accessibility): Array<AxeViolation & { state: string; frame: 'host' | 'panel' }> {
+  if (accessibility.status !== 'ran') return [];
+  return accessibility.states.flatMap((entry) => entry.violations.filter((violation) => BLOCKING_IMPACTS.has(violation.impact)).map((violation) => ({ ...violation, state: entry.state, frame: entry.frame })));
+}
+
+// ---------------------------------------------------------------------------
 // Pressing
 
 interface PressRecord {
@@ -230,6 +286,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const foundIds = new Map<string, { seeds: Set<SeedId>; pressed: boolean; disabled: boolean }>();
   const unlisted = new Map<string, { key: string; label: string; rowName: string; pressed: boolean }>();
   const seedFailures = new Map<SeedId, string>();
+  const axeStates: AccessibilityState[] = [];
+  let axeVersion = '';
   let totalPresses = 0;
   let opened = options.signedIn === true;
 
@@ -298,6 +356,13 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     const loadRequests = load.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)) && !(loadRefusal && REFUSAL_REQUESTS.some((rule) => rule.test(request.url))));
     const loadConsole = load.console.filter((message) => !ALWAYS_ALLOWED_CONSOLE.some((rule) => rule.test(message)) && !(/Failed to load resource/.test(message) && load.requests.length > 0));
     const base = await panelControls(driver);
+    // The accessibility audit of the page as seeded (before any press changes it).
+    if (options.axeSource) {
+      const audited = await auditAccessibility(driver, options.axeSource, seed.id);
+      axeVersion = audited.version || axeVersion;
+      axeStates.push(...audited.states);
+      driver.drainEvents();
+    }
     const steps: StepTrace[] = [];
     const baseFindings = [
       ...await pageFindings(driver, base),
@@ -520,7 +585,9 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   return {
     seeds, traces, coverage, unlisted: [...unlisted.values()],
     summary: { listed, found, pressed, missed: listed - pressed, unlisted: unlisted.size, presses: totalPresses },
-    accessibility: { status: 'skipped', reason: 'no accessibility checker (axe-core or similar) is installed in the repository or on the machine, and adding one is a dependency decision for the owner; the generic rules above cover names, reasons and overflow only' },
+    accessibility: options.axeSource
+      ? { status: 'ran', version: axeVersion, states: axeStates }
+      : { status: 'skipped', reason: 'the accessibility checker (axe-core) was not given to the explorer, so no audit ran; the generic rules above cover names, reasons and overflow only' },
   };
 }
 
@@ -555,6 +622,24 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
     status: s.missed === 0 ? 'pass' : 'warn',
     detail: `${s.listed} controls listed from the source; ${s.found} found on the page, ${s.pressed} pressed, ${s.missed} missed (reasons in the report); ${s.unlisted} found that the list does not name`,
   });
-  checks.push({ id: 'explore.accessibility', title: 'Accessibility audit of the Sources section', status: 'skip', detail: result.accessibility.reason });
+  checks.push(accessibilityCheck(result.accessibility));
   return checks;
+}
+
+/** Blocking for serious and critical violations (and for a page the checker could not audit); the lesser ones are in the detail and the report. */
+export function accessibilityCheck(accessibility: Accessibility): CheckResult {
+  const id = 'explore.accessibility';
+  const title = 'Accessibility audit (axe-core) of the dashboard pages as seeded';
+  if (accessibility.status === 'skipped') return { id, title, status: 'skip', detail: accessibility.reason };
+  const blocking = blockingViolations(accessibility);
+  const errors = accessibility.states.filter((entry) => entry.error);
+  const lesser = accessibility.states.reduce((sum, entry) => sum + entry.violations.filter((violation) => !BLOCKING_IMPACTS.has(violation.impact)).length, 0);
+  const where = (entry: { state: string; frame: string }): string => `${entry.state}/${entry.frame}`;
+  const lines = [
+    ...blocking.slice(0, 6).map((violation) => `${violation.rule} (${violation.impact}, ${where(violation)}): ${violation.nodeCount} element(s), e.g. ${violation.nodes[0]?.target ?? '?'}`),
+    ...errors.map((entry) => `could not audit ${where(entry)}: ${entry.error}`),
+  ];
+  const pages = accessibility.states.length;
+  if (lines.length === 0) return { id, title, status: 'pass', detail: `axe-core ${accessibility.version}: ${pages} page state(s) audited, no serious or critical violation${lesser > 0 ? `; ${lesser} lesser violation(s) reported` : ''}` };
+  return { id, title, status: 'fail', detail: `${lines.join(' | ')}${lesser > 0 ? ` | plus ${lesser} lesser violation(s) in the report` : ''}` };
 }
