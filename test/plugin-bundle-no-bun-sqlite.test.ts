@@ -18,6 +18,11 @@ const ROOT = join(import.meta.dir, '..');
 describe('plugin bundle', () => {
   test('dist/index.js carries no bun:sqlite import', () => {
     const bundle = readFileSync(join(ROOT, 'dist/index.js'), 'utf8');
-    expect(bundle.includes('bun:sqlite')).toBe(false);
+    // Any module-loading form fails under Node. The file lease's one
+    // runtime require is reached only behind a Bun check, so it is allowed,
+    // and only that exact gated form.
+    const uses = [...bundle.matchAll(/[\s\S]{0,160}bun:sqlite/g)].map((match) => match[0]);
+    expect(uses.every((use) => /typeof globalThis\.Bun !== "undefined"\) \{\s*const \{ Database \} = runtimeRequire\("bun:sqlite$/.test(use))).toBe(true);
+    expect(uses.length).toBeLessThanOrEqual(1);
   });
 });

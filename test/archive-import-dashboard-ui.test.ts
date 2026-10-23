@@ -404,7 +404,8 @@ describe('imports asked for', () => {
     });
     answer = dashboard('archives-none', meta([], []));
     again.button(A.decline).click();
-    await until(() => again.calls(ARCHIVE_DECLINE_TOOL_NAME).length > 0 && again.text().includes(A.declined));
+    await until(() => again.calls(ARCHIVE_DECLINE_TOOL_NAME).length > 0 && again.text().includes(A.declined)
+      && !again.text().includes(fill(A.requestLine, { name: REQUEST.name, where: REQUEST.where })));
     expect(again.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(again.text()).toContain(A.declined);
     expect(again.text()).not.toContain(fill(A.requestLine, { name: REQUEST.name, where: REQUEST.where }));

@@ -72,8 +72,8 @@ describe('writeConsultSettings: the happy path', () => {
     const read = readConsultSettings({ env });
     expect(read.state).toBe('valid');
     expect(read.settings.enabled).toBe(true);
-    // No temporary file or lock is left behind.
-    expect(readdirSync(join(home, '.olympus'))).toEqual(['consult.json']);
+    // No temporary file is left behind (the empty lock database persists by design).
+    expect(readdirSync(join(home, '.olympus')).filter((name) => !name.endsWith('.lock.db'))).toEqual(['consult.json']);
   });
 
   test('the level is always written, so the file never relies on the reader\'s default; an invalid level writes nothing', () => {
@@ -125,7 +125,7 @@ describe('writeConsultSettings: the happy path', () => {
     if (!failed.ok) expect(['write_failed', 'directory_custody']).toContain(failed.reason);
     expect(readFileSync(settingsFile(home), 'utf8')).toBe(before);
     // No temp file was left behind either.
-    expect(readdirSync(join(home, '.olympus')).filter((name) => name !== 'consult.json')).toEqual([]);
+    expect(readdirSync(join(home, '.olympus')).filter((name) => name !== 'consult.json' && !name.endsWith('.lock.db'))).toEqual([]);
   });
 
   test('a failure after the publish (the rename) is not "nothing changed": the file is read back and the new state reported', () => {
@@ -143,26 +143,6 @@ describe('writeConsultSettings: the happy path', () => {
     chmodSync(join(home, '.olympus'), 0o700);
     if (!before.ok) expect(['write_failed', 'directory_custody']).toContain(before.reason);
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: before.ok ? 3 : 2 } });
-  });
-
-  test('a lease release that throws after the publish is reported from the file, never as "nothing changed"', () => {
-    const home = tempHome();
-    const env = { HOME: home };
-    expect(writeConsultSettings(UPDATE, { env }).ok).toBe(true);
-    const lockPath = `${settingsFile(home)}.lock`;
-    // After the publish the lock file becomes a directory: the release's read
-    // of its own record throws (not ENOENT), and so does the release.
-    __consultSettingsWriterTestHooks.afterPublish = () => {
-      rmSync(lockPath, { force: true });
-      mkdirSync(lockPath);
-    };
-    const result = writeConsultSettings({ ...UPDATE, enabled: false, expectedRevision: 1 }, { env });
-    __consultSettingsWriterTestHooks.afterPublish = undefined;
-    rmSync(lockPath, { recursive: true, force: true });
-    expect(result).toMatchObject({ ok: true, publishedDespiteError: true, settings: { revision: 2, enabled: false } });
-    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false } });
-    // The next write works once the lock is gone.
-    expect(writeConsultSettings({ ...UPDATE, expectedRevision: 2 }, { env })).toMatchObject({ ok: true, settings: { revision: 3 } });
   });
 
   test('an explicit path wins over HOME, like the reader', () => {
