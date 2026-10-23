@@ -458,6 +458,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       // Errors the page logged, except a refusal the product makes on purpose.
       const refusal = seed.id === 'failed' || kind === 'confirm' || kind === 'delete-data';
       const requests = events.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)) && !(refusal && REFUSAL_REQUESTS.some((rule) => rule.test(request.url))));
+      // Requests the product is allowed to fail here are not defects, but they are shown (what failed and why), so they can be told from a page that was never touched.
+      const tolerated = events.requests.filter((request) => !requests.includes(request)).map((request) => `${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`);
       const consoleErrors = events.console.filter((message) => !ALWAYS_ALLOWED_CONSOLE.some((rule) => rule.test(message)) && !(/Failed to load resource/.test(message) && events.requests.length > 0));
       for (const message of consoleErrors) findings.push(`console error: ${message.slice(0, 200)}`);
       for (const request of requests) findings.push(`failed request: ${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`);
@@ -471,7 +473,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         n: steps.length + 1, name: `${control.rowName ? `${control.rowName}: ` : ''}${control.name || control.key}${item.path.length > 1 ? ` (after ${item.path.slice(0, -1).join(', ')})` : ''}`,
         action: `press ${control.tag} "${control.name}" [${control.key}] from the "${seed.id}" page`,
         expected: outcomes.length > 0 ? outcomes.map((outcome) => outcome.expected).join('; ') : 'something happens, and the generic rules hold',
-        actual: left ? `the press left the dashboard for ${at || 'another page'}` : outcomes.length > 0 ? outcomes.map((outcome) => outcome.actual).join('; ') : (changed ? 'the page changed' : 'nothing changed'),
+        actual: `${left ? `the press left the dashboard for ${at || 'another page'}` : outcomes.length > 0 ? outcomes.map((outcome) => outcome.actual).join('; ') : (changed ? 'the page changed' : 'nothing changed')}${tolerated.length > 0 ? `; allowed failures seen: ${tolerated.join(' | ').slice(0, 400)}` : ''}`,
         ok, ms: now() - started, at: at.replace(/token=[^&#]*/g, 'token=…'),
         consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests: requests.map((request) => `${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`), findings: [...new Set(findings)].slice(0, 10),
       };
