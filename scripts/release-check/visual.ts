@@ -129,7 +129,6 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
   // The references were taken under an earlier design approval than this build's: a changed look is then an approved change.
   const recorded = readApprovalDigest(input.baselinesDir);
   const approvedSince = input.approvalDigest !== undefined && recorded !== undefined && recorded !== input.approvalDigest;
-  let refreshed = false;
   for (const item of input.names) {
     const actualPath = join(input.actualDir, `${item.name}.png`);
     if (!existsSync(actualPath)) continue;
@@ -158,11 +157,13 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
     } else if (approvedSince && (comparison.status === 'different' || comparison.status === 'size') && isReadablePng(actual)) {
       writeFileSync(baselinePath, actual);
       result.approvedRefresh = true;
-      refreshed = true;
     }
     results.push(result);
   }
-  if (input.approvalDigest !== undefined && (input.update || refreshed)) writeFileSync(join(input.baselinesDir, APPROVAL_FILE), `${JSON.stringify({ approvalDigest: input.approvalDigest }, null, 2)}\n`);
+  // The newer approval is used up by one complete, clean comparison (every screen read and compared; none unreadable, missing or failing),
+  // even when no pixel changed; otherwise it would stay live and refresh a later, unapproved regression. An incomplete run leaves it.
+  const complete = results.length === input.names.length && results.every((result) => result.updated === true || result.approvedRefresh === true || result.comparison.status === 'match');
+  if (input.approvalDigest !== undefined && (input.update || (approvedSince && complete))) writeFileSync(join(input.baselinesDir, APPROVAL_FILE), `${JSON.stringify({ approvalDigest: input.approvalDigest }, null, 2)}\n`);
   return { results, baselinesDir: input.baselinesDir, update: input.update };
 }
 

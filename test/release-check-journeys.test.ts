@@ -345,6 +345,44 @@ describe('visual baselines', () => {
     }
   });
 
+  test('a newer approval is recorded after a complete clean comparison even if nothing changed, and an incomplete or broken run leaves it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-visual-'));
+    try {
+      const actualDir = join(dir, 'actual');
+      const baselinesDir = join(dir, 'baselines');
+      const outDir = join(dir, 'out');
+      for (const folder of [actualDir, baselinesDir, outDir]) mkdirSync(folder, { recursive: true });
+      const names = [SCREENS[0]!, SCREENS[1]!].map((screen) => ({ name: screenName(screen.id, 1280, 'light'), screen, width: 1280, theme: 'light' }));
+      const recorded = (): string => JSON.parse(readFileSync(join(baselinesDir, APPROVAL_FILE), 'utf8')).approvalDigest;
+      const setUp = (): void => {
+        for (const item of names) { writeFileSync(join(actualDir, `${item.name}.png`), base); writeFileSync(join(baselinesDir, `${item.name}.png`), base); }
+        writeFileSync(join(baselinesDir, APPROVAL_FILE), JSON.stringify({ approvalDigest: 'old' }));
+      };
+      const look = (): ReturnType<typeof compareScreens> => compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names });
+
+      setUp();
+      look(); // every screen still matches
+      expect(recorded()).toBe('new');
+
+      setUp();
+      rmSync(join(actualDir, `${names[1]!.name}.png`)); // a screen did not come back
+      look();
+      expect(recorded()).toBe('old');
+
+      setUp();
+      writeFileSync(join(actualDir, `${names[1]!.name}.png`), base.subarray(0, 40)); // unreadable
+      look();
+      expect(recorded()).toBe('old');
+
+      setUp();
+      rmSync(join(baselinesDir, `${names[1]!.name}.png`)); // no reference
+      look();
+      expect(recorded()).toBe('old');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('the Inbox mask hides what varies with the run and keeps the intro paragraph', () => {
     const window = new Window({ url: 'http://127.0.0.1/' });
     window.document.body.innerHTML = '<section class="pasection" aria-labelledby="waiting"><h3 id="waiting">Inbox</h3><p class="pnote" data-pa-none>none</p><p class="pnote" id="intro">Intro</p><ul data-pa-list><li>row</li></ul><div class="pbuttons"><button>Delete all</button></div><p data-pa-older-removed>older</p></section>';
