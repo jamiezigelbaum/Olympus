@@ -27,6 +27,7 @@ import { OperationError, type OperationErrorCode } from '../../core/operation-er
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
+import { archiveFormatForProvider } from '../../core/archive-formats.ts';
 import type {
   TranscriptionModelView,
   ChatGptDeleteSourceId,
@@ -942,6 +943,9 @@ function citationLine(citation: ChatGptCitation): string {
 /** The product's own name for a provider; unknown providers are not cited. */
 function sourceLabel(provider: unknown, family: unknown): string | undefined {
   if (typeof provider !== 'string') return undefined;
+  // An imported archive's items are named by their format ("Imported mail"), not by the Archives row.
+  const imported = archiveFormatForProvider(provider)?.citationLabel;
+  if (imported) return imported;
   const definition = DASHBOARD_SUPPORTED_SOURCES.find((candidate) => candidate.provider === provider)
     ?? DASHBOARD_SUPPORTED_SOURCES.find((candidate) => candidate.source_id.split('.')[0] === provider);
   if (definition && definition.family !== 'model') return definition.label;

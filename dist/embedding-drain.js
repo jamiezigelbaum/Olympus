@@ -881,6 +881,7 @@ var init_public_surface = __esm(() => {
     "google_drive.docs",
     "dropbox.files",
     "local.files",
+    "archive.imports",
     "x.bookmarks",
     "telegram.messages",
     "whatsapp.personal.messages",
@@ -31890,6 +31891,17 @@ var init_public_source_capabilities = __esm(() => {
       supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"]
     },
     {
+      source_id: "archive.imports",
+      label: "Archives",
+      authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      dependencies: [
+        { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
+      ],
+      provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+    },
+    {
       source_id: "x.bookmarks",
       label: "X bookmarks",
       authentication: { type: "oauth2", ownership: "user-owned X developer application and API plan" },
@@ -32036,7 +32048,7 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -32316,6 +32328,137 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  DASHBOARD_ARCHIVE_COPY = {
+    importAction: "Import an archive",
+    pick: {
+      back: "Back to Olympus",
+      title: "Import an archive",
+      intro: "Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.",
+      source: "This computer",
+      makePrivate: "Import",
+      makePrivateFor: "Import {name}",
+      alreadyPrivate: "Imported",
+      busy: "Starting…",
+      chooseAnother: "Choose another"
+    },
+    listLabel: "Imported archives",
+    status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
+    dates: "{earliest} to {latest}",
+    items: { one: "1 message", many: "{n} messages" },
+    importingLine: "{percent}% read · {items} so far",
+    importingLineUncounted: "{percent}% read",
+    importedLine: "{items} · imported {when}",
+    importedLineNoTime: "{items}",
+    removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
+    notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
+    notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
+    removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    judgedLine: "{judged} judged · {held} waiting for the private model",
+    heldWhy: {
+      ready: "Until the private model judges them, they stay Private.",
+      waiting: "They stay Private until the private model judges them, and it is not answering right now.",
+      off: "No private model is set up, so they stay Private and are not judged."
+    },
+    setUpPrivateModel: "Set up the private model",
+    countsUnavailable: {
+      why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
+      fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
+    },
+    notRunning: {
+      why: {
+        disabled: "Background syncing is turned off in Olympus's settings, so imports can't run.",
+        not_selected: "Background syncing in Olympus's settings leaves out archives, so imports can't run."
+      },
+      fix: {
+        disabled: "The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it. Each import and removal goes on from where it is.",
+        not_selected: "The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it. Each import and removal goes on from where it is."
+      }
+    },
+    removeNotRunning: {
+      disabled: "Remove can't run while background syncing is turned off.",
+      not_selected: "Remove can't run while background syncing leaves out archives."
+    },
+    stopped: {
+      file_changed: { why: "{file} changed after the import started.", fix: "Remove this archive, then import the file again once it has stopped changing." },
+      file_missing: { why: "{file} is no longer where it was.", fix: "Remove this archive, then import it again from where it is now." },
+      file_unreadable: { why: "Olympus could not read {file}.", fix: "Check that your user account can open it, then remove this archive and import it again." },
+      resume_point_invalid: { why: "Olympus lost its place in this archive.", fix: "Remove this archive and import it again." },
+      format_unavailable: { why: "This version of Olympus cannot read this kind of archive.", fix: "Update Olympus, or remove this archive." },
+      root_changed: { why: "The folder it was in was moved or replaced.", fix: "Remove this archive, then import it again from where it is now." },
+      other: { why: "The import stopped.", fix: "Remove this archive and import it again." }
+    },
+    thisFile: "A file of this archive",
+    gaps: {
+      message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
+      message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
+      charset_not_decoded: { one: "1 message in a character set Olympus could not read", many: "{n} messages in a character set Olympus could not read" },
+      attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
+      text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
+      spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      other: { one: "1 item not read fully", many: "{n} items not read fully" }
+    },
+    seeWhy: "See what was not read",
+    gapInFile: "{file}: {gap}",
+    remove: "Remove",
+    removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
+    requestLine: "An agent asked to import {name} from {where}.",
+    approve: "Import",
+    decline: "Decline",
+    checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
+    cancel: "Cancel",
+    cancelled: "Cancelled. {name} was not imported.",
+    alreadyLine: "{name} is already imported as {archive}.",
+    alreadyLineUnnamed: "{name} is already imported.",
+    failedLine: "{name} was not imported: {reason}",
+    failed: {
+      not_found: "it is no longer there.",
+      permission_denied: "your user account is not allowed to open it.",
+      changed: "it changed while Olympus was reading it.",
+      unreadable: "Olympus could not read it.",
+      unsupported: "Olympus does not import this kind of file.",
+      ambiguous: "Olympus could not tell which kind of export it is.",
+      replaced: "it was moved, replaced or changed after you chose it."
+    },
+    tryAgain: "Try again",
+    dismiss: "Dismiss",
+    started: "Importing {name}. It shows under Archives as it is read.",
+    checking: "Checking whether {name} is already imported…",
+    already: "{name} is already imported as {archive}.",
+    alreadyUnnamed: "{name} is already imported.",
+    removing: "Removing {name}.",
+    declined: "Declined.",
+    needsYou: {
+      stopped: "An import stopped: {name}",
+      request: "An agent asked to import {name}",
+      failed: "An import did not start: {name}",
+      counts: "Olympus can't count the messages in {name}",
+      scheduler: {
+        disabled: "Imports can't run: background syncing is turned off",
+        not_selected: "Imports can't run: background syncing leaves out archives"
+      },
+      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      unreadable: "Olympus can't read its list of imported archives",
+      seeWhy: "See why",
+      review: "Review",
+      setUp: "Set up the private model",
+      check: "Check the private model"
+    },
+    unreadable: {
+      why: {
+        damaged: "{file} is damaged, so Olympus cannot tell which archives it imported.",
+        unknown_form: "{file} was written by a newer version of Olympus, or it is damaged.",
+        permission: "Your user account is not allowed to open {file}.",
+        other: "Olympus could not open {file}."
+      },
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      fix: {
+        damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
+        unknown_form: "Update Olympus, then open this page again.",
+        permission: "Check that your user account can open that file, then open this page again.",
+        other: "Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support."
+      }
+    }
+  };
   DASHBOARD_COMPUTER_PANEL_COPY = {
     section: "On this computer",
     onlyHere: "only here",
@@ -32329,7 +32472,8 @@ var init_vocabulary = __esm(() => {
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
     locked: "Open dashboard controls first",
     readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
-    indexFaster: DASHBOARD_INDEX_FASTER
+    indexFaster: DASHBOARD_INDEX_FASTER,
+    archives: DASHBOARD_ARCHIVE_COPY
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -32338,7 +32482,8 @@ var init_vocabulary = __esm(() => {
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
     deleteData: "Delete indexed data",
-    changeModels: "Change"
+    changeModels: "Change",
+    importArchive: DASHBOARD_ARCHIVE_COPY.importAction
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
     back: "Back to Olympus",
@@ -33561,7 +33706,8 @@ function allOpenTargets() {
     { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
   ];
 }
 function openTargetToken(target) {
@@ -33573,6 +33719,8 @@ function openTargetToken(target) {
     return `fix.${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return;
 }
 function openTargetTokenPattern() {
@@ -33590,7 +33738,7 @@ function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
 }
 function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
+  return target.kind === "unreadable" || target.kind === "archives";
 }
 function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
@@ -34141,7 +34289,7 @@ var init_source_watch = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -34161,7 +34309,11 @@ var init_dashboard_contract = __esm(() => {
     INDEX_FASTER_TOOL_NAME,
     UNPAIR_SOURCE_TOOL_NAME,
     OPEN_UNREADABLE_FILE_TOOL_NAME,
-    UNREADABLE_FILES_PAGE_TOOL_NAME
+    UNREADABLE_FILES_PAGE_TOOL_NAME,
+    ARCHIVE_BROWSE_TOOL_NAME,
+    ARCHIVE_APPROVE_TOOL_NAME,
+    ARCHIVE_DECLINE_TOOL_NAME,
+    ARCHIVE_REMOVE_TOOL_NAME
   ];
 });
 
@@ -34376,7 +34528,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool)))
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text2 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -34434,6 +34586,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         refresh();
         scheduleRefresh();
         state.notice = P.deleteDataDone;
+        redraw();
+        return;
+      }
+      if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool) && result && !result.isError) {
+        const said = archiveNotice(name, args, result);
+        refresh();
+        state.notice = said;
         redraw();
         return;
       }
@@ -34747,6 +34906,15 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     if (privacy && privacy.handles(fix)) {
       action = () => openPrivacy(key2);
+    } else if (fix.archiveImport === true && picker) {
+      action = () => startArchivePick(key2);
+    } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
+      action = () => focusArchive(String(fix.archiveFocus));
+    } else if (fix.archiveModels === true) {
+      action = () => {
+        state.open.models = true;
+        render("summary:models");
+      };
     } else if (picker && picker.handles(fix)) {
       action = () => {
         supersede();
@@ -34915,7 +35083,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     add(list, waiting);
     items.forEach((item, index) => {
       const key2 = "need:" + String(item.id || index);
-      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key2, "warn", true, itemSource(item)));
+      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(archiveNeedFix(item), key2, "warn", true, itemSource(item)));
       add(list, add(el("li", "row need"), body));
     });
     return add(section, list);
@@ -34953,6 +35121,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function sourceRow(source) {
     const id = String(source.id || source.label);
     const status = String(source.status || "");
+    const archives = archivesMeta(id);
     const item = sourceItem(source);
     const tone = item ? "warn" : config.statusTone[status] || "off";
     const row = el("li", item ? "row source need-row" : "row source");
@@ -34994,21 +35163,23 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null);
     if (why)
       add(main, why);
-    else if (state.landed && state.landed.id === id)
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)))
       row.className += " landed";
+    if (archives)
+      add(main, archiveList(archives));
     add(row, main);
     const controls = el("div", "source-actions");
     const context2 = { id, label: String(source.label || id) };
-    const fix = item && item.fix ? item.fix : source.primary;
+    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary);
     const isSync = (entry) => !!entry && entry.tool === config.syncTool;
     if (fix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
     const unpair = unpairEntry(id);
     if (unpair)
       menu.push(unpair);
@@ -35031,6 +35202,291 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(row, menuBox);
     }
     return row;
+  }
+  function archivesMeta(id) {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !meta.archives || typeof meta.archives !== "object")
+      return null;
+    const archives = meta.archives;
+    return archives.sourceId === id && Array.isArray(archives.archives) && Array.isArray(archives.requests) ? archives : null;
+  }
+  function archiveFix(archives, fix) {
+    return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction ? { label: fix.label, archiveImport: true } : fix;
+  }
+  function archiveNeedFix(item) {
+    const fix = item && item.fix;
+    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
+    const id = item && typeof item.id === "string" ? item.id : "";
+    if (!fix || typeof fix.label !== "string" || !meta || typeof meta !== "object")
+      return fix;
+    if (id === "archives:held")
+      return { label: fix.label, archiveModels: true };
+    if (id === "archives:unreadable" || id === "archives:scheduler" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0) {
+      return { label: fix.label, archiveFocus: id };
+    }
+    return fix;
+  }
+  function focusArchive(target) {
+    const meta = state.computerMeta && state.computerMeta.archives;
+    const sourceId = meta && typeof meta.sourceId === "string" ? meta.sourceId : "";
+    const rowWhy = target === "archives:unreadable" || target === "archives:scheduler";
+    if (rowWhy) {
+      if (!sourceId)
+        return;
+      state.open["why:" + sourceId] = true;
+      state.landed = { id: sourceId, until: Date.now() + H.landedMs };
+    } else
+      state.landed = { id: target, until: Date.now() + H.landedMs };
+    render(rowWhy ? "summary:why:" + sourceId : "");
+    const node = root.querySelector(".landed");
+    if (node && typeof node.scrollIntoView === "function")
+      node.scrollIntoView({ block: "center" });
+    const control = node ? node.querySelector("button, summary") : null;
+    if (control && typeof control.focus === "function")
+      control.focus();
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector(".landed");
+      if (shown)
+        shown.classList.remove("landed");
+    }, H.landedMs);
+  }
+  function archiveNeeds(meta) {
+    return Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && archiveNeedsPerson(entry)) || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && requestNeedsPerson(entry));
+  }
+  function archiveNeedsPerson(archive) {
+    return archive.status === "stopped" || archive.countsUnavailable === true && archive.status !== "removing";
+  }
+  function requestNeedsPerson(request2) {
+    return request2.status === "pending" && request2.origin === "agent" || request2.status === "failed";
+  }
+  function archiveLanded(own3, needsPerson) {
+    const landed = state.landed;
+    if (!landed)
+      return false;
+    const meta = state.computerMeta && state.computerMeta.archives;
+    return landed.id === own3 || needsPerson && !!meta && landed.id === meta.sourceId;
+  }
+  function archiveUnreadable(meta, id) {
+    const A = H.copy.archives;
+    const unreadable = meta.unreadable;
+    if (!unreadable || typeof unreadable !== "object")
+      return null;
+    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable.reason) ? String(unreadable.reason) : "other";
+    const file = typeof unreadable.file === "string" && unreadable.file ? unreadable.file : "";
+    const box = details("why:" + id, doc.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", fill2(A.unreadable.why[reason], { file: file || A.thisFile })), el("li", "", A.unreadable.kept), el("li", "", A.unreadable.fix[reason])));
+    return box;
+  }
+  function archiveSetting(meta) {
+    return meta && (meta.notRunning === "disabled" || meta.notRunning === "not_selected") ? String(meta.notRunning) : "";
+  }
+  function archiveNotRunning(meta, id) {
+    const A = H.copy.archives;
+    const setting = archiveSetting(meta);
+    if (!setting)
+      return null;
+    const box = details("why:" + id, doc.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", A.notRunning.why[setting]), el("li", "", A.notRunning.fix[setting])));
+    return box;
+  }
+  function archivesMoving() {
+    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
+    if (!meta || typeof meta !== "object")
+      return false;
+    return !archiveSetting(meta) && Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && entry.status === "checking");
+  }
+  function startArchivePick(key2) {
+    supersede();
+    state.notice = "";
+    state.confirming = "";
+    picker.pickArchive(H.copy.archives.pick, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2));
+  }
+  function archiveOutcome(outcome) {
+    const A = H.copy.archives;
+    const name = outcome && typeof outcome.name === "string" ? outcome.name : "";
+    if (!name)
+      return "";
+    const archive = typeof outcome.archiveName === "string" ? outcome.archiveName : typeof outcome.archive_name === "string" ? outcome.archive_name : "";
+    if (outcome.status === "checking")
+      return fill2(A.checking, { name });
+    if (outcome.status === "already_imported")
+      return archive ? fill2(A.already, { name, archive }) : fill2(A.alreadyUnnamed, { name });
+    return outcome.status === "started" ? fill2(A.started, { name }) : "";
+  }
+  function archiveNotice(name, args, result) {
+    const A = H.copy.archives;
+    const meta = state.computerMeta && state.computerMeta.archives;
+    if (name === H.archiveRemoveTool) {
+      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry) => entry && entry.id === (args && args.archive_id))[0] : null;
+      return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
+    }
+    if (name === H.archiveDeclineTool) {
+      const request2 = meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === (args && args.request_id))[0] : null;
+      if (request2 && request2.status === "checking" && typeof request2.name === "string")
+        return fill2(A.cancelled, { name: request2.name });
+      return request2 && request2.status === "pending" ? A.declined : "";
+    }
+    return archiveOutcome(result && result.structuredContent);
+  }
+  const ARCHIVE_STATUSES = ["importing", "imported", "stopped", "removing"];
+  const ARCHIVE_REQUEST_STATUSES = ["pending", "checking", "already_imported", "failed"];
+  function validArchive(entry) {
+    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_STATUSES.indexOf(entry.status) >= 0 && Array.isArray(entry.gaps) && Array.isArray(entry.skipped);
+  }
+  function validArchiveRequest(entry) {
+    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_REQUEST_STATUSES.indexOf(entry.status) >= 0;
+  }
+  function wholeCount(value) {
+    return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+  function messageCount(n) {
+    const A = H.copy.archives;
+    return fill2(n === 1 ? A.items.one : A.items.many, { n: count(n) });
+  }
+  function archiveList(meta) {
+    const A = H.copy.archives;
+    const requests = meta.requests.filter(validArchiveRequest);
+    const archives = meta.archives.filter(validArchive);
+    if (!requests.length && !archives.length)
+      return null;
+    const list = el("ul", "archives");
+    list.setAttribute("aria-label", A.listLabel);
+    for (const request2 of requests)
+      add(list, archiveRequestItem(request2));
+    for (const archive of archives)
+      add(list, archiveItem(archive, String(meta.privateModel || ""), archiveSetting(meta)));
+    return list;
+  }
+  function archiveRequestItem(request2) {
+    const A = H.copy.archives;
+    const item = el("li", "archive request");
+    item.setAttribute("data-request", String(request2.status));
+    if (archiveLanded("archive-request:" + request2.id, requestNeedsPerson(request2)))
+      item.className += " landed";
+    const key2 = "archive-request:" + request2.id;
+    const where = typeof request2.where === "string" ? request2.where : "";
+    if (request2.status === "pending") {
+      add(item, el("p", "", fill2(A.requestLine, { name: request2.name, where })));
+      add(item, add(el("div", "archive-actions"), fixControl({ label: A.approve, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":approve", "plain", false), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
+      return item;
+    }
+    if (request2.status === "checking") {
+      const line = el("p", "muted", fill2(A.checkingLine, { name: request2.name }));
+      line.setAttribute("role", "status");
+      return add(item, line, add(el("div", "archive-actions"), fixControl({ label: A.cancel, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":cancel", "plain", false)));
+    }
+    const archive = typeof request2.archiveName === "string" ? request2.archiveName : "";
+    const failed = request2.status === "failed";
+    const sentence = !failed ? archive ? fill2(A.alreadyLine, { name: request2.name, archive }) : fill2(A.alreadyLineUnnamed, { name: request2.name }) : fill2(A.failedLine, { name: request2.name, reason: A.failed[String(request2.code)] || A.failed.unreadable });
+    add(item, el("p", failed ? "reason strong" : "", sentence));
+    const actions = el("div", "archive-actions");
+    if (failed)
+      add(actions, fixControl({ label: A.tryAgain, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":retry", "plain", false));
+    return add(item, add(actions, fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":dismiss", "plain", false)));
+  }
+  function archiveItem(archive, model, setting) {
+    const A = H.copy.archives;
+    const item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
+    item.setAttribute("data-archive", archive.status);
+    if (archiveLanded("archive:" + archive.id, archiveNeedsPerson(archive)))
+      item.className += " landed";
+    const halted = !!setting && (archive.status === "importing" || archive.status === "removing");
+    if (halted)
+      item.setAttribute("data-not-running", setting);
+    add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", halted ? A.status.notRunning : A.status[archive.status])));
+    const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
+    const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
+    const latest = typeof archive.latest === "string" ? archive.latest : "";
+    if (earliest && latest)
+      facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill2(A.dates, { earliest, latest })));
+    if (facts.length) {
+      const line = el("p", "muted archive-facts");
+      facts.forEach((fact, index) => {
+        if (index)
+          add(line, doc.createTextNode(" · "));
+        add(line, fact);
+      });
+      add(item, line);
+    }
+    const items = wholeCount(archive.items);
+    const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
+    if (halted && archive.status === "importing") {
+      const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+      add(item, el("p", "muted", uncounted ? fill2(A.notRunningLineUncounted, { percent: percent(pct) }) : fill2(A.notRunningLine, { percent: percent(pct), items: messageCount(items) })));
+    } else if (halted) {
+      add(item, el("p", "muted", A.removingNotRunningLine));
+    } else if (archive.status === "importing") {
+      const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+      const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
+    } else if (archive.status === "imported") {
+      const when = typeof archive.importedAt === "string" ? ago(archive.importedAt) : "";
+      if (!uncounted)
+        add(item, el("p", "muted", when ? fill2(A.importedLine, { items: messageCount(items), when }) : fill2(A.importedLineNoTime, { items: messageCount(items) })));
+    } else if (archive.status === "removing") {
+      const line = el("p", "muted", A.removingLine);
+      line.setAttribute("role", "status");
+      add(item, line);
+    } else {
+      const stop = archive.stop && typeof archive.stop === "object" ? archive.stop : {};
+      const words2 = A.stopped[String(stop.code)] || A.stopped.other;
+      const file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
+      add(item, el("p", "reason strong", fill2(words2.why, { file })), el("p", "muted", words2.fix));
+    }
+    if (uncounted)
+      add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
+    else if (archive.status !== "removing" && items > 0)
+      add(item, archiveHeld(archive, model));
+    const why = archiveWhy(archive);
+    if (why)
+      add(item, why);
+    if (archive.status !== "removing") {
+      add(item, add(el("div", "archive-actions"), fixControl({
+        label: A.remove,
+        tool: H.archiveRemoveTool,
+        args: { archive_id: archive.id },
+        destructive: true,
+        confirmText: fill2(A.removeConfirm, { name: archive.name }),
+        ...setting ? { disabledReason: A.removeNotRunning[setting] } : {}
+      }, "archive-remove:" + archive.id, "plain", true)));
+    }
+    return item;
+  }
+  function archiveHeld(archive, model) {
+    const A = H.copy.archives;
+    const held = wholeCount(archive.held);
+    const block = el("div", "archive-held");
+    add(block, el("p", "muted", fill2(A.judgedLine, { judged: count(wholeCount(archive.judged)), held: count(held) })));
+    if (!held)
+      return block;
+    const level = model === "ready" || model === "off" ? model : "waiting";
+    add(block, el("p", "muted", A.heldWhy[level]));
+    if (level !== "ready") {
+      add(block, add(el("div", "archive-actions"), button(A.setUpPrivateModel, "archive-models:" + archive.id, () => {
+        state.open.models = true;
+        render("summary:models");
+      }, "plain")));
+    }
+    return block;
+  }
+  function archiveWhy(archive) {
+    const A = H.copy.archives;
+    const kinds = A.gaps;
+    const lines = archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => {
+      const words2 = kinds[entry.kind] || kinds.other;
+      const n = wholeCount(entry.count);
+      const gap = fill2(n === 1 ? words2.one : words2.many, { n: count(n) });
+      return el("li", "", typeof entry.file === "string" && entry.file ? fill2(A.gapInFile, { file: entry.file, gap }) : gap);
+    });
+    if (!lines.length)
+      return null;
+    const box = details("archive-why:" + archive.id, doc.createTextNode(A.seeWhy), "why");
+    return add(box, add(el("ul", "plain"), ...lines));
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
@@ -35818,6 +36274,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return true;
     if (data2.progress && !data2.progress.stalled && !progressFinished(data2.progress))
       return true;
+    if (archivesMoving())
+      return true;
     return !!data2.models && !!data2.models.embedding && installLines(data2.models).some((entry) => entry.state !== "failed");
   }
   function deletePending() {
@@ -36460,6 +36918,58 @@ function chatgptPickerProgram(kit) {
       kit.fullscreen();
     openScope(sourceId, sourceLabel, words2.title, "", "", undefined, { words: words2, taken: taken.slice(), done });
   }
+  function pickArchive(words2, done) {
+    stopTimer();
+    session++;
+    if (kit.compact())
+      kit.fullscreen();
+    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done } });
+  }
+  function archiveMode() {
+    return !!p && !!p.pick && !!p.pick.archive;
+  }
+  function errorSentence(result) {
+    const parts = result && Array.isArray(result.content) ? result.content : [];
+    const text2 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text2 ? String(text2.text) : "";
+  }
+  function approveArchive(key2, name) {
+    if (!archiveMode() || p.loading || p.saving)
+      return;
+    p.saving = true;
+    p.savingKey = key2;
+    p.saveError = "";
+    p.saveAccess = null;
+    kit.render("picker:pick:" + key2);
+    const mine = session;
+    const refused = (text2, access) => {
+      if (mine !== session || !p)
+        return;
+      p.saving = false;
+      p.savingKey = "";
+      p.saveError = text2 || Q.loadFailed;
+      p.saveAccess = access && typeof access.message === "string" && access.message ? access : null;
+      kit.render("picker:archive-error");
+    };
+    kit.call(T.archiveApprove, { key: key2 }).then((result) => {
+      if (mine !== session || !p)
+        return;
+      const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+      const status = content ? content.status : "";
+      if (!result || result.isError || status !== "started" && status !== "checking" && status !== "already_imported") {
+        refused(errorSentence(result), content ? content.access : null);
+        return;
+      }
+      const done = p.pick.archive.done;
+      const picked = { name: typeof content.name === "string" && content.name ? content.name : name, status };
+      if (typeof content.archive_name === "string" && content.archive_name)
+        picked.archiveName = content.archive_name;
+      stopTimer();
+      p = null;
+      session++;
+      done(picked);
+    }, () => refused("", null));
+  }
   function openScope(id, label, title, returnKey, notice, initial, pick) {
     stopTimer();
     session++;
@@ -36481,6 +36991,8 @@ function chatgptPickerProgram(kit) {
       saving: false,
       saveError: "",
       discarding: false,
+      savingKey: "",
+      saveAccess: null,
       roots: [],
       rootCursor: "",
       branches: new Map,
@@ -36532,6 +37044,9 @@ function chatgptPickerProgram(kit) {
   function validBrowse(page2) {
     return !!page2 && typeof page2 === "object" && typeof page2.account_generation === "string" && !!page2.account_generation && typeof page2.scope_revision === "string" && !!page2.scope_revision && Array.isArray(page2.nodes) && page2.nodes.every(validNode);
   }
+  function validArchiveBrowse(page2) {
+    return !!page2 && typeof page2 === "object" && Array.isArray(page2.nodes) && page2.nodes.every(validNode);
+  }
   function failLoad(retry, focus) {
     p.loading = "";
     p.error = Q.loadFailed;
@@ -36540,10 +37055,11 @@ function chatgptPickerProgram(kit) {
   }
   function list(parentKey, append, after) {
     const cursor = append ? parentKey ? p.cursors.get(parentKey) : p.rootCursor : "";
-    const args = { source_id: p.id };
+    const archive = archiveMode();
+    const args = archive ? {} : { source_id: p.id };
     if (parentKey)
       args.parent_key = parentKey;
-    if (parentKey && (p.ancestors.get(parentKey) || []).length)
+    if (!archive && parentKey && (p.ancestors.get(parentKey) || []).length)
       args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
     if (cursor)
       args.cursor = cursor;
@@ -36552,11 +37068,11 @@ function chatgptPickerProgram(kit) {
     const focus = append ? "picker:more:" + parentKey : p.loaded ? "" : "picker:back";
     kit.render(focus);
     const mine = session;
-    kit.call(T.scopeList, args).then((result) => {
+    kit.call(archive ? T.archiveBrowse : T.scopeList, args).then((result) => {
       if (mine !== session || !p)
         return;
       const page2 = scopeData(result);
-      if (!validBrowse(page2)) {
+      if (!(archive ? validArchiveBrowse(page2) : validBrowse(page2))) {
         failLoad(() => list(parentKey, append, after), "picker:retry");
         return;
       }
@@ -37069,6 +37585,14 @@ function chatgptPickerProgram(kit) {
   }
   function pickButton(key2, name, focusKey) {
     const words2 = p.pick.words;
+    if (archiveMode()) {
+      const busy = p.saving && p.savingKey === key2;
+      const control2 = kit.button(busy ? words2.busy : words2.makePrivate, focusKey, p.loading || p.saving ? null : () => approveArchive(key2, name), "plain");
+      if (busy)
+        control2.setAttribute("aria-busy", "true");
+      control2.setAttribute("aria-label", fill2(words2.makePrivateFor, { name }));
+      return control2;
+    }
     if (p.pick.taken.indexOf(key2) >= 0)
       return kit.button(words2.alreadyPrivate, focusKey, null, "plain");
     const control = kit.button(words2.makePrivate, focusKey, p.loading ? null : () => leave("", false, { key: key2, name }), "plain");
@@ -37078,11 +37602,18 @@ function chatgptPickerProgram(kit) {
   function pickRow(node) {
     const key2 = node.key;
     const li = el("li", "frow pick");
+    const label = (target) => {
+      if (archiveMode())
+        nameParts(target, node.name, "", node);
+      else
+        add(target, el("span", "fname-text", node.name));
+      return target;
+    };
     if (node.has_children) {
       const open3 = el("button", "fname");
       open3.type = "button";
       open3.setAttribute("data-key", "picker:open:" + key2);
-      add(open3, el("span", "fname-text", node.name));
+      label(open3);
       const chevron = el("span", "chev", "›");
       chevron.setAttribute("aria-hidden", "true");
       add(open3, chevron);
@@ -37092,7 +37623,7 @@ function chatgptPickerProgram(kit) {
         open3.addEventListener("click", () => drill(key2));
       add(li, open3);
     } else
-      add(li, add(el("p", "fname leaf"), el("span", "fname-text", node.name)));
+      add(li, label(el("p", "fname leaf")));
     if (node.selectable !== false)
       add(li, pickButton(key2, node.name, "picker:pick:" + key2));
     return li;
@@ -37276,6 +37807,18 @@ function chatgptPickerProgram(kit) {
       error.setAttribute("role", "alert");
       add(error, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
       add(body, error);
+    }
+    if (archiveMode() && p.saveError) {
+      const error = el("div", "banner");
+      error.setAttribute("role", "alert");
+      add(error, add(el("div", "banner-body"), el("p", "", p.saveError), add(el("div", "actions"), kit.button(p.pick.words.chooseAnother, "picker:archive-error", () => {
+        p.saveError = "";
+        p.saveAccess = null;
+        kit.render(p.path.length ? "picker:up" : "picker:back");
+      }, "plain"))));
+      add(body, error);
+      if (p.saveAccess)
+        add(body, accessNote(p.saveAccess, null));
     }
   }
   function folderFooter() {
@@ -37633,6 +38176,7 @@ function chatgptPickerProgram(kit) {
     handles,
     start,
     pickFolder,
+    pickArchive,
     active: () => !!p,
     view,
     afterRender: () => {
@@ -37646,7 +38190,9 @@ var init_picker = __esm(() => {
   CHATGPT_PICKER_TOOLS = {
     connectSource: CONNECT_SOURCE_TOOL_NAME,
     scopeList: SCOPE_LIST_TOOL_NAME,
-    scopeSet: SCOPE_SET_TOOL_NAME
+    scopeSet: SCOPE_SET_TOOL_NAME,
+    archiveBrowse: ARCHIVE_BROWSE_TOOL_NAME,
+    archiveApprove: ARCHIVE_APPROVE_TOOL_NAME
   };
   CHATGPT_PICKER_MAIL_ARGS = { list: "draft", set: "mail" };
   CHATGPT_SCOPE_META_KEY = SCOPE_UI_META_KEY;
@@ -38443,6 +38989,9 @@ function chatgptDashboardPageHtml(options = {}) {
       unpairTool: UNPAIR_SOURCE_TOOL_NAME,
       unreadableOpenTool: OPEN_UNREADABLE_FILE_TOOL_NAME,
       unreadablePageTool: UNREADABLE_FILES_PAGE_TOOL_NAME,
+      archiveApproveTool: ARCHIVE_APPROVE_TOOL_NAME,
+      archiveDeclineTool: ARCHIVE_DECLINE_TOOL_NAME,
+      archiveRemoveTool: ARCHIVE_REMOVE_TOOL_NAME,
       landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
@@ -38636,6 +39185,19 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
 .why .files li{overflow-wrap:anywhere}
 .why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--accent);text-align:left}
+.why-head{margin-top:0.5rem;font-size:0.875rem;font-weight:600}
+.archives{list-style:none;margin:0.5rem 0 0;padding:0}
+.archive{padding:0.625rem 0;border-top:1px solid var(--line)}
+.archive>p+p,.archive>p+div,.archive>div+p,.archive>div+div,.archive>div+details,.archive>p+details{margin-top:0.25rem}
+.archive-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.archive-name{font-weight:600;min-width:0;overflow-wrap:anywhere}
+.archive-facts{overflow-wrap:anywhere}
+.archive-dates{white-space:nowrap}
+.archive.stopped .ftag{color:var(--text);border-color:var(--warn)}
+.archive-progress{display:flex;flex-direction:column;gap:0.25rem}
+.archive-progress .bar{height:0.375rem}
+.archive-held>p+p{margin-top:0.125rem}
+.archive-actions{display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.5rem}
 .landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
 @keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
@@ -38864,6 +39426,7 @@ var init_archive_formats = __esm(() => {
     label: "Mail (mbox)",
     family: "email",
     provider: "mbox",
+    citationLabel: "Imported mail",
     detect(probe) {
       if (probe.chosen.kind === "file")
         return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
@@ -38878,6 +39441,9 @@ var init_archive_formats = __esm(() => {
 });
 
 // src/workers/archive-import/store.ts
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
   init_archive_formats();
@@ -38892,7 +39458,7 @@ var init_store2 = __esm(() => {
 });
 
 // src/workers/source-ingestion-ledger.ts
-var SAMPLE_RETENTION_MS2, corpusPopulations;
+var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
   init_config();
   init_source_corpus_registry();
@@ -38912,6 +39478,62 @@ var init_source_ingestion_ledger = __esm(() => {
   init_store();
   init_archive_formats();
   init_store2();
+  SOURCE_DEFINITIONS = {
+    email: {
+      label: "Email",
+      primaryCorpusId: "secure_local.email.private",
+      family: "email",
+      corpusSourceIds: ["gmail.email"]
+    },
+    google_drive: {
+      label: "Google Drive",
+      primaryCorpusId: "internal.drive.docs",
+      family: "file",
+      corpusSourceIds: ["google_drive.docs"]
+    },
+    telegram: {
+      label: "Telegram",
+      primaryCorpusId: "internal.telegram.messages",
+      family: "chat",
+      corpusSourceIds: ["telegram.messages"]
+    },
+    readwise: {
+      label: "Readwise",
+      primaryCorpusId: "internal.readwise.library",
+      family: "readwise",
+      corpusSourceIds: ["readwise.library"]
+    },
+    x: {
+      label: "X bookmarks",
+      primaryCorpusId: "internal.x.bookmarks",
+      family: "x",
+      corpusSourceIds: ["x.bookmarks"]
+    },
+    dropbox: {
+      label: "Dropbox",
+      primaryCorpusId: "secure_local.dropbox.files",
+      family: "file",
+      corpusSourceIds: ["dropbox.files"]
+    },
+    whatsapp: {
+      label: "WhatsApp",
+      primaryCorpusId: "secure_local.whatsapp.messages",
+      family: "chat",
+      corpusSourceIds: ["whatsapp.personal.messages"]
+    },
+    local_files: {
+      label: "Files on this computer",
+      primaryCorpusId: "secure_local.local.files",
+      family: "file",
+      corpusSourceIds: ["local.files"]
+    },
+    archive_imports: {
+      label: "Archives",
+      primaryCorpusId: archiveCorpusId("secure_local", "email"),
+      family: "email",
+      corpusSourceIds: ["archive.imports"]
+    }
+  };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
   corpusPopulations = new WeakMap;
 });
@@ -42023,6 +42645,25 @@ init_atomic_file();
 init_file_lease();
 init_linux_engine_layout();
 
+// src/workers/archive-import/requests.ts
+init_atomic_file();
+init_file_lease();
+
+// src/workers/archive-import/manifest.ts
+init_archive_formats();
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire2 = createRequire4(import.meta.url);
+var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+
+// src/workers/archive-import/requests.ts
+var STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
+
 // src/data-lifecycle.ts
 init_google_connectors();
 init_telegram_messages();
@@ -42231,11 +42872,6 @@ var SOURCE_CODE_EXTENSIONS = new Set([
   "conf",
   "env"
 ]);
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire2 = createRequire4(import.meta.url);
-var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 
 // src/workers/local-files/locations.ts
 init_paths();
@@ -43896,12 +44532,14 @@ var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
 // src/workers/archive-import/start.ts
 init_archive_formats();
 
-// src/workers/archive-import/manifest.ts
-init_archive_formats();
-var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
-var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
-
 // src/workers/archive-import/runtime.ts
+init_store2();
+
+// src/workers/archive-import/dashboard.ts
+init_archive_formats();
+
+// src/workers/archive-import/removal.ts
+init_sniffer_store();
 init_store2();
 
 // src/workers/email-source/server.ts
@@ -43909,10 +44547,6 @@ init_store2();
 
 // src/workers/archive-import/scheduler-source.ts
 init_embeddings();
-
-// src/workers/archive-import/removal.ts
-init_sniffer_store();
-init_store2();
 
 // src/workers/archive-import/sync.ts
 init_archive_formats();
@@ -44496,7 +45130,7 @@ function ancestorScopePaths(scopePath) {
   }
   return out;
 }
-function createLocalFilesFolderScopeBrowser(options = {}) {
+function localFilesListing(options, mode) {
   const volumes = options.volumes ?? new VolumeResolver;
   const home = safeRealpath(options.home ?? options.context?.home ?? homedir22());
   const context2 = options.context ?? {
@@ -44510,7 +45144,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
     memoryPath: join36(olympusDataDir(), "local-files", "folder-access.json")
   });
   const node = (scopePath, name, parentKey, access) => {
-    const reason = defaultExclusionForFolder(scopePath, context2);
+    const reason = mode === "folders" ? defaultExclusionForFolder(scopePath, context2) : undefined;
     return {
       key: scopePath,
       ...parentKey !== undefined ? { parent_key: parentKey } : {},
@@ -44522,6 +45156,14 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       ...access ? { access } : {}
     };
   };
+  const fileNode = (scopePath, name, parentKey) => ({
+    key: scopePath,
+    ...parentKey !== undefined ? { parent_key: parentKey } : {},
+    name: name.normalize("NFC"),
+    kind: "file",
+    has_children: false,
+    selectable: true
+  });
   const childFolders = (realPath, parentKey) => {
     let entries;
     try {
@@ -44541,8 +45183,11 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
     }
-    return entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => {
+    const offered = (entry) => !entry.isSymbolicLink() && (entry.isDirectory() || mode === "archive" && entry.isFile() && !entry.name.startsWith("."));
+    return entries.filter(offered).map((entry) => {
       const childReal = join36(realPath, entry.name);
+      if (!entry.isDirectory())
+        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
       return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
@@ -44554,59 +45199,79 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
     });
   };
+  const browse = async (request) => {
+    const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
+    const cursorScope = mode === "archive" ? ARCHIVE_CURSOR_SCOPE : LOCAL_FILES_SOURCE_ID;
+    const offsetText = decodeCursor(cursorScope, parent ?? "", request.cursor);
+    const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
+    if (!Number.isInteger(offset) || offset < 0)
+      throw new Error("Folder browse cursor is invalid.");
+    let all;
+    let access;
+    if (parent === undefined) {
+      volumes.refresh();
+      all = [
+        ...childFolders(home, undefined),
+        ...volumes.locations().map((volume) => {
+          const guard = permissions.guardOf(volume.mountPoint, volume);
+          const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
+          return {
+            key: scopePathFor("/", volume.id),
+            name: volume.label,
+            kind: "folder",
+            has_children: true,
+            selectable: true,
+            is_disk: true,
+            ...diskAccess ? { access: diskAccess } : {}
+          };
+        })
+      ];
+      if (mode === "folders")
+        access = permissions.fullDiskAccessNote();
+    } else {
+      const real = realPathOfScopePath(volumes, parent);
+      if (!real)
+        throw new Error("That disk is not connected right now.");
+      const guard = permissions.guardOf(real, volumes.volumeOf(real));
+      const refused = guard ? await permissions.open(guard) : undefined;
+      if (refused)
+        return { nodes: [], access: refused };
+      try {
+        all = childFolders(real, parent);
+      } catch (error) {
+        if (error instanceof AccessRefused)
+          return { nodes: [], access: error.access };
+        throw error;
+      }
+    }
+    const page2 = all.slice(offset, offset + BROWSE_PAGE_SIZE2);
+    const next = offset + BROWSE_PAGE_SIZE2;
+    return {
+      nodes: mode === "archive" ? page2.map(withFileSize) : page2,
+      ...next < all.length ? { nextCursor: encodeCursor(cursorScope, parent ?? "", String(next)) } : {},
+      ...access ? { access } : {}
+    };
+  };
+  const withFileSize = (entry) => {
+    if (entry.kind !== "file")
+      return entry;
+    const real = realPathOfScopePath(volumes, entry.key);
+    let stat3;
+    try {
+      stat3 = real ? lstatSync11(real) : undefined;
+    } catch {
+      stat3 = undefined;
+    }
+    return stat3?.isFile() ? { ...entry, size_bytes: stat3.size } : entry;
+  };
+  return { volumes, permissions, browse };
+}
+var ARCHIVE_CURSOR_SCOPE = "archive.imports";
+function createLocalFilesFolderScopeBrowser(options = {}) {
+  const { volumes, permissions, browse } = localFilesListing(options, "folders");
   return {
     sourceId: LOCAL_FILES_SOURCE_ID,
-    async browse(request) {
-      const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
-      const offsetText = decodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? "", request.cursor);
-      const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
-      if (!Number.isInteger(offset) || offset < 0)
-        throw new Error("Folder browse cursor is invalid.");
-      let all;
-      let access;
-      if (parent === undefined) {
-        volumes.refresh();
-        all = [
-          ...childFolders(home, undefined),
-          ...volumes.locations().map((volume) => {
-            const guard = permissions.guardOf(volume.mountPoint, volume);
-            const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
-            return {
-              key: scopePathFor("/", volume.id),
-              name: volume.label,
-              kind: "folder",
-              has_children: true,
-              selectable: true,
-              is_disk: true,
-              ...diskAccess ? { access: diskAccess } : {}
-            };
-          })
-        ];
-        access = permissions.fullDiskAccessNote();
-      } else {
-        const real = realPathOfScopePath(volumes, parent);
-        if (!real)
-          throw new Error("That disk is not connected right now.");
-        const guard = permissions.guardOf(real, volumes.volumeOf(real));
-        const refused = guard ? await permissions.open(guard) : undefined;
-        if (refused)
-          return { nodes: [], access: refused };
-        try {
-          all = childFolders(real, parent);
-        } catch (error) {
-          if (error instanceof AccessRefused)
-            return { nodes: [], access: error.access };
-          throw error;
-        }
-      }
-      const page2 = all.slice(offset, offset + BROWSE_PAGE_SIZE2);
-      const next = offset + BROWSE_PAGE_SIZE2;
-      return {
-        nodes: page2,
-        ...next < all.length ? { nextCursor: encodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? "", String(next)) } : {},
-        ...access ? { access } : {}
-      };
-    },
+    browse,
     checkApproval({ selections, wholeAccount }) {
       if (!permissions.active || permissions.hasHelper())
         return;
@@ -45395,7 +46060,9 @@ class TierSnifferService {
       reason = "awaiting_owner_approval";
     else if (tick.state === "failed")
       reason = "failed";
-    else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
+    else if (tick.state === "ran" && tick.report.pendingSeen > 0 && (tick.report.stoppedBy === "transport_failures" || tick.report.calls > 0 && tick.report.failedCalls === tick.report.calls)) {
+      reason = "model_not_answering";
+    } else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
       reason = stop === "yield" || stop === "preempted" || stop === "aborted" ? overran ? "pass_stuck" : this.answering() ? "yielding_to_answers" : this.breakerOpen() ? "breaker_open" : "yielding_to_answers" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;
     }

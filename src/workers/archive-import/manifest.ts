@@ -228,6 +228,54 @@ export function archiveFileSha256(root: ScopeRoot, file: ArchiveManifestFile): s
   }
 }
 
+function sameVersion(a: ArchiveManifestFile, b: ArchiveManifestFile): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtime_ms === b.mtime_ms;
+}
+
+function sameSample(a: ArchiveManifestFile, b: ArchiveManifestFile): boolean {
+  return a.size === b.size
+    && a.fingerprint.head_sha256 === b.fingerprint.head_sha256
+    && a.fingerprint.tail_sha256 === b.fingerprint.tail_sha256;
+}
+
+function comparable<T extends { status: string; files: readonly ArchiveManifestFile[] }>(
+  records: readonly T[],
+  files: readonly ArchiveManifestFile[],
+): T[] {
+  return records.filter((record) => record.status !== 'removing' && record.files.length === files.length);
+}
+
+/**
+ * The import that read exactly these files at exactly these versions, known
+ * from metadata alone. An archive being removed does not count.
+ */
+export function findSameVersionImport<T extends { status: string; files: readonly ArchiveManifestFile[] }>(
+  records: readonly T[],
+  files: readonly ArchiveManifestFile[],
+): T | undefined {
+  return comparable(records, files).find((record) => record.files.every((file, index) => sameVersion(file, files[index]!)));
+}
+
+/**
+ * Completed imports these files may be a copy of: the same size and the same
+ * first and last bytes in every file. Only a whole-file SHA-256 says whether
+ * one is (`isCopyOf`); this only picks the imports worth reading the files for.
+ */
+export function findProbableCopies<T extends { status: string; files: readonly ArchiveManifestFile[] }>(
+  records: readonly T[],
+  files: readonly ArchiveManifestFile[],
+): T[] {
+  return comparable(records, files)
+    .filter((record) => record.files.every((file, index) => sameSample(file, files[index]!) && file.sha256 !== undefined));
+}
+
+/**
+ * Whether `record` holds files with exactly these whole-file SHA-256 digests, in order.
+ */
+export function isCopyOf(record: { files: readonly ArchiveManifestFile[] }, digests: readonly string[]): boolean {
+  return record.files.length === digests.length && record.files.every((file, index) => file.sha256 === digests[index]);
+}
+
 /**
  * The import already holding these files: the same files at the same
  * versions, or a completed import of files with the same whole-file
@@ -240,24 +288,10 @@ export function findAlreadyImported<T extends { status: string; files: readonly 
   files: readonly ArchiveManifestFile[],
   digest: (index: number) => string,
 ): T | undefined {
-  const sameVersion = (a: ArchiveManifestFile, b: ArchiveManifestFile): boolean =>
-    a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtime_ms === b.mtime_ms;
-  const sameSample = (a: ArchiveManifestFile, b: ArchiveManifestFile): boolean =>
-    a.size === b.size
-    && a.fingerprint.head_sha256 === b.fingerprint.head_sha256
-    && a.fingerprint.tail_sha256 === b.fingerprint.tail_sha256;
-  const digests = new Map<number, string>();
-  const digestOf = (index: number): string => {
-    let value = digests.get(index);
-    if (value === undefined) {
-      value = digest(index);
-      digests.set(index, value);
-    }
-    return value;
-  };
-  const candidates = records.filter((record) => record.status !== 'removing' && record.files.length === files.length);
-  const same = candidates.find((record) => record.files.every((file, index) => sameVersion(file, files[index]!)));
+  const same = findSameVersionImport(records, files);
   if (same) return same;
-  return candidates.find((record) => record.files.every((file, index) => sameSample(file, files[index]!) && file.sha256 !== undefined)
-    && record.files.every((file, index) => file.sha256 === digestOf(index)));
+  const copies = findProbableCopies(records, files);
+  if (copies.length === 0) return undefined;
+  const digests = files.map((_file, index) => digest(index));
+  return copies.find((record) => isCopyOf(record, digests));
 }

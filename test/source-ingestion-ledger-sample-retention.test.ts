@@ -51,9 +51,15 @@ describe('source ingestion ledger sample retention', () => {
         ).get() as { oldest: string }).oldest;
         // The first tick is more than 24h behind the newest sample.
         expect(oldest).toBe('2026-08-01T12:00:00.000Z');
+        // The two ticks inside the window remain, one row per dashboard
+        // source each: the eight connected sources and Archives
+        // (archive_imports), which the prune removes like any other.
         expect((db.query(
           'SELECT COUNT(*) AS count FROM source_dashboard_samples',
-        ).get() as { count: number }).count).toBe(16);
+        ).get() as { count: number }).count).toBe(18);
+        expect((db.query(
+          "SELECT COUNT(*) AS count FROM source_dashboard_samples WHERE source_id = 'archive_imports'",
+        ).get() as { count: number }).count).toBe(2);
       } finally {
         db.close();
       }

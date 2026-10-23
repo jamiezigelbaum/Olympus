@@ -14,7 +14,7 @@
  * so a destructive fix confirms inline and help is selectable text.
  */
 import type { DashboardStatus } from '../vocabulary.ts';
-import type { ChatGptPicker, ChatGptPickerConfig, ChatGptPickerKit } from './picker.ts';
+import type { ChatGptArchivePicked, ChatGptPicker, ChatGptPickerConfig, ChatGptPickerKit } from './picker.ts';
 import type { ChatGptPrivacy, ChatGptPrivacyConfig, ChatGptPrivacyKit } from './privacy.ts';
 import type {
   DashboardViewModelV1,
@@ -78,6 +78,14 @@ export interface ChatGptDashboardClientConfig {
     unreadableOpenTool: string;
     /** The next page of one source's unreadable files (`{source_id, after}`), on the computer only. */
     unreadablePageTool: string;
+    /**
+     * The Archives row's own controls, on the computer only: import an agent's
+     * request (`{request_id}`), decline or dismiss one, remove an archive
+     * (`{archive_id}`). Choosing a new one is the picker's (picker.ts).
+     */
+    archiveApproveTool: string;
+    archiveDeclineTool: string;
+    archiveRemoveTool: string;
     /** How long the place an open link landed on stays outlined (`.landed`). */
     landedMs: number;
     copy: typeof DASHBOARD_COMPUTER_PANEL_COPY;
@@ -382,8 +390,9 @@ export function chatgptDashboardClient(
   function inlineError(result: Any, name?: string): string {
     if (!result || !result.isError) return '';
     const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
-    // Unpair's refusals, and opening a file, are the computer's own sentences: always beside the control.
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool))) return '';
+    // Unpair's refusals, opening a file and the Archives row's controls are the computer's own sentences: always beside the control.
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool
+      || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool))) return '';
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
     return text ? String(text.text) : '';
@@ -451,6 +460,15 @@ export function chatgptDashboardClient(
         // replaces the idle timer: start the settle cadence now.
         scheduleRefresh();
         state.notice = P.deleteDataDone;
+        redraw();
+        return;
+      }
+      if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool) && result && !result.isError) {
+        // The Archives row says what it did; the list itself arrives with the read.
+        const said = archiveNotice(name, args, result);
+        refresh();
+        // refresh() clears the notice as it starts; the read's answer leaves it.
+        state.notice = said;
         redraw();
         return;
       }
@@ -790,6 +808,18 @@ export function chatgptDashboardClient(
     if (privacy && privacy.handles(fix)) {
       // Tell Olympus what's private, and the Privacy row's Edit, open the Privacy screen in place.
       action = () => openPrivacy(key);
+    } else if (fix.archiveImport === true && picker) {
+      // Import an archive (computer only): the picker over this computer's files, in place.
+      action = () => startArchivePick(key);
+    } else if (typeof fix.archiveFocus === 'string' && fix.archiveFocus) {
+      // A Needs you line about one archive or request (computer only): straight to it, in place.
+      action = () => focusArchive(String(fix.archiveFocus));
+    } else if (fix.archiveModels === true) {
+      // Held items (computer only): the private model under Models, in place.
+      action = () => {
+        state.open.models = true;
+        render('summary:models');
+      };
     } else if (picker && picker.handles(fix)) {
       // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
       action = () => {
@@ -972,7 +1002,7 @@ export function chatgptDashboardClient(
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
       // A warm box with an orange edge carries the state, so the row has no dot.
-      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(item.fix, key, 'warn', true, itemSource(item)));
+      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(archiveNeedFix(item), key, 'warn', true, itemSource(item)));
       add(list, add(el('li', 'row need'), body));
     });
     return add(section, list);
@@ -1017,6 +1047,8 @@ export function chatgptDashboardClient(
   function sourceRow(source: Any): HTMLElement {
     const id = String(source.id || source.label);
     const status = String(source.status || '');
+    // The Archives row on the computer: its own list, and Import an archive in place.
+    const archives = archivesMeta(id);
     const item = sourceItem(source);
     // A source that needs the owner gets the amber dot, whatever its status word.
     const tone = item ? 'warn' : (config.statusTone as Any)[status] || 'off';
@@ -1066,23 +1098,26 @@ export function chatgptDashboardClient(
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
     }
     // A pause the row shows (not one a Sync now line stands in for) gets its See why.
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual)
+      || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null);
     if (why) add(main, why);
-    // Landed on a source with nothing to see why about now: the row itself is outlined.
-    else if (state.landed && state.landed.id === id) row.className += ' landed';
+    // Landed on a source with nothing to see why about now: the row itself is
+    // outlined, or on the Archives row each archive and request that needs the person.
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives))) row.className += ' landed';
+    if (archives) add(main, archiveList(archives));
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
     // Row buttons are all outlined; the accent belongs to the page's one primary action.
     // One fix per row: the Needs-you fix when there is one, else the source's own.
-    const fix = item && item.fix ? item.fix : source.primary;
+    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary);
     const isSync = (entry: Any) => !!entry && entry.tool === config.syncTool;
     if (fix && !(checking && isSync(fix))) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
     // A press still checking: its button says so, disabled, in the row's place.
     if (checking) add(controls, checkingControl('primary:' + id));
     // The ⋯ menu keeps only secondary actions, never a copy of the row's fix,
     // and no second Sync now while one is checking.
-    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry: Any) =>
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry: Any) => archiveFix(archives, entry)).filter((entry: Any) =>
       (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
     // Unpair for a paired chat app, on the computer only: the pairing lives here.
     const unpair = unpairEntry(id);
@@ -1107,6 +1142,347 @@ export function chatgptDashboardClient(
       add(row, menuBox);
     }
     return row;
+  }
+
+  // ---- archives (computer only) ----------------------------------------
+  /** The Archives row's list from the computer meta, when this is that row on the computer. */
+  function archivesMeta(id: string): Any {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !meta.archives || typeof meta.archives !== 'object') return null;
+    const archives = meta.archives;
+    return archives.sourceId === id && Array.isArray(archives.archives) && Array.isArray(archives.requests) ? archives : null;
+  }
+
+  /** On the computer the Archives row's Import an archive opens the picker in place, not this page again. */
+  function archiveFix(archives: Any, fix: Any): Any {
+    return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction
+      ? { label: fix.label, archiveImport: true }
+      : fix;
+  }
+
+  /**
+   * On the computer a Needs you line about imports acts in place: an archive
+   * or a request is scrolled to and outlined, the unreadable list and imports
+   * that cannot run open the row's See why, and held items open the private
+   * model under Models. Anywhere
+   * else (ChatGPT) the line's own link opens the computer's Archives row.
+   */
+  function archiveNeedFix(item: Any): Any {
+    const fix = item && item.fix;
+    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
+    const id = item && typeof item.id === 'string' ? item.id : '';
+    if (!fix || typeof fix.label !== 'string' || !meta || typeof meta !== 'object') return fix;
+    if (id === 'archives:held') return { label: fix.label, archiveModels: true };
+    if (id === 'archives:unreadable' || id === 'archives:scheduler' || id.indexOf('archive:') === 0 || id.indexOf('archive-request:') === 0) {
+      return { label: fix.label, archiveFocus: id };
+    }
+    return fix;
+  }
+
+  /** Scroll to one archive or request (or the row's See why) and outline it briefly. */
+  function focusArchive(target: string): void {
+    const meta = state.computerMeta && state.computerMeta.archives;
+    const sourceId = meta && typeof meta.sourceId === 'string' ? meta.sourceId : '';
+    const rowWhy = target === 'archives:unreadable' || target === 'archives:scheduler';
+    if (rowWhy) {
+      if (!sourceId) return;
+      state.open['why:' + sourceId] = true;
+      state.landed = { id: sourceId, until: Date.now() + H.landedMs };
+    } else state.landed = { id: target, until: Date.now() + H.landedMs };
+    render(rowWhy ? 'summary:why:' + sourceId : '');
+    const node = root.querySelector('.landed') as HTMLElement | null;
+    if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center' });
+    const control = node ? node.querySelector('button, summary') as HTMLElement | null : null;
+    if (control && typeof control.focus === 'function') control.focus();
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector('.landed');
+      if (shown) shown.classList.remove('landed');
+    }, H.landedMs);
+  }
+
+  /** Whether an archive or a request on the Archives row needs the person now. */
+  function archiveNeeds(meta: Any): boolean {
+    return (Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && archiveNeedsPerson(entry)))
+      || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && requestNeedsPerson(entry)));
+  }
+
+  /** A stopped archive, or one Olympus cannot count now. */
+  function archiveNeedsPerson(archive: Any): boolean {
+    return archive.status === 'stopped' || (archive.countsUnavailable === true && archive.status !== 'removing');
+  }
+
+  /** An agent's request waiting, or a check that ended without importing. */
+  function requestNeedsPerson(request: Any): boolean {
+    return (request.status === 'pending' && request.origin === 'agent') || request.status === 'failed';
+  }
+
+  /** An item on the Archives row outlined: by its own Needs you line, or by an open link that landed on the row. */
+  function archiveLanded(own: string, needsPerson: boolean): boolean {
+    const landed = state.landed;
+    if (!landed) return false;
+    const meta = state.computerMeta && state.computerMeta.archives;
+    return landed.id === own || (needsPerson && !!meta && landed.id === meta.sourceId);
+  }
+
+  /** See why under the Archives row while its list cannot be read: why, what is kept, and what to do. */
+  function archiveUnreadable(meta: Any, id: string): HTMLElement | null {
+    const A = H.copy.archives;
+    const unreadable = meta.unreadable;
+    if (!unreadable || typeof unreadable !== 'object') return null;
+    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable.reason) ? String(unreadable.reason) : 'other';
+    const file = typeof unreadable.file === 'string' && unreadable.file ? unreadable.file : '';
+    const box = details('why:' + id, doc.createTextNode(P.seeWhy), 'why');
+    if (state.landed && state.landed.id === id) box.className += ' landed';
+    add(box, add(el('ul', 'plain'),
+      el('li', '', fill((A.unreadable.why as Any)[reason], { file: file || A.thisFile })),
+      el('li', '', A.unreadable.kept),
+      el('li', '', (A.unreadable.fix as Any)[reason])));
+    return box;
+  }
+
+  /** Which of this computer's settings keeps imports and removals from running, or '' when they run. */
+  function archiveSetting(meta: Any): string {
+    return meta && (meta.notRunning === 'disabled' || meta.notRunning === 'not_selected') ? String(meta.notRunning) : '';
+  }
+
+  /** See why under the Archives row while this computer's settings keep imports and removals from running. */
+  function archiveNotRunning(meta: Any, id: string): HTMLElement | null {
+    const A = H.copy.archives;
+    const setting = archiveSetting(meta);
+    if (!setting) return null;
+    const box = details('why:' + id, doc.createTextNode(P.seeWhy), 'why');
+    if (state.landed && state.landed.id === id) box.className += ' landed';
+    add(box, add(el('ul', 'plain'),
+      el('li', '', (A.notRunning.why as Any)[setting]),
+      el('li', '', (A.notRunning.fix as Any)[setting])));
+    return box;
+  }
+
+  /** An import being read, removed or checked keeps the page reading often. */
+  function archivesMoving(): boolean {
+    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
+    if (!meta || typeof meta !== 'object') return false;
+    // Imports this computer's settings keep from running are not moving.
+    return (!archiveSetting(meta) && Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
+      || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && entry.status === 'checking'));
+  }
+
+  /** Import an archive: the picker over this computer's files; its one line says what came of the choice. */
+  function startArchivePick(key: string): void {
+    supersede();
+    state.notice = '';
+    state.confirming = '';
+    // Names in the line are the person's own files, shown only on this computer.
+    picker!.pickArchive(H.copy.archives.pick, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key));
+  }
+
+  /** The one line after an approval: started, checking, or already imported. */
+  function archiveOutcome(outcome: Any): string {
+    const A = H.copy.archives;
+    const name = outcome && typeof outcome.name === 'string' ? outcome.name : '';
+    if (!name) return '';
+    const archive = typeof outcome.archiveName === 'string' ? outcome.archiveName : typeof outcome.archive_name === 'string' ? outcome.archive_name : '';
+    if (outcome.status === 'checking') return fill(A.checking, { name });
+    if (outcome.status === 'already_imported') return archive ? fill(A.already, { name, archive }) : fill(A.alreadyUnnamed, { name });
+    return outcome.status === 'started' ? fill(A.started, { name }) : '';
+  }
+
+  /** What an Archives row control did, from the list read before it (names are the computer's own). */
+  function archiveNotice(name: string, args: Any, result: Any): string {
+    const A = H.copy.archives;
+    const meta = state.computerMeta && state.computerMeta.archives;
+    if (name === H.archiveRemoveTool) {
+      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry: Any) => entry && entry.id === (args && args.archive_id))[0] : null;
+      return removed && typeof removed.name === 'string' ? fill(A.removing, { name: removed.name }) : '';
+    }
+    if (name === H.archiveDeclineTool) {
+      // Decline answers an agent's request, Cancel stops a check; Dismiss only clears a finished one.
+      const request = meta && Array.isArray(meta.requests) ? meta.requests.filter((entry: Any) => entry && entry.id === (args && args.request_id))[0] : null;
+      if (request && request.status === 'checking' && typeof request.name === 'string') return fill(A.cancelled, { name: request.name });
+      return request && request.status === 'pending' ? A.declined : '';
+    }
+    return archiveOutcome(result && result.structuredContent);
+  }
+
+  const ARCHIVE_STATUSES = ['importing', 'imported', 'stopped', 'removing'];
+  const ARCHIVE_REQUEST_STATUSES = ['pending', 'checking', 'already_imported', 'failed'];
+
+  function validArchive(entry: Any): boolean {
+    return !!entry && typeof entry.id === 'string' && !!entry.id && typeof entry.name === 'string'
+      && ARCHIVE_STATUSES.indexOf(entry.status) >= 0
+      && Array.isArray(entry.gaps) && Array.isArray(entry.skipped);
+  }
+
+  function validArchiveRequest(entry: Any): boolean {
+    return !!entry && typeof entry.id === 'string' && !!entry.id && typeof entry.name === 'string'
+      && ARCHIVE_REQUEST_STATUSES.indexOf(entry.status) >= 0;
+  }
+
+  function wholeCount(value: Any): number {
+    return typeof value === 'number' && isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+
+  function messageCount(n: number): string {
+    const A = H.copy.archives;
+    return fill(n === 1 ? A.items.one : A.items.many, { n: count(n) });
+  }
+
+  /**
+   * Under the Archives row: each import asked for, then each archive, with
+   * what it holds, how far it is, what still waits for the private model and
+   * what could not be read, each with its way forward (owner ruling,
+   * 2026-10-10: nothing wrong without a route to exactly what).
+   */
+  function archiveList(meta: Any): HTMLElement | null {
+    const A = H.copy.archives;
+    const requests = meta.requests.filter(validArchiveRequest);
+    const archives = meta.archives.filter(validArchive);
+    if (!requests.length && !archives.length) return null;
+    const list = el('ul', 'archives');
+    list.setAttribute('aria-label', A.listLabel);
+    for (const request of requests) add(list, archiveRequestItem(request));
+    for (const archive of archives) add(list, archiveItem(archive, String(meta.privateModel || ''), archiveSetting(meta)));
+    return list;
+  }
+
+  function archiveRequestItem(request: Any): HTMLElement {
+    const A = H.copy.archives;
+    const item = el('li', 'archive request');
+    item.setAttribute('data-request', String(request.status));
+    if (archiveLanded('archive-request:' + request.id, requestNeedsPerson(request))) item.className += ' landed';
+    const key = 'archive-request:' + request.id;
+    const where = typeof request.where === 'string' ? request.where : '';
+    if (request.status === 'pending') {
+      add(item, el('p', '', fill(A.requestLine, { name: request.name, where })));
+      add(item, add(el('div', 'archive-actions'),
+        fixControl({ label: A.approve, tool: H.archiveApproveTool, args: { request_id: request.id } }, key + ':approve', 'plain', false),
+        fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':decline', 'plain', false)));
+      return item;
+    }
+    if (request.status === 'checking') {
+      const line = el('p', 'muted', fill(A.checkingLine, { name: request.name }));
+      line.setAttribute('role', 'status');
+      return add(item, line, add(el('div', 'archive-actions'),
+        fixControl({ label: A.cancel, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':cancel', 'plain', false)));
+    }
+    const archive = typeof request.archiveName === 'string' ? request.archiveName : '';
+    const failed = request.status === 'failed';
+    const sentence = !failed
+      ? (archive ? fill(A.alreadyLine, { name: request.name, archive }) : fill(A.alreadyLineUnnamed, { name: request.name }))
+      : fill(A.failedLine, { name: request.name, reason: (A.failed as Any)[String(request.code)] || A.failed.unreadable });
+    add(item, el('p', failed ? 'reason strong' : '', sentence));
+    const actions = el('div', 'archive-actions');
+    if (failed) add(actions, fixControl({ label: A.tryAgain, tool: H.archiveApproveTool, args: { request_id: request.id } }, key + ':retry', 'plain', false));
+    return add(item, add(actions,
+      fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':dismiss', 'plain', false)));
+  }
+
+  /** One archive; `setting` names what keeps imports and removals from running ('' when they run). */
+  function archiveItem(archive: Any, model: string, setting: string): HTMLElement {
+    const A = H.copy.archives;
+    const item = el('li', 'archive' + (archive.status === 'stopped' ? ' stopped' : ''));
+    item.setAttribute('data-archive', archive.status);
+    if (archiveLanded('archive:' + archive.id, archiveNeedsPerson(archive))) item.className += ' landed';
+    // Importing or removing, but not running: never "Importing", never a moving bar.
+    const halted = !!setting && (archive.status === 'importing' || archive.status === 'removing');
+    if (halted) item.setAttribute('data-not-running', setting);
+    add(item, add(el('p', 'archive-head'), el('span', 'archive-name', archive.name), el('span', 'ftag', halted ? A.status.notRunning : (A.status as Any)[archive.status])));
+    const facts: HTMLElement[] = [archive.format, archive.where]
+      .filter((part: Any) => typeof part === 'string' && part)
+      .map((part: string) => el('span', '', part));
+    const earliest = typeof archive.earliest === 'string' ? archive.earliest : '';
+    const latest = typeof archive.latest === 'string' ? archive.latest : '';
+    // A date never breaks at its hyphens.
+    if (earliest && latest) facts.push(el('span', 'archive-dates', earliest === latest ? earliest : fill(A.dates, { earliest, latest })));
+    if (facts.length) {
+      const line = el('p', 'muted archive-facts');
+      facts.forEach((fact, index) => {
+        if (index) add(line, doc.createTextNode(' · '));
+        add(line, fact);
+      });
+      add(item, line);
+    }
+    const items = wholeCount(archive.items);
+    // An index that cannot be read now is said as such, never as no messages.
+    const uncounted = archive.countsUnavailable === true && archive.status !== 'removing';
+    if (halted && archive.status === 'importing') {
+      const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
+      add(item, el('p', 'muted', uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: messageCount(items) })));
+    } else if (halted) {
+      add(item, el('p', 'muted', A.removingNotRunningLine));
+    } else if (archive.status === 'importing') {
+      const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
+      const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
+    } else if (archive.status === 'imported') {
+      const when = typeof archive.importedAt === 'string' ? ago(archive.importedAt) : '';
+      if (!uncounted) add(item, el('p', 'muted', when ? fill(A.importedLine, { items: messageCount(items), when }) : fill(A.importedLineNoTime, { items: messageCount(items) })));
+    } else if (archive.status === 'removing') {
+      const line = el('p', 'muted', A.removingLine);
+      line.setAttribute('role', 'status');
+      add(item, line);
+    } else {
+      // Stopped: what happened to which file, and what to do.
+      const stop = archive.stop && typeof archive.stop === 'object' ? archive.stop : {};
+      const words = (A.stopped as Any)[String(stop.code)] || A.stopped.other;
+      const file = typeof stop.file === 'string' && stop.file ? stop.file : A.thisFile;
+      add(item, el('p', 'reason strong', fill(words.why, { file })), el('p', 'muted', words.fix));
+    }
+    if (uncounted) add(item, el('p', 'reason strong', A.countsUnavailable.why), el('p', 'muted', A.countsUnavailable.fix));
+    else if (archive.status !== 'removing' && items > 0) add(item, archiveHeld(archive, model));
+    const why = archiveWhy(archive);
+    if (why) add(item, why);
+    if (archive.status !== 'removing') {
+      // While removals cannot run, Remove is shown but not pressable, the reason beside it.
+      add(item, add(el('div', 'archive-actions'), fixControl({
+        label: A.remove,
+        tool: H.archiveRemoveTool,
+        args: { archive_id: archive.id },
+        destructive: true,
+        confirmText: fill(A.removeConfirm, { name: archive.name }),
+        ...(setting ? { disabledReason: (A.removeNotRunning as Any)[setting] } : {}),
+      }, 'archive-remove:' + archive.id, 'plain', true)));
+    }
+    return item;
+  }
+
+  /** Judged so far and still held Private, with the way to the private model when it is not answering. */
+  function archiveHeld(archive: Any, model: string): HTMLElement {
+    const A = H.copy.archives;
+    const held = wholeCount(archive.held);
+    const block = el('div', 'archive-held');
+    add(block, el('p', 'muted', fill(A.judgedLine, { judged: count(wholeCount(archive.judged)), held: count(held) })));
+    if (!held) return block;
+    const level = model === 'ready' || model === 'off' ? model : 'waiting';
+    add(block, el('p', 'muted', (A.heldWhy as Any)[level]));
+    if (level !== 'ready') {
+      add(block, add(el('div', 'archive-actions'), button(A.setUpPrivateModel, 'archive-models:' + archive.id, () => {
+        state.open.models = true;
+        render('summary:models');
+      }, 'plain')));
+    }
+    return block;
+  }
+
+  /**
+   * What could not be read fully, per kind (for an archive of several files,
+   * which file each is in), then what was left out on purpose.
+   */
+  function archiveWhy(archive: Any): HTMLElement | null {
+    const A = H.copy.archives;
+    const kinds = A.gaps as Any;
+    const lines = archive.gaps.concat(archive.skipped)
+      .filter((entry: Any) => entry && typeof entry.kind === 'string' && wholeCount(entry.count) > 0)
+      .map((entry: Any) => {
+        const words = kinds[entry.kind] || kinds.other;
+        const n = wholeCount(entry.count);
+        const gap = fill(n === 1 ? words.one : words.many, { n: count(n) });
+        return el('li', '', typeof entry.file === 'string' && entry.file ? fill(A.gapInFile, { file: entry.file, gap }) : gap);
+      });
+    if (!lines.length) return null;
+    const box = details('archive-why:' + archive.id, doc.createTextNode(A.seeWhy), 'why');
+    return add(box, add(el('ul', 'plain'), ...lines));
   }
 
   /**
@@ -1995,6 +2371,7 @@ export function chatgptDashboardClient(
       return !!progress && !progress.stalled;
     })) return true;
     if (data.progress && !data.progress.stalled && !progressFinished(data.progress)) return true;
+    if (archivesMoving()) return true;
     return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed');
   }
 

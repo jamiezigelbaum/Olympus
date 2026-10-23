@@ -19,6 +19,7 @@ import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import {
@@ -27,7 +28,7 @@ import {
 } from '../src/workers/telegram-messages/index.ts';
 
 describe('source ingestion ledger', () => {
-  test('normalizes source status into the eight-source ingestion census', () => {
+  test('normalizes source status into the nine-source ingestion census', () => {
     const snapshot = buildSourceIngestionLedgerSnapshot(fixtureStatus(), {
       now: new Date('2026-07-08T20:00:00.000Z'),
       schedulerStatus: {
@@ -79,7 +80,7 @@ describe('source ingestion ledger', () => {
       }],
     });
 
-    expect(snapshot.rows).toHaveLength(8);
+    expect(snapshot.rows).toHaveLength(9);
     expect(snapshot.rows.find((row) => row.source_id === 'email')).toMatchObject({
       items: 10,
       content_indexed: 8,
@@ -148,8 +149,8 @@ describe('source ingestion ledger', () => {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
-        expect((db.query('SELECT COUNT(*) AS count FROM source_ingestion_ledger').get() as { count: number }).count).toBe(8);
-        expect((db.query('SELECT COUNT(*) AS count FROM source_dashboard_samples').get() as { count: number }).count).toBe(8);
+        expect((db.query('SELECT COUNT(*) AS count FROM source_ingestion_ledger').get() as { count: number }).count).toBe(9);
+        expect((db.query('SELECT COUNT(*) AS count FROM source_dashboard_samples').get() as { count: number }).count).toBe(9);
         expect(db.query('SELECT items, content_indexed, coverage_percent, ingestion_health_json FROM source_ingestion_ledger WHERE source_id = ?').get('dropbox')).toMatchObject({
           items: 20,
           content_indexed: 4,
@@ -557,10 +558,13 @@ describe('ledger corpus assignment', () => {
   test('every registry source id a ledger row declares exists in the registry', () => {
     // Guards the whatsapp_personal/whatsapp class of defect from the other
     // side: a mistyped declaration would own nothing and drop its corpora.
-    const registrySourceIds = new Set(createSourceCorpusRegistry().list().map((corpus) => corpus.sourceId));
-    const status = statusWithCorpora(createSourceCorpusRegistry().list('status')
+    // The registry the worker builds (email-source/server.ts): the shipped
+    // roster plus the imported-archive stores, which join it at run time.
+    const registry = createSourceCorpusRegistry(withArchiveImportCorpora());
+    const registrySourceIds = new Set(registry.list().map((corpus) => corpus.sourceId));
+    const status = statusWithCorpora(registry.list('status')
       .map((corpus) => corpusFixture(corpus.corpusId, corpus.family, corpus.trustDomain, 1, 1)));
-    const snapshot = buildSourceIngestionLedgerSnapshot(status, { now: NOW });
+    const snapshot = buildSourceIngestionLedgerSnapshot(status, { now: NOW, sourceCorpusRegistry: registry });
 
     const ownsNothing = snapshot.rows
       .filter((row) => row.corpus_ids.length === 0)
