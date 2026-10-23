@@ -543,6 +543,12 @@ export interface ComputerArchivesMeta {
    * shown as ~). The lists above are then what could still be read, or empty.
    */
   unreadable?: { reason: 'damaged' | 'unknown_form' | 'permission' | 'other'; file: string; list: 'archives' | 'requests' };
+  /**
+   * Imports and removals cannot run while an archive is importing or being
+   * removed: Olympus's background reading is turned off (`disabled`), or its
+   * list of sources leaves archives out (`not_selected`).
+   */
+  notRunning?: 'disabled' | 'not_selected';
 }
 
 export interface ComputerArchiveEntry {
@@ -560,6 +566,12 @@ export interface ComputerArchiveEntry {
   judged: number;
   /** Of those, still held Private until the private model judges them. */
   held: number;
+  /**
+   * Olympus could not read how many items it holds from this archive (its
+   * index could not be opened): the three numbers above are then 0 and
+   * mean nothing.
+   */
+  countsUnavailable?: true;
   /** While importing: how much of its bytes are read, 0 to 99. */
   percent?: number;
   /** The earliest and latest item dates (YYYY-MM-DD). */
@@ -663,6 +675,17 @@ export const ARCHIVE_DECLINE_TOOL_NAME = 'olympus_archive_decline';
  * (`{archive_id}`), or approve an agent's request to remove one (`{request_id}`).
  */
 export const ARCHIVE_REMOVE_TOOL_NAME = 'olympus_archive_remove';
+/**
+ * The archive tools only the person at this computer's dashboard may use: a
+ * local-grade control session (workers/http.ts), never the worker bearer nor
+ * a session a bearer or its launch ticket minted. The computer's host page
+ * opens that session (the local unlock) before the first of them.
+ */
+export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_DECLINE_TOOL_NAME,
+  ARCHIVE_REMOVE_TOOL_NAME,
+];
 
 /** One level of the archive picker. */
 export interface ArchiveBrowseList {

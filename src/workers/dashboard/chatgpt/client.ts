@@ -1098,7 +1098,8 @@ export function chatgptDashboardClient(
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
     }
     // A pause the row shows (not one a Sync now line stands in for) gets its See why.
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) : null);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual)
+      || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null);
     if (why) add(main, why);
     // Landed on a source with nothing to see why about now: the row itself is
     // outlined, or on the Archives row each archive and request that needs the person.
@@ -1161,8 +1162,9 @@ export function chatgptDashboardClient(
 
   /**
    * On the computer a Needs you line about imports acts in place: an archive
-   * or a request is scrolled to and outlined, the unreadable list opens its
-   * See why, and held items open the private model under Models. Anywhere
+   * or a request is scrolled to and outlined, the unreadable list and imports
+   * that cannot run open the row's See why, and held items open the private
+   * model under Models. Anywhere
    * else (ChatGPT) the line's own link opens the computer's Archives row.
    */
   function archiveNeedFix(item: Any): Any {
@@ -1171,20 +1173,23 @@ export function chatgptDashboardClient(
     const id = item && typeof item.id === 'string' ? item.id : '';
     if (!fix || typeof fix.label !== 'string' || !meta || typeof meta !== 'object') return fix;
     if (id === 'archives:held') return { label: fix.label, archiveModels: true };
-    if (id === 'archives:unreadable' || id.indexOf('archive:') === 0 || id.indexOf('archive-request:') === 0) return { label: fix.label, archiveFocus: id };
+    if (id === 'archives:unreadable' || id === 'archives:scheduler' || id.indexOf('archive:') === 0 || id.indexOf('archive-request:') === 0) {
+      return { label: fix.label, archiveFocus: id };
+    }
     return fix;
   }
 
-  /** Scroll to one archive or request (or the unreadable list's See why) and outline it briefly. */
+  /** Scroll to one archive or request (or the row's See why) and outline it briefly. */
   function focusArchive(target: string): void {
     const meta = state.computerMeta && state.computerMeta.archives;
     const sourceId = meta && typeof meta.sourceId === 'string' ? meta.sourceId : '';
-    if (target === 'archives:unreadable') {
+    const rowWhy = target === 'archives:unreadable' || target === 'archives:scheduler';
+    if (rowWhy) {
       if (!sourceId) return;
       state.open['why:' + sourceId] = true;
       state.landed = { id: sourceId, until: Date.now() + H.landedMs };
     } else state.landed = { id: target, until: Date.now() + H.landedMs };
-    render(target === 'archives:unreadable' ? 'summary:why:' + sourceId : '');
+    render(rowWhy ? 'summary:why:' + sourceId : '');
     const node = root.querySelector('.landed') as HTMLElement | null;
     if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center' });
     const control = node ? node.querySelector('button, summary') as HTMLElement | null : null;
@@ -1198,8 +1203,18 @@ export function chatgptDashboardClient(
 
   /** Whether an archive or a request on the Archives row needs the person now. */
   function archiveNeeds(meta: Any): boolean {
-    return (Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && entry.status === 'stopped'))
-      || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && entry.status === 'pending' && entry.origin === 'agent'));
+    return (Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && archiveNeedsPerson(entry)))
+      || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && requestNeedsPerson(entry)));
+  }
+
+  /** A stopped archive, or one Olympus cannot count now. */
+  function archiveNeedsPerson(archive: Any): boolean {
+    return archive.status === 'stopped' || (archive.countsUnavailable === true && archive.status !== 'removing');
+  }
+
+  /** An agent's request waiting, or a check that ended without importing. */
+  function requestNeedsPerson(request: Any): boolean {
+    return (request.status === 'pending' && request.origin === 'agent') || request.status === 'failed';
   }
 
   /** An item on the Archives row outlined: by its own Needs you line, or by an open link that landed on the row. */
@@ -1223,6 +1238,19 @@ export function chatgptDashboardClient(
       el('li', '', fill((A.unreadable.why as Any)[reason], { file: file || A.thisFile })),
       el('li', '', A.unreadable.kept),
       el('li', '', (A.unreadable.fix as Any)[reason])));
+    return box;
+  }
+
+  /** See why under the Archives row while this computer's settings keep imports and removals from running. */
+  function archiveNotRunning(meta: Any, id: string): HTMLElement | null {
+    const A = H.copy.archives;
+    const setting = meta.notRunning === 'disabled' || meta.notRunning === 'not_selected' ? String(meta.notRunning) : '';
+    if (!setting) return null;
+    const box = details('why:' + id, doc.createTextNode(P.seeWhy), 'why');
+    if (state.landed && state.landed.id === id) box.className += ' landed';
+    add(box, add(el('ul', 'plain'),
+      el('li', '', (A.notRunning.why as Any)[setting]),
+      el('li', '', (A.notRunning.fix as Any)[setting])));
     return box;
   }
 
@@ -1268,8 +1296,9 @@ export function chatgptDashboardClient(
       return removed && typeof removed.name === 'string' ? fill(A.removing, { name: removed.name }) : '';
     }
     if (name === H.archiveDeclineTool) {
-      // Decline answers an agent's request; Dismiss only clears a finished check.
+      // Decline answers an agent's request, Cancel stops a check; Dismiss only clears a finished one.
       const request = meta && Array.isArray(meta.requests) ? meta.requests.filter((entry: Any) => entry && entry.id === (args && args.request_id))[0] : null;
+      if (request && request.status === 'checking' && typeof request.name === 'string') return fill(A.cancelled, { name: request.name });
       return request && request.status === 'pending' ? A.declined : '';
     }
     return archiveOutcome(result && result.structuredContent);
@@ -1320,7 +1349,7 @@ export function chatgptDashboardClient(
     const A = H.copy.archives;
     const item = el('li', 'archive request');
     item.setAttribute('data-request', String(request.status));
-    if (archiveLanded('archive-request:' + request.id, request.status === 'pending' && request.origin === 'agent')) item.className += ' landed';
+    if (archiveLanded('archive-request:' + request.id, requestNeedsPerson(request))) item.className += ' landed';
     const key = 'archive-request:' + request.id;
     const where = typeof request.where === 'string' ? request.where : '';
     if (request.kind === 'remove') {
@@ -1349,14 +1378,18 @@ export function chatgptDashboardClient(
     if (request.status === 'checking') {
       const line = el('p', 'muted', fill(A.checkingLine, { name: request.name }));
       line.setAttribute('role', 'status');
-      return add(item, line);
+      return add(item, line, add(el('div', 'archive-actions'),
+        fixControl({ label: A.cancel, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':cancel', 'plain', false)));
     }
     const archive = typeof request.archiveName === 'string' ? request.archiveName : '';
-    const sentence = request.status === 'already_imported'
+    const failed = request.status === 'failed';
+    const sentence = !failed
       ? (archive ? fill(A.alreadyLine, { name: request.name, archive }) : fill(A.alreadyLineUnnamed, { name: request.name }))
       : fill(A.failedLine, { name: request.name, reason: (A.failed as Any)[String(request.code)] || A.failed.unreadable });
-    add(item, el('p', '', sentence));
-    return add(item, add(el('div', 'archive-actions'),
+    add(item, el('p', failed ? 'reason strong' : '', sentence));
+    const actions = el('div', 'archive-actions');
+    if (failed) add(actions, fixControl({ label: A.tryAgain, tool: H.archiveApproveTool, args: { request_id: request.id } }, key + ':retry', 'plain', false));
+    return add(item, add(actions,
       fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':dismiss', 'plain', false)));
   }
 
@@ -1364,7 +1397,7 @@ export function chatgptDashboardClient(
     const A = H.copy.archives;
     const item = el('li', 'archive' + (archive.status === 'stopped' ? ' stopped' : ''));
     item.setAttribute('data-archive', archive.status);
-    if (archiveLanded('archive:' + archive.id, archive.status === 'stopped')) item.className += ' landed';
+    if (archiveLanded('archive:' + archive.id, archiveNeedsPerson(archive))) item.className += ' landed';
     add(item, add(el('p', 'archive-head'), el('span', 'archive-name', archive.name), el('span', 'ftag', (A.status as Any)[archive.status])));
     const facts: HTMLElement[] = [archive.format, archive.where]
       .filter((part: Any) => typeof part === 'string' && part)
@@ -1382,13 +1415,15 @@ export function chatgptDashboardClient(
       add(item, line);
     }
     const items = wholeCount(archive.items);
+    // An index that cannot be read now is said as such, never as no messages.
+    const uncounted = archive.countsUnavailable === true && archive.status !== 'removing';
     if (archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
-      const line = fill(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: messageCount(items) });
       add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
     } else if (archive.status === 'imported') {
       const when = typeof archive.importedAt === 'string' ? ago(archive.importedAt) : '';
-      add(item, el('p', 'muted', when ? fill(A.importedLine, { items: messageCount(items), when }) : fill(A.importedLineNoTime, { items: messageCount(items) })));
+      if (!uncounted) add(item, el('p', 'muted', when ? fill(A.importedLine, { items: messageCount(items), when }) : fill(A.importedLineNoTime, { items: messageCount(items) })));
     } else if (archive.status === 'removing') {
       const line = el('p', 'muted', A.removingLine);
       line.setAttribute('role', 'status');
@@ -1400,7 +1435,8 @@ export function chatgptDashboardClient(
       const file = typeof stop.file === 'string' && stop.file ? stop.file : A.thisFile;
       add(item, el('p', 'reason strong', fill(words.why, { file })), el('p', 'muted', words.fix));
     }
-    if (archive.status !== 'removing' && items > 0) add(item, archiveHeld(archive, model));
+    if (uncounted) add(item, el('p', 'reason strong', A.countsUnavailable.why), el('p', 'muted', A.countsUnavailable.fix));
+    else if (archive.status !== 'removing' && items > 0) add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why) add(item, why);
     if (archive.status !== 'removing') {

@@ -69,7 +69,7 @@ import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-to
 import type { OperationContext } from '../../core/operations.ts';
 import { FILES_AND_FOLDERS_URL } from '../local-files/mac-permissions.ts';
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
-import { DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../http.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../http.ts';
 
 /** Where the call came from: the origin the browser reached Olympus at. */
 export interface DashboardPanelCallContext {
@@ -125,6 +125,9 @@ export interface DashboardPanelToolsOptions {
    */
   archives?: () => ComputerArchivesMeta | undefined;
 }
+
+/** Why an archive control did nothing for a session that is not this computer's own. */
+const ARCHIVE_LOCAL_SESSION_REFUSAL = 'Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.';
 
 function refused(text: string, code: string): ChatGptToolResult {
   return { content: [{ type: 'text', text }], structuredContent: { error: code }, isError: true };
@@ -224,10 +227,21 @@ async function archiveRoute(
   options: DashboardPanelToolsOptions,
   route: 'browse' | 'approve' | 'decline' | 'remove',
   body: Record<string, unknown>,
+  context: DashboardPanelCallContext,
 ): Promise<{ ok: true; parsed: Record<string, unknown> } | { ok: false; result: ChatGptToolResult }> {
+  // Approve, Decline and Remove are the person's at this computer's own
+  // dashboard: a local-grade session, never the bearer (the OpenClaw tab's
+  // gateway method holds it) nor a session a bearer minted. The grade rides
+  // to the route only from here, so the route refuses everything else too.
+  if (route !== 'browse' && context.localSession !== true) {
+    return { ok: false, result: refused(ARCHIVE_LOCAL_SESSION_REFUSAL, 'mac_dashboard_only') };
+  }
   const response = await options.workerFetch(new Request(`http://olympus-worker.internal/dashboard/archive-import/${route}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(route !== 'browse' ? { [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: 'local' } : {}),
+    },
     body: JSON.stringify(body),
   }));
   const parsed = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
@@ -249,14 +263,14 @@ async function archiveRoute(
 }
 
 /** One level of the archive picker: files and folders, the names in the picker's `_meta` only. */
-async function archiveBrowse(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+async function archiveBrowse(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
   const keys = Object.keys(args);
   if (keys.some((key) => key !== 'parent_key' && key !== 'cursor')
     || (args.parent_key !== undefined && !archiveArg(args.parent_key))
     || (args.cursor !== undefined && !archiveArg(args.cursor))) {
     return refused('parent_key and cursor must be from the picker.', 'invalid_params');
   }
-  const answer = await archiveRoute(options, 'browse', args);
+  const answer = await archiveRoute(options, 'browse', args, context);
   if (!answer.ok) return answer.result;
   const nodes = Array.isArray(answer.parsed.nodes) ? answer.parsed.nodes : [];
   return {
@@ -273,12 +287,12 @@ async function archiveBrowse(options: DashboardPanelToolsOptions, args: Record<s
 }
 
 /** Import the chosen file or folder, or approve an agent's request: answered at once (started, checking, already imported). */
-async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
   const keys = Object.keys(args);
   const byKey = keys.length === 1 && keys[0] === 'key' && archiveArg(args.key);
   const byRequest = keys.length === 1 && keys[0] === 'request_id' && archiveArg(args.request_id);
   if (!byKey && !byRequest) return refused('Give the chosen key or a request id.', 'invalid_params');
-  const answer = await archiveRoute(options, 'approve', args);
+  const answer = await archiveRoute(options, 'approve', args, context);
   if (!answer.ok) return answer.result;
   const status = answer.parsed.status;
   if (status !== 'started' && status !== 'checking' && status !== 'already_imported') return refused('Olympus could not do that. Try again.', 'internal');
@@ -291,10 +305,10 @@ async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<
 }
 
 /** Decline an agent's request, or dismiss a finished check. */
-async function archiveDecline(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+async function archiveDecline(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
   const keys = Object.keys(args);
   if (keys.length !== 1 || keys[0] !== 'request_id' || !archiveArg(args.request_id)) return refused('request_id is required.', 'invalid_params');
-  const answer = await archiveRoute(options, 'decline', args);
+  const answer = await archiveRoute(options, 'decline', args, context);
   if (!answer.ok) return answer.result;
   return { content: [{ type: 'text', text: 'Declined.' }], structuredContent: { status: 'declined' } };
 }
@@ -304,12 +318,12 @@ async function archiveDecline(options: DashboardPanelToolsOptions, args: Record<
  * remove one (`request_id`): the panel's confirm is the acknowledgement the
  * route asks for. Both run the same removal.
  */
-async function archiveRemove(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+async function archiveRemove(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
   const keys = Object.keys(args);
   const byArchive = keys.length === 1 && keys[0] === 'archive_id' && archiveArg(args.archive_id);
   const byRequest = keys.length === 1 && keys[0] === 'request_id' && archiveArg(args.request_id);
   if (!byArchive && !byRequest) return refused('Give an archive id or a request id.', 'invalid_params');
-  const answer = await archiveRoute(options, 'remove', { ...(byArchive ? { archive_id: args.archive_id } : { request_id: args.request_id }), acknowledge: true });
+  const answer = await archiveRoute(options, 'remove', { ...(byArchive ? { archive_id: args.archive_id } : { request_id: args.request_id }), acknowledge: true }, context);
   if (!answer.ok) return answer.result;
   return { content: [{ type: 'text', text: 'Removing.' }], structuredContent: { status: 'removing' } };
 }
@@ -453,10 +467,10 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name === UNPAIR_SOURCE_TOOL_NAME) return await unpairSource(options, args);
       if (name === OPEN_UNREADABLE_FILE_TOOL_NAME) return await openUnreadableFile(options, args, context);
       if (name === UNREADABLE_FILES_PAGE_TOOL_NAME) return await unreadableFilesPage(options, args, context);
-      if (name === ARCHIVE_BROWSE_TOOL_NAME) return await archiveBrowse(options, args);
-      if (name === ARCHIVE_APPROVE_TOOL_NAME) return await archiveApprove(options, args);
-      if (name === ARCHIVE_DECLINE_TOOL_NAME) return await archiveDecline(options, args);
-      if (name === ARCHIVE_REMOVE_TOOL_NAME) return await archiveRemove(options, args);
+      if (name === ARCHIVE_BROWSE_TOOL_NAME) return await archiveBrowse(options, args, context);
+      if (name === ARCHIVE_APPROVE_TOOL_NAME) return await archiveApprove(options, args, context);
+      if (name === ARCHIVE_DECLINE_TOOL_NAME) return await archiveDecline(options, args, context);
+      if (name === ARCHIVE_REMOVE_TOOL_NAME) return await archiveRemove(options, args, context);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       // Keep the view the dashboard result is built from, for Unpair's entries.

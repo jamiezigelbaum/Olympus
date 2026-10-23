@@ -110,6 +110,41 @@ describe('Needs you for imported archives', () => {
     expect(offered).not.toContain(A.importAction);
   });
 
+  test('a check that ended without importing: its own item, going to that request', () => {
+    const { row, items } = dashboard({ archives: 1, importing: false, attention: [{ kind: 'failed', id: REQUEST_ID, name: 'Takeout-2.mbox' }] });
+    expect(items).toEqual([{
+      id: `archive-request:${REQUEST_ID}`,
+      sentence: fill(A.needsYou.failed, { name: 'Takeout-2.mbox' }),
+      fix: { label: A.needsYou.seeWhy, tool: 'olympus_dashboard', args: {}, href: ARCHIVES_PAGE, openHref: true },
+    }]);
+    expect(row.status).toBe('Needs you');
+  });
+
+  test('an archive Olympus cannot count now: its own item, going to that archive', () => {
+    const { row, items } = dashboard({ archives: 1, importing: false, attention: [{ kind: 'counts', id: STOPPED_ID, name: 'Old work mail.mbox' }] });
+    expect(items).toEqual([{
+      id: `archive:${STOPPED_ID}`,
+      sentence: fill(A.needsYou.counts, { name: 'Old work mail.mbox' }),
+      fix: { label: A.needsYou.seeWhy, tool: 'olympus_dashboard', args: {}, href: ARCHIVES_PAGE, openHref: true },
+    }]);
+    expect(row.status).toBe('Needs you');
+  });
+
+  test('imports this computer\'s settings keep from running: one item naming which, with See why', () => {
+    for (const setting of ['disabled', 'not_selected'] as const) {
+      const { row, items } = dashboard({ archives: 1, importing: true, attention: [{ kind: 'scheduler', setting }] });
+      expect(items).toEqual([{
+        id: 'archives:scheduler',
+        sentence: A.needsYou.scheduler[setting],
+        fix: { label: A.needsYou.seeWhy, tool: 'olympus_dashboard', args: {}, href: ARCHIVES_PAGE, openHref: true },
+      }]);
+      expect(row.status).toBe('Needs you');
+    }
+    // A setting this build does not know is not passed on.
+    const unknown = dashboard({ archives: 1, importing: true, attention: [{ kind: 'scheduler', setting: 'later' as 'disabled' }] });
+    expect(unknown.items).toEqual([]);
+  });
+
   test('several at once: one item each, in order, and Import still offered while the list reads', () => {
     const { row, items } = dashboard({
       archives: 1,

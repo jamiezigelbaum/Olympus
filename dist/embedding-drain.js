@@ -32763,6 +32763,7 @@ var init_vocabulary = __esm(() => {
     dates: "{earliest} to {latest}",
     items: { one: "1 message", many: "{n} messages" },
     importingLine: "{percent}% read · {items} so far",
+    importingLineUncounted: "{percent}% read",
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
@@ -32773,6 +32774,20 @@ var init_vocabulary = __esm(() => {
       off: "No private model is set up, so they stay Private and are not judged."
     },
     setUpPrivateModel: "Set up the private model",
+    countsUnavailable: {
+      why: "Olympus can’t count the messages in this archive right now: its index could not be opened.",
+      fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
+    },
+    notRunning: {
+      why: {
+        disabled: "Background reading is turned off on this computer (the worker.scheduler.enabled setting), so imports and removals do not run.",
+        not_selected: "Background reading on this computer leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals do not run."
+      },
+      fix: {
+        disabled: "Turn it on, then restart Olympus. Each import and removal goes on from where it is.",
+        not_selected: "Add archive.imports to that setting, or empty it, then restart Olympus. Each import and removal goes on from where it is."
+      }
+    },
     stopped: {
       file_changed: { why: "{file} changed after the import started.", fix: "Remove this archive, then import the file again once it has stopped changing." },
       file_missing: { why: "{file} is no longer where it was.", fix: "Remove this archive, then import it again from where it is now." },
@@ -32800,6 +32815,8 @@ var init_vocabulary = __esm(() => {
     approve: "Import",
     decline: "Decline",
     checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
+    cancel: "Cancel",
+    cancelled: "Cancelled. {name} was not imported.",
     alreadyLine: "{name} is already imported as {archive}.",
     alreadyLineUnnamed: "{name} is already imported.",
     failedLine: "{name} was not imported: {reason}",
@@ -32809,8 +32826,10 @@ var init_vocabulary = __esm(() => {
       changed: "it changed while Olympus was reading it. Import it again once it has stopped changing.",
       unreadable: "Olympus could not read it.",
       unsupported: "Olympus does not import this kind of file.",
-      ambiguous: "Olympus could not tell which kind of export it is."
+      ambiguous: "Olympus could not tell which kind of export it is.",
+      replaced: "it was moved, replaced or changed after you chose it. Try again to import it as it is now."
     },
+    tryAgain: "Try again",
     dismiss: "Dismiss",
     started: "Importing {name}. It shows under Archives as it is read.",
     checking: "Checking whether {name} is already imported…",
@@ -32821,6 +32840,12 @@ var init_vocabulary = __esm(() => {
     needsYou: {
       stopped: "An import stopped: {name}",
       request: "An agent asked to import {name}",
+      failed: "An import did not start: {name}",
+      counts: "Olympus can't count the messages in {name}",
+      scheduler: {
+        disabled: "Imports can't run: background reading is turned off",
+        not_selected: "Imports can't run: background reading leaves out archives"
+      },
       held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
       seeWhy: "See why",
@@ -35548,7 +35573,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) : null);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null);
     if (why)
       add(main, why);
     else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)))
@@ -35606,21 +35631,23 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return fix;
     if (id === "archives:held")
       return { label: fix.label, archiveModels: true };
-    if (id === "archives:unreadable" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0)
+    if (id === "archives:unreadable" || id === "archives:scheduler" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0) {
       return { label: fix.label, archiveFocus: id };
+    }
     return fix;
   }
   function focusArchive(target) {
     const meta = state.computerMeta && state.computerMeta.archives;
     const sourceId = meta && typeof meta.sourceId === "string" ? meta.sourceId : "";
-    if (target === "archives:unreadable") {
+    const rowWhy = target === "archives:unreadable" || target === "archives:scheduler";
+    if (rowWhy) {
       if (!sourceId)
         return;
       state.open["why:" + sourceId] = true;
       state.landed = { id: sourceId, until: Date.now() + H.landedMs };
     } else
       state.landed = { id: target, until: Date.now() + H.landedMs };
-    render(target === "archives:unreadable" ? "summary:why:" + sourceId : "");
+    render(rowWhy ? "summary:why:" + sourceId : "");
     const node = root.querySelector(".landed");
     if (node && typeof node.scrollIntoView === "function")
       node.scrollIntoView({ block: "center" });
@@ -35635,7 +35662,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }, H.landedMs);
   }
   function archiveNeeds(meta) {
-    return Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && entry.status === "stopped") || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && entry.status === "pending" && entry.origin === "agent");
+    return Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && archiveNeedsPerson(entry)) || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && requestNeedsPerson(entry));
+  }
+  function archiveNeedsPerson(archive) {
+    return archive.status === "stopped" || archive.countsUnavailable === true && archive.status !== "removing";
+  }
+  function requestNeedsPerson(request2) {
+    return request2.status === "pending" && request2.origin === "agent" || request2.status === "failed";
   }
   function archiveLanded(own3, needsPerson) {
     const landed = state.landed;
@@ -35655,6 +35688,17 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (state.landed && state.landed.id === id)
       box.className += " landed";
     add(box, add(el("ul", "plain"), el("li", "", fill2(A.unreadable.why[reason], { file: file || A.thisFile })), el("li", "", A.unreadable.kept), el("li", "", A.unreadable.fix[reason])));
+    return box;
+  }
+  function archiveNotRunning(meta, id) {
+    const A = H.copy.archives;
+    const setting = meta.notRunning === "disabled" || meta.notRunning === "not_selected" ? String(meta.notRunning) : "";
+    if (!setting)
+      return null;
+    const box = details("why:" + id, doc.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", A.notRunning.why[setting]), el("li", "", A.notRunning.fix[setting])));
     return box;
   }
   function archivesMoving() {
@@ -35690,6 +35734,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     if (name === H.archiveDeclineTool) {
       const request2 = meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === (args && args.request_id))[0] : null;
+      if (request2 && request2.status === "checking" && typeof request2.name === "string")
+        return fill2(A.cancelled, { name: request2.name });
       return request2 && request2.status === "pending" ? A.declined : "";
     }
     return archiveOutcome(result && result.structuredContent);
@@ -35727,7 +35773,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const A = H.copy.archives;
     const item = el("li", "archive request");
     item.setAttribute("data-request", String(request2.status));
-    if (archiveLanded("archive-request:" + request2.id, request2.status === "pending" && request2.origin === "agent"))
+    if (archiveLanded("archive-request:" + request2.id, requestNeedsPerson(request2)))
       item.className += " landed";
     const key2 = "archive-request:" + request2.id;
     const where = typeof request2.where === "string" ? request2.where : "";
@@ -35739,18 +35785,22 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (request2.status === "checking") {
       const line = el("p", "muted", fill2(A.checkingLine, { name: request2.name }));
       line.setAttribute("role", "status");
-      return add(item, line);
+      return add(item, line, add(el("div", "archive-actions"), fixControl({ label: A.cancel, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":cancel", "plain", false)));
     }
     const archive = typeof request2.archiveName === "string" ? request2.archiveName : "";
-    const sentence = request2.status === "already_imported" ? archive ? fill2(A.alreadyLine, { name: request2.name, archive }) : fill2(A.alreadyLineUnnamed, { name: request2.name }) : fill2(A.failedLine, { name: request2.name, reason: A.failed[String(request2.code)] || A.failed.unreadable });
-    add(item, el("p", "", sentence));
-    return add(item, add(el("div", "archive-actions"), fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":dismiss", "plain", false)));
+    const failed = request2.status === "failed";
+    const sentence = !failed ? archive ? fill2(A.alreadyLine, { name: request2.name, archive }) : fill2(A.alreadyLineUnnamed, { name: request2.name }) : fill2(A.failedLine, { name: request2.name, reason: A.failed[String(request2.code)] || A.failed.unreadable });
+    add(item, el("p", failed ? "reason strong" : "", sentence));
+    const actions = el("div", "archive-actions");
+    if (failed)
+      add(actions, fixControl({ label: A.tryAgain, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":retry", "plain", false));
+    return add(item, add(actions, fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":dismiss", "plain", false)));
   }
   function archiveItem(archive, model) {
     const A = H.copy.archives;
     const item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
     item.setAttribute("data-archive", archive.status);
-    if (archiveLanded("archive:" + archive.id, archive.status === "stopped"))
+    if (archiveLanded("archive:" + archive.id, archiveNeedsPerson(archive)))
       item.className += " landed";
     add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", A.status[archive.status])));
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
@@ -35768,13 +35818,15 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(item, line);
     }
     const items = wholeCount(archive.items);
+    const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
     if (archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
-      const line = fill2(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: messageCount(items) });
       add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
     } else if (archive.status === "imported") {
       const when = typeof archive.importedAt === "string" ? ago(archive.importedAt) : "";
-      add(item, el("p", "muted", when ? fill2(A.importedLine, { items: messageCount(items), when }) : fill2(A.importedLineNoTime, { items: messageCount(items) })));
+      if (!uncounted)
+        add(item, el("p", "muted", when ? fill2(A.importedLine, { items: messageCount(items), when }) : fill2(A.importedLineNoTime, { items: messageCount(items) })));
     } else if (archive.status === "removing") {
       const line = el("p", "muted", A.removingLine);
       line.setAttribute("role", "status");
@@ -35785,7 +35837,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
       add(item, el("p", "reason strong", fill2(words2.why, { file })), el("p", "muted", words2.fix));
     }
-    if (archive.status !== "removing" && items > 0)
+    if (uncounted)
+      add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
+    else if (archive.status !== "removing" && items > 0)
       add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why)
@@ -46383,6 +46437,8 @@ class TierSnifferService {
       reason = "awaiting_owner_approval";
     else if (tick.state === "failed")
       reason = "failed";
+    else if (tick.state === "ran" && tick.report.stoppedBy === "transport_failures" && tick.report.pendingSeen > 0)
+      reason = "model_not_answering";
     else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
       reason = stop === "yield" || stop === "preempted" || stop === "aborted" ? overran ? "pass_stuck" : this.answering() ? "yielding_to_answers" : this.breakerOpen() ? "breaker_open" : "yielding_to_answers" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;

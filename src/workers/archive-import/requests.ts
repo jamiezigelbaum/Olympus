@@ -72,8 +72,22 @@ export interface ArchiveImportRequest {
    * failed: why, as a closed code the dashboard words.
    */
   code?: string;
+  /**
+   * checking: exactly what the person approved (the folder's identity and
+   * the files' versions), so a check a restart interrupted resumes against
+   * that approval and never against files replaced meanwhile.
+   */
+  approved?: ArchiveImportApproval;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * What one approval pinned: the chosen folder's identity and the manifest's digest.
+ */
+export interface ArchiveImportApproval {
+  root_identity: { dev: string; ino: string };
+  manifest_sha256: string;
 }
 
 interface PersistedRequests {
@@ -90,6 +104,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const STATUSES: ReadonlySet<string> = new Set(['pending', 'checking', 'already_imported', 'failed']);
+
+function validApproval(value: unknown): value is ArchiveImportApproval {
+  if (!isRecord(value) || !isRecord(value.root_identity)) return false;
+  const identity = value.root_identity;
+  return typeof identity.dev === 'string' && typeof identity.ino === 'string'
+    && typeof value.manifest_sha256 === 'string' && value.manifest_sha256.length === 64;
+}
 
 function validRequest(value: unknown): boolean {
   if (!isRecord(value)) return false;
@@ -108,6 +129,7 @@ function validRequest(value: unknown): boolean {
     && typeof value.status === 'string' && STATUSES.has(value.status)
     && (value.archive_id === undefined || (typeof value.archive_id === 'string' && isArchiveId(value.archive_id)))
     && (value.code === undefined || typeof value.code === 'string')
+    && (value.approved === undefined || validApproval(value.approved))
     && typeof value.created_at === 'string' && typeof value.updated_at === 'string';
 }
 
@@ -203,12 +225,12 @@ export class ArchiveImportRequestStore {
   /**
    * The person's approval, while its files are read whole (the one already checking, for a second press).
    */
-  addChecking(path: string): ArchiveImportRequest {
+  addChecking(path: string, approved: ArchiveImportApproval): ArchiveImportRequest {
     let entry: ArchiveImportRequest | undefined;
     this.mutate((state) => {
       entry = state.requests.find((request) => request.status === 'checking' && request.path === path);
       if (entry) return false;
-      entry = this.entry('import', 'dashboard', path, 'checking');
+      entry = { ...this.entry('import', 'dashboard', path, 'checking'), approved };
       state.requests.push(entry);
       return true;
     });
@@ -216,12 +238,13 @@ export class ArchiveImportRequestStore {
   }
 
   /**
-   * A pending request the person approved: it is checked now.
+   * A pending request the person approved: it is checked now, against what they approved.
    */
-  startChecking(requestId: string): ArchiveImportRequest | undefined {
+  startChecking(requestId: string, approved: ArchiveImportApproval): ArchiveImportRequest | undefined {
     return this.change(requestId, (request) => {
       if (request.kind !== 'import' || request.status !== 'pending') return false;
       request.status = 'checking';
+      request.approved = approved;
     });
   }
 
@@ -233,6 +256,7 @@ export class ArchiveImportRequestStore {
       const request = state.requests.find((entry) => entry.request_id === requestId);
       if (!request) return false;
       request.status = outcome.status;
+      delete request.approved;
       if (outcome.status === 'already_imported') {
         request.archive_id = outcome.archiveId;
         delete request.code;

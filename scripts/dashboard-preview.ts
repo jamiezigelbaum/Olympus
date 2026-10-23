@@ -698,14 +698,17 @@ function localFilesPreview(state: string) {
  *   archives-stopped     the file changed during the import: what happened and what to do
  *   archives-removing    Remove pressed: everything Olympus made from it is being deleted
  *   archives-unreadable  the list of imported archives cannot be read: See why, no Import
- * A stopped import, an agent's request and held messages no private model
- * can judge are each a Needs you line too (request, waiting, stopped).
+ *   archives-uncounted   an imported archive whose index cannot be opened now: never "0 messages"
+ *   archives-not-running an import waiting while background reading is turned off: See why names the setting
+ * A stopped import, an agent's request, a check that ended without importing,
+ * an archive that cannot be counted, imports that cannot run, and held
+ * messages no private model can judge are each a Needs you line too.
  */
 const ARCHIVE_STATES = [
   'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
   'archives-remove-request',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
-  'archives-unreadable',
+  'archives-unreadable', 'archives-uncounted', 'archives-not-running',
 ] as const;
 
 function archivesPreview(state: string): SourceDashboardViewModel {
@@ -741,12 +744,16 @@ function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedA
   const attention: DashboardImportAttention[] = [];
   if (meta.unreadable) attention.push({ kind: 'unreadable', reason: meta.unreadable.reason });
   for (const entry of meta.archives) if (entry.status === 'stopped') attention.push({ kind: 'stopped', id: entry.id, name: entry.name });
+  if (meta.notRunning) attention.push({ kind: 'scheduler', setting: meta.notRunning });
+  const counted = meta.archives.filter((entry) => entry.status !== 'removing');
+  for (const entry of counted) if (entry.countsUnavailable) attention.push({ kind: 'counts', id: entry.id, name: entry.name });
   for (const request of meta.requests) {
     if (request.origin === 'agent' && request.status === 'pending') {
       attention.push({ kind: request.kind === 'remove' ? 'removal' : 'request', id: request.id, name: request.name });
     }
   }
-  const held = meta.archives.filter((entry) => entry.status !== 'removing').reduce((sum, entry) => sum + entry.held, 0);
+  for (const request of meta.requests) if (request.status === 'failed') attention.push({ kind: 'failed', id: request.id, name: request.name });
+  const held = counted.filter((entry) => !entry.countsUnavailable).reduce((sum, entry) => sum + entry.held, 0);
   if (meta.privateModel !== 'ready' && held > 0) attention.push({ kind: 'held', count: held, model: meta.privateModel });
   return {
     archives: meta.unreadable && meta.archives.length === 0 ? 0 : meta.archives.length,
@@ -807,6 +814,12 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
   } else if (state === 'archives-remove-request') {
     archives.push(takeout);
     requests.push({ id: '7d1e2f30-4c5b-4a6d-9e7f-8b9c0d1e2f3a', kind: 'remove', name: takeout.name, where: takeout.where, origin: 'agent', status: 'pending', archiveId: takeout.id, archiveName: takeout.name });
+  } else if (state === 'archives-uncounted') {
+    archives.push({ ...takeout, items: 0, judged: 0, held: 0, countsUnavailable: true });
+  } else if (state === 'archives-not-running') {
+    const { importedAt: _importedAt, ...started } = takeout;
+    archives.push({ ...started, status: 'importing', items: 0, judged: 0, held: 0, percent: 0, latest: '2009-03-14' });
+    return { sourceId: 'archive.imports', archives, requests, privateModel, notRunning: 'disabled' };
   } else if (state === 'archives-unreadable') {
     return {
       sourceId: 'archive.imports', archives, requests, privateModel,

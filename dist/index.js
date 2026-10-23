@@ -13693,6 +13693,7 @@ var init_vocabulary = __esm(() => {
     dates: "{earliest} to {latest}",
     items: { one: "1 message", many: "{n} messages" },
     importingLine: "{percent}% read · {items} so far",
+    importingLineUncounted: "{percent}% read",
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
@@ -13703,6 +13704,20 @@ var init_vocabulary = __esm(() => {
       off: "No private model is set up, so they stay Private and are not judged."
     },
     setUpPrivateModel: "Set up the private model",
+    countsUnavailable: {
+      why: "Olympus can’t count the messages in this archive right now: its index could not be opened.",
+      fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
+    },
+    notRunning: {
+      why: {
+        disabled: "Background reading is turned off on this computer (the worker.scheduler.enabled setting), so imports and removals do not run.",
+        not_selected: "Background reading on this computer leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals do not run."
+      },
+      fix: {
+        disabled: "Turn it on, then restart Olympus. Each import and removal goes on from where it is.",
+        not_selected: "Add archive.imports to that setting, or empty it, then restart Olympus. Each import and removal goes on from where it is."
+      }
+    },
     stopped: {
       file_changed: { why: "{file} changed after the import started.", fix: "Remove this archive, then import the file again once it has stopped changing." },
       file_missing: { why: "{file} is no longer where it was.", fix: "Remove this archive, then import it again from where it is now." },
@@ -13730,6 +13745,8 @@ var init_vocabulary = __esm(() => {
     approve: "Import",
     decline: "Decline",
     checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
+    cancel: "Cancel",
+    cancelled: "Cancelled. {name} was not imported.",
     alreadyLine: "{name} is already imported as {archive}.",
     alreadyLineUnnamed: "{name} is already imported.",
     failedLine: "{name} was not imported: {reason}",
@@ -13739,8 +13756,10 @@ var init_vocabulary = __esm(() => {
       changed: "it changed while Olympus was reading it. Import it again once it has stopped changing.",
       unreadable: "Olympus could not read it.",
       unsupported: "Olympus does not import this kind of file.",
-      ambiguous: "Olympus could not tell which kind of export it is."
+      ambiguous: "Olympus could not tell which kind of export it is.",
+      replaced: "it was moved, replaced or changed after you chose it. Try again to import it as it is now."
     },
+    tryAgain: "Try again",
     dismiss: "Dismiss",
     started: "Importing {name}. It shows under Archives as it is read.",
     checking: "Checking whether {name} is already imported…",
@@ -13751,6 +13770,12 @@ var init_vocabulary = __esm(() => {
     needsYou: {
       stopped: "An import stopped: {name}",
       request: "An agent asked to import {name}",
+      failed: "An import did not start: {name}",
+      counts: "Olympus can't count the messages in {name}",
+      scheduler: {
+        disabled: "Imports can't run: background reading is turned off",
+        not_selected: "Imports can't run: background reading leaves out archives"
+      },
       held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
       seeWhy: "See why",

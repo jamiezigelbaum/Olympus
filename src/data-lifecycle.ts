@@ -49,7 +49,7 @@ import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './worke
 import { archiveImportFamilies } from './core/archive-formats.ts';
 import { archiveConnectorStoreDbPaths, archiveImportCorpora } from './workers/archive-import/store.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
-import { archiveImportRequestsPath } from './workers/archive-import/requests.ts';
+import { ArchiveImportRequestStore, archiveImportRequestsPath } from './workers/archive-import/requests.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -330,14 +330,21 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         return [statePath, archiveImportRequestsPath(statePath)];
       },
       approvals: {
+        // An approval still being checked for copies counts too: the check
+        // records the import when it finishes, so deleting under it would let
+        // an import land after the delete. Either file unreadable counts as
+        // present.
         present: (context) => {
           try {
-            return new ArchiveImportStateStore({ path: defaultArchiveImportStatePath(envForContext(context)) }).list().length > 0;
+            const statePath = defaultArchiveImportStatePath(envForContext(context));
+            if (new ArchiveImportStateStore({ path: statePath }).list().length > 0) return true;
+            return new ArchiveImportRequestStore({ path: archiveImportRequestsPath(statePath) }).list()
+              .some((request) => request.status === 'checking');
           } catch {
             return true;
           }
         },
-        nextAction: 'Remove each archive under Archives in the local dashboard, then rerun the CLI delete.',
+        nextAction: 'Under Archives in the local dashboard, cancel any import still being checked (or let it finish) and remove each archive, then rerun the CLI delete.',
       },
     },
     {
