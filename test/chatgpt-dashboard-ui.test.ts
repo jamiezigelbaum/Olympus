@@ -1139,6 +1139,28 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
   // keep offering Delete indexed data until the idle 60 s poll. Every source
   // that offers it behaves the same, so the page keeps re-reading until the
   // offer is gone.
+  test('if the read right after Delete fails (the restart overlap), the next read comes at the settle cadence, not the idle one', async () => {
+    jest.useFakeTimers();
+    try {
+      const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+      const dashboardCalls = (host: Host) => host.toolCalls().filter((call) => call.name === 'olympus_dashboard').length;
+      const host = mount();
+      host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+      host.button('Delete indexed data').click();
+      host.button('Yes, delete indexed data').click();
+      host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+      await flush();
+      expect(dashboardCalls(host)).toBe(1);
+      host.respond('tools/call', undefined, { code: -32000, message: 'worker restarting' });
+      await flush();
+      jest.advanceTimersByTime(8_000);
+      await flush();
+      expect(dashboardCalls(host)).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a read that still offers Delete after it ran is not trusted: the page re-reads soon until the row is settled', async () => {
     jest.useFakeTimers();
     try {

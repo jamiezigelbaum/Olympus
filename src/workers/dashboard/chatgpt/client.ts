@@ -447,6 +447,9 @@ export function chatgptDashboardClient(
         const deletedId = args && typeof args.source_id === 'string' ? args.source_id : '';
         if (deletedId) state.deleting[deletedId] = Date.now() + R.settleForMs;
         refresh();
+        // If that read fails or times out (the restart overlap), nothing else
+        // replaces the idle timer: start the settle cadence now.
+        scheduleRefresh();
         state.notice = P.deleteDataDone;
         redraw();
         return;

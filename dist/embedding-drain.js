@@ -34696,6 +34696,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         if (deletedId)
           state.deleting[deletedId] = Date.now() + R.settleForMs;
         refresh();
+        scheduleRefresh();
         state.notice = P.deleteDataDone;
         redraw();
         return;
