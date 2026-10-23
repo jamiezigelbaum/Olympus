@@ -34,6 +34,20 @@ Apple Developer organization account (owner decision 2026-10-21). Design and
 delivery sequence:
 [local files](design/local-files.md).
 
+## Archive import (owner direction 2026-10-23)
+
+Planned, not built. One "Import an archive" entry point in the dashboard and
+one `archive_import` operation for agents: Olympus detects the format and a
+thin per-format connector reads it. Order: mail (mbox) with the shared spine,
+then Reflect and Roam, WhatsApp chat export, Telegram Desktop export. This adds
+Reflect, Roam and archive import to the public surface after 1.0; the 0.4
+source roster in Slice 3A below is the 0.4 record and does not limit it.
+Imported content stays Private until the private model judges it: the
+local model, or Venice Private where there is none, as for every source
+(owner, 2026-10-23); cleared names follow the existing names rule. This is a
+shared classifier change that goes through the contract change gate. Design and delivery sequence:
+[archive import](design/archive-import.md).
+
 ## Olympus 1.0 (ChatGPT)
 
 Status: active, 2026-10-02. Owner decision 2026-10-01 (Decisions, below):
