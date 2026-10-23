@@ -48,6 +48,15 @@ afterEach(async () => {
   while (windows.length) await windows.pop()!.happyDOM.close();
 });
 const settle = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Wait until the page shows what a click leads to: its tool call and the
+ * dashboard read after it take longer on a loaded machine than a fixed sleep.
+ * Gives up after `ms`, so the assertion that follows says what is missing.
+ */
+async function until(ready: () => boolean, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!ready() && Date.now() < end) await settle(10);
+}
 
 const LINKS = {
   keys: 'http://127.0.0.1:8787/dashboard?keys',
@@ -195,7 +204,7 @@ describe('Import an archive on the computer', () => {
 
     answer = dashboard('archives-importing', meta([{ ...ARCHIVE, name: 'Takeout-2026-10.mbox', status: 'importing', percent: 5, items: 40, judged: 0, held: 40 }]));
     page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
-    await settle(30);
+    await until(() => page.doc.querySelector('li.archive[data-archive="importing"]') !== null);
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/Users/you/Mail exports/Takeout-2026-10.mbox' } }]);
     // Back on the dashboard, read again, with the one line that says what happened.
     expect(page.text()).not.toContain(A.pick.intro);
@@ -215,7 +224,7 @@ describe('Import an archive on the computer', () => {
     (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
     await settle();
     page.button(fill(A.pick.makePrivateFor, { name: 'notes.txt' })).click();
-    await settle(30);
+    await until(() => page.doc.querySelector('[role="alert"]') !== null);
     const alert = page.doc.querySelector('[role="alert"]');
     expect(alert).not.toBeNull();
     expect(alert!.textContent).toContain('Mail (mbox)');
@@ -246,7 +255,7 @@ describe('Import an archive on the computer', () => {
     (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
     await settle();
     page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
-    await settle(30);
+    await until(() => page.text().includes(fill(A.checking, { name: 'Takeout-2026-10.mbox' })));
     expect(page.text()).toContain(fill(A.checking, { name: 'Takeout-2026-10.mbox' }));
   });
 });
@@ -363,7 +372,7 @@ describe('each archive under the Archives row', () => {
     expect(page.calls(ARCHIVE_REMOVE_TOOL_NAME)).toEqual([]);
     answer = dashboard('archives-removing', meta([{ ...ARCHIVE, status: 'removing' }]));
     page.button('Yes, remove').click();
-    await settle(30);
+    await until(() => page.doc.querySelector('li.archive[data-archive="removing"]') !== null);
     expect(page.calls(ARCHIVE_REMOVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_REMOVE_TOOL_NAME, arguments: { archive_id: ARCHIVE.id } }]);
     expect(page.text()).toContain(fill(A.removing, { name: ARCHIVE.name }));
     const removing = archiveItem(page, 'removing');
@@ -384,7 +393,7 @@ describe('imports asked for', () => {
     });
     expect(page.text()).toContain(fill(A.requestLine, { name: REQUEST.name, where: REQUEST.where }));
     page.button(A.approve).click();
-    await settle(30);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.started, { name: REQUEST.name })));
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(page.text()).toContain(fill(A.started, { name: REQUEST.name }));
 
@@ -395,7 +404,7 @@ describe('imports asked for', () => {
     });
     answer = dashboard('archives-none', meta([], []));
     again.button(A.decline).click();
-    await settle(30);
+    await until(() => again.calls(ARCHIVE_DECLINE_TOOL_NAME).length > 0 && again.text().includes(A.declined));
     expect(again.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(again.text()).toContain(A.declined);
     expect(again.text()).not.toContain(fill(A.requestLine, { name: REQUEST.name, where: REQUEST.where }));
@@ -418,6 +427,7 @@ describe('imports asked for', () => {
     // A check still running has nothing to dismiss.
     expect(dismiss).toHaveLength(2);
     dismiss[0]!.click();
+    await until(() => page.calls(ARCHIVE_DECLINE_TOOL_NAME).length > 0);
     await settle(30);
     expect(page.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: '9d4c3b2a-7f6e-4d8c-9b0a-4e5f6a7b8c93' } }]);
     // Dismiss only clears a finished check: no "Declined." line.
@@ -438,14 +448,14 @@ describe('imports asked for', () => {
     expect(page.text()).toContain(fill(A.failedLine, { name: 'Moved.mbox', reason: A.failed.replaced }));
     answer = dashboard('archives-checking', meta([ARCHIVE], [{ ...REQUEST, id: FAILED, name: 'Moved.mbox', origin: 'dashboard', status: 'failed', code: 'replaced' }]));
     page.button(A.cancel).click();
-    await settle(30);
+    await until(() => page.text().includes(fill(A.cancelled, { name: REQUEST.name })) && !page.hasButton(A.cancel));
     expect(page.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(page.text()).toContain(fill(A.cancelled, { name: REQUEST.name }));
     expect(page.hasButton(A.cancel)).toBe(false);
 
     answer = dashboard('archives-checking', meta([ARCHIVE], []));
     page.button(A.tryAgain).click();
-    await settle(30);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.started, { name: 'Moved.mbox' })));
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { request_id: FAILED } }]);
     expect(page.text()).toContain(fill(A.started, { name: 'Moved.mbox' }));
   });
