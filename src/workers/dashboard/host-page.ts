@@ -20,9 +20,11 @@ import { installerForPlatform, type UpdateAvailable } from '../../core/update-ch
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
+  COMPUTER_LOCAL_SESSION_TOOL_NAMES,
   DASHBOARD_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
 } from '../chatgpt/dashboard-contract.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS } from './outside-help.ts';
 import {
   CHATGPT_DASHBOARD_DARK,
   CHATGPT_DASHBOARD_LIGHT,
@@ -105,6 +107,12 @@ export interface ComputerHostPageInput {
   origin: string;
   /** The control session's CSRF token; absent means the controls are locked. */
   csrfToken?: string;
+  /**
+   * The control session is local-grade (opened from this computer's own
+   * browser, not by the bearer or its launch link). Without it the page
+   * opens one before the first tool only such a session may use.
+   */
+  localSession?: boolean;
   /** A dash_ reader's token, carried on every local link and the locked read. */
   readToken?: string;
 }
@@ -188,6 +196,11 @@ function lockedGate(hidden: boolean): string {
 function hostProgram(input: {
   bridge: DashboardHostBridgeConfig;
   csrfToken: string;
+  /** The session is already local-grade. */
+  localSession: boolean;
+  /** Tools only a local-grade session may use, and the local unlock that opens one. */
+  localTools: readonly string[];
+  localSessionPath: string;
   readUrl: string;
   /** /dashboard, carrying a dash_ reader's token: the locked page with its data. */
   lockedUrl: string;
@@ -229,19 +242,38 @@ function hostProgram(input: {
     document.body.setAttribute('data-locked', 'true');
     if (handle) handle.lock();
   }
+  let csrfToken = input.csrfToken;
+  let localSession = input.localSession;
+  /**
+   * A tool only this computer's own session may use (approving an import):
+   * open that session first, the way the local pages' Unlock does. The
+   * worker grants it to a loopback browser presenting no bearer, so an
+   * agent's bearer never reaches it; refused, the tool says so itself.
+   */
+  function localUnlock(name: string): Promise<void> {
+    if (localSession || input.localTools.indexOf(name) < 0) return Promise.resolve();
+    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((body: { csrf_token?: unknown } | undefined) => {
+        if (body && typeof body.csrf_token === 'string' && body.csrf_token) {
+          csrfToken = body.csrf_token;
+          localSession = true;
+        }
+      }, () => undefined);
+  }
   function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
     if (expired) return lastRead !== undefined && name === input.bridge.readTool ? Promise.resolve(lastRead) : Promise.reject(new Error('locked'));
-    if (!input.csrfToken) {
+    if (!csrfToken) {
       return fetch(input.readUrl, { cache: 'no-store', credentials: 'same-origin' })
         .then((response) => (response.ok ? response.json() : failed()));
     }
-    return fetch(input.toolsCallPath, {
+    return localUnlock(name).then(() => fetch(input.toolsCallPath, {
       method: 'POST',
       cache: 'no-store',
       credentials: 'same-origin',
-      headers: { 'X-Olympus-CSRF': input.csrfToken, 'Content-Type': 'application/json' },
+      headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, arguments: args }),
-    }).then((response) => {
+    })).then((response) => {
       if (response.status === 401 || response.status === 403) {
         lockPage();
         if (lastRead !== undefined && name === input.bridge.readTool) return lastRead;
@@ -399,6 +431,9 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
   const program = `(${hostProgram.toString()})(${scriptJson({
     bridge,
     csrfToken: input.csrfToken ?? '',
+    localSession: input.localSession === true,
+    localTools: COMPUTER_LOCAL_SESSION_TOOL_NAMES,
+    localSessionPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
     readUrl,
     lockedUrl: dashboardHomeHref(token),
     openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,

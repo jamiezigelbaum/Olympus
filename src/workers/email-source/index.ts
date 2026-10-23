@@ -45,6 +45,7 @@ import { selectedItemContentFieldPath } from '../../core/source-index/selected-i
 import { dropboxPolicyExcludedPathPrefixes, type SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
+import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
 import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
 import {
   artifactPresence,
@@ -214,6 +215,7 @@ import {
   type DashboardManualSync,
   type DashboardApiKeySource,
   type DashboardConnectSource,
+  type DashboardImportedArchives,
   type DashboardSyncSource,
   type DashboardThisComputerSource,
   type DashboardOAuthSource,
@@ -637,6 +639,12 @@ export interface EmailSourceWorkerOptions {
      * Absent: 8010, the engine's default.
      */
     loopbackPort?: number;
+    /**
+     * Imported archives (archive-import/dashboard.ts): the picker, approval,
+     * Decline, Remove and the Archives row. Absent: the archive routes say
+     * importing is not set up here.
+     */
+    archiveImports?: ArchiveImportDashboard;
     fileSourceScopes?: {
       summaries(): SourceFolderScopeSummary[];
       browse(input: {
@@ -1324,6 +1332,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {}),
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
+              ...(controlSessionCsrfToken && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local' ? { localSession: true } : {}),
               ...(dashboardReadToken(url) ? { readToken: dashboardReadToken(url)! } : {}),
             }), {
               status: 200,
@@ -1470,6 +1479,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
               contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
               ingestionDispositionsAvailable: sourceDashboard.ingestionDispositions !== undefined,
+              ...dashboardImportedArchives(sourceDashboard.archiveImports),
               // The dispatch chain is this worker's to know. Without it the card
               // offered Sync now for a source nothing here can sync.
               syncNowAvailable: dashboardSourceSyncAvailable,
@@ -2817,6 +2827,71 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             },
           );
           });
+        }
+
+        // Importing an archive (archive-import/dashboard.ts): the picker's
+        // listing, the person's approval, Decline of an agent's request, and
+        // Remove. Control routes only (workers/http.ts), never the dash_ read
+        // token: the listing is made of file names, and only the person at
+        // the dashboard approves or removes. Approve, Decline and Remove take
+        // a local-grade session alone, whose grade the boundary injects and
+        // nothing else can set: never the worker bearer, nor a session a
+        // bearer minted. Every change runs under the grant guard, and hands
+        // the scheduler its tasks at once.
+        if (request.method === 'POST' && url.pathname.startsWith('/dashboard/archive-import/')) {
+          const archiveImports = sourceDashboard?.archiveImports;
+          if (!archiveImports) {
+            throw new EmailSourceWorkerError(501, 'archive_import_not_supported', 'Importing archives is not set up in this engine.');
+          }
+          if (request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            throw new EmailSourceWorkerError(
+              403,
+              'mac_dashboard_only',
+              'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.',
+            );
+          }
+          const record = await parseObjectBody(request);
+          if (url.pathname === '/dashboard/archive-import/browse') {
+            const parentKey = asOptionalString(record.parent_key);
+            const cursor = asOptionalString(record.cursor);
+            return json({
+              ok: true,
+              ...(await archiveImports.browse({ ...(parentKey ? { parentKey } : {}), ...(cursor ? { cursor } : {}) })),
+            });
+          }
+          if (url.pathname === '/dashboard/archive-import/approve') {
+            return await withDashboardGrantMutation(async () => {
+              assertDashboardModelsReady();
+              const key = asOptionalString(record.key);
+              const requestId = asOptionalString(record.request_id);
+              if ((key === undefined) === (requestId === undefined)) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either key or request_id.');
+              }
+              return json(await archiveImports.approve(key !== undefined ? { key } : { requestId: requestId! }));
+            });
+          }
+          if (url.pathname === '/dashboard/archive-import/decline') {
+            return await withDashboardGrantMutation(async () => {
+              const requestId = asOptionalString(record.request_id);
+              if (!requestId) throw new EmailSourceWorkerError(400, 'invalid_request', 'request_id is required.');
+              return json(archiveImports.decline(requestId));
+            });
+          }
+          if (url.pathname === '/dashboard/archive-import/remove') {
+            return await withDashboardGrantMutation(async () => {
+              const archiveId = asOptionalString(record.archive_id);
+              if (!archiveId) throw new EmailSourceWorkerError(400, 'invalid_request', 'archive_id is required.');
+              if (record.acknowledge !== true) {
+                throw new EmailSourceWorkerError(
+                  400,
+                  'remove_confirmation_required',
+                  'Confirm that Remove deletes everything Olympus made from this archive, and leaves the file itself where it is.',
+                );
+              }
+              return json(archiveImports.remove(archiveId));
+            });
+          }
+          throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
         }
 
         // The Background page's embedding-priority toggle.
@@ -5383,6 +5458,19 @@ function sourceWatchNotSupported(): EmailSourceWorkerError {
 }
 
 
+
+/**
+ * The Archives card's connection. A failure to read it is said as such,
+ * never as no archives imported.
+ */
+function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): { importedArchives?: DashboardImportedArchives } {
+  if (!archiveImports) return {};
+  try {
+    return { importedArchives: archiveImports.present() };
+  } catch {
+    return { importedArchives: { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: 'other' }] } };
+  }
+}
 
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;

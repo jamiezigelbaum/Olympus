@@ -517,6 +517,93 @@ export interface ComputerDashboardMeta {
    * never the Gateway bearer; absent when none wait.
    */
   waitingPrivateQuestions?: number;
+  /**
+   * Imported archives and the imports waiting on the person, for the
+   * Archives row (archive-import/dashboard.ts). The list, with the folders
+   * the person's files are in, is only ever in this meta; what needs the
+   * person reaches both surfaces as Needs you items, by name only.
+   */
+  archives?: ComputerArchivesMeta;
+}
+
+/** The Archives row's own list, on the computer only. */
+export interface ComputerArchivesMeta {
+  /** The dashboard row these belong under. */
+  sourceId: string;
+  archives: ComputerArchiveEntry[];
+  requests: ComputerArchiveRequest[];
+  /**
+   * Whether the private model is judging held items now (`ready`), set up but
+   * not answering or not approved (`waiting`), or not set up at all (`off`).
+   */
+  privateModel: 'ready' | 'waiting' | 'off';
+  /**
+   * The list of imports (or of the imports asked for) cannot be read: why,
+   * as a closed code, and where it is kept (home folder shown as ~). The
+   * lists above are then what could still be read, or empty.
+   */
+  unreadable?: { reason: 'damaged' | 'unknown_form' | 'permission' | 'other'; file: string };
+  /**
+   * With any archive here, imports and removals cannot run: Olympus's
+   * background syncing is turned off (`disabled`), or its list of sources
+   * leaves archives out (`not_selected`). An import or a removal then shows
+   * as not running, and Remove is shown but cannot be pressed.
+   */
+  notRunning?: 'disabled' | 'not_selected';
+}
+
+export interface ComputerArchiveEntry {
+  id: string;
+  /** The chosen file's or folder's name. */
+  name: string;
+  /** The format's own label ("Mail (mbox)"). */
+  format: string;
+  /** The folder it is in, home folder shown as ~. */
+  where: string;
+  status: 'importing' | 'imported' | 'stopped' | 'removing';
+  /** Items stored from it so far. */
+  items: number;
+  /** Of those, judged by the private model (or by the rules) already. */
+  judged: number;
+  /** Of those, still held Private until the private model judges them. */
+  held: number;
+  /**
+   * Olympus could not read how many items it holds from this archive (its
+   * index could not be opened): the three numbers above are then 0 and
+   * mean nothing.
+   */
+  countsUnavailable?: true;
+  /** While importing: how much of its bytes are read, 0 to 99. */
+  percent?: number;
+  /** The earliest and latest item dates (YYYY-MM-DD). */
+  earliest?: string;
+  latest?: string;
+  startedAt: string;
+  importedAt?: string;
+  /** Why it stopped (a closed code) and the file that did it. */
+  stop?: { code: string; file?: string };
+  /**
+   * What could not be read fully, per closed kind; for an archive of several
+   * files, per file too (`file`, its name). Where in a file is kept in the
+   * record, never shown.
+   */
+  gaps: Array<{ kind: string; count: number; file?: string }>;
+  /** What was left out on purpose, per closed kind. */
+  skipped: Array<{ kind: string; count: number }>;
+}
+
+export interface ComputerArchiveRequest {
+  id: string;
+  name: string;
+  where: string;
+  /** An agent asked (waiting for Approve or Decline), or the person chose it here. */
+  origin: 'agent' | 'dashboard';
+  status: 'pending' | 'checking' | 'already_imported' | 'failed';
+  /** already_imported: the archive that holds it. */
+  archiveId?: string;
+  archiveName?: string;
+  /** failed: why (a closed code). */
+  code?: string;
 }
 
 export interface ComputerUnpairEntry {
@@ -563,6 +650,43 @@ export const OPEN_UNREADABLE_FILE_TOOL_NAME = 'olympus_open_unreadable_file';
 export const UNREADABLE_FILES_PAGE_TOOL_NAME = 'olympus_unreadable_files';
 
 /**
+ * Computer only, never listed to ChatGPT: the archive picker's listing
+ * (`{parent_key?, cursor?}`), files and folders, with the names in
+ * `_meta[SCOPE_UI_META_KEY]` only (ArchiveBrowseList).
+ */
+export const ARCHIVE_BROWSE_TOOL_NAME = 'olympus_archive_browse';
+/**
+ * Computer only: import the chosen file or folder (`{key}`, a picker key), or
+ * an agent's waiting request (`{request_id}`). Answers `{status: 'started' |
+ * 'checking' | 'already_imported'}`; a check reads the files whole and its
+ * outcome arrives with a later dashboard read.
+ */
+export const ARCHIVE_APPROVE_TOOL_NAME = 'olympus_archive_approve';
+/** Computer only: decline an agent's request, or dismiss a finished check (`{request_id}`). */
+export const ARCHIVE_DECLINE_TOOL_NAME = 'olympus_archive_decline';
+/** Computer only (destructive, the panel confirms): remove one imported archive (`{archive_id}`). */
+export const ARCHIVE_REMOVE_TOOL_NAME = 'olympus_archive_remove';
+/**
+ * The archive tools only the person at this computer's dashboard may use: a
+ * local-grade control session (workers/http.ts), never the worker bearer nor
+ * a session a bearer or its launch ticket minted. The computer's host page
+ * opens that session (the local unlock) before the first of them.
+ */
+export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
+  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_DECLINE_TOOL_NAME,
+  ARCHIVE_REMOVE_TOOL_NAME,
+];
+
+/** One level of the archive picker. */
+export interface ArchiveBrowseList {
+  nodes: ScopeFolderNode[];
+  next_cursor?: string;
+  access?: ScopeFolderAccess;
+}
+
+/**
  * Every tool the panel calls, and so the only tools an Olympus host runs for
  * it (POST /dashboard/tools/call, the Control UI's gateway method). Search and
  * the answer tools are the conversation's, not the panel's.
@@ -581,13 +705,20 @@ export const PANEL_TOOL_NAMES = [
   SYNC_SOURCE_TOOL_NAME,
 ] as const;
 
-/** The computer adds Index faster, Unpair, and listing and opening unreadable files to the panel's tools. */
+/**
+ * The computer adds Index faster, Unpair, listing and opening unreadable
+ * files, and importing archives to the panel's tools.
+ */
 export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [
   ...PANEL_TOOL_NAMES,
   INDEX_FASTER_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNREADABLE_FILES_PAGE_TOOL_NAME,
+  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_DECLINE_TOOL_NAME,
+  ARCHIVE_REMOVE_TOOL_NAME,
 ];
 
 /** The `_meta` key carrying the picker's names to the widget only. */
@@ -642,7 +773,8 @@ export interface ScopeFolderNode {
   key: string;
   parent_key?: string;
   name: string;
-  kind: 'folder';
+  /** A file only in the archive picker (ARCHIVE_BROWSE_TOOL_NAME); a source's scope lists folders. */
+  kind: 'folder' | 'file';
   has_children: boolean;
   selectable: boolean;
   /**

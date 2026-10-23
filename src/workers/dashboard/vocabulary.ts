@@ -10,6 +10,7 @@
 import type {
   DashboardAnswerLaneCard,
   DashboardConnectionState,
+  DashboardImportAttention,
   DashboardSourceCard,
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
@@ -206,6 +207,11 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
     };
   }
   if (unknownValue !== undefined) return unknownStatus(unknownValue);
+  // An import that stopped, a request waiting for an answer, imported items
+  // no private model can judge now, or a record that cannot be read: each is
+  // the person's to answer, whatever the imports' progress says (owner rule,
+  // 2026-10-10: nothing wrong without a route to exactly what).
+  if ((source.connection.imports_attention?.length ?? 0) > 0) return { status: 'Needs you', mappedUnknown: false };
 
   const connectionStatus = DASHBOARD_CONNECTION_STATE_STATUS[source.connection.state];
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
@@ -439,6 +445,9 @@ export function dashboardAttentionLine(
     default:
       break;
   }
+  // What an import source's imports need is one Needs you item each
+  // (dashboardImportAttentionSentence); the row keeps its own line.
+  if (source.connection.imports_attention?.length) return source.connection.label;
   if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return DASHBOARD_FOLDER_NEEDS_PERMISSION;
   if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return DASHBOARD_FOLDER_NEEDS_HELPER;
   if (source.schedule?.degraded_reason === 'scope_root_unreadable') return DASHBOARD_FOLDER_UNREADABLE;
@@ -989,6 +998,8 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   // The answer lane has nothing to sync, and its freshness label is the only
   // field that says so.
   if (source.freshness.label.startsWith('Answer lane:')) return 'answers questions directly';
+  // Imports are read once, never synced: the line says how many are held.
+  if (source.connection.action.kind === 'archive_import') return source.connection.label;
   const unreadable = dashboardUnreadablePhrase(source);
   // The owner's own Sync now press, while it is the latest word, says what it
   // found in place of the bare sync time.
@@ -1773,6 +1784,188 @@ export const DASHBOARD_HOST_GATE_COPY = {
   refused: 'That token was not accepted.',
 } as const;
 
+/**
+ * The Archives row on the computer (archive-import/dashboard.ts): Import an
+ * archive, each imported archive and its state, and the imports waiting on
+ * the person. Names and folders are the person's own; they appear only
+ * beside these words, on the computer.
+ */
+export const DASHBOARD_ARCHIVE_COPY = {
+  importAction: 'Import an archive',
+  /** The picker in archive mode: one file or folder, no save step. */
+  pick: {
+    back: 'Back to Olympus',
+    title: 'Import an archive',
+    intro: 'Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.',
+    source: 'This computer',
+    makePrivate: 'Import',
+    makePrivateFor: 'Import {name}',
+    alreadyPrivate: 'Imported',
+    busy: 'Starting…',
+    chooseAnother: 'Choose another',
+  },
+  listLabel: 'Imported archives',
+  status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },
+  dates: '{earliest} to {latest}',
+  items: { one: '1 message', many: '{n} messages' },
+  importingLine: '{percent}% read · {items} so far',
+  importingLineUncounted: '{percent}% read',
+  importedLine: '{items} · imported {when}',
+  importedLineNoTime: '{items}',
+  removingLine: 'Removing everything Olympus made from this archive. The file itself stays where it is.',
+  /** An import or a removal this computer's settings keep from running: no progress bar, nothing moving. */
+  notRunningLine: '{percent}% read · {items} so far. It goes on from there once imports can run.',
+  notRunningLineUncounted: '{percent}% read. It goes on from there once imports can run.',
+  removingNotRunningLine: 'It is removed once removals can run. The file itself stays where it is.',
+  judgedLine: '{judged} judged · {held} waiting for the private model',
+  heldWhy: {
+    ready: 'Until the private model judges them, they stay Private.',
+    waiting: 'They stay Private until the private model judges them, and it is not answering right now.',
+    off: 'No private model is set up, so they stay Private and are not judged.',
+  },
+  setUpPrivateModel: 'Set up the private model',
+  /** An archive whose index cannot be opened now: never shown as empty. */
+  countsUnavailable: {
+    why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
+    fix: 'Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support.',
+  },
+  /**
+   * See why under the Archives row while this computer's settings keep
+   * imports and removals from running: the plain reason, then the setting.
+   */
+  notRunning: {
+    why: {
+      disabled: "Background syncing is turned off in Olympus's settings, so imports can't run.",
+      not_selected: "Background syncing in Olympus's settings leaves out archives, so imports can't run.",
+    },
+    fix: {
+      disabled: 'The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it. Each import and removal goes on from where it is.',
+      not_selected: 'The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it. Each import and removal goes on from where it is.',
+    },
+  },
+  /** Beside Remove, shown but not pressable, while removals cannot run. */
+  removeNotRunning: {
+    disabled: "Remove can't run while background syncing is turned off.",
+    not_selected: "Remove can't run while background syncing leaves out archives.",
+  },
+  stopped: {
+    file_changed: { why: '{file} changed after the import started.', fix: 'Remove this archive, then import the file again once it has stopped changing.' },
+    file_missing: { why: '{file} is no longer where it was.', fix: 'Remove this archive, then import it again from where it is now.' },
+    file_unreadable: { why: 'Olympus could not read {file}.', fix: 'Check that your user account can open it, then remove this archive and import it again.' },
+    resume_point_invalid: { why: 'Olympus lost its place in this archive.', fix: 'Remove this archive and import it again.' },
+    format_unavailable: { why: 'This version of Olympus cannot read this kind of archive.', fix: 'Update Olympus, or remove this archive.' },
+    root_changed: { why: 'The folder it was in was moved or replaced.', fix: 'Remove this archive, then import it again from where it is now.' },
+    other: { why: 'The import stopped.', fix: 'Remove this archive and import it again.' },
+  },
+  /** A file of the archive, when the stop names none. */
+  thisFile: 'A file of this archive',
+  /** What could not be read fully, per kind; and what was left out on purpose. */
+  gaps: {
+    message_too_large: { one: '1 message too large to read', many: '{n} messages too large to read' },
+    message_unreadable: { one: '1 message could not be read', many: '{n} messages could not be read' },
+    charset_not_decoded: { one: '1 message in a character set Olympus could not read', many: '{n} messages in a character set Olympus could not read' },
+    attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
+    text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
+    spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    other: { one: '1 item not read fully', many: '{n} items not read fully' },
+  },
+  seeWhy: 'See what was not read',
+  /** A gap line for an archive of several files: which file it is in. */
+  gapInFile: '{file}: {gap}',
+  remove: 'Remove',
+  removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
+  /** An agent's request, waiting for the person. */
+  requestLine: 'An agent asked to import {name} from {where}.',
+  approve: 'Import',
+  decline: 'Decline',
+  checkingLine: 'Checking whether {name} is already imported. Olympus reads it once to compare.',
+  /** Stops a check: nothing is imported. */
+  cancel: 'Cancel',
+  cancelled: 'Cancelled. {name} was not imported.',
+  alreadyLine: '{name} is already imported as {archive}.',
+  alreadyLineUnnamed: '{name} is already imported.',
+  failedLine: '{name} was not imported: {reason}',
+  failed: {
+    not_found: 'it is no longer there.',
+    permission_denied: 'your user account is not allowed to open it.',
+    changed: 'it changed while Olympus was reading it.',
+    unreadable: 'Olympus could not read it.',
+    unsupported: 'Olympus does not import this kind of file.',
+    ambiguous: 'Olympus could not tell which kind of export it is.',
+    replaced: 'it was moved, replaced or changed after you chose it.',
+  },
+  /** A check that ended without importing: the same path approved again. */
+  tryAgain: 'Try again',
+  dismiss: 'Dismiss',
+  /** After a choice in the picker. */
+  started: 'Importing {name}. It shows under Archives as it is read.',
+  checking: 'Checking whether {name} is already imported…',
+  already: '{name} is already imported as {archive}.',
+  alreadyUnnamed: '{name} is already imported.',
+  removing: 'Removing {name}.',
+  declined: 'Declined.',
+  /**
+   * Under Needs you, one line each, with the way to exactly that archive or
+   * request (on the computer the line's button goes to it in place).
+   */
+  needsYou: {
+    stopped: 'An import stopped: {name}',
+    request: 'An agent asked to import {name}',
+    failed: 'An import did not start: {name}',
+    counts: "Olympus can't count the messages in {name}",
+    scheduler: {
+      disabled: "Imports can't run: background syncing is turned off",
+      not_selected: "Imports can't run: background syncing leaves out archives",
+    },
+    held: { one: '1 imported message waits for the private model', many: '{n} imported messages wait for the private model' },
+    unreadable: "Olympus can't read its list of imported archives",
+    seeWhy: 'See why',
+    review: 'Review',
+    setUp: 'Set up the private model',
+    check: 'Check the private model',
+  },
+  /** See why under the Archives row while its list cannot be read; {file} is where the list is kept. */
+  unreadable: {
+    why: {
+      damaged: '{file} is damaged, so Olympus cannot tell which archives it imported.',
+      unknown_form: '{file} was written by a newer version of Olympus, or it is damaged.',
+      permission: 'Your user account is not allowed to open {file}.',
+      other: 'Olympus could not open {file}.',
+    },
+    kept: 'Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.',
+    fix: {
+      damaged: 'Restore that file from a backup, or ask for help at olympusplugin.ai/support.',
+      unknown_form: 'Update Olympus, then open this page again.',
+      permission: 'Check that your user account can open that file, then open this page again.',
+      other: 'Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support.',
+    },
+  },
+} as const;
+
+/**
+ * The sentence one Needs you item about imports carries (both surfaces read
+ * the same words; names are the person's own file names).
+ */
+export function dashboardImportAttentionSentence(entry: DashboardImportAttention): string {
+  const words = DASHBOARD_ARCHIVE_COPY.needsYou;
+  switch (entry.kind) {
+    case 'stopped':
+      return words.stopped.replace('{name}', entry.name);
+    case 'request':
+      return words.request.replace('{name}', entry.name);
+    case 'failed':
+      return words.failed.replace('{name}', entry.name);
+    case 'counts':
+      return words.counts.replace('{name}', entry.name);
+    case 'scheduler':
+      return words.scheduler[entry.setting];
+    case 'held':
+      return entry.count === 1 ? words.held.one : words.held.many.replace('{n}', dashboardCount(entry.count));
+    case 'unreadable':
+      return words.unreadable;
+  }
+}
+
 export const DASHBOARD_COMPUTER_PANEL_COPY = {
   section: 'On this computer',
   onlyHere: 'only here',
@@ -1798,6 +1991,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   /** The OpenClaw tab for a connection without operator.write. */
   readOnlyOpenClaw: 'Reconnect OpenClaw with operator.write access to change this',
   indexFaster: DASHBOARD_INDEX_FASTER,
+  archives: DASHBOARD_ARCHIVE_COPY,
 } as const;
 
 /**
@@ -1813,6 +2007,7 @@ export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   disconnect: 'Disconnect',
   deleteData: 'Delete indexed data',
   changeModels: 'Change',
+  importArchive: DASHBOARD_ARCHIVE_COPY.importAction,
 } as const;
 
 /**

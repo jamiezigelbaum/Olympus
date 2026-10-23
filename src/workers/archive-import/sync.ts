@@ -297,10 +297,13 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
     if (!check.ok) return stop(stopFrom(check, now().toISOString()));
 
     const pending: ArchiveImportFinding[] = [];
+    let position: { fileIndex: number; offset: number } | undefined;
     const flush = (): void => {
-      if (pending.length === 0) return;
+      const moved = position;
+      position = undefined;
+      if (pending.length === 0 && !moved) return;
       const batch = pending.splice(0, pending.length);
-      options.state.recordFindings(record.archive_id, batch);
+      options.state.recordFindings(record.archive_id, batch, moved);
     };
     const connectorId = archiveConnectorId(record.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
@@ -313,6 +316,7 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       files: archiveFileEntries(record.files),
       manifestSha256: record.manifest_sha256,
       report: (finding) => { pending.push(finding); },
+      reportPosition: (next) => { position = next; },
       shouldContinue,
       ...(options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {}),
       ...(options.pageSize !== undefined ? { pageSize: options.pageSize } : {}),

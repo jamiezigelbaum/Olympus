@@ -230,6 +230,12 @@ import {
 import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
 import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
+import {
+  archiveImportScheduling,
+  archivePrivateModelFromSniffer,
+  createArchiveImportDashboard,
+  type ArchivePrivateModelState,
+} from '../archive-import/dashboard.ts';
 import { archiveLaneLegs } from '../archive-import/lane.ts';
 import { withArchiveImportCorpora } from '../archive-import/store.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
@@ -243,7 +249,7 @@ import { VolumeResolver } from '../local-files/volume-identity.ts';
 import { WatchHub, watchIgnoreGlobs } from '../local-files/watch-hub.ts';
 import { localOpenArguments } from '../../core/local-open.ts';
 import { createConnectorFileExtractionSource } from '../file-extraction/connector-source.ts';
-import '../local-files/scope-browser.ts';
+import { createLocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
 import { tieredExtractionView } from '../connector-store/tiered-extraction.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
@@ -2041,6 +2047,8 @@ export async function main(): Promise<void> {
   // Set once the sniffer runs: its backlog, for the status surface.
   let classificationBusy = () => false;
   let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
+  // Set once the sniffer is built: whether it can judge imported items now.
+  let archivePrivateModelState: () => ArchivePrivateModelState = () => 'waiting';
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED,
@@ -4465,6 +4473,26 @@ export async function main(): Promise<void> {
         : {}),
     })
     : undefined;
+  // Importing an archive from the dashboard (archive-import/dashboard.ts):
+  // the picker lists files as well as folders, only the dashboard's own
+  // routes approve, and every started or removed import is handed to the
+  // scheduler at once. How the private model stands is read off the
+  // sniffer, bound once it runs further down.
+  const archiveImportDashboard = createArchiveImportDashboard({
+    runtime: archiveImports,
+    browser: createLocalFilesArchiveBrowser(),
+    refreshScheduler: () => {
+      sourceScheduler?.updateSources(schedulerSourcesForHandles(
+        activeLaneHandles(readActiveConnectedHandles(process.env), process.env),
+      ).sources);
+    },
+    privateModel: () => archivePrivateModelState(),
+    // Without the scheduler, or with a source list that leaves archives out,
+    // nothing runs an import or a removal: approving one is refused, and one
+    // already waiting says which setting under Needs you.
+    scheduling: () => (sourceScheduler ? archiveImportScheduling(olympusConfig.worker.scheduler) : 'disabled'),
+  });
+  archiveImportDashboard.resume();
   // Built-in transcription installs only when the chosen sources contain
   // audio (each approved extraction lane checks at scheduler start, and each
   // plan pass after a sync), and once ready wakes every extraction task so
@@ -4921,6 +4949,7 @@ export async function main(): Promise<void> {
             oauthHandback: () => chatgptOAuthHandback(),
             loopbackPort: port,
             ...(fileSourceScopes ? { fileSourceScopes } : {}),
+            archiveImports: archiveImportDashboard,
             enforceConnectedSourceReads: true,
             // The filter applies to the override too. An override is a caller
             // saying which handles changed, never a claim that an unpaired
@@ -5759,6 +5788,7 @@ export async function main(): Promise<void> {
     },
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
+    archives: () => archiveImportDashboard.view(),
   });
 
   const socketPath = prepareWorkerSocket();
@@ -5952,6 +5982,7 @@ export async function main(): Promise<void> {
   }
   classificationBusy = () => tierSniffer?.hasPriority ?? false;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
+  archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
 
   // The worker owns a background tick that outlives any request, so the process
@@ -5969,6 +6000,7 @@ export async function main(): Promise<void> {
     if (desktopPoll) clearInterval(desktopPoll);
     clearInterval(captureTick);
     tierSniffer?.stop();
+    archiveImportDashboard.close();
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     stopBuiltInModelOnShutdown(workerBuiltInModel?.model);

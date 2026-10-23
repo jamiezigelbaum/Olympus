@@ -124,6 +124,7 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
   'google_drive.docs',
   'dropbox.files',
   'local.files',
+  'archive.imports',
   'x.bookmarks',
   'telegram.messages',
   'whatsapp.personal.messages',
@@ -249,6 +250,12 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/disconnect' },
   { method: 'POST', path: '/dashboard/delete-source-data' },
   { method: 'POST', path: '/dashboard/unpair' },
+  // Importing an archive: the picker's listing, approval, Decline and Remove
+  // (archive-import/dashboard.ts). Control session only.
+  { method: 'POST', path: '/dashboard/archive-import/browse' },
+  { method: 'POST', path: '/dashboard/archive-import/approve' },
+  { method: 'POST', path: '/dashboard/archive-import/decline' },
+  { method: 'POST', path: '/dashboard/archive-import/remove' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as
   // every route above.

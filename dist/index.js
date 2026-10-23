@@ -302,6 +302,7 @@ var init_public_surface = __esm(() => {
     "google_drive.docs",
     "dropbox.files",
     "local.files",
+    "archive.imports",
     "x.bookmarks",
     "telegram.messages",
     "whatsapp.personal.messages",
@@ -13059,7 +13060,7 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -13289,6 +13290,137 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  DASHBOARD_ARCHIVE_COPY = {
+    importAction: "Import an archive",
+    pick: {
+      back: "Back to Olympus",
+      title: "Import an archive",
+      intro: "Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.",
+      source: "This computer",
+      makePrivate: "Import",
+      makePrivateFor: "Import {name}",
+      alreadyPrivate: "Imported",
+      busy: "Starting…",
+      chooseAnother: "Choose another"
+    },
+    listLabel: "Imported archives",
+    status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
+    dates: "{earliest} to {latest}",
+    items: { one: "1 message", many: "{n} messages" },
+    importingLine: "{percent}% read · {items} so far",
+    importingLineUncounted: "{percent}% read",
+    importedLine: "{items} · imported {when}",
+    importedLineNoTime: "{items}",
+    removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
+    notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
+    notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
+    removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    judgedLine: "{judged} judged · {held} waiting for the private model",
+    heldWhy: {
+      ready: "Until the private model judges them, they stay Private.",
+      waiting: "They stay Private until the private model judges them, and it is not answering right now.",
+      off: "No private model is set up, so they stay Private and are not judged."
+    },
+    setUpPrivateModel: "Set up the private model",
+    countsUnavailable: {
+      why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
+      fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
+    },
+    notRunning: {
+      why: {
+        disabled: "Background syncing is turned off in Olympus's settings, so imports can't run.",
+        not_selected: "Background syncing in Olympus's settings leaves out archives, so imports can't run."
+      },
+      fix: {
+        disabled: "The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it. Each import and removal goes on from where it is.",
+        not_selected: "The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it. Each import and removal goes on from where it is."
+      }
+    },
+    removeNotRunning: {
+      disabled: "Remove can't run while background syncing is turned off.",
+      not_selected: "Remove can't run while background syncing leaves out archives."
+    },
+    stopped: {
+      file_changed: { why: "{file} changed after the import started.", fix: "Remove this archive, then import the file again once it has stopped changing." },
+      file_missing: { why: "{file} is no longer where it was.", fix: "Remove this archive, then import it again from where it is now." },
+      file_unreadable: { why: "Olympus could not read {file}.", fix: "Check that your user account can open it, then remove this archive and import it again." },
+      resume_point_invalid: { why: "Olympus lost its place in this archive.", fix: "Remove this archive and import it again." },
+      format_unavailable: { why: "This version of Olympus cannot read this kind of archive.", fix: "Update Olympus, or remove this archive." },
+      root_changed: { why: "The folder it was in was moved or replaced.", fix: "Remove this archive, then import it again from where it is now." },
+      other: { why: "The import stopped.", fix: "Remove this archive and import it again." }
+    },
+    thisFile: "A file of this archive",
+    gaps: {
+      message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
+      message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
+      charset_not_decoded: { one: "1 message in a character set Olympus could not read", many: "{n} messages in a character set Olympus could not read" },
+      attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
+      text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
+      spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      other: { one: "1 item not read fully", many: "{n} items not read fully" }
+    },
+    seeWhy: "See what was not read",
+    gapInFile: "{file}: {gap}",
+    remove: "Remove",
+    removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
+    requestLine: "An agent asked to import {name} from {where}.",
+    approve: "Import",
+    decline: "Decline",
+    checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
+    cancel: "Cancel",
+    cancelled: "Cancelled. {name} was not imported.",
+    alreadyLine: "{name} is already imported as {archive}.",
+    alreadyLineUnnamed: "{name} is already imported.",
+    failedLine: "{name} was not imported: {reason}",
+    failed: {
+      not_found: "it is no longer there.",
+      permission_denied: "your user account is not allowed to open it.",
+      changed: "it changed while Olympus was reading it.",
+      unreadable: "Olympus could not read it.",
+      unsupported: "Olympus does not import this kind of file.",
+      ambiguous: "Olympus could not tell which kind of export it is.",
+      replaced: "it was moved, replaced or changed after you chose it."
+    },
+    tryAgain: "Try again",
+    dismiss: "Dismiss",
+    started: "Importing {name}. It shows under Archives as it is read.",
+    checking: "Checking whether {name} is already imported…",
+    already: "{name} is already imported as {archive}.",
+    alreadyUnnamed: "{name} is already imported.",
+    removing: "Removing {name}.",
+    declined: "Declined.",
+    needsYou: {
+      stopped: "An import stopped: {name}",
+      request: "An agent asked to import {name}",
+      failed: "An import did not start: {name}",
+      counts: "Olympus can't count the messages in {name}",
+      scheduler: {
+        disabled: "Imports can't run: background syncing is turned off",
+        not_selected: "Imports can't run: background syncing leaves out archives"
+      },
+      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      unreadable: "Olympus can't read its list of imported archives",
+      seeWhy: "See why",
+      review: "Review",
+      setUp: "Set up the private model",
+      check: "Check the private model"
+    },
+    unreadable: {
+      why: {
+        damaged: "{file} is damaged, so Olympus cannot tell which archives it imported.",
+        unknown_form: "{file} was written by a newer version of Olympus, or it is damaged.",
+        permission: "Your user account is not allowed to open {file}.",
+        other: "Olympus could not open {file}."
+      },
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      fix: {
+        damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
+        unknown_form: "Update Olympus, then open this page again.",
+        permission: "Check that your user account can open that file, then open this page again.",
+        other: "Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support."
+      }
+    }
+  };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
     syncNow: "Sync now",
@@ -13296,7 +13428,8 @@ var init_vocabulary = __esm(() => {
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
     deleteData: "Delete indexed data",
-    changeModels: "Change"
+    changeModels: "Change",
+    importArchive: DASHBOARD_ARCHIVE_COPY.importAction
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
     back: "Back to Olympus",
@@ -17949,6 +18082,17 @@ var init_public_source_capabilities = __esm(() => {
       supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"]
     },
     {
+      source_id: "archive.imports",
+      label: "Archives",
+      authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      dependencies: [
+        { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
+      ],
+      provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+    },
+    {
       source_id: "x.bookmarks",
       label: "X bookmarks",
       authentication: { type: "oauth2", ownership: "user-owned X developer application and API plan" },
@@ -18188,6 +18332,7 @@ var init_archive_formats = __esm(() => {
     label: "Mail (mbox)",
     family: "email",
     provider: "mbox",
+    citationLabel: "Imported mail",
     detect(probe) {
       if (probe.chosen.kind === "file")
         return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
@@ -18202,6 +18347,9 @@ var init_archive_formats = __esm(() => {
 });
 
 // src/workers/archive-import/store.ts
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
   init_archive_formats();
@@ -18792,6 +18940,12 @@ var init_source_ingestion_ledger = __esm(() => {
       primaryCorpusId: "secure_local.local.files",
       family: "file",
       corpusSourceIds: ["local.files"]
+    },
+    archive_imports: {
+      label: "Archives",
+      primaryCorpusId: archiveCorpusId("secure_local", "email"),
+      family: "email",
+      corpusSourceIds: ["archive.imports"]
     }
   };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
@@ -18925,7 +19079,8 @@ function allOpenTargets() {
     { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
   ];
 }
 function openTargetPath(target) {
@@ -18937,6 +19092,8 @@ function openTargetPath(target) {
     return `fix/${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable/${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return "dashboard";
 }
 function openTargetFromPath(path) {
@@ -18956,6 +19113,8 @@ function openTargetToken(target) {
     return `fix.${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return;
 }
 function openTargetTokenPattern() {
@@ -18973,7 +19132,7 @@ function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
 }
 function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
+  return target.kind === "unreadable" || target.kind === "archives";
 }
 function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);

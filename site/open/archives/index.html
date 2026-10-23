@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Opening Olympus on your computer - Olympus</title>
+  <meta name="description" content="Opens Olympus on your computer, or says how to open it by hand.">
+  <meta name="robots" content="noindex">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="refresh" content="0; url=olympus://open/archives">
+  <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
+  <link rel="stylesheet" href="/style.css?v=1.0.0">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>Opening Olympus on your computer…</h1>
+      <p class="lede">If your browser asks whether to open Olympus, choose <strong>Open</strong>. Olympus opens in your browser, ready to use.</p>
+      <p class="cta"><a class="button" href="olympus://open/archives">Open Olympus</a></p>
+
+      <h2 id="by-hand">If nothing happens</h2>
+      <p>On a phone, or on a computer where Olympus is not installed yet or is older, do it by hand:</p>
+      <ol class="flow">
+        <li>On the computer running Olympus, open Terminal and run <code>olympus dashboard</code>. Olympus opens in your browser.</li>
+        <li>Under <strong>Sources</strong>, find <strong>Archives</strong>. Each imported archive, and each import an agent asked for, says what it needs, with its own buttons.</li>
+      </ol>
+
+      <h2 id="on-a-server">If Olympus runs on a server</h2>
+      <p>Open it on your computer through a secure tunnel. On your computer, run:</p>
+      <pre><code>ssh -N -L 8010:127.0.0.1:8010 you@your-server</code></pre>
+      <p>Then on the server, run this and open the link it prints in your computer's browser:</p>
+      <pre><code>olympus dashboard --no-open --target archives</code></pre>
+      <p>8010 is the usual port. If the printed link shows another number, use that number on both sides of the tunnel: the link only works on that port. Replace <code>you@your-server</code> with how you sign in to the server.</p>
+      <p>If your assistant runs on the server and your computer is paired with it (OpenClaw), you can ask it instead: <strong>Open Olympus on my computer</strong>.</p>
+      <p class="meta">More help: <a href="/help/on-your-computer/#open-olympus">Fix it on your computer</a>.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

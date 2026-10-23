@@ -48,7 +48,8 @@ import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
 import { archiveImportFamilies } from './core/archive-formats.ts';
 import { archiveConnectorStoreDbPaths, archiveImportCorpora } from './workers/archive-import/store.ts';
-import { defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
+import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
+import { ArchiveImportRequestStore, archiveImportRequestsPath, withArchiveImportApprovals } from './workers/archive-import/requests.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -186,6 +187,22 @@ export interface LifecycleSourceSpec {
    * refuse a pairing that is still live.
    */
   pairingSessionPaths?(context?: LifecyclePathContext): string[];
+  /**
+   * For a source with neither a credential nor a pairing (imported archives):
+   * whether it still holds something the person approved in the dashboard,
+   * which counts as connected for the per-source delete, and how the person
+   * ends it there. A record that cannot be read counts as present.
+   */
+  approvals?: {
+    present(context?: LifecyclePathContext): boolean;
+    nextAction: string;
+    /**
+     * Runs the custody check and the delete under the one exclusion the
+     * dashboard's approvals hold while they move between stores, so an
+     * approval never lands between the check and the delete.
+     */
+    exclusive?<T>(context: LifecyclePathContext | undefined, run: () => T): T;
+  };
   policyPaths?(context?: LifecyclePathContext): string[];
 }
 
@@ -314,9 +331,31 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
       connectorStorePaths: (context) => archiveConnectorStoreDbPaths(archiveImportFamilies(), envForContext(context)),
       registryCorpora: archiveImportCorpora,
-      // The record of each import (the chosen paths, file versions, progress).
-      // The person's own export files are never touched.
-      rawStatePaths: (context) => [defaultArchiveImportStatePath(envForContext(context))],
+      // The record of each import (the chosen paths, file versions, progress)
+      // and the imports asked for but not yet recorded. The person's own
+      // export files are never touched.
+      rawStatePaths: (context) => {
+        const statePath = defaultArchiveImportStatePath(envForContext(context));
+        return [statePath, archiveImportRequestsPath(statePath)];
+      },
+      approvals: {
+        // An approval still being checked for copies counts too: the check
+        // records the import when it finishes, so deleting under it would let
+        // an import land after the delete. Either file unreadable counts as
+        // present.
+        present: (context) => {
+          try {
+            const statePath = defaultArchiveImportStatePath(envForContext(context));
+            if (new ArchiveImportStateStore({ path: statePath }).list().length > 0) return true;
+            return new ArchiveImportRequestStore({ path: archiveImportRequestsPath(statePath) }).list()
+              .some((request) => request.status === 'checking');
+          } catch {
+            return true;
+          }
+        },
+        nextAction: 'Under Archives in the local dashboard, cancel any import still being checked (or let it finish) and remove each archive, then rerun the CLI delete.',
+        exclusive: (context, run) => withArchiveImportApprovals(defaultArchiveImportStatePath(envForContext(context)), run),
+      },
     },
     {
       sourceId: 'google_drive.docs',
@@ -795,6 +834,16 @@ export function deleteOlympusDataWithCustody(options: {
    */
   engineLoaded?: boolean;
 } & LifecyclePathContext): DataDeleteWithCustodyResult {
+  // A source whose approvals move between stores is checked and deleted
+  // under their exclusion; every other source as before.
+  const exclusive = options.dryRun !== true && options.sourceId
+    ? lifecycleSourceSpecs().find((entry) => entry.sourceId === options.sourceId?.trim() || entry.sourceAliases?.includes(options.sourceId!.trim()))?.approvals?.exclusive
+    : undefined;
+  const run = (): DataDeleteWithCustodyResult => deleteUnderCustody(options);
+  return exclusive ? exclusive(options, run) : run();
+}
+
+function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCustody>[0]): DataDeleteWithCustodyResult {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
     throw new OperationError(
@@ -880,6 +929,14 @@ export function dataDeleteCustody(options: {
             observed: 'connected',
             next_action: 'Use Disconnect in the local dashboard, then rerun the CLI delete.',
           };
+    }
+    if (source!.approvals?.present(options)) {
+      return {
+        requirement: 'source_disconnected',
+        ready: false,
+        observed: 'connected',
+        next_action: source!.approvals.nextAction,
+      };
     }
     // A paired-session source (Telegram, WhatsApp) has no handle to disconnect
     // and its card infers a live session from sync evidence, so "no handle" is
