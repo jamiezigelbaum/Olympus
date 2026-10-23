@@ -72424,7 +72424,7 @@ function withLegacyConsultLease(layout, run) {
       if (legacyConsultWriterIsLive(directory))
         throw new FileLeaseBusyError(join68(directory, "consult.json"));
       const result = run();
-      for (const name of [...LEGACY_CONSULT_LEASE_FILES, "consult.json.lock.db"])
+      for (const name of LEGACY_CONSULT_LEASE_FILES)
         rmSync17(join68(directory, name), { force: true });
       return result;
     }), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
