@@ -8,7 +8,7 @@ import { afterEach, describe, expect, jest, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/dashboard/chatgpt/privacy.ts';
-import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import type { DashboardFix, DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import {
@@ -1104,6 +1104,67 @@ function luminance(hex: string): number {
   };
   return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
 }
+
+describe('Delete indexed data (olympus_delete_source_data): confirm in the source\'s name, then the engine runs it', () => {
+  const DELETE = { label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: { source_id: 'dropbox.files' }, destructive: true };
+  const DISCONNECT = { label: 'Disconnect', tool: 'olympus_disconnect_source', args: { source_id: 'dropbox.files' }, destructive: true };
+  const dropbox = (menu: DashboardFix[]): DashboardViewModelV1['sources'][number] => ({
+    id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Needs you', detail: 'signed out', menu,
+  });
+
+  test('the confirmation says what goes and what stays, names the source, and nothing runs until Yes', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+    host.button('Delete indexed data').click();
+    expect(host.toolCalls()).toEqual([]);
+    const words = DASHBOARD_CHATGPT_PAGE_COPY.deleteDataConfirm.split('{source}').join('Dropbox');
+    expect(words).toContain('Your files and accounts are not touched');
+    expect(words).toContain('cannot be undone');
+    expect(host.text()).toContain(words);
+    host.button('Cancel').click();
+    expect(host.text()).not.toContain(words);
+    host.button('Delete indexed data').click();
+    host.button('Yes, delete indexed data').click();
+    expect(host.toolCalls()).toEqual([{ name: 'olympus_delete_source_data', arguments: { source_id: 'dropbox.files' } }]);
+
+    // Done: the row is read again and a brief line says so.
+    host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+    await sleep(0);
+    expect(host.toolCalls().at(-1)).toEqual({ name: 'olympus_dashboard', arguments: {} });
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataDone);
+  });
+
+  test('an unexpected error is never reported as deleted', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+    host.button('Delete indexed data').click();
+    host.button('Yes, delete indexed data').click();
+    host.respond('tools/call', { isError: true, structuredContent: { error: { code: 'internal' } }, content: [{ type: 'text', text: 'internal' }] });
+    await sleep(0);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataDone);
+  });
+
+  test('Disconnect says the indexed data stays until it is deleted', () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [{ ...dropbox([DISCONNECT]), status: 'Fresh', detail: 'synced' }] }) });
+    host.button('Disconnect').click();
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.disconnectConfirm.split('{source}').join('Dropbox'));
+  });
+
+  test('a refusal reads beside the control', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+    host.button('Delete indexed data').click();
+    host.button('Yes, delete indexed data').click();
+    host.respond('tools/call', {
+      isError: true,
+      content: [{ type: 'text', text: 'Disconnect this source first, then delete its indexed data.' }],
+      structuredContent: { error: 'delete_needs_disconnect' },
+    });
+    await sleep(0);
+    expect(host.text()).toContain('Disconnect this source first');
+  });
+});
 
 describe('Sync now (olympus_sync_source): start, then the result on a later read', () => {
   const SYNC = { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: 'dropbox.files' } };

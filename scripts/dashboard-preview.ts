@@ -36,7 +36,7 @@ import {
   dashboardOutsideHelpRedirect,
   renderDashboardLocalPage,
 } from '../src/workers/dashboard/index.ts';
-import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME, SCOPE_LIST_TOOL_NAME, SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME, DELETE_SOURCE_DATA_TOOL_NAME, SCOPE_LIST_TOOL_NAME, SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
 import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
@@ -448,6 +448,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     return view;
   }
   if (state.startsWith('local-files')) return localFilesPreview(state.startsWith('local-files-picker') ? 'local-files-connected' : state);
+  if (state === 'delete-data' || state === 'delete-data-done') return deleteDataPreview(state === 'delete-data-done');
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -657,6 +658,36 @@ function localFilesPreview(state: string) {
   });
 }
 
+/**
+ * Delete indexed data (owner, 2026-10-23). Readwise connected and fresh;
+ * Dropbox disconnected with its index still on the computer
+ * ('delete-data': the ⋯ menu offers Delete indexed data), or after the delete
+ * ('delete-data-done': nothing indexed, the plain not-connected row). In the
+ * 'delete-data' state the harness answers the delete tool and then reads as
+ * the done state, so the confirmation and the result line can be walked.
+ */
+function deleteDataPreview(done: boolean): SourceDashboardViewModel {
+  const status = emptyStatus();
+  status.corpora = [
+    corpus('internal.readwise.library', 'readwise', 'internal', 'readwise', 250, 250, { withText: 250, embedded: 250 }),
+    ...(done ? [] : [corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 30_012, 600_000, { withText: 30_012, embedded: 30_012 })]),
+  ];
+  const view = buildSourceDashboardViewModel({
+    sourceIndexStatus: status,
+    schedulerStatus: scheduler([schedulerSource('readwise.library', 'internal.readwise.library', 0.4)]),
+    sovereigntyEngine: engine,
+    connectedHandleRegistry: registry([handle('readwise.personal', 'readwise', ['readwise.library.sync'], [])]),
+    apiKeyAvailability: { readwise: true },
+    oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
+    oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
+    googlePilotClientConfigured: true,
+    oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+    now: NOW,
+  });
+  view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
+  return view;
+}
+
 function dropboxPreview(mode: 'initial' | 'update') {
   const status = emptyStatus();
   const dropbox = corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 30_012, 600_000);
@@ -809,7 +840,11 @@ export const DASHBOARD_PREVIEW_STATES = [
   'local-files-off', 'local-files-connected', 'local-files-indexing', 'local-files-reading', 'local-files-needs-permission',
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
+  'delete-data', 'delete-data-done',
 ] as const;
+
+/** 'delete-data': set once the preview's delete tool has run, so the next read is the done state. */
+let previewDataDeleted = false;
 
 const LOCAL_FILES_HOME = '/Users/you';
 
@@ -898,6 +933,7 @@ function pickerAutoScript(spec: string): string {
 
 /** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
+  if (state === 'delete-data' && previewDataDeleted) state = 'delete-data-done';
   const result = dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) }));
   return {
     ...result,
@@ -1022,6 +1058,13 @@ if (import.meta.main) {
       if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
         return Response.json(previewScopeList(state, body.arguments));
       }
+      if (body.name === DELETE_SOURCE_DATA_TOOL_NAME && state === 'delete-data') {
+        previewDataDeleted = true;
+        return Response.json({
+          content: [{ type: 'text', text: 'Indexed data deleted for Dropbox. Your files and accounts were not touched.' }],
+          structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true },
+        });
+      }
       // The waiting count rides only an unlocked session, as on the computer.
       if (body.name === DASHBOARD_TOOL_NAME) return Response.json(previewDashboardToolResult(state, false, previewUnlocked ? waitingCount : 0));
       return Response.json({
@@ -1055,6 +1098,7 @@ if (import.meta.main) {
       // (headless screenshots need no redirect).
       const namedState = url.searchParams.get('state') ?? '';
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
+      if (stateOverride === 'delete-data') previewDataDeleted = false;
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [
         ...(stateOverride ? [`olympus_preview_state=${stateOverride}; Path=/; SameSite=Strict`] : []),

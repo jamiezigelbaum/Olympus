@@ -14,7 +14,7 @@ import type {
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
 import type { DashboardSyncName } from '../source-dashboard.ts';
-import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL } from '../source-dashboard.ts';
+import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
@@ -209,11 +209,15 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
   const queueStatus = DASHBOARD_QUEUE_HEALTH_STATUS[source.queue_health.label as DashboardQueueHealthLabel];
   if (connectionStatus === 'Needs you' || connectionStatus === 'Off') {
-    // 'Off' is only honest for a source with nothing behind it. A card whose
-    // connection state reads never-connected while its corpus holds indexed
-    // items is connected-but-broken — a revoked or deleted handle — so it
-    // reads Needs you rather than hiding behind a calm word.
-    if (connectionStatus === 'Off' && source.coverage.indexed_items > 0) {
+    // A card that reads never-connected while its corpus still holds indexed
+    // items has no grant at all (no handle, no this-computer record): the
+    // owner disconnected it and its data was kept (owner ruling, 2026-10-23).
+    // It stays Off, worded "Disconnected · indexed data kept"; a grant that
+    // is still present but expired or revoked reads reauth_required (Needs
+    // you), a degradation or a provider refusal, all decided above. Custody
+    // that is not settled (registry or unpair record unreadable, an unpair
+    // that left files) keeps its warning: Needs you, with its own label.
+    if (connectionStatus === 'Off' && dashboardUnsettledWithData(source)) {
       return { status: 'Needs you', mappedUnknown: false };
     }
     return { status: connectionStatus, mappedUnknown: false };
@@ -291,8 +295,7 @@ export function dashboardIsConnectedSource(source: DashboardSourceCard): boolean
   // is exactly the report home exists to carry, and dropping the card because
   // the attempt never produced a handle would hide the failure on the page the
   // owner is looking at.
-  if (source.connection.provider_refusal) return true;
-  return source.coverage.indexed_items > 0;
+  return source.connection.provider_refusal !== undefined || dashboardUnsettledWithData(source);
 }
 
 /** Cards bucketed by status, in DASHBOARD_STATUS_ORDER, empty groups dropped. */
@@ -375,8 +378,24 @@ export function dashboardSubLine(
     case 'Fresh':
       return freshLine(source, options?.now ?? new Date());
     case 'Off':
-      return source.connection.label;
+      // Not connected with indexed data left: disconnected on purpose, data
+      // kept (owner ruling, 2026-10-23), not a lost sign-in.
+      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source)
+        && !dashboardUnsettledWithData(source)
+        ? DASHBOARD_DISCONNECTED_DATA_KEPT
+        : source.connection.label;
   }
+}
+
+function dashboardIsUnconnectedState(source: DashboardSourceCard): boolean {
+  return DASHBOARD_UNCONNECTED_STATES.has(source.connection.state);
+}
+
+/** Unconnected with indexed data, but custody is not settled (see DASHBOARD_UNSETTLED_CUSTODY_LABELS). */
+export function dashboardUnsettledWithData(source: DashboardSourceCard): boolean {
+  return source.coverage.indexed_items > 0
+    && dashboardIsUnconnectedState(source)
+    && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
 }
 
 /**
@@ -414,14 +433,7 @@ export function dashboardAttentionLine(
     }
     case 'needs_setup':
     case 'not_connected':
-      // A source that holds data and reads not-connected has LOST its
-      // connection — a revoked or deleted handle — and the row says that,
-      // not the registry's bare word (owner note, 2026-09-01: "not connected
-      // — Set up" on a source with 4,000 files read as a demand for a source
-      // nobody asked for).
-      return source.coverage.indexed_items > 0
-        ? DASHBOARD_SIGNED_OUT
-        : source.connection.label;
+      return source.connection.label;
     default:
       break;
   }
@@ -446,6 +458,8 @@ export function dashboardAttentionLine(
 
 /** The row word for a connection the owner has to sign back into. */
 export const DASHBOARD_SIGNED_OUT = 'signed out';
+/** A source the owner disconnected whose indexed data is still on the computer. */
+export const DASHBOARD_DISCONNECTED_DATA_KEPT = 'Disconnected · indexed data kept';
 
 /**
  * The one verb for repairing a connection, everywhere on owner surfaces. The
@@ -1680,6 +1694,15 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    * the engine's own (dashboardManualSyncLine), the same on both surfaces.
    */
   syncChecking: 'Checking…',
+  /**
+   * Delete indexed data (owner, 2026-10-23), for a source that is already
+   * disconnected. The confirmation says what goes and what does not, in the
+   * user's words; {source} is the source's name. Disconnect's confirmation
+   * tells the reader the indexed data stays and can be deleted afterwards.
+   */
+  deleteDataConfirm: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.',
+  deleteDataDone: 'Indexed data deleted',
+  disconnectConfirm: 'Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
   /**
    * The disclosure under a row whose files can't be read: counts and
@@ -1775,6 +1798,7 @@ export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   chooseFolders: 'Choose folders',
   chooseMail: 'Choose mail',
   disconnect: 'Disconnect',
+  deleteData: 'Delete indexed data',
   changeModels: 'Change',
 } as const;
 

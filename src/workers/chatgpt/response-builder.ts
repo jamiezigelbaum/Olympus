@@ -40,6 +40,7 @@ import type {
   DashboardSource,
   DashboardUnreadable,
   DashboardViewModelV1,
+  DeleteSourceDataResult,
   DisconnectSourceResult,
   FolderScopeList,
   ScopeFolderAccess,
@@ -69,6 +70,7 @@ import {
   CONNECT_SOURCE_TOOL_NAME,
   DASHBOARD_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
   MODEL_RETRY_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
   PRIVACY_GET_TOOL_NAME,
@@ -132,6 +134,7 @@ const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [CONNECT_SOURCE_TOOL_NAME]: { source: OAUTH_SOURCES },
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
+  [DELETE_SOURCE_DATA_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
   [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers', 'transcription']) },
   [SYNC_SOURCE_TOOL_NAME]: { source_id: SYNC_SOURCE_IDS },
@@ -1025,6 +1028,15 @@ export function disconnectToolResult(result: DisconnectSourceResult): ChatGptToo
   };
 }
 
+export function deleteSourceDataToolResult(result: DeleteSourceDataResult): ChatGptToolResult {
+  const sourceId = DISCONNECT_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
+  if (!sourceId) return errorToolResult(new ChatGptSurfaceError('internal'));
+  return {
+    content: [{ type: 'text', text: `Indexed data deleted for ${SOURCE_LABELS[sourceId]}. Your files and accounts were not touched.` }],
+    structuredContent: { status: 'deleted', source_id: sourceId, restarting: result.restarting === true },
+  };
+}
+
 /**
  * `olympus_sync_source`: whether a sync started, and nothing else. What it
  * finds reaches the panel as the source's `lastManualSync`; never a file name.
@@ -1298,7 +1310,10 @@ type SurfaceOnlyErrorCode =
   | 'source_not_connected'
   | 'source_busy'
   | 'sync_unavailable'
-  | 'disconnect_incomplete';
+  | 'disconnect_incomplete'
+  | 'delete_needs_disconnect'
+  | 'delete_unavailable'
+  | 'delete_incomplete';
 
 const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   invalid_params: 'The request was not valid. Check the arguments and try again.',
@@ -1329,6 +1344,9 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   source_busy: 'This source is finishing a read. Try again in a moment.',
   sync_unavailable: 'Olympus can\'t check this source from here right now. It keeps checking on its own.',
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
+  delete_needs_disconnect: 'Disconnect this source first, then delete its indexed data.',
+  delete_incomplete: 'Olympus couldn\'t finish deleting this source\'s indexed data. Try again; the engine is reopening its stores.',
+  delete_unavailable: 'Olympus can\'t delete this source\'s indexed data from here right now. Nothing was deleted. Try again in a moment.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
   privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',

@@ -638,6 +638,7 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/sync-now',
     '/dashboard/embedding-priority',
     '/dashboard/disconnect',
+    '/dashboard/delete-source-data',
     '/dashboard/unpair',
     '/dashboard/agents/pairing-code',
     '/dashboard/agents/keys',

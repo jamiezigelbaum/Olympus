@@ -13638,6 +13638,9 @@ var init_vocabulary = __esm(() => {
     },
     sourcePaused: "Paused",
     syncChecking: "Checking…",
+    deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
+    deleteDataDone: "Indexed data deleted",
+    disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
     unreadableMore: DASHBOARD_UNREADABLE_MORE,
@@ -13653,6 +13656,7 @@ var init_vocabulary = __esm(() => {
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
+    deleteData: "Delete indexed data",
     changeModels: "Change"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
@@ -18370,7 +18374,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir16(), ".local", "share");
   return join35(standaloneLinuxDataDir(env) ?? join35(dataHome, "openclaw", "olympus"), "source-dashboard.sqlite");
 }
-var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -18389,6 +18393,11 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
+    DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_INCOMPLETE_LABEL
+  ]);
   DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
     "credential_refresh_busy",
     "credential_session_latched"
@@ -29859,6 +29868,7 @@ var OLYMPUS_TAB_TOOL_NAMES = [
   "olympus_scope_list",
   "olympus_scope_set",
   "olympus_disconnect_source",
+  "olympus_delete_source_data",
   "olympus_model_set",
   "olympus_model_retry",
   "olympus_privacy_get",

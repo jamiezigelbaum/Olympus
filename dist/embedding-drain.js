@@ -32196,7 +32196,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -32215,6 +32215,11 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
+    DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_INCOMPLETE_LABEL
+  ]);
   DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
     "credential_refresh_busy",
     "credential_session_latched"
@@ -32532,6 +32537,9 @@ var init_vocabulary = __esm(() => {
     },
     sourcePaused: "Paused",
     syncChecking: "Checking…",
+    deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
+    deleteDataDone: "Indexed data deleted",
+    disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
     unreadableMore: DASHBOARD_UNREADABLE_MORE,
@@ -32562,6 +32570,7 @@ var init_vocabulary = __esm(() => {
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
+    deleteData: "Delete indexed data",
     changeModels: "Change"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
@@ -34365,7 +34374,7 @@ var init_source_watch = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -34373,6 +34382,7 @@ var init_dashboard_contract = __esm(() => {
     SCOPE_LIST_TOOL_NAME,
     SCOPE_SET_TOOL_NAME,
     DISCONNECT_SOURCE_TOOL_NAME,
+    DELETE_SOURCE_DATA_TOOL_NAME,
     MODEL_SET_TOOL_NAME,
     MODEL_RETRY_TOOL_NAME,
     "olympus_privacy_get",
@@ -34645,6 +34655,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
             after: cursorOf(page2.after)
           };
         }
+        redraw();
+        return;
+      }
+      if (name === config.deleteDataTool && !(result && result.isError)) {
+        refresh();
+        state.notice = P.deleteDataDone;
         redraw();
         return;
       }
@@ -34987,7 +35003,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       if (state.confirming === key2) {
         const run = action;
         wrap.className = "fix confirm";
-        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run, "danger"), button(P.cancel, key2 + ":no", () => {
+        const sourceWords = source ? String(source.label || "") : "";
+        const named = sourceWords && fix.tool === config.deleteDataTool ? fill2(P.deleteDataConfirm, { source: sourceWords }) : sourceWords && fix.tool === config.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
+        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
           render(key2);
         }, "plain"));
@@ -38604,6 +38622,8 @@ function chatgptDashboardPageHtml(options = {}) {
   const config = {
     toolName: DASHBOARD_TOOL_NAME,
     syncTool: SYNC_SOURCE_TOOL_NAME,
+    deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
+    disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -38678,6 +38698,9 @@ var init_page = __esm(() => {
     "source_busy",
     "sync_unavailable",
     "disconnect_incomplete",
+    "delete_needs_disconnect",
+    "delete_unavailable",
+    "delete_incomplete",
     "models_not_ready",
     "connect_unavailable",
     "already_connected"
@@ -39059,6 +39082,56 @@ var init_source_ingestion_ledger = __esm(() => {
   init_store();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
   corpusPopulations = new WeakMap;
+});
+
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
 });
 
 // src/core/delphi.ts
@@ -41929,6 +42002,33 @@ var CHAT_TITLE_STOPWORDS = new Set([
 init_atomic_file();
 init_file_lease();
 init_file_scope_sources();
+// src/data-lifecycle.ts
+init_atomic_file();
+init_operation_error();
+init_sqlite_migrations();
+init_remote_connections();
+init_waiting_private_questions();
+init_source_ingestion_policy();
+init_dropbox_files();
+init_store();
+init_google_connectors();
+init_telegram_messages();
+init_readwise();
+init_tier_set2();
+init_x_bookmarks();
+init_tier_set3();
+init_reconcile_state();
+init_live_control2();
+// src/workers/whatsapp/index.ts
+init_live_connector();
+init_store_sync2();
+
+// src/data-lifecycle.ts
+init_sovereignty();
+init_source_corpus_registry();
+init_public_source_capabilities();
+init_worker_service();
+init_media_cache();
 
 // src/workers/email-source/index.ts
 init_corpora();
@@ -42374,11 +42474,6 @@ init_readwise();
 init_embeddings();
 init_x_bookmarks();
 init_live_control2();
-// src/workers/whatsapp/index.ts
-init_live_connector();
-init_store_sync2();
-
-// src/workers/source-scheduler.ts
 init_telegram_messages();
 
 // src/workers/source-scheduler-state.ts
