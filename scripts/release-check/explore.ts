@@ -41,8 +41,13 @@ export interface PanelControl {
 export interface Seed {
   id: SeedId;
   title: string;
-  /** Puts the install in this state (and checks it got there). `ok: false` says why it could not, and the seed is reported as missed. */
-  apply(): Promise<{ ok: boolean; detail: string }>;
+  /**
+   * Puts the install in this state (and checks it got there). `ok: false` says why it could not, and the seed is reported as missed.
+   * A seed that drives several sources reports each one that did not reach the state it should have in `failedSources`: the seed is
+   * still pressed for the others, and the `explore.sources` check fails for the one that did not (a source the machine claims to
+   * drive has to be driven).
+   */
+  apply(): Promise<{ ok: boolean; detail: string; failedSources?: Array<{ source: string; detail: string }> }>;
   /** The press changed the install in a way a reload does not undo (a disconnect): the next press starts by applying the seed again. */
   resetAfter?: ControlKind[];
   /** Presses whose effect cannot be undone (the data is gone): run last, and nothing is replayed after them. */
@@ -86,6 +91,8 @@ export interface ExploreResult {
   /** Controls the page showed in the Sources section that the source-derived list does not name. */
   unlisted: Array<{ key: string; label: string; rowName: string; pressed: boolean }>;
   summary: { listed: number; found: number; pressed: number; missed: number; unlisted: number; presses: number };
+  /** Sources a seed was meant to drive and could not bring to the state: the machine claims to drive them, so this blocks. */
+  sourceFailures?: Array<{ seed: SeedId; source: string; detail: string }>;
   /** Why there is no accessibility audit, or its result. */
   accessibility: { status: 'skipped'; reason: string };
 }
@@ -135,6 +142,11 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
     const no = c.after.controls.some((control) => control.key === `${c.control.key}:no` && control.visible);
     return { ok: yes && no, expected: 'Delete indexed data asks first, with Confirm and Cancel', actual: yes && no ? 'it asks' : 'it did not ask' };
   },
+  unpair: (c) => {
+    const yes = c.after.controls.some((control) => control.key === `${c.control.key}:yes` && control.visible);
+    const no = c.after.controls.some((control) => control.key === `${c.control.key}:no` && control.visible);
+    return { ok: yes && no, expected: 'Unpair asks first, with Confirm and Cancel', actual: yes && no ? 'it asks' : 'it did not ask' };
+  },
   cancel: (c) => {
     const base = c.control.key.replace(/:no$/, '');
     const gone = !c.after.controls.some((control) => control.key === `${base}:yes`);
@@ -154,6 +166,10 @@ export const AFTER_CONFIRM: Partial<Record<ControlKind, (context: PressContext &
   'delete-data': (c) => {
     const gone = !c.after.controls.some((control) => control.rowName === c.control.rowName && kindOf(control.key, control.name) === 'delete-data');
     return { ok: gone, expected: 'after Delete indexed data the row no longer offers it', actual: gone ? 'it is gone' : 'the row still offers it' };
+  },
+  unpair: (c) => {
+    const gone = !c.after.controls.some((control) => control.rowName === c.control.rowName && kindOf(control.key, control.name) === 'unpair');
+    return { ok: gone, expected: 'after Unpair the row no longer offers it', actual: gone ? 'it is gone' : 'the row still offers Unpair' };
   },
 };
 
@@ -230,6 +246,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const foundIds = new Map<string, { seeds: Set<SeedId>; pressed: boolean; disabled: boolean }>();
   const unlisted = new Map<string, { key: string; label: string; rowName: string; pressed: boolean }>();
   const seedFailures = new Map<SeedId, string>();
+  /** Sources a seed was meant to drive and did not reach the state for. */
+  const sourceFailures: Array<{ seed: SeedId; source: string; detail: string }> = [];
   let totalPresses = 0;
   let opened = options.signedIn === true;
 
@@ -284,12 +302,13 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   };
 
   for (const seed of options.seeds) {
-    const applied = await seed.apply().catch((error: unknown) => ({ ok: false, detail: error instanceof Error ? error.message : String(error) }));
+    const applied: Awaited<ReturnType<Seed['apply']>> = await seed.apply().catch((error: unknown) => ({ ok: false, detail: error instanceof Error ? error.message : String(error) }));
     if (!applied.ok) {
       seeds.push({ id: seed.id, title: seed.title, produced: false, detail: applied.detail, pressed: 0, failed: 0 });
       seedFailures.set(seed.id, applied.detail);
       continue;
     }
+    for (const failure of applied.failedSources ?? []) sourceFailures.push({ seed: seed.id, ...failure });
     await freshPage();
     await watch();
     // What the page logged and requested while loading is judged here, once, with the seeded page; each press then starts from a clean log.
@@ -346,15 +365,15 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     let dirty = false;
     let pressedHere = 0;
     let failedHere = 0;
-    let destroyed = false;
-    while (queue.length > 0 && presses < maxPresses && !destroyed) {
+    while (queue.length > 0 && presses < maxPresses) {
       queue.sort((a, b) => orderKey(a) - orderKey(b));
       const item = queue.shift()!;
       const started = now();
       try {
       if (dirty) {
-        const again = await seed.apply().catch((error: unknown) => ({ ok: false, detail: String(error) }));
+        const again: Awaited<ReturnType<Seed["apply"]>> = await seed.apply().catch((error: unknown) => ({ ok: false, detail: String(error) }));
         if (!again.ok) { steps.push(failureStep(steps.length + 1, item.path, `the seed could not be applied again: ${again.detail}`)); failedHere += 1; break; }
+        for (const failure of again.failedSources ?? []) if (!sourceFailures.some((known) => known.seed === seed.id && known.source === failure.source)) sourceFailures.push({ seed: seed.id, ...failure });
         dirty = false;
       }
       await freshPage();
@@ -488,8 +507,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         record(child, idOf(child));
         enqueue([...item.path, child.key], kind);
       }
-      if ((seed.resetAfter ?? []).includes(kind) || kind === 'confirm') dirty = true;
-      if (kind === 'confirm' && parent && lastKinds.has(parent)) destroyed = true;
+      // A confirmed press that cannot be undone (the data is gone, the phone unpaired) is not replayed; the presses after it start from a fresh page of
+      // what is left, which is why those run last and each source's own come one after another.
+      const spent = kind === 'confirm' && parent !== undefined && lastKinds.has(parent);
+      if (!spent && ((seed.resetAfter ?? []).includes(kind) || kind === 'confirm')) dirty = true;
       } catch (error) {
         // The page or the browser failed under a press: that press fails, with the reason, and the exploration goes on.
         steps.push(failureStep(steps.length + 1, item.path, `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`));
@@ -520,6 +541,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   return {
     seeds, traces, coverage, unlisted: [...unlisted.values()],
     summary: { listed, found, pressed, missed: listed - pressed, unlisted: unlisted.size, presses: totalPresses },
+    sourceFailures,
     accessibility: { status: 'skipped', reason: 'no accessibility checker (axe-core or similar) is installed in the repository or on the machine, and adding one is a dependency decision for the owner; the generic rules above cover names, reasons and overflow only' },
   };
 }
@@ -547,6 +569,14 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
       status: failed.length === 0 ? 'pass' : 'fail',
       detail: failed.length === 0 ? `${seed.pressed} control(s) pressed, each with its outcome and no rule broken` : failed.slice(0, 4).map((step) => `${step.name}: ${step.findings.length > 0 ? step.findings.join('; ') : `expected ${step.expected}; got ${step.actual}`}`).join(' | '),
       ...(trace ? { ms: trace.ms } : {}),
+    });
+  }
+  const failures = result.sourceFailures ?? [];
+  if (failures.length > 0) {
+    checks.push({
+      id: 'explore.sources', title: 'Every source the machine drives reached the states it has',
+      status: 'fail',
+      detail: failures.slice(0, 6).map((failure) => `${failure.source} (${failure.seed}): ${failure.detail.slice(0, 200)}`).join(' | '),
     });
   }
   const s = result.summary;

@@ -57,6 +57,8 @@ interface PanelState {
   staleLogs?: boolean;
   /** The page logs a console error while it loads. */
   loadLogs?: boolean;
+  /** The row is a paired chat app: its ⋯ menu offers this instead of Disconnect. */
+  unpairLabel?: string;
 }
 
 /** A panel with one source, Readwise, that behaves the way the dashboard's does: a row, a ⋯ menu, a question before Disconnect. */
@@ -81,7 +83,7 @@ class PanelDriver implements JourneyDriver {
     const sync = s.disabledSync ? `<button data-key="menu:readwise.library:0" disabled>Sync now</button>${s.disabledSync === 'reason' ? '<span class="reason">Waiting for the first sync</span>' : ''}` : `<button data-key="menu:readwise.library:0">Sync now</button>`;
     const disconnect = s.confirming
       ? `<span class="fix confirm"><span class="reason strong">Disconnect Readwise?</span><button data-key="menu:readwise.library:1:yes">Confirm disconnect</button><button data-key="menu:readwise.library:1:no">Cancel</button></span>`
-      : `<span class="fix"><button data-key="menu:readwise.library:1">Disconnect</button></span>`;
+      : `<span class="fix"><button data-key="menu:readwise.library:1">${s.unpairLabel ?? 'Disconnect'}</button></span>`;
     const row = s.connected
       ? `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">${s.line}</p></div>
           <details class="menu" data-open-key="menu:readwise.library" ${s.menuOpen ? 'open' : ''}><summary data-key="summary:menu:readwise.library">⋯<span class="sr">More actions for Readwise</span></summary><div class="menu-panel"><span class="fix">${sync}</span>${disconnect}</div></details></li>`
@@ -399,17 +401,49 @@ describe('exploring the Sources section', () => {
     expect(result.summary.presses).toBeGreaterThan(2);
   });
 
-  test('Telegram and WhatsApp Unpair are listed, destructive, and unreachable on a throwaway machine', () => {
+  test('Telegram and WhatsApp Unpair are listed and destructive, and the machine can reach them through the capture stand-ins', () => {
     const unpair = buildInventory().filter((entry) => entry.kind === 'unpair');
     expect(unpair.map((entry) => entry.sourceId).sort()).toEqual(['telegram.messages', 'whatsapp.personal.messages']);
-    expect(unpair.every((entry) => entry.destructive && typeof entry.unreachable === 'string')).toBe(true);
+    expect(unpair.every((entry) => entry.destructive && entry.unreachable === undefined)).toBe(true);
     expect(kindOf('x', 'Unpair Telegram')).toBe('unpair');
     // Sources that cannot be synced here offer Check again when they need the owner.
     const again = buildInventory().filter((entry) => entry.kind === 'check-again');
     expect(again.map((entry) => entry.sourceId)).toContain('telegram.messages');
     expect(again.map((entry) => entry.sourceId)).toContain('whatsapp.personal.messages');
-    expect(again.every((entry) => typeof entry.unreachable === 'string' || entry.sourceId !== 'readwise.library')).toBe(true);
     expect(kindOf('x', 'Check again')).toBe('check-again');
+  });
+
+  test('which sources a machine can drive: Readwise, the chat apps and (on Linux) Files on this computer; the sign-in sources say why not', () => {
+    const reach = (os: 'linux' | 'macos'): Map<string, string[]> => {
+      const all = buildInventory(undefined, os);
+      return new Map([...new Set(all.map((entry) => entry.sourceId))].map((id) => [id, all.filter((entry) => entry.sourceId === id && entry.unreachable === undefined).map((entry) => entry.kind)]));
+    };
+    const linux = reach('linux');
+    expect(linux.get('readwise.library')!.length).toBeGreaterThan(0);
+    expect(linux.get('telegram.messages')).toContain('unpair');
+    expect(linux.get('whatsapp.personal.messages')).toContain('unpair');
+    expect(linux.get('local.files')).toEqual(expect.arrayContaining(['connect', 'scope', 'disconnect', 'delete-data']));
+    expect(linux.get('local.files')).not.toContain('privacy-settings');
+    for (const id of ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks']) expect(linux.get(id)).toEqual([]);
+    // A Mac asks for a permission the machine cannot grant.
+    expect(reach('macos').get('local.files')).toEqual([]);
+    expect(buildInventory().find((entry) => entry.sourceId === 'gmail.email')!.unreachable).toContain('closed table');
+  });
+
+  test('Unpair asks first and its Confirm is not replayed: it runs last, from a fresh page, and the row no longer offers it', async () => {
+    const driver = new PanelDriver({ unpairLabel: 'Unpair Readwise' });
+    let applied = 0;
+    const seed: Seed = { id: 'populated', title: 'populated', apply: async () => { applied += 1; driver.state.connected = true; return { ok: true, detail: 'paired' }; }, resetAfter: ['confirm'], last: ['unpair'] };
+    const result = await explore({ driver, seeds: [seed], inventory: inventory(), ...quick() });
+    const steps = result.traces[0]!.steps;
+    const asks = steps.find((step) => /Unpair Readwise/.test(step.name) && !/Confirm|Cancel/.test(step.name) && step.action.startsWith('press'));
+    expect(asks?.expected).toContain('Unpair asks first');
+    const confirm = steps.find((step) => /Confirm disconnect/.test(step.name))!;
+    expect(confirm.expected).toContain('no longer offers it');
+    expect(confirm.ok).toBe(true);
+    // The confirmed Unpair is the last press, and the seed was not applied again for it.
+    expect(steps[steps.length - 1]!.name).toContain('Confirm disconnect');
+    expect(applied).toBe(1);
   });
 
   test('the press bound stops the exploration and says so', async () => {
@@ -420,6 +454,6 @@ describe('exploring the Sources section', () => {
   });
 
   test('the expectation table names a kind only where one is cheap to state', () => {
-    expect(Object.keys(EXPECTATIONS).sort()).toEqual(['cancel', 'delete-data', 'disconnect', 'menu', 'see-why']);
+    expect(Object.keys(EXPECTATIONS).sort()).toEqual(['cancel', 'delete-data', 'disconnect', 'menu', 'see-why', 'unpair']);
   });
 });

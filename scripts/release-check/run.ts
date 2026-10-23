@@ -114,6 +114,8 @@ export interface RunOptions {
   skipJourneys?: boolean;
   /** Leave out the bounded exploration of the Sources section. */
   skipExplore?: boolean;
+  /** Leave out the agent suite (the questions put to each agent), for a run that is after another leg; a partial run, like the other skips. */
+  skipSuite?: boolean;
   /** Run only these journeys (by id); omitted runs them all. */
   onlyJourneys?: string[];
   /** Where the approved pictures are (one folder per platform, `<screen>-<width>-<theme>.png`). Omitted, the screens are not compared. */
@@ -876,7 +878,7 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
  */
 async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   if (run.options.skipExplore) return;
-  const inventory = buildInventory();
+  const inventory = buildInventory(undefined, run.machine!.os);
   const scratch = join(outDir, '_explore');
   rmSync(scratch, { recursive: true, force: true });
   mkdirSync(scratch, { recursive: true });
@@ -1095,9 +1097,9 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
     } else {
       const ready = await setupMachine(run, workDir, bundlePath);
-      if (ready && Date.now() < deadline) {
+      if (ready && !options.skipSuite && Date.now() < deadline) {
         await runSuite(run, workDir, judge, { mintToken: true });
-      } else if (ready) {
+      } else if (ready && !options.skipSuite) {
         run.errors.push('the run exceeded its time budget before the agent suite');
       }
       if (ready) {
@@ -1259,6 +1261,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     skipInbox: has('--skip-inbox'),
     skipJourneys: has('--skip-journeys'),
     skipExplore: has('--skip-explore'),
+    skipSuite: has('--skip-suite'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
     updateBaselines: has('--update-baselines'),
