@@ -79,7 +79,7 @@ describe('source ingestion ledger', () => {
       }],
     });
 
-    expect(snapshot.rows).toHaveLength(8);
+    expect(snapshot.rows).toHaveLength(9);
     expect(snapshot.rows.find((row) => row.source_id === 'email')).toMatchObject({
       items: 10,
       content_indexed: 8,

@@ -46,6 +46,9 @@ import {
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
+import { archiveImportFamilies } from './core/archive-formats.ts';
+import { archiveConnectorStoreDbPaths } from './workers/archive-import/store.ts';
+import { defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -296,6 +299,16 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       connectorStorePaths: (context) => localFilesTierConnectorStoreDbPaths(envForContext(context)),
       // The change snapshots that let a restart catch up without a rescan.
       rawStatePaths: (context) => [localFilesWatchDir(envForContext(context))],
+    },
+    {
+      // Connector stores only: one set per family, every archive's items in it.
+      sourceId: 'archive.imports',
+      label: 'Imported archives connector stores',
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      connectorStorePaths: (context) => archiveConnectorStoreDbPaths(archiveImportFamilies(), envForContext(context)),
+      // The record of each import (the chosen paths, file versions, progress).
+      // The person's own export files are never touched.
+      rawStatePaths: (context) => [defaultArchiveImportStatePath(envForContext(context))],
     },
     {
       sourceId: 'google_drive.docs',

@@ -325,6 +325,17 @@ export class TierSnifferStore {
   }
 
   /**
+   * Drop every queued question for one account scope's items (an imported
+   * archive being removed), with the material they hold. Verdicts are keyed
+   * by material, not by item, and stay as the shared cache; a scan position
+   * past a deleted question is a position like any other (`listQuestions`).
+   */
+  deleteAccountScopeQuestions(provider: string, accountScope: string): number {
+    return this.db.query('DELETE FROM sniffer_questions WHERE provider = ? AND account_scope = ?')
+      .run(provider, accountScope).changes;
+  }
+
+  /**
    * Re-ask a question under the item's current map revision: the queued
    * material (names or excerpt) is still the item's, only the map it is
    * judged under changed. Attempts start over.

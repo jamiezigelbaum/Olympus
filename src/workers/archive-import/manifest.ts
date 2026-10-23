@@ -27,13 +27,19 @@ import {
   type ScopeRoot,
 } from '../../core/scope-safe-fs.ts';
 
-/** How much of each end of a file the content fingerprint hashes. */
+/**
+ * How much of each end of a file the content fingerprint hashes.
+ */
 export const ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
-/** Files inside a chosen folder whose first bytes the probe reads. */
+/**
+ * Files inside a chosen folder whose first bytes the probe reads.
+ */
 const PROBE_MAX_FILE_HEADS = 32;
 
 export interface ArchiveManifestFile {
-  /** Relative to the archive's approved root. */
+  /**
+   * Relative to the archive's approved root.
+   */
   rel_path: string;
   dev: string;
   ino: string;
@@ -104,7 +110,9 @@ function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-/** Opens each file through the scope-safe reader and records its version and fingerprint. */
+/**
+ * Opens each file through the scope-safe reader and records its version and fingerprint.
+ */
 export function buildArchiveManifest(root: ScopeRoot, relPaths: readonly string[]): ArchiveManifestFile[] {
   return relPaths.map((relPath) => {
     const reader = root.openFile(relPath);
@@ -135,7 +143,9 @@ export function archiveFileEntries(files: readonly ArchiveManifestFile[]): Archi
   return files.map((file) => ({ relPath: file.rel_path, version: manifestFileVersion(file) }));
 }
 
-/** The digest a resume point is bound to: every file's path and version, in order. */
+/**
+ * The digest a resume point is bound to: every file's path and version, in order.
+ */
 export function archiveManifestSha256(files: readonly ArchiveManifestFile[]): string {
   return createHash('sha256')
     .update(JSON.stringify(files.map((file) => [file.rel_path, file.dev, file.ino, file.size, file.mtime_ms])))
@@ -146,7 +156,9 @@ export type ArchiveManifestCheck =
   | { ok: true }
   | { ok: false; code: 'file_changed' | 'file_missing' | 'file_unreadable'; relPath: string; message: string };
 
-/** Whether every file is still exactly the version the import started with. Reads no content. */
+/**
+ * Whether every file is still exactly the version the import started with. Reads no content.
+ */
 export function verifyArchiveManifest(root: ScopeRoot, files: readonly ArchiveManifestFile[]): ArchiveManifestCheck {
   for (const file of files) {
     let reader;

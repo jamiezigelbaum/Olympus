@@ -48,6 +48,16 @@ describe('source-family posture and packet contracts', () => {
       ingestMode: 'archive_import',
       credentialKinds: ['archive_path'],
     });
+    expect(sourceFamilyPostureRegistry.require('archive.imports')).toMatchObject({
+      family: 'email',
+      provider: 'mbox',
+      ingestMode: 'archive_import',
+      defaultTrustDomain: 'secure_local',
+      rawDataCustodian: 'archive_importer',
+      credentialKinds: ['archive_path'],
+      writePosture: 'read_only',
+      defaultSensitivity: { trustDomain: 'secure_local', cloudEmbeddingEligible: false },
+    });
   });
 
   test('keeps email account-aware without splitting the corpus by account', () => {

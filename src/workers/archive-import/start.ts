@@ -32,9 +32,13 @@ export type ArchiveImportStart =
 
 export function startArchiveImport(input: {
   state: ArchiveImportStateStore;
-  /** The canonical absolute path of the chosen file or folder. */
+  /**
+   * The canonical absolute path of the chosen file or folder.
+   */
   path: string;
-  /** Test seam: the formats to detect among. */
+  /**
+   * Test seam: the formats to detect among.
+   */
   formats?: readonly ArchiveFormatDefinition[];
 }): ArchiveImportStart {
   const path = input.path;

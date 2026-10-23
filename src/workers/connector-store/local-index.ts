@@ -6281,6 +6281,62 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Removes the items one account of one provider holds here (an imported
+   * archive: its id is the account scope), at most `limit` per call, and then
+   * the connector's own run rows once no row refers to them. A removal runs
+   * in bounded steps, so a large archive never holds the store for long; the
+   * caller repeats until nothing is left.
+   *
+   * The same deletion as `purgeExcludedItems`: FTS rows first (they carry no
+   * foreign key), then vectors, chunks, owners and the item, in one
+   * transaction per step. Only this store's rows: the provider's own data is
+   * never touched.
+   */
+  purgeAccountScope(options: {
+    provider: string;
+    accountScope: string;
+    /** The connector whose run rows go once its items are gone. */
+    connectorId?: string;
+    limit?: number;
+  }): { itemsRemoved: number; chunksRemoved: number; remaining: number; syncRunsRemoved: number } {
+    try {
+      return this.db.transaction(() => {
+        const limit = Math.max(1, Math.min(options.limit ?? 2_000, 50_000));
+        const doomed = (this.db.query(`
+          SELECT item_pk FROM items WHERE provider = ? AND account_scope = ? ORDER BY item_pk LIMIT ?
+        `).all(options.provider, options.accountScope, limit) as Array<{ item_pk: number }>).map((row) => row.item_pk);
+        const chunks = this.countRowsForItems('chunks', doomed);
+        for (const itemPk of doomed) this.deleteFtsForItem(itemPk);
+        for (const batch of batched(doomed, 400)) {
+          const placeholders = batch.map(() => '?').join(', ');
+          this.db.query(`DELETE FROM chunk_embeddings WHERE item_pk IN (${placeholders})`).run(...batch);
+          this.db.query(`DELETE FROM chunks WHERE item_pk IN (${placeholders})`).run(...batch);
+          this.db.query(`DELETE FROM item_owners WHERE item_pk IN (${placeholders})`).run(...batch);
+          this.db.query(`DELETE FROM items WHERE item_pk IN (${placeholders})`).run(...batch);
+        }
+        const remaining = (this.db.query(
+          'SELECT COUNT(*) AS count FROM items WHERE provider = ? AND account_scope = ?',
+        ).get(options.provider, options.accountScope) as { count: number }).count;
+        let syncRunsRemoved = 0;
+        if (remaining === 0 && options.connectorId) {
+          syncRunsRemoved = this.db.query(`
+            DELETE FROM sync_runs
+            WHERE connector_id = ?
+              AND NOT EXISTS (SELECT 1 FROM items i WHERE i.sync_run_id = sync_runs.sync_run_id)
+              AND NOT EXISTS (
+                SELECT 1 FROM item_owners o
+                WHERE o.first_seen_sync_run_id = sync_runs.sync_run_id OR o.last_seen_sync_run_id = sync_runs.sync_run_id
+              )
+          `).run(options.connectorId).changes;
+        }
+        return { itemsRemoved: doomed.length, chunksRemoved: chunks, remaining, syncRunsRemoved };
+      })();
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  /**
    * Strip the CONTENT of everything the owner marked metadata-only, keeping
    * every item row — or, with `dryRun`, report exactly what such a run would
    * remove.

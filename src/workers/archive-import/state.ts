@@ -25,7 +25,9 @@ import type { ArchiveManifestFile } from './manifest.ts';
 export const ARCHIVE_IMPORTS_STATE_PATH_ENV = 'OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH';
 export const ARCHIVE_IMPORTS_SOURCE_ID = 'archive.imports';
 
-/** Findings kept per archive as examples of exactly where each gap is. */
+/**
+ * Findings kept per archive as examples of exactly where each gap is.
+ */
 export const ARCHIVE_FINDING_SAMPLES_MAX = 50;
 
 export type ArchiveImportStatus = 'importing' | 'imported' | 'stopped' | 'removing';
@@ -47,7 +49,9 @@ export interface ArchiveImportFindings {
   gaps: Record<string, number>;
   skipped: Record<string, number>;
   samples: ArchiveFindingSample[];
-  /** The last position counted: a finding at or before it was counted already. */
+  /**
+   * The last position counted: a finding at or before it was counted already.
+   */
   through?: { file_index: number; offset: number };
 }
 
@@ -56,12 +60,18 @@ export interface ArchiveImportRecord {
   format: string;
   provider: string;
   family: string;
-  /** The chosen file or folder's name, for display. */
+  /**
+   * The chosen file or folder's name, for display.
+   */
   label: string;
-  /** The approved folder the reader opens (a chosen file's parent, or the chosen folder). */
+  /**
+   * The approved folder the reader opens (a chosen file's parent, or the chosen folder).
+   */
   root_path: string;
   root_identity: { dev: string; ino: string };
-  /** The chosen path inside the root ('' for the root itself). */
+  /**
+   * The chosen path inside the root ('' for the root itself).
+   */
   chosen_rel_path: string;
   files: ArchiveManifestFile[];
   manifest_sha256: string;
@@ -72,7 +82,9 @@ export interface ArchiveImportRecord {
   completed_at?: string;
   removal_started_at?: string;
   findings: ArchiveImportFindings;
-  /** Earliest and latest item dates seen. */
+  /**
+   * Earliest and latest item dates seen.
+   */
   date_range?: { earliest: string; latest: string };
 }
 
@@ -98,7 +110,9 @@ export function emptyArchiveFindings(): ArchiveImportFindings {
   return { gaps: {}, skipped: {}, samples: [] };
 }
 
-/** A version-4 UUID in lowercase hex, as `randomUUID` writes it. */
+/**
+ * A version-4 UUID in lowercase hex, as `randomUUID` writes it.
+ */
 export function isArchiveId(value: string): boolean {
   if (value.length !== 36) return false;
   for (let index = 0; index < value.length; index += 1) {
@@ -194,7 +208,9 @@ export class ArchiveImportStateStore {
     return record;
   }
 
-  /** Applies `change` to the archive's record; undefined when it is not recorded. */
+  /**
+   * Applies `change` to the archive's record; undefined when it is not recorded.
+   */
   update(archiveId: string, change: (record: ArchiveImportRecord) => void): ArchiveImportRecord | undefined {
     let updated: ArchiveImportRecord | undefined;
     this.mutate((state) => {
@@ -239,7 +255,9 @@ export class ArchiveImportStateStore {
     });
   }
 
-  /** Forgets the archive. Only the removal calls this, once nothing derived from it is left. */
+  /**
+   * Forgets the archive. Only the removal calls this, once nothing derived from it is left.
+   */
   delete(archiveId: string): boolean {
     let removed = false;
     this.mutate((state) => {

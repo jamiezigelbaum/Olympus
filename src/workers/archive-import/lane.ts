@@ -24,6 +24,9 @@ import {
   type OnDemandTierStore,
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
+import type { TierMigrationLaneSpec } from '../classification/tier-migration-lanes.ts';
+import { archiveImportFamilies } from '../../core/archive-formats.ts';
+import { ARCHIVE_IMPORTS_SOURCE_ID } from './state.ts';
 import {
   archiveConnectorStoreDbPath,
   archiveCorpusId,
@@ -49,20 +52,23 @@ export function archiveLaneLegs(lane: ArchiveTierLane): OnDemandTierStore[] {
   return [lane.secure, lane.internal, lane.public];
 }
 
-/** The lane's stores that exist, opening any whose file is there. */
+/**
+ * The lane's stores that exist, opening any whose file is there. Never creates one.
+ */
 export function archiveLaneStores(lane: ArchiveTierLane): LocalConnectorStore[] {
-  return archiveLaneLegs(lane).flatMap((leg) => {
-    if (leg.current()) return [leg.current()!];
-    return leg.exists() ? [leg.open()] : [];
-  });
+  return lane.set.openStores();
 }
 
 export function createArchiveTierLane(options: {
   family: SourceFamily;
   env?: Record<string, string | undefined>;
-  /** Opens the secret-locations index beside the Private store. */
+  /**
+   * Opens the secret-locations index beside the Private store.
+   */
   openSecretLocations?: (secureDbPath: string) => SecretLocationsIndex | undefined;
-  /** Told once when a store opens, so a runtime can serve it. */
+  /**
+   * Told once when a store opens, so a runtime can serve it.
+   */
   onStoreOpened?: (store: LocalConnectorStore) => void;
 }): ArchiveTierLane {
   const env = options.env ?? process.env;
@@ -99,4 +105,33 @@ export function createArchiveTierLane(options: {
     public: publicStore,
     ...(secretLocations ? { secretLocations } : {}),
   };
+}
+
+/**
+ * The archive lanes as the tier migration opens them (tier-migration-lanes.ts):
+ * the same stores, set ledger and classification input as the runtime's.
+ */
+export function archiveTierMigrationLaneSpecs(
+  env: Record<string, string | undefined> = process.env,
+): TierMigrationLaneSpec[] {
+  return archiveImportFamilies().map((family) => {
+    const leg = (domain: SourceTrustDomain, legacy: boolean) => ({
+      corpusId: archiveCorpusId(domain, family),
+      dbPath: archiveConnectorStoreDbPath(domain, family, env),
+      family,
+      ...(legacy ? { legacy: true } : {}),
+      open: ({ readOnly, tierLedger }: { readOnly: boolean; tierLedger: TierLedger }) =>
+        createArchiveConnectorStore(domain, family, env, { readOnly, tierLedger }),
+    });
+    return {
+      sourceId: ARCHIVE_IMPORTS_SOURCE_ID,
+      setId: archiveTierSetId(family),
+      tierClassification: ARCHIVE_TIER_CLASSIFICATION,
+      legs: {
+        public_safe: leg('public_safe', false),
+        internal: leg('internal', false),
+        secure_local: leg('secure_local', true),
+      },
+    };
+  });
 }

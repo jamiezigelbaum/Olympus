@@ -126,6 +126,7 @@ export const SCHEDULER_SOURCE_IDS = {
   xBookmarks: 'x.bookmarks',
   telegram: TELEGRAM_MESSAGES_SOURCE_ID,
   whatsapp: WHATSAPP_PERSONAL_SOURCE_ID,
+  archiveImports: 'archive.imports',
 } as const;
 
 export interface SourceSchedulerConstructionDecision {
@@ -826,6 +827,14 @@ export class SourceScheduler {
   hasExecutingTask(sourceIds: ReadonlySet<string>): boolean {
     for (const state of this.executingStates) {
       if (sourceIds.has(state.source.sourceId) || sourceIds.has(state.source.corpusId)) return true;
+    }
+    return false;
+  }
+
+  /** Whether this one task is executing (one archive's import, not its whole source). */
+  hasExecutingTaskId(taskId: string): boolean {
+    for (const state of this.executingStates) {
+      if (state.task.id === taskId) return true;
     }
     return false;
   }

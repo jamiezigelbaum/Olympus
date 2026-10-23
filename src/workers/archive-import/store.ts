@@ -23,19 +23,25 @@ import type { ConnectorStorePlacementRule } from '../connector-store/tier-placem
 
 export const ARCHIVE_TIER_DOMAINS: readonly SourceTrustDomain[] = ['public_safe', 'internal', 'secure_local'];
 
-/** Where an archive item rests when no per-item route applies: S4 / secure_local, raised to S5 for a secret. */
+/**
+ * Where an archive item rests when no per-item route applies: S4 / secure_local, raised to S5 for a secret.
+ */
 export const ARCHIVE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
   trustTier: 'S4',
   trustDomain: 'secure_local',
   secretsInContent: true,
 });
 
-/** The corpus id of one tier store of one family's archives. */
+/**
+ * The corpus id of one tier store of one family's archives.
+ */
 export function archiveCorpusId(trustDomain: SourceTrustDomain, family: SourceFamily): string {
   return `${trustDomain}.archive.${family}`;
 }
 
-/** The set id of one family's archive stores in the tier ledger. */
+/**
+ * The set id of one family's archive stores in the tier ledger.
+ */
 export function archiveTierSetId(family: SourceFamily): string {
   return `archive.imports.${family}`;
 }
@@ -59,7 +65,9 @@ export function archiveConnectorStoreDbPath(
   return join(dataDir(env), `archive-${family}${FILE_LABEL[trustDomain] ?? `-${trustDomain}`}-connector-store.sqlite`);
 }
 
-/** Every archive store's path for these families: the lifecycle deletes all of them with the source. */
+/**
+ * Every archive store's path for these families: the lifecycle deletes all of them with the source.
+ */
 export function archiveConnectorStoreDbPaths(
   families: readonly SourceFamily[],
   env: Record<string, string | undefined> = process.env,
