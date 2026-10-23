@@ -49194,10 +49194,16 @@ function archiveImportRequestsPath(statePath) {
 function isRecord3(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
+function validApproval(value) {
+  if (!isRecord3(value) || !isRecord3(value.root_identity))
+    return false;
+  const identity2 = value.root_identity;
+  return typeof identity2.dev === "string" && typeof identity2.ino === "string" && typeof value.manifest_sha256 === "string" && value.manifest_sha256.length === 64;
+}
 function validRequest(value) {
   if (!isRecord3(value))
     return false;
-  return typeof value.request_id === "string" && isArchiveId(value.request_id) && (value.origin === "agent" || value.origin === "dashboard") && typeof value.path === "string" && value.path.length > 0 && value.path.length <= ARCHIVE_IMPORT_REQUEST_PATH_MAX && typeof value.label === "string" && typeof value.status === "string" && STATUSES.has(value.status) && (value.archive_id === undefined || typeof value.archive_id === "string" && isArchiveId(value.archive_id)) && (value.code === undefined || typeof value.code === "string") && typeof value.created_at === "string" && typeof value.updated_at === "string";
+  return typeof value.request_id === "string" && isArchiveId(value.request_id) && (value.origin === "agent" || value.origin === "dashboard") && typeof value.path === "string" && value.path.length > 0 && value.path.length <= ARCHIVE_IMPORT_REQUEST_PATH_MAX && typeof value.label === "string" && typeof value.status === "string" && STATUSES.has(value.status) && (value.archive_id === undefined || typeof value.archive_id === "string" && isArchiveId(value.archive_id)) && (value.code === undefined || typeof value.code === "string") && (value.approved === undefined || validApproval(value.approved)) && typeof value.created_at === "string" && typeof value.updated_at === "string";
 }
 function readRequests(path) {
   if (!existsSync32(path))
@@ -49246,23 +49252,24 @@ class ArchiveImportRequestStore {
     });
     return added;
   }
-  addChecking(path) {
+  addChecking(path, approved) {
     let entry;
     this.mutate((state) => {
       entry = state.requests.find((request) => request.status === "checking" && request.path === path);
       if (entry)
         return false;
-      entry = this.entry("dashboard", path, "checking");
+      entry = { ...this.entry("dashboard", path, "checking"), approved };
       state.requests.push(entry);
       return true;
     });
     return entry;
   }
-  startChecking(requestId) {
+  startChecking(requestId, approved) {
     return this.change(requestId, (request) => {
       if (request.status !== "pending")
         return false;
       request.status = "checking";
+      request.approved = approved;
     });
   }
   settle(requestId, outcome) {
@@ -49271,6 +49278,7 @@ class ArchiveImportRequestStore {
       if (!request)
         return false;
       request.status = outcome.status;
+      delete request.approved;
       if (outcome.status === "already_imported") {
         request.archive_id = outcome.archiveId;
         delete request.code;
@@ -62259,12 +62267,15 @@ function lifecycleSourceSpecs() {
       approvals: {
         present: (context2) => {
           try {
-            return new ArchiveImportStateStore({ path: defaultArchiveImportStatePath(envForContext(context2)) }).list().length > 0;
+            const statePath = defaultArchiveImportStatePath(envForContext(context2));
+            if (new ArchiveImportStateStore({ path: statePath }).list().length > 0)
+              return true;
+            return new ArchiveImportRequestStore({ path: archiveImportRequestsPath(statePath) }).list().some((request) => request.status === "checking");
           } catch {
             return true;
           }
         },
-        nextAction: "Remove each archive under Archives in the local dashboard, then rerun the CLI delete."
+        nextAction: "Under Archives in the local dashboard, cancel any import still being checked (or let it finish) and remove each archive, then rerun the CLI delete."
       }
     },
     {
@@ -74777,6 +74788,12 @@ function dashboardImportAttentionSentence(entry) {
       return words2.stopped.replace("{name}", entry.name);
     case "request":
       return words2.request.replace("{name}", entry.name);
+    case "failed":
+      return words2.failed.replace("{name}", entry.name);
+    case "counts":
+      return words2.counts.replace("{name}", entry.name);
+    case "scheduler":
+      return words2.scheduler[entry.setting];
     case "held":
       return entry.count === 1 ? words2.held.one : words2.held.many.replace("{n}", dashboardCount(entry.count));
     case "unreadable":
@@ -75147,6 +75164,7 @@ var init_vocabulary = __esm(() => {
     dates: "{earliest} to {latest}",
     items: { one: "1 message", many: "{n} messages" },
     importingLine: "{percent}% read · {items} so far",
+    importingLineUncounted: "{percent}% read",
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
@@ -75157,6 +75175,20 @@ var init_vocabulary = __esm(() => {
       off: "No private model is set up, so they stay Private and are not judged."
     },
     setUpPrivateModel: "Set up the private model",
+    countsUnavailable: {
+      why: "Olympus can’t count the messages in this archive right now: its index could not be opened.",
+      fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
+    },
+    notRunning: {
+      why: {
+        disabled: "Background reading is turned off on this computer (the worker.scheduler.enabled setting), so imports and removals do not run.",
+        not_selected: "Background reading on this computer leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals do not run."
+      },
+      fix: {
+        disabled: "Turn it on, then restart Olympus. Each import and removal goes on from where it is.",
+        not_selected: "Add archive.imports to that setting, or empty it, then restart Olympus. Each import and removal goes on from where it is."
+      }
+    },
     stopped: {
       file_changed: { why: "{file} changed after the import started.", fix: "Remove this archive, then import the file again once it has stopped changing." },
       file_missing: { why: "{file} is no longer where it was.", fix: "Remove this archive, then import it again from where it is now." },
@@ -75184,6 +75216,8 @@ var init_vocabulary = __esm(() => {
     approve: "Import",
     decline: "Decline",
     checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
+    cancel: "Cancel",
+    cancelled: "Cancelled. {name} was not imported.",
     alreadyLine: "{name} is already imported as {archive}.",
     alreadyLineUnnamed: "{name} is already imported.",
     failedLine: "{name} was not imported: {reason}",
@@ -75193,8 +75227,10 @@ var init_vocabulary = __esm(() => {
       changed: "it changed while Olympus was reading it. Import it again once it has stopped changing.",
       unreadable: "Olympus could not read it.",
       unsupported: "Olympus does not import this kind of file.",
-      ambiguous: "Olympus could not tell which kind of export it is."
+      ambiguous: "Olympus could not tell which kind of export it is.",
+      replaced: "it was moved, replaced or changed after you chose it. Try again to import it as it is now."
     },
+    tryAgain: "Try again",
     dismiss: "Dismiss",
     started: "Importing {name}. It shows under Archives as it is read.",
     checking: "Checking whether {name} is already imported…",
@@ -75205,6 +75241,12 @@ var init_vocabulary = __esm(() => {
     needsYou: {
       stopped: "An import stopped: {name}",
       request: "An agent asked to import {name}",
+      failed: "An import did not start: {name}",
+      counts: "Olympus can't count the messages in {name}",
+      scheduler: {
+        disabled: "Imports can't run: background reading is turned off",
+        not_selected: "Imports can't run: background reading leaves out archives"
+      },
       held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
       seeWhy: "See why",
@@ -126432,8 +126474,13 @@ function unreadableNames(input) {
     return [chars.length > UNREADABLE_NAME_MAX_CHARS ? `${chars.slice(0, UNREADABLE_NAME_MAX_CHARS - 1).join("")}…` : line];
   });
 }
-var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", COMPUTER_LOCAL_SESSION_TOOL_NAMES, PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
+  COMPUTER_LOCAL_SESSION_TOOL_NAMES = [
+    ARCHIVE_APPROVE_TOOL_NAME,
+    ARCHIVE_DECLINE_TOOL_NAME,
+    ARCHIVE_REMOVE_TOOL_NAME
+  ];
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
     CONNECT_SOURCE_TOOL_NAME,
@@ -127306,7 +127353,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) : null);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null);
     if (why)
       add(main, why);
     else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)))
@@ -127364,21 +127411,23 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return fix;
     if (id === "archives:held")
       return { label: fix.label, archiveModels: true };
-    if (id === "archives:unreadable" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0)
+    if (id === "archives:unreadable" || id === "archives:scheduler" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0) {
       return { label: fix.label, archiveFocus: id };
+    }
     return fix;
   }
   function focusArchive(target) {
     const meta2 = state.computerMeta && state.computerMeta.archives;
     const sourceId = meta2 && typeof meta2.sourceId === "string" ? meta2.sourceId : "";
-    if (target === "archives:unreadable") {
+    const rowWhy = target === "archives:unreadable" || target === "archives:scheduler";
+    if (rowWhy) {
       if (!sourceId)
         return;
       state.open["why:" + sourceId] = true;
       state.landed = { id: sourceId, until: Date.now() + H.landedMs };
     } else
       state.landed = { id: target, until: Date.now() + H.landedMs };
-    render(target === "archives:unreadable" ? "summary:why:" + sourceId : "");
+    render(rowWhy ? "summary:why:" + sourceId : "");
     const node = root.querySelector(".landed");
     if (node && typeof node.scrollIntoView === "function")
       node.scrollIntoView({ block: "center" });
@@ -127393,7 +127442,13 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }, H.landedMs);
   }
   function archiveNeeds(meta2) {
-    return Array.isArray(meta2.archives) && meta2.archives.some((entry) => !!entry && entry.status === "stopped") || Array.isArray(meta2.requests) && meta2.requests.some((entry) => !!entry && entry.status === "pending" && entry.origin === "agent");
+    return Array.isArray(meta2.archives) && meta2.archives.some((entry) => !!entry && archiveNeedsPerson(entry)) || Array.isArray(meta2.requests) && meta2.requests.some((entry) => !!entry && requestNeedsPerson(entry));
+  }
+  function archiveNeedsPerson(archive) {
+    return archive.status === "stopped" || archive.countsUnavailable === true && archive.status !== "removing";
+  }
+  function requestNeedsPerson(request2) {
+    return request2.status === "pending" && request2.origin === "agent" || request2.status === "failed";
   }
   function archiveLanded(own3, needsPerson) {
     const landed = state.landed;
@@ -127413,6 +127468,17 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (state.landed && state.landed.id === id)
       box.className += " landed";
     add(box, add(el("ul", "plain"), el("li", "", fill2(A.unreadable.why[reason], { file: file || A.thisFile })), el("li", "", A.unreadable.kept), el("li", "", A.unreadable.fix[reason])));
+    return box;
+  }
+  function archiveNotRunning(meta2, id) {
+    const A = H.copy.archives;
+    const setting = meta2.notRunning === "disabled" || meta2.notRunning === "not_selected" ? String(meta2.notRunning) : "";
+    if (!setting)
+      return null;
+    const box = details("why:" + id, doc2.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", A.notRunning.why[setting]), el("li", "", A.notRunning.fix[setting])));
     return box;
   }
   function archivesMoving() {
@@ -127448,6 +127514,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (name === H.archiveDeclineTool) {
       const request2 = meta2 && Array.isArray(meta2.requests) ? meta2.requests.filter((entry) => entry && entry.id === (args && args.request_id))[0] : null;
+      if (request2 && request2.status === "checking" && typeof request2.name === "string")
+        return fill2(A.cancelled, { name: request2.name });
       return request2 && request2.status === "pending" ? A.declined : "";
     }
     return archiveOutcome(result && result.structuredContent);
@@ -127485,7 +127553,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const A = H.copy.archives;
     const item = el("li", "archive request");
     item.setAttribute("data-request", String(request2.status));
-    if (archiveLanded("archive-request:" + request2.id, request2.status === "pending" && request2.origin === "agent"))
+    if (archiveLanded("archive-request:" + request2.id, requestNeedsPerson(request2)))
       item.className += " landed";
     const key2 = "archive-request:" + request2.id;
     const where2 = typeof request2.where === "string" ? request2.where : "";
@@ -127497,18 +127565,22 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (request2.status === "checking") {
       const line = el("p", "muted", fill2(A.checkingLine, { name: request2.name }));
       line.setAttribute("role", "status");
-      return add(item, line);
+      return add(item, line, add(el("div", "archive-actions"), fixControl({ label: A.cancel, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":cancel", "plain", false)));
     }
     const archive = typeof request2.archiveName === "string" ? request2.archiveName : "";
-    const sentence = request2.status === "already_imported" ? archive ? fill2(A.alreadyLine, { name: request2.name, archive }) : fill2(A.alreadyLineUnnamed, { name: request2.name }) : fill2(A.failedLine, { name: request2.name, reason: A.failed[String(request2.code)] || A.failed.unreadable });
-    add(item, el("p", "", sentence));
-    return add(item, add(el("div", "archive-actions"), fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":dismiss", "plain", false)));
+    const failed = request2.status === "failed";
+    const sentence = !failed ? archive ? fill2(A.alreadyLine, { name: request2.name, archive }) : fill2(A.alreadyLineUnnamed, { name: request2.name }) : fill2(A.failedLine, { name: request2.name, reason: A.failed[String(request2.code)] || A.failed.unreadable });
+    add(item, el("p", failed ? "reason strong" : "", sentence));
+    const actions = el("div", "archive-actions");
+    if (failed)
+      add(actions, fixControl({ label: A.tryAgain, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":retry", "plain", false));
+    return add(item, add(actions, fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":dismiss", "plain", false)));
   }
   function archiveItem(archive, model) {
     const A = H.copy.archives;
     const item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
     item.setAttribute("data-archive", archive.status);
-    if (archiveLanded("archive:" + archive.id, archive.status === "stopped"))
+    if (archiveLanded("archive:" + archive.id, archiveNeedsPerson(archive)))
       item.className += " landed";
     add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", A.status[archive.status])));
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
@@ -127526,13 +127598,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(item, line);
     }
     const items = wholeCount(archive.items);
+    const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
     if (archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
-      const line = fill2(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: messageCount(items) });
       add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
     } else if (archive.status === "imported") {
       const when = typeof archive.importedAt === "string" ? ago(archive.importedAt) : "";
-      add(item, el("p", "muted", when ? fill2(A.importedLine, { items: messageCount(items), when }) : fill2(A.importedLineNoTime, { items: messageCount(items) })));
+      if (!uncounted)
+        add(item, el("p", "muted", when ? fill2(A.importedLine, { items: messageCount(items), when }) : fill2(A.importedLineNoTime, { items: messageCount(items) })));
     } else if (archive.status === "removing") {
       const line = el("p", "muted", A.removingLine);
       line.setAttribute("role", "status");
@@ -127543,7 +127617,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
       add(item, el("p", "reason strong", fill2(words2.why, { file })), el("p", "muted", words2.fix));
     }
-    if (archive.status !== "removing" && items > 0)
+    if (uncounted)
+      add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
+    else if (archive.status !== "removing" && items > 0)
       add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why)
@@ -131618,19 +131694,33 @@ function hostProgram(input, bridge) {
     if (handle)
       handle.lock();
   }
+  let csrfToken = input.csrfToken;
+  let localSession = input.localSession;
+  function localUnlock(name) {
+    if (localSession || input.localTools.indexOf(name) < 0)
+      return Promise.resolve();
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+      if (body && typeof body.csrf_token === "string" && body.csrf_token) {
+        csrfToken = body.csrf_token;
+        localSession = true;
+      }
+    }, () => {
+      return;
+    });
+  }
   function callTool(name, args) {
     if (expired)
       return lastRead !== undefined && name === input.bridge.readTool ? Promise.resolve(lastRead) : Promise.reject(new Error("locked"));
-    if (!input.csrfToken) {
+    if (!csrfToken) {
       return fetch(input.readUrl, { cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : failed());
     }
-    return fetch(input.toolsCallPath, {
+    return localUnlock(name).then(() => fetch(input.toolsCallPath, {
       method: "POST",
       cache: "no-store",
       credentials: "same-origin",
-      headers: { "X-Olympus-CSRF": input.csrfToken, "Content-Type": "application/json" },
+      headers: { "X-Olympus-CSRF": csrfToken, "Content-Type": "application/json" },
       body: JSON.stringify({ name, arguments: args })
-    }).then((response) => {
+    })).then((response) => {
       if (response.status === 401 || response.status === 403) {
         lockPage();
         if (lastRead !== undefined && name === input.bridge.readTool)
@@ -131789,6 +131879,9 @@ function renderComputerHostPage(input) {
   const program = `(${hostProgram.toString()})(${scriptJson2({
     bridge,
     csrfToken: input.csrfToken ?? "",
+    localSession: input.localSession === true,
+    localTools: COMPUTER_LOCAL_SESSION_TOOL_NAMES,
+    localSessionPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
     readUrl,
     lockedUrl: dashboardHomeHref(token),
     openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
@@ -131826,6 +131919,7 @@ var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/
 var init_host_page = __esm(() => {
   init_update_check();
   init_dashboard_contract();
+  init_outside_help();
   init_page();
   init_vocabulary();
   init_open_targets();
@@ -134076,17 +134170,20 @@ function isDashboardConsultControlRoute(request) {
 function isDashboardPrivateAnswersRoute(request) {
   return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_PRIVATE_ANSWERS_PATH;
 }
+function isDashboardArchiveImportLocalRoute(request) {
+  return request.method === "POST" && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
+}
 function isDashboardLocalGradeRoute(request) {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request);
 }
 function dashboardLocalGradeRefusal(request) {
-  if (!isDashboardPrivateAnswersRoute(request))
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request))
     return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: "mac_dashboard_only",
-      message: "Private answers open only in the dashboard on this computer, in an unlocked browser."
+      message: isDashboardArchiveImportLocalRoute(request) ? "Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser." : "Private answers open only in the dashboard on this computer, in an unlocked browser."
     }
   }), {
     status: 403,
@@ -134473,7 +134570,7 @@ function optionalEnv(value2) {
   const trimmed2 = value2?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", GRADE_CODES;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS, GRADE_CODES;
 var init_http = __esm(() => {
   init_request_peer();
   init_worker_auth();
@@ -134492,6 +134589,11 @@ var init_http = __esm(() => {
     "/dashboard/consult/writer",
     "/dashboard/consult/writer/test",
     "/dashboard/consult/standard"
+  ];
+  DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS = [
+    "/dashboard/archive-import/approve",
+    "/dashboard/archive-import/decline",
+    "/dashboard/archive-import/remove"
   ];
   GRADE_CODES = { bearer: "b", local: "l" };
 });
@@ -135509,6 +135611,7 @@ function createEmailSourceWorker(options = {}) {
               ...options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {},
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {},
+              ...controlSessionCsrfToken && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local" ? { localSession: true } : {},
               ...dashboardReadToken(url) ? { readToken: dashboardReadToken(url) } : {}
             }), {
               status: 200,
@@ -136424,6 +136527,9 @@ function createEmailSourceWorker(options = {}) {
           const archiveImports = sourceDashboard?.archiveImports;
           if (!archiveImports) {
             throw new EmailSourceWorkerError(501, "archive_import_not_supported", "Importing archives is not set up in this engine.");
+          }
+          if (url.pathname !== "/dashboard/archive-import/browse" && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            throw new EmailSourceWorkerError(403, "mac_dashboard_only", "Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.");
           }
           const record5 = await parseObjectBody(request);
           if (url.pathname === "/dashboard/archive-import/browse") {
@@ -149289,9 +149395,9 @@ function commitArchiveImport(state, prepared, digests) {
   if (prepared.copies.length > 0) {
     if (!digests)
       throw new Error("A possible copy is recorded only once its files were read whole.");
-    const copy = prepared.copies.find((record5) => isCopyOf(record5, digests));
+    const copy = findProbableCopies(state.list(), prepared.record.files).find((record5) => isCopyOf(record5, digests));
     if (copy)
-      return { kind: "already_imported", archive: state.get(copy.archive_id) ?? copy };
+      return { kind: "already_imported", archive: copy };
   }
   try {
     const check = verifyArchiveManifest(prepared.root, prepared.record.files);
@@ -149486,6 +149592,18 @@ var init_removal = __esm(() => {
 // src/workers/archive-import/dashboard.ts
 import { homedir as homedir65 } from "node:os";
 import { posix as posix5 } from "node:path";
+function archivePrivateModelFromSniffer(sniffer) {
+  if (!sniffer)
+    return "off";
+  const reason = sniffer.status().waiting?.reason;
+  return reason === undefined || reason === "yielding_to_answers" || reason === "pass_running" ? "ready" : "waiting";
+}
+function archiveImportScheduling(scheduler) {
+  if (!scheduler.enabled)
+    return "disabled";
+  const selected = scheduler.sourceIds.map((sourceId) => sourceId.trim());
+  return selected.length > 0 && !selected.includes(SCHEDULER_SOURCE_IDS.archiveImports) ? "not_selected" : "on";
+}
 function fill2(template, values) {
   let out = template;
   for (const [key2, value2] of Object.entries(values))
@@ -149531,6 +149649,18 @@ function createArchiveImportDashboard(options) {
   let closed = false;
   let checks4 = Promise.resolve();
   const running = new Set;
+  const cancelled = new Set;
+  const scheduling = () => {
+    try {
+      return options.scheduling?.() ?? "on";
+    } catch {
+      return "on";
+    }
+  };
+  const notRunning = () => {
+    const setting = scheduling();
+    return setting === "on" ? undefined : refusal3("imports_not_running", ARCHIVE_NOT_RUNNING_COPY[setting]);
+  };
   const shown = (path) => {
     if (path === home2)
       return "~";
@@ -149568,14 +149698,22 @@ function createArchiveImportDashboard(options) {
               digests.push(step.value);
               break;
             }
-            if (closed) {
+            if (closed || cancelled.has(requestId)) {
               steps.return("");
               return;
             }
             await pause();
           }
         }
-        if (closed)
+        if (closed || cancelled.has(requestId))
+          return;
+        let current2;
+        try {
+          current2 = requests.get(requestId);
+        } catch {
+          return;
+        }
+        if (!current2 || current2.status !== "checking")
           return;
         outcome(requestId, commitArchiveImport(state, prepared, digests));
       } catch (error2) {
@@ -149587,10 +149725,16 @@ function createArchiveImportDashboard(options) {
         } catch {}
       } finally {
         running.delete(requestId);
+        cancelled.delete(requestId);
         prepared.root.close();
       }
     });
   };
+  const approvalOf = (prepared) => ({
+    root_identity: { dev: prepared.record.root_identity.dev, ino: prepared.record.root_identity.ino },
+    manifest_sha256: prepared.record.manifest_sha256
+  });
+  const sameApproval = (approved, prepared) => approved !== undefined && approved.root_identity.dev === prepared.record.root_identity.dev && approved.root_identity.ino === prepared.record.root_identity.ino && approved.manifest_sha256 === prepared.record.manifest_sha256;
   const approvePath = (path, requestId) => {
     const name = posix5.basename(path);
     const prepared = prepareArchiveImport({ state, path });
@@ -149631,7 +149775,7 @@ function createArchiveImportDashboard(options) {
     }
     let entry;
     try {
-      entry = requestId ? requests.startChecking(requestId) : requests.addChecking(path);
+      entry = requestId ? requests.startChecking(requestId, approvalOf(prepared)) : requests.addChecking(path, approvalOf(prepared));
     } catch (error2) {
       prepared.root.close();
       throw error2;
@@ -149652,9 +149796,10 @@ function createArchiveImportDashboard(options) {
       const tally = lane.ledger.accountScopeCounts(record5.provider, record5.archive_id);
       return { items: tally.items, held: tally.awaitingJudgment };
     } catch {
-      return { items: 0, held: 0 };
+      return;
     }
   };
+  const stuck = (records) => records.some((record5) => record5.status === "importing" || record5.status === "removing");
   const percent = (record5) => {
     const total = record5.files.reduce((sum2, file) => sum2 + file.size, 0);
     const read = record5.read_position;
@@ -149669,10 +149814,27 @@ function createArchiveImportDashboard(options) {
     if (record5.files.length < 2 || !byFile || Object.keys(byFile).length === 0)
       return tallies(record5.findings.gaps);
     const fileName = (index) => posix5.basename(record5.files[index]?.rel_path || record5.label) || record5.label;
-    return Object.entries(byFile).map(([index, kinds]) => ({ index: Number(index), kinds })).filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record5.files.length).sort((a, b) => a.index - b.index).flatMap((entry) => tallies(entry.kinds).map((gap) => ({ ...gap, file: fileName(entry.index) })));
+    const perFile = Object.entries(byFile).map(([index, kinds]) => ({ index: Number(index), kinds })).filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record5.files.length).sort((a, b) => a.index - b.index);
+    const placed = {};
+    for (const entry of perFile) {
+      for (const [kind, count] of Object.entries(entry.kinds)) {
+        if (Number.isFinite(count) && count > 0)
+          placed[kind] = (placed[kind] ?? 0) + Math.floor(count);
+      }
+    }
+    const remainder = {};
+    for (const [kind, count] of Object.entries(record5.findings.gaps)) {
+      if (Number.isFinite(count))
+        remainder[kind] = Math.floor(count) - (placed[kind] ?? 0);
+    }
+    return [
+      ...perFile.flatMap((entry) => tallies(entry.kinds).map((gap) => ({ ...gap, file: fileName(entry.index) }))),
+      ...tallies(remainder)
+    ];
   };
   const entryOf = (record5) => {
-    const { items, held } = counts(record5);
+    const counted = counts(record5);
+    const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly2(record5.date_range?.earliest);
     const latest = dateOnly2(record5.date_range?.latest);
     const stopFile = record5.stop?.rel_path ? posix5.basename(record5.stop.rel_path) : undefined;
@@ -149685,6 +149847,7 @@ function createArchiveImportDashboard(options) {
       items,
       judged: Math.max(0, items - held),
       held,
+      ...counted ? {} : { countsUnavailable: true },
       ...record5.status === "importing" ? { percent: percent(record5) } : {},
       ...earliest ? { earliest } : {},
       ...latest ? { latest } : {},
@@ -149728,8 +149891,20 @@ function createArchiveImportDashboard(options) {
       };
     },
     async approve(request) {
+      const blocked = notRunning();
+      if (blocked)
+        return blocked;
       if ("requestId" in request) {
         const waiting = requests.get(request.requestId);
+        if (waiting?.status === "failed") {
+          const resolved3 = await options.browser.resolvePath(waiting.path);
+          if (!resolved3.ok)
+            return { ok: false, code: resolved3.code, message: resolved3.message, ...resolved3.access ? { access: resolved3.access } : {} };
+          const again = approvePath(resolved3.path);
+          if (again.ok)
+            requests.remove(waiting.request_id);
+          return again;
+        }
         if (!waiting || waiting.status !== "pending")
           return refusal3("not_waiting", ARCHIVE_APPROVE_COPY.not_waiting);
         const resolved2 = await options.browser.resolvePath(waiting.path);
@@ -149746,12 +149921,15 @@ function createArchiveImportDashboard(options) {
       const request = requests.get(requestId);
       if (!request)
         return { ok: false, code: "not_waiting", message: ARCHIVE_APPROVE_COPY.not_waiting };
-      if (request.status === "checking")
-        return { ok: false, code: "checking", message: ARCHIVE_APPROVE_COPY.checking };
+      if (request.status === "checking" && running.has(requestId))
+        cancelled.add(requestId);
       requests.remove(requestId);
       return { ok: true };
     },
     remove(archiveId) {
+      const blocked = notRunning();
+      if (blocked && !blocked.ok)
+        return { ok: false, code: blocked.code, message: blocked.message };
       const record5 = state.get(archiveId);
       if (!record5)
         return { ok: false, code: "unknown_archive", message: ARCHIVE_APPROVE_COPY.unknown_archive };
@@ -149785,10 +149963,12 @@ function createArchiveImportDashboard(options) {
           unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path) }
         };
       }
+      const setting = scheduling();
       return {
         ...base,
         archives: records.map(entryOf),
-        requests: asked.map((request) => requestOf(request, records))
+        requests: asked.map((request) => requestOf(request, records)),
+        ...setting !== "on" && stuck(records) ? { notRunning: setting } : {}
       };
     },
     present() {
@@ -149809,14 +149989,31 @@ function createArchiveImportDashboard(options) {
         if (record5.status === "stopped")
           attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
       }
+      const setting = scheduling();
+      if (setting !== "on" && stuck(records))
+        attention.push({ kind: "scheduler", setting });
+      const counted = new Map;
+      for (const record5 of records) {
+        if (record5.status === "removing")
+          continue;
+        const tally = counts(record5);
+        if (tally)
+          counted.set(record5.archive_id, tally);
+        else
+          attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
+      }
       for (const request of asked) {
         if (request.origin === "agent" && request.status === "pending") {
           attention.push({ kind: "request", id: request.request_id, name: request.label });
         }
       }
+      for (const request of asked) {
+        if (request.status === "failed")
+          attention.push({ kind: "failed", id: request.request_id, name: request.label });
+      }
       const model = options.privateModel();
       if (model !== "ready") {
-        const held = records.filter((record5) => record5.status !== "removing").reduce((sum2, record5) => sum2 + counts(record5).held, 0);
+        const held = [...counted.values()].reduce((sum2, tally) => sum2 + tally.held, 0);
         if (held > 0)
           attention.push({ kind: "held", count: held, model });
       }
@@ -149846,6 +150043,11 @@ function createArchiveImportDashboard(options) {
             outcome(request.request_id, prepared);
             return;
           }
+          if (!sameApproval(request.approved, prepared)) {
+            prepared.root.close();
+            requests.settle(request.request_id, { status: "failed", code: "replaced" });
+            return;
+          }
           if (prepared.copies.length === 0) {
             try {
               outcome(request.request_id, commitArchiveImport(state, prepared));
@@ -149864,10 +150066,11 @@ function createArchiveImportDashboard(options) {
     }
   };
 }
-var ARCHIVE_APPROVE_COPY;
+var ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY;
 var init_dashboard2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
+  init_source_scheduler();
   init_manifest3();
   init_removal();
   init_start();
@@ -149884,6 +150087,10 @@ var init_dashboard2 = __esm(() => {
     checking: "Olympus is still checking this one.",
     unknown_archive: "This archive is no longer in the list.",
     already_removing: "This archive is already being removed."
+  };
+  ARCHIVE_NOT_RUNNING_COPY = {
+    disabled: "Olympus’s background reading is turned off (the worker.scheduler.enabled setting), so imports and removals never run. Turn it on, restart Olympus, then try again.",
+    not_selected: "Olympus’s background reading leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals never run. Add archive.imports to it, or empty it, restart Olympus, then try again."
   };
 });
 
@@ -152713,6 +152920,8 @@ class TierSnifferService {
       reason = "awaiting_owner_approval";
     else if (tick.state === "failed")
       reason = "failed";
+    else if (tick.state === "ran" && tick.report.stoppedBy === "transport_failures" && tick.report.pendingSeen > 0)
+      reason = "model_not_answering";
     else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
       reason = stop === "yield" || stop === "preempted" || stop === "aborted" ? overran ? "pass_stuck" : this.answering() ? "yielding_to_answers" : this.breakerOpen() ? "breaker_open" : "yielding_to_answers" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;
@@ -154193,6 +154402,12 @@ function importAttentionItem(entry) {
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
     case "request":
       return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words2.review, archives) };
+    case "failed":
+      return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
+    case "counts":
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
+    case "scheduler":
+      return { id: "archives:scheduler", sentence, fix: helpLinkFix(words2.seeWhy, archives) };
     case "held":
       return {
         id: "archives:held",
@@ -154564,10 +154779,12 @@ function importsAttention(input) {
   for (const entry of input) {
     if (!entry || typeof entry !== "object")
       continue;
-    if ((entry.kind === "stopped" || entry.kind === "request") && typeof entry.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
+    if ((entry.kind === "stopped" || entry.kind === "request" || entry.kind === "failed" || entry.kind === "counts") && typeof entry.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
       out.push({ kind: entry.kind, id: entry.id, name: name(entry.name) });
     } else if (entry.kind === "held" && finite(entry.count) && entry.count > 0 && (entry.model === "off" || entry.model === "waiting")) {
       out.push({ kind: "held", count: count(entry.count), model: entry.model });
+    } else if (entry.kind === "scheduler" && (entry.setting === "disabled" || entry.setting === "not_selected")) {
+      out.push({ kind: "scheduler", setting: entry.setting });
     } else if (entry.kind === "unreadable") {
       out.push({ kind: "unreadable", reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : "other" });
     }
@@ -171903,10 +172120,16 @@ async function unpairSource(options, args) {
 function archiveArg(value2) {
   return typeof value2 === "string" && value2.length > 0 && value2.length <= ARCHIVE_ARG_MAX && !value2.includes("\x00");
 }
-async function archiveRoute(options, route, body) {
+async function archiveRoute(options, route, body, context2) {
+  if (route !== "browse" && context2.localSession !== true) {
+    return { ok: false, result: refused2(ARCHIVE_LOCAL_SESSION_REFUSAL, "mac_dashboard_only") };
+  }
   const response = await options.workerFetch(new Request(`http://olympus-worker.internal/dashboard/archive-import/${route}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...route !== "browse" ? { [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: "local" } : {}
+    },
     body: JSON.stringify(body)
   }));
   const parsed = await response.json().catch(() => {
@@ -171927,12 +172150,12 @@ async function archiveRoute(options, route, body) {
     }
   };
 }
-async function archiveBrowse(options, args) {
+async function archiveBrowse(options, args, context2) {
   const keys = Object.keys(args);
   if (keys.some((key2) => key2 !== "parent_key" && key2 !== "cursor") || args.parent_key !== undefined && !archiveArg(args.parent_key) || args.cursor !== undefined && !archiveArg(args.cursor)) {
     return refused2("parent_key and cursor must be from the picker.", "invalid_params");
   }
-  const answer = await archiveRoute(options, "browse", args);
+  const answer = await archiveRoute(options, "browse", args, context2);
   if (!answer.ok)
     return answer.result;
   const nodes = Array.isArray(answer.parsed.nodes) ? answer.parsed.nodes : [];
@@ -171948,13 +172171,13 @@ async function archiveBrowse(options, args) {
     }
   };
 }
-async function archiveApprove(options, args) {
+async function archiveApprove(options, args, context2) {
   const keys = Object.keys(args);
   const byKey = keys.length === 1 && keys[0] === "key" && archiveArg(args.key);
   const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
   if (!byKey && !byRequest)
     return refused2("Give the chosen key or a request id.", "invalid_params");
-  const answer = await archiveRoute(options, "approve", args);
+  const answer = await archiveRoute(options, "approve", args, context2);
   if (!answer.ok)
     return answer.result;
   const status = answer.parsed.status;
@@ -171967,20 +172190,20 @@ async function archiveApprove(options, args) {
     structuredContent: { status, name, ...archiveName ? { archive_name: archiveName } : {} }
   };
 }
-async function archiveDecline(options, args) {
+async function archiveDecline(options, args, context2) {
   const keys = Object.keys(args);
   if (keys.length !== 1 || keys[0] !== "request_id" || !archiveArg(args.request_id))
     return refused2("request_id is required.", "invalid_params");
-  const answer = await archiveRoute(options, "decline", args);
+  const answer = await archiveRoute(options, "decline", args, context2);
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Declined." }], structuredContent: { status: "declined" } };
 }
-async function archiveRemove(options, args) {
+async function archiveRemove(options, args, context2) {
   const keys = Object.keys(args);
   if (keys.length !== 1 || keys[0] !== "archive_id" || !archiveArg(args.archive_id))
     return refused2("archive_id is required.", "invalid_params");
-  const answer = await archiveRoute(options, "remove", { archive_id: args.archive_id, acknowledge: true });
+  const answer = await archiveRoute(options, "remove", { archive_id: args.archive_id, acknowledge: true }, context2);
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Removing." }], structuredContent: { status: "removing" } };
@@ -172104,13 +172327,13 @@ function createDashboardPanelTools(options) {
       if (name === UNREADABLE_FILES_PAGE_TOOL_NAME)
         return await unreadableFilesPage(options, args, context2);
       if (name === ARCHIVE_BROWSE_TOOL_NAME)
-        return await archiveBrowse(options, args);
+        return await archiveBrowse(options, args, context2);
       if (name === ARCHIVE_APPROVE_TOOL_NAME)
-        return await archiveApprove(options, args);
+        return await archiveApprove(options, args, context2);
       if (name === ARCHIVE_DECLINE_TOOL_NAME)
-        return await archiveDecline(options, args);
+        return await archiveDecline(options, args, context2);
       if (name === ARCHIVE_REMOVE_TOOL_NAME)
-        return await archiveRemove(options, args);
+        return await archiveRemove(options, args, context2);
       const signal = context2.signal ?? new AbortController().signal;
       const base = options.surface();
       let view2;
@@ -172147,7 +172370,7 @@ function createDashboardPanelTools(options) {
     }
   };
 }
-var UNPAIR_SOURCE_IDS, ARCHIVE_ARG_MAX = 4096;
+var ARCHIVE_LOCAL_SESSION_REFUSAL = "Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.", UNPAIR_SOURCE_IDS, ARCHIVE_ARG_MAX = 4096;
 var init_dashboard_panel_tools = __esm(() => {
   init_dashboard_contract();
   init_unreadable_files();
@@ -174779,7 +175002,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     refreshScheduler: () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     },
-    privateModel: () => archivePrivateModelState()
+    privateModel: () => archivePrivateModelState(),
+    scheduling: () => sourceScheduler ? archiveImportScheduling(olympusConfig.worker.scheduler) : "disabled"
   });
   archiveImportDashboard.resume();
   wireBuiltInTranscriptionAtBoot({
@@ -175979,12 +176203,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }
   classificationBusy = () => tierSniffer?.hasPriority ?? false;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
-  archivePrivateModelState = () => {
-    if (!tierSniffer)
-      return "off";
-    const reason = tierSniffer.status().waiting?.reason;
-    return reason === undefined || reason === "yielding_to_answers" || reason === "pass_running" ? "ready" : "waiting";
-  };
+  archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
   let shuttingDown = false;
   const shutdown = (signal) => {
