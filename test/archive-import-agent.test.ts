@@ -35,9 +35,10 @@ import {
   ARCHIVE_REMOVE_TOOL_NAME,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { createArchiveImportAgent } from '../src/workers/archive-import/agent.ts';
 import { createArchiveImportDashboard, type ArchivePrivateModelState } from '../src/workers/archive-import/dashboard.ts';
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
-import { ARCHIVE_IMPORT_PENDING_REQUESTS_MAX, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
+import { ARCHIVE_IMPORT_PENDING_REQUESTS_MAX, ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
 import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
@@ -412,6 +413,32 @@ describe('status carries no content and tells the truth', () => {
       // The damaged file is left exactly as it was found.
       expect(readFileSync(file, 'utf8')).toBe('{"version": 1, "archi');
     }
+  });
+
+  test('an archive whose messages cannot be counted has no numbers, and imports that cannot run are said so', async () => {
+    const f = fixture();
+    const entry = {
+      id: '0b9e4c52-7a1d-4d3e-9f0a-3c1b2a4d5e6f', name: 'Takeout.mbox', format: 'Mail (mbox)', where: '~/Mail exports', status: 'importing' as const,
+      items: 0, judged: 0, held: 0, percent: 40, startedAt: '2026-10-23T10:00:00.000Z', gaps: [], skipped: [], countsUnavailable: true as const,
+    };
+    const agent = createArchiveImportAgent({
+      state: f.runtime.state,
+      requests: new ArchiveImportRequestStore({ path: f.requestsPath }),
+      view: () => ({ sourceId: 'archive.imports', archives: [entry], requests: [], privateModel: 'off', notRunning: 'disabled' }),
+    });
+    const status = agent.status();
+    if (!status.ok) throw new Error('expected a list');
+    const [archive] = status.archives;
+    expect(archive).toMatchObject({ archive_id: entry.id, status: 'importing', progress_percent: 40, counts_unavailable: true });
+    // Not zero: unknown. And no private-model note about messages nobody could count.
+    for (const key of ['messages', 'judged', 'waiting_for_private_model']) expect(archive).not.toHaveProperty(key);
+    expect(archive!.summary).toContain('40% read');
+    expect(archive!.summary).toContain('can’t count the messages');
+    expect(status).not.toHaveProperty('private_model_note');
+    expect(status.not_running).toEqual({
+      setting: 'disabled',
+      message: expect.stringContaining('Background reading is turned off on this computer'),
+    });
   });
 
   test('one archive can be asked for; an id that is not an imported archive is unknown', async () => {

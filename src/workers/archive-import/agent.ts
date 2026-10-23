@@ -71,12 +71,14 @@ export interface AgentArchive {
   /** The folder it was imported from (home shown as ~). */
   where: string;
   status: ComputerArchiveEntry['status'];
-  /** Messages stored so far. */
-  messages: number;
+  /** Messages stored so far. Absent when Olympus cannot count them now (`counts_unavailable`): never 0. */
+  messages?: number;
   /** Of those, judged by the private model (or by the rules). */
-  judged: number;
+  judged?: number;
   /** Of those, held Private until the private model judges them. */
-  waiting_for_private_model: number;
+  waiting_for_private_model?: number;
+  /** Olympus could not open its index to count this archive's messages; the numbers are left out, not zero. */
+  counts_unavailable?: true;
   progress_percent?: number;
   earliest?: string;
   latest?: string;
@@ -114,6 +116,8 @@ export type ArchiveAgentStatus =
     private_model: ComputerArchivesMeta['privateModel'];
     /** Said when messages wait for the private model. */
     private_model_note?: string;
+    /** Imports and removals are waiting for background reading that this computer's settings keep from running. */
+    not_running?: { setting: 'disabled' | 'not_selected'; message: string };
   }
   | { ok: false; code: 'archives_unreadable'; reason: string; message: string }
   | { ok: false; code: 'unknown_archive'; message: string };
@@ -193,6 +197,11 @@ function kindLine(kinds: Readonly<Record<string, { one: string; many: string }>>
 
 function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | undefined): string {
   const copy = DASHBOARD_ARCHIVE_COPY;
+  if (entry.countsUnavailable && entry.status !== 'stopped' && entry.status !== 'removing') {
+    // The counts are not zero, they are unknown: say so, never "0 messages".
+    const read = entry.status === 'importing' ? `${fill(copy.importingLineUncounted, { percent: String(entry.percent ?? 0) })}. ` : '';
+    return `${read}${copy.countsUnavailable.why} ${copy.countsUnavailable.fix}`;
+  }
   const items = messages(entry.items);
   const held = entry.items > 0 && entry.status !== 'removing'
     ? ` ${fill(copy.judgedLine, { judged: String(entry.judged), held: String(entry.held) })}.`
@@ -227,9 +236,9 @@ function archiveOf(entry: ComputerArchiveEntry): AgentArchive {
     format: entry.format,
     where: entry.where,
     status: entry.status,
-    messages: entry.items,
-    judged: entry.judged,
-    waiting_for_private_model: entry.held,
+    ...(entry.countsUnavailable
+      ? { counts_unavailable: true as const }
+      : { messages: entry.items, judged: entry.judged, waiting_for_private_model: entry.held }),
     ...(entry.status === 'importing' && entry.percent !== undefined ? { progress_percent: entry.percent } : {}),
     ...(entry.earliest ? { earliest: entry.earliest } : {}),
     ...(entry.latest ? { latest: entry.latest } : {}),
@@ -385,7 +394,7 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
       if (archiveId !== undefined && entries.length === 0) {
         return { ok: false, code: 'unknown_archive', message: ARCHIVE_AGENT_COPY.unknownArchive };
       }
-      const held = entries.some((entry) => entry.status !== 'removing' && entry.held > 0);
+      const held = entries.some((entry) => entry.status !== 'removing' && !entry.countsUnavailable && entry.held > 0);
       const result: Extract<ArchiveAgentStatus, { ok: true }> = {
         ok: true,
         archives: entries.map(archiveOf),
@@ -400,6 +409,10 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
         result.requests = asked.map(requestOf);
       }
       if (held) result.private_model_note = ARCHIVE_AGENT_COPY.heldNote[meta.privateModel];
+      if (meta.notRunning) {
+        const copy = DASHBOARD_ARCHIVE_COPY.notRunning;
+        result.not_running = { setting: meta.notRunning, message: `${copy.why[meta.notRunning]} ${copy.fix[meta.notRunning]}` };
+      }
       return result;
     },
 
