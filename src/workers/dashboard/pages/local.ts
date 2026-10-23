@@ -19,7 +19,6 @@
  * up, and every blurb is a fact — where the key lives, what it costs, what
  * the provider will show.
  */
-import { GOOGLE_SIGNIN_FULL_SENTENCE } from '../../../core/google-signin-full-copy.ts';
 import type { DashboardAgentsView } from '../../agent-connections.ts';
 import type { WorkerCredentialDegradation } from '../../credential-degradation.ts';
 import type {
@@ -241,14 +240,11 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
   if (action.kind === 'needs_setup') {
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     const link = keyLocationLink(action.instructions);
-    // Olympus's own Google app is full: the row says so in the owner's own
-    // words and the disclosure carries the steps for using their own app.
-    const full = action.publisher_full === true;
     const row = setupRow({
       ...id,
       label: source.label,
-      blurb: full ? action.instructions.plain_intro.replace(GOOGLE_SIGNIN_FULL_SENTENCE, '').trim() : action.instructions.plain_intro,
-      ...(full ? { summary: GOOGLE_SIGNIN_FULL_SENTENCE } : dashboardSetupLead(source.source_id, action.instructions.plain_intro)),
+      blurb: action.instructions.plain_intro,
+      ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
       action: { label: action.label, kind: 'none', sheet: sheetId, ...gate },
       ...(link === undefined ? {} : { blurbLink: link }),
     });

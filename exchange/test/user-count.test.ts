@@ -7,8 +7,6 @@ import { COUNT_KEY, NO_ID_TOKEN_KEY, USER_KEY_PREFIX, subFromIdToken, userKeyFor
  *  - the owner needs the number of DISTINCT Google accounts that connected;
  *  - Gmail and Drive for one account, and every reconnect, count once;
  *  - counting is bookkeeping and can never break, change or delay an exchange;
- *  - /exchange/capacity says only open or full, full at (count + offset) >= full-at,
- *    or whenever the owner forces it;
  *  - /exchange/stats is the owner's and answers nobody without the token.
  */
 
@@ -80,14 +78,6 @@ async function stats(kv: ListingKv | undefined, overrides: Partial<Env> = {}): P
   );
   expect(response.status).toBe(200);
   return await response.json() as Record<string, unknown>;
-}
-
-async function capacity(kv: ListingKv | undefined, overrides: Partial<Env> = {}, headers: Record<string, string> = {}): Promise<Response> {
-  return handleRequest(
-    new Request('https://auth.olympusplugin.ai/exchange/capacity', { headers }),
-    env(kv, overrides),
-    deps(() => tokenResponse({})),
-  );
 }
 
 describe('distinct user counting', () => {
@@ -284,88 +274,7 @@ describe('counting never breaks, changes or delays an exchange', () => {
   });
 });
 
-describe('GET /exchange/capacity', () => {
-  async function seeded(count: number): Promise<ListingKv> {
-    const kv = new ListingKv();
-    kv.store.set(COUNT_KEY, String(count));
-    return kv;
-  }
-
-  test('open below the threshold', async () => {
-    const response = await capacity(await seeded(5), { GOOGLE_USER_COUNT_OFFSET: '2', GOOGLE_FULL_AT: '90' });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ google: 'open' });
-  });
-
-  test('open one short of the threshold, full at it (counted plus offset against full-at)', async () => {
-    const overrides = { GOOGLE_USER_COUNT_OFFSET: '2', GOOGLE_FULL_AT: '90' };
-    expect(await (await capacity(await seeded(87), overrides)).json()).toEqual({ google: 'open' });
-    expect(await (await capacity(await seeded(88), overrides)).json()).toEqual({ google: 'full' });
-    expect(await (await capacity(await seeded(95), overrides)).json()).toEqual({ google: 'full' });
-  });
-
-  test('the defaults are offset 2 and full at 90', async () => {
-    const kv = await seeded(87);
-    const fresh: Env = { GOOGLE_CLIENT_ID: CLIENT_ID, GOOGLE_CLIENT_SECRET: 'x', RATE_LIMIT_KV: kv };
-    const open = await handleRequest(new Request('https://auth.olympusplugin.ai/exchange/capacity'), fresh, deps(() => tokenResponse({})));
-    expect(await open.json()).toEqual({ google: 'open' });
-    kv.store.set(COUNT_KEY, '88');
-    const full = await handleRequest(new Request('https://auth.olympusplugin.ai/exchange/capacity'), fresh, deps(() => tokenResponse({})));
-    expect(await full.json()).toEqual({ google: 'full' });
-  });
-
-  test('the manual override forces full whatever the count says, and "0" does not', async () => {
-    expect(await (await capacity(await seeded(0), { GOOGLE_SIGNIN_FULL: '1' })).json()).toEqual({ google: 'full' });
-    expect(await (await capacity(undefined, { GOOGLE_SIGNIN_FULL: '1' })).json()).toEqual({ google: 'full' });
-    expect(await (await capacity(await seeded(0), { GOOGLE_SIGNIN_FULL: '0' })).json()).toEqual({ google: 'open' });
-  });
-
-  test('an unreadable counter fails open', async () => {
-    const broken = { get: () => Promise.reject(new Error('down')), put: () => Promise.reject(new Error('down')) };
-    const response = await handleRequest(
-      new Request('https://auth.olympusplugin.ai/exchange/capacity'),
-      { ...env(undefined), RATE_LIMIT_KV: broken },
-      deps(() => tokenResponse({})),
-    );
-    expect(await response.json()).toEqual({ google: 'open' });
-    expect(await (await capacity(undefined)).json()).toEqual({ google: 'open' });
-  });
-
-  test('the body carries only the state: no count, cap, threshold or offset anywhere', async () => {
-    const response = await capacity(await seeded(61), { GOOGLE_USER_COUNT_OFFSET: '2' });
-    const text = await response.text();
-    expect(JSON.parse(text)).toEqual({ google: 'open' });
-    expect(text).not.toContain('61');
-    expect(text).not.toContain('63');
-    expect([...response.headers.entries()].join(' ')).not.toContain('61');
-  });
-
-  test('public, cacheable for about a minute, readable from any origin', async () => {
-    const response = await capacity(await seeded(1), {}, { Origin: 'https://chatgpt.com' });
-    expect(response.status).toBe(200);
-    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60');
-    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
-  });
-
-  test('answers a CORS preflight', async () => {
-    const response = await handleRequest(
-      new Request('https://auth.olympusplugin.ai/exchange/capacity', { method: 'OPTIONS', headers: { Origin: 'https://chatgpt.com' } }),
-      env(undefined),
-      deps(() => tokenResponse({})),
-    );
-    expect(response.status).toBe(204);
-    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
-  });
-
-  test('refuses writes', async () => {
-    const response = await handleRequest(
-      new Request('https://auth.olympusplugin.ai/exchange/capacity', { method: 'POST' }),
-      env(undefined),
-      deps(() => tokenResponse({})),
-    );
-    expect(response.status).toBe(405);
-  });
-
+describe('the exchange route', () => {
   test('the exchange route still refuses a browser Origin', async () => {
     const request = new Request('https://auth.olympusplugin.ai/exchange/google', {
       method: 'POST',

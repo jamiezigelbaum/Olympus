@@ -249,9 +249,9 @@ describe('connect', () => {
     }
   });
 
-  test('another refusal sentence (sign-in full) shows as is, with Try again and no Models route', async () => {
-    const sentence = 'Google sign-in is full right now.';
-    const host = mount({ openai: {}, serve: { [T.connectSource]: () => ({ content: [{ type: 'text', text: sentence }], structuredContent: { error: 'google_signin_full' }, isError: true }) } });
+  test('another refusal sentence (connect unavailable) shows as is, with Try again and no Models route', async () => {
+    const sentence = 'This source can\'t be connected from ChatGPT on this computer.';
+    const host = mount({ openai: {}, serve: { [T.connectSource]: () => ({ content: [{ type: 'text', text: sentence }], structuredContent: { error: 'connect_unavailable' }, isError: true }) } });
     host.push({ structuredContent: offDropbox });
     host.button('Connect').click();
     await host.settle();

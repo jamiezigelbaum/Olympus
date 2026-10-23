@@ -18,8 +18,8 @@
  * the same account, and every reconnect, land on the same key.
  *
  * Storage: the same KV namespace the rate limiter uses, under their own
- * prefix and with no TTL. `google-users:count` is a materialised total, so the
- * public capacity route costs one KV read rather than a list.
+ * prefix and with no TTL. `google-users:count` is a materialised total, so
+ * reading the count costs one KV read rather than a list.
  *
  * Failure policy: counting is bookkeeping and must never break or delay an
  * exchange. Every KV call is wrapped; a failure loses at most one tally (the

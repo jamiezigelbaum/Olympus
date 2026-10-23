@@ -69,7 +69,7 @@ export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
  */
 export const CHATGPT_INLINE_ERROR_CODES = [
   'sign_in_failed', 'source_not_connected', 'source_busy', 'sync_unavailable', 'disconnect_incomplete',
-  'models_not_ready', 'connect_unavailable', 'google_signin_full', 'already_connected',
+  'models_not_ready', 'connect_unavailable', 'already_connected',
 ] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;
 /** Visible-page refresh: often while something moves, rarely when settled, backing off on failure. */

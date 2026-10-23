@@ -8,10 +8,9 @@
  * Routes:
  *   POST /exchange/google          {code, code_verifier, redirect_uri, state?}
  *   POST /exchange/google/refresh  {refresh_token}
- *   GET  /exchange/capacity        {google: "open" | "full"}      (public)
  *   GET  /exchange/stats           the owner's user count         (STATS_TOKEN)
- * The two POST routes accept nothing else; the two GET routes are in
- * capacity.ts, and the count they report is kept by user-count.ts.
+ * The two POST routes accept nothing else; the GET route is in stats.ts, and
+ * the count it reports is kept by user-count.ts.
  *
  * Every response — success or failure, from this endpoint or forwarded from
  * Google — is `Cache-Control: no-store` and carries no cookies. Nothing here
@@ -29,7 +28,7 @@ import {
 import { isAllowedRedirectUri, parseAllowedRedirectUris } from './redirect-allowlist.ts';
 import { checkRateLimit, type RateLimitBinding, type RateLimitResult } from './rate-limit.ts';
 import { parseExchangeRequest, parseRefreshRequest } from './schema.ts';
-import { handleCapacity, handleStats } from './capacity.ts';
+import { handleStats } from './stats.ts';
 import { recordGoogleUser, type CapacityEnv, type UserCountKv } from './user-count.ts';
 
 export interface Env extends CapacityEnv {
@@ -90,14 +89,9 @@ export async function handleRequest(request: Request, env: Env, deps: Deps = def
   const startedAt = deps.now();
   let outcome: { status: number; error?: string } = { status: 500 };
   try {
-    // The two read routes sit ahead of the POST-only exchange rules: capacity
-    // is public and may be read from any origin, stats is token-gated and is
-    // opened from a browser address bar (no Origin header on a navigation).
-    if (url.pathname === '/exchange/capacity') {
-      const response = await handleCapacity(request, env);
-      outcome = { status: response.status };
-      return response;
-    }
+    // The read route sits ahead of the POST-only exchange rules: stats is
+    // token-gated and is opened from a browser address bar (no Origin header
+    // on a navigation).
     if (url.pathname === '/exchange/stats') {
       const response = hasBrowserOrigin(request)
         ? errorResponse(403, 'browser_origin_refused', 'This endpoint accepts only direct requests.')
