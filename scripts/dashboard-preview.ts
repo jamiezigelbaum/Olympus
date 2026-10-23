@@ -58,6 +58,7 @@ import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
 import { ARCHIVE_FORMATS } from '../src/core/archive-formats.ts';
 import { ARCHIVE_APPROVE_COPY } from '../src/workers/archive-import/dashboard.ts';
 import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
+import { displayText } from '../src/workers/dashboard/display-text.ts';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { dashboardToolResult } from '../src/workers/chatgpt/response-builder.ts';
@@ -691,6 +692,9 @@ function localFilesPreview(state: string) {
  *   archives-already     that check found the archive already imported
  *   archives-failed      a choice that was not imported, and why
  *   archives-request     an agent asked to import a file: Import or Decline
+ *   archives-remove-request  an agent asked to remove an imported archive: Remove or Decline
+ *   archives-request-hidden  an agent asked for a file whose name holds a zero-width space: the name and the
+ *                        whole path show it as U+200B, never as a name that looks plain
  *   archives-importing   one archive 42% read, its messages held for the private model
  *   archives-imported    one archive imported, with what was not read, per kind
  *   archives-waiting     imported, but no private model is set up: the route to set one up
@@ -705,6 +709,7 @@ function localFilesPreview(state: string) {
  */
 const ARCHIVE_STATES = [
   'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
+  'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running',
 ] as const;
@@ -737,6 +742,9 @@ function archivesPreview(state: string): SourceDashboardViewModel {
   });
 }
 
+/** A file name an agent chose, with a zero-width space the person could not see. */
+const PREVIEW_HIDDEN_NAME = 'Inbox\u200B.mbox';
+
 /** The card's side of a preview list, as archive-import/dashboard.ts present() derives it. */
 function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedArchives {
   const attention: DashboardImportAttention[] = [];
@@ -747,7 +755,11 @@ function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedA
   const counted = meta.archives.filter((entry) => entry.status !== 'removing');
   for (const entry of counted) if (entry.countsUnavailable) attention.push({ kind: 'counts', id: entry.id, name: entry.name });
   for (const request of meta.requests) {
-    if (request.origin === 'agent' && request.status === 'pending') attention.push({ kind: 'request', id: request.id, name: request.name });
+    if (request.origin === 'agent' && request.status === 'pending') {
+      // The engine hands the Needs you line the name as asked and writes it out there; the list already has.
+      const name = request.name === displayText(PREVIEW_HIDDEN_NAME) ? PREVIEW_HIDDEN_NAME : request.name;
+      attention.push({ kind: request.kind === 'remove' ? 'removal' : 'request', id: request.id, name });
+    }
   }
   for (const request of meta.requests) if (request.status === 'failed') attention.push({ kind: 'failed', id: request.id, name: request.name });
   const held = counted.filter((entry) => !entry.countsUnavailable).reduce((sum, entry) => sum + entry.held, 0);
@@ -807,7 +819,19 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
   } else if (state === 'archives-failed') {
     requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Inbox.mbox', where: '~/Desktop', origin: 'dashboard', status: 'failed', code: 'changed' });
   } else if (state === 'archives-request') {
-    requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Takeout-2.mbox', where: '~/Downloads', origin: 'agent', status: 'pending' });
+    requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Takeout-2.mbox', where: '~/Downloads', path: '~/Downloads/Takeout-2.mbox', origin: 'agent', status: 'pending' });
+  } else if (state === 'archives-request-hidden') {
+    requests.push({
+      id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f',
+      name: displayText(PREVIEW_HIDDEN_NAME),
+      where: '~/Downloads',
+      path: displayText(`~/Downloads/${PREVIEW_HIDDEN_NAME}`),
+      origin: 'agent',
+      status: 'pending',
+    });
+  } else if (state === 'archives-remove-request') {
+    archives.push(takeout);
+    requests.push({ id: '7d1e2f30-4c5b-4a6d-9e7f-8b9c0d1e2f3a', kind: 'remove', name: takeout.name, where: takeout.where, path: `${takeout.where}/${takeout.name}`, origin: 'agent', status: 'pending', archiveId: takeout.id, archiveName: takeout.name });
   } else if (state === 'archives-uncounted') {
     archives.push({ ...takeout, items: 0, judged: 0, held: 0, countsUnavailable: true });
   } else if (state === 'archives-not-running') {
@@ -817,7 +841,7 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
   } else if (state === 'archives-unreadable') {
     return {
       sourceId: 'archive.imports', archives, requests, privateModel,
-      unreadable: { reason: 'damaged', file: '~/.local/share/openclaw/olympus/archive-imports.json' },
+      unreadable: { reason: 'damaged', file: '~/.local/share/openclaw/olympus/archive-imports.json', list: 'archives' },
     };
   }
   return { sourceId: 'archive.imports', archives, requests, privateModel };

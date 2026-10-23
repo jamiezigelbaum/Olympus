@@ -1428,7 +1428,8 @@ export interface DashboardImportedArchives {
   importing: boolean;
   /**
    * What the imports need from the person, one entry each: an import that
-   * stopped, an agent's request waiting for an answer, imported items no
+   * stopped, an agent's request (to import, or to remove an archive) waiting
+   * for an answer, imported items no
    * private model can judge now, or the record of imports itself unreadable.
    * Absent or empty: nothing.
    */
@@ -1443,6 +1444,7 @@ export interface DashboardImportedArchives {
 export type DashboardImportAttention =
   | { kind: 'stopped'; id: string; name: string }
   | { kind: 'request'; id: string; name: string }
+  | { kind: 'removal'; id: string; name: string }
   /** A check of an approved import that ended without importing it. */
   | { kind: 'failed'; id: string; name: string }
   /** An archive whose counts cannot be read now. */

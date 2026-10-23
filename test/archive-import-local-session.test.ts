@@ -51,6 +51,9 @@ function archives() {
     async approve() { reached.push('approve'); return { ok: true, status: 'started', archive_id: ARCHIVE_ID, name: 'Takeout.mbox' }; },
     decline() { reached.push('decline'); return { ok: true }; },
     remove() { reached.push('remove'); return { ok: true }; },
+    approveRemoval() { reached.push('remove'); return { ok: true }; },
+    // The agent's side only records requests (archive-import-agent.test.ts); nothing here reaches it.
+    agent: {} as ArchiveImportDashboard['agent'],
     view: () => ({ sourceId: 'archive.imports', privateModel: 'ready', archives: [], requests: [] }),
     present: () => ({ archives: 0, importing: false }),
     resume() {},

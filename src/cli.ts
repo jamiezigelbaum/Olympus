@@ -1305,6 +1305,7 @@ function printHelp(): void {
   console.log('  olympus argus complete <prompt> [--lane fast|deep]');
   console.log('  olympus source answer <question>');
   console.log('  olympus ask <question> [--level strict|standard] [--cleanup as_written|light_cleanup|custom] [--remember true] [--model <zkapi-model>]');
+  console.log('  olympus archive start --path <path> | status [--archive-id <id>] | remove --archive-id <id>');
   console.log('  olympus source index status');
   console.log('  olympus source index search <query> --corpus-id <corpus>');
   console.log('  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]');

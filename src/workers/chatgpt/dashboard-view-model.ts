@@ -600,6 +600,7 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
     case 'stopped':
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
     case 'request':
+    case 'removal':
       return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words.review, archives) };
     case 'failed':
       return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
@@ -1205,7 +1206,7 @@ function importsAttention(input: readonly DashboardImportAttention[] | undefined
   const out: DashboardImportAttention[] = [];
   for (const entry of input) {
     if (!entry || typeof entry !== 'object') continue;
-    if ((entry.kind === 'stopped' || entry.kind === 'request' || entry.kind === 'failed' || entry.kind === 'counts') && typeof entry.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
+    if ((entry.kind === 'stopped' || entry.kind === 'request' || entry.kind === 'removal' || entry.kind === 'failed' || entry.kind === 'counts') && typeof entry.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
       out.push({ kind: entry.kind, id: entry.id, name: name(entry.name) });
     } else if (entry.kind === 'held' && finite(entry.count) && entry.count > 0 && (entry.model === 'off' || entry.model === 'waiting')) {
       out.push({ kind: 'held', count: count(entry.count), model: entry.model });

@@ -468,7 +468,7 @@ describe('what the imports need from the person', () => {
       // Damaged: not JSON at all. (The record is outside this home folder, so its whole path shows.)
       writeFileSync(path, '{"version": 1, "archi');
       expect(f.dashboard.present().attention).toEqual([{ kind: 'unreadable', reason: 'damaged' }]);
-      expect(f.dashboard.view().unreadable).toEqual({ reason: 'damaged', file: path });
+      expect(f.dashboard.view().unreadable).toEqual({ reason: 'damaged', file: path, list: which });
       // In a form this build does not read: a newer version, or damage that still parses.
       writeFileSync(path, JSON.stringify({ version: 2 }));
       expect(f.dashboard.present().attention).toEqual([{ kind: 'unreadable', reason: 'unknown_form' }]);

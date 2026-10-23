@@ -1403,6 +1403,7 @@ var init_public_surface = __esm(() => {
     "source_watch_cancel",
     "olympus_doctor",
     "ask_anonymously",
+    "archive_import",
     "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
@@ -1414,7 +1415,8 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "archive_import"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -1424,7 +1426,8 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "archive_import"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
@@ -1516,6 +1519,7 @@ var init_public_surface = __esm(() => {
     "tier migrate",
     "doctor",
     "ask",
+    "archive",
     "argus ping",
     "argus list",
     "argus complete",
@@ -59814,7 +59818,12 @@ function validApproval(value2) {
 function validRequest(value2) {
   if (!isRecord3(value2))
     return false;
-  return typeof value2.request_id === "string" && isArchiveId(value2.request_id) && (value2.origin === "agent" || value2.origin === "dashboard") && typeof value2.path === "string" && value2.path.length > 0 && value2.path.length <= ARCHIVE_IMPORT_REQUEST_PATH_MAX && typeof value2.label === "string" && typeof value2.status === "string" && STATUSES.has(value2.status) && (value2.archive_id === undefined || typeof value2.archive_id === "string" && isArchiveId(value2.archive_id)) && (value2.code === undefined || typeof value2.code === "string") && (value2.approved === undefined || validApproval(value2.approved)) && typeof value2.created_at === "string" && typeof value2.updated_at === "string";
+  const kind = value2.kind === undefined ? "import" : value2.kind;
+  if (kind !== "import" && kind !== "remove")
+    return false;
+  const path = value2.path;
+  const named = kind === "import" ? typeof path === "string" && path.length > 0 && path.length <= ARCHIVE_IMPORT_REQUEST_PATH_MAX : path === "" && value2.origin === "agent" && value2.status === "pending" && typeof value2.archive_id === "string";
+  return typeof value2.request_id === "string" && isArchiveId(value2.request_id) && (value2.origin === "agent" || value2.origin === "dashboard") && named && typeof value2.label === "string" && typeof value2.status === "string" && STATUSES.has(value2.status) && (value2.archive_id === undefined || typeof value2.archive_id === "string" && isArchiveId(value2.archive_id)) && (value2.code === undefined || typeof value2.code === "string") && (value2.approved === undefined || validApproval(value2.approved)) && typeof value2.created_at === "string" && typeof value2.updated_at === "string";
 }
 function readRequests(path) {
   if (!existsSync39(path))
@@ -59823,7 +59832,10 @@ function readRequests(path) {
   if (!isRecord3(parsed) || parsed.version !== 1 || !Array.isArray(parsed.requests) || !parsed.requests.every(validRequest)) {
     throw new ArchiveRecordFormError("The archive import requests are not in a form this build reads.");
   }
-  return { version: 1, requests: parsed.requests };
+  return {
+    version: 1,
+    requests: parsed.requests.map((entry) => ({ ...entry, kind: entry.kind ?? "import" }))
+  };
 }
 function archivePathLabel(path) {
   const parts = path.split("/").filter(Boolean);
@@ -59850,14 +59862,33 @@ class ArchiveImportRequestStore {
     let added;
     this.mutate((state) => {
       const waiting = state.requests.filter((request) => request.status === "pending");
-      const same = waiting.find((request) => request.path === path);
+      const same = waiting.find((request) => request.kind === "import" && request.path === path);
       if (same) {
         added = same;
         return false;
       }
       if (waiting.length >= ARCHIVE_IMPORT_PENDING_REQUESTS_MAX)
         return false;
-      added = this.entry("agent", path, "pending");
+      added = this.entry("import", "agent", path, "pending");
+      state.requests.push(added);
+      return true;
+    });
+    return added;
+  }
+  addRemoval(archiveId, name) {
+    if (!isArchiveId(archiveId))
+      throw new Error("The archive to remove is not an archive id.");
+    let added;
+    this.mutate((state) => {
+      const waiting = state.requests.filter((request) => request.status === "pending");
+      const same = waiting.find((request) => request.kind === "remove" && request.archive_id === archiveId);
+      if (same) {
+        added = same;
+        return false;
+      }
+      if (waiting.length >= ARCHIVE_IMPORT_PENDING_REQUESTS_MAX)
+        return false;
+      added = this.entry("remove", "agent", "", "pending", { archiveId, label: name });
       state.requests.push(added);
       return true;
     });
@@ -59869,7 +59900,7 @@ class ArchiveImportRequestStore {
       entry = state.requests.find((request) => request.status === "checking" && request.path === path);
       if (entry)
         return false;
-      entry = { ...this.entry("dashboard", path, "checking"), approved };
+      entry = { ...this.entry("import", "dashboard", path, "checking"), approved };
       state.requests.push(entry);
       return true;
     });
@@ -59877,7 +59908,7 @@ class ArchiveImportRequestStore {
   }
   startChecking(requestId, approved) {
     return this.change(requestId, (request) => {
-      if (request.status !== "pending")
+      if (request.kind !== "import" || request.status !== "pending")
         return false;
       request.status = "checking";
       request.approved = approved;
@@ -59914,9 +59945,19 @@ class ArchiveImportRequestStore {
     });
     return removed;
   }
-  entry(origin, path, status) {
+  entry(kind, origin, path, status, removal) {
     const at = this.now().toISOString();
-    return { request_id: randomUUID13(), origin, path, label: archivePathLabel(path), status, created_at: at, updated_at: at };
+    return {
+      request_id: randomUUID13(),
+      kind,
+      origin,
+      path,
+      label: removal ? removal.label.normalize("NFC").slice(0, 255) : archivePathLabel(path),
+      status,
+      ...removal ? { archive_id: removal.archiveId } : {},
+      created_at: at,
+      updated_at: at
+    };
   }
   change(requestId, edit) {
     let changed;
@@ -76965,6 +77006,23 @@ class EmailClient {
       ...options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}
     });
   }
+  async archiveImport(options) {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) {
+      throw new OperationError("source_index_not_enabled", "Archive import is off because the source index is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
+    }
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before importing an archive.");
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/archive-import/${options.action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
+      body: JSON.stringify({
+        ...options.path !== undefined ? { path: options.path } : {},
+        ...options.archiveId !== undefined ? { archive_id: options.archiveId } : {}
+      })
+    });
+  }
   async sourceAnswer(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
@@ -78511,6 +78569,25 @@ var init_answer_ready_coverage = __esm(() => {
   ];
 });
 
+// src/workers/dashboard/display-text.ts
+function escapeOne(char) {
+  if (char === " ")
+    return char;
+  const code = char.codePointAt(0) ?? 0;
+  return `⟨U+${code.toString(16).toUpperCase().padStart(4, "0")}⟩`;
+}
+function visibleText(text2) {
+  return text2.replace(HIDDEN, escapeOne);
+}
+function displayText(text2) {
+  const shown = visibleText(text2);
+  return /^[\x20-\x7e]*$/.test(shown) ? shown : `${FIRST_STRONG_ISOLATE}${shown}${POP_DIRECTIONAL_ISOLATE}`;
+}
+var FIRST_STRONG_ISOLATE = "⁨", POP_DIRECTIONAL_ISOLATE = "⁩", HIDDEN;
+var init_display_text = __esm(() => {
+  HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}͏ᅟᅠ឴឵⠀ㅤﾠ⟨⟩]/gu;
+});
+
 // src/workers/dashboard/vocabulary.ts
 function dashboardStatusResolution(input) {
   const source = input.source;
@@ -78961,13 +79038,15 @@ function dashboardImportAttentionSentence(entry) {
   const words2 = DASHBOARD_ARCHIVE_COPY.needsYou;
   switch (entry.kind) {
     case "stopped":
-      return words2.stopped.replace("{name}", entry.name);
+      return words2.stopped.replace("{name}", () => displayText(entry.name));
     case "request":
-      return words2.request.replace("{name}", entry.name);
+      return words2.request.replace("{name}", () => displayText(entry.name));
+    case "removal":
+      return words2.removal.replace("{name}", () => displayText(entry.name));
     case "failed":
-      return words2.failed.replace("{name}", entry.name);
+      return words2.failed.replace("{name}", () => displayText(entry.name));
     case "counts":
-      return words2.counts.replace("{name}", entry.name);
+      return words2.counts.replace("{name}", () => displayText(entry.name));
     case "scheduler":
       return words2.scheduler[entry.setting];
     case "held":
@@ -78980,6 +79059,7 @@ var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is mis
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
+  init_display_text();
   init_scheduler_markers();
   DASHBOARD_UPDATE_COPY = {
     notice: (version) => `Olympus ${version} is available. To update, run this in Terminal:`,
@@ -79396,6 +79476,10 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    fullPath: "Full path: {path}",
+    removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
+    removeRequestLineNoWhere: "An agent asked to remove {name}.",
+    removeRequestNote: "Removing deletes everything Olympus made from it. The file itself stays where it is.",
     approve: "Import",
     decline: "Decline",
     checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
@@ -79424,6 +79508,7 @@ var init_vocabulary = __esm(() => {
     needsYou: {
       stopped: "An import stopped: {name}",
       request: "An agent asked to import {name}",
+      removal: "An agent asked to remove {name}",
       failed: "An import did not start: {name}",
       counts: "Olympus can't count the messages in {name}",
       scheduler: {
@@ -90884,7 +90969,7 @@ async function revalidateStdioSourceAnswer(ctx, result) {
     return result;
   return typeof ctx.email.revalidateSourceAnswer === "function" ? ctx.email.revalidateSourceAnswer(result) : withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
 }
-var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, operations;
+var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, ARCHIVE_IMPORT_PARAMS, operations;
 var init_operations = __esm(() => {
   init_release_manifest();
   init_doctor();
@@ -90970,6 +91055,16 @@ var init_operations = __esm(() => {
     remember: { type: "boolean", description: "Save this level (and cleanup) as the default for later questions, so the user is not asked again." },
     model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; a model from the provider hosting this conversation is refused. Omit to use the model configured for this provider." },
     timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000)." }
+  };
+  ARCHIVE_IMPORT_PARAMS = {
+    action: {
+      type: "string",
+      required: true,
+      enum: ["start", "status", "remove"],
+      description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).'
+    },
+    path: { type: "string", description: "start only: the full path of the export (an .mbox file, or an Apple Mail .mbox folder), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
+    archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
   };
   operations = [
     {
@@ -91398,6 +91493,46 @@ var init_operations = __esm(() => {
         });
         const jobs = ctx.sourceAnswerJobs;
         return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+      }
+    },
+    {
+      name: "archive_import",
+      description: [
+        "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
+        "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
+        "Never open, read or copy the file yourself, and never retry to get around the approval.",
+        `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
+        "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
+        "remove {archive_id}: also needs the user's approval on the dashboard (same needs_approval result); removing deletes what Olympus made from the archive and never touches the file.",
+        "Any other {ok: false, message} is a refusal to tell the user in those words."
+      ].join(" "),
+      params: ARCHIVE_IMPORT_PARAMS,
+      mutating: true,
+      nativeExposure: "sourceIndexEnabledOnly",
+      cliHints: { name: "archive", positional: ["action"] },
+      handler: async (ctx, params) => {
+        assertNoUndeclaredParams(ARCHIVE_IMPORT_PARAMS, params, "Archive import");
+        const action = asString(params.action, "action");
+        if (action !== "start" && action !== "status" && action !== "remove") {
+          throw new OperationError("invalid_params", 'action must be "start", "status" or "remove".');
+        }
+        const path = optionalString9(params.path);
+        const archiveId = optionalString9(params.archive_id);
+        if (action === "start" && (path === undefined || archiveId !== undefined)) {
+          throw new OperationError("invalid_params", "start needs path, and takes no archive_id.");
+        }
+        if (action === "remove" && (archiveId === undefined || path !== undefined)) {
+          throw new OperationError("invalid_params", "remove needs archive_id, and takes no path.");
+        }
+        if (action === "status" && path !== undefined) {
+          throw new OperationError("invalid_params", "status takes no path; give archive_id to show one archive.");
+        }
+        return ctx.email.archiveImport({
+          action,
+          ...path !== undefined ? { path } : {},
+          ...archiveId !== undefined ? { archiveId } : {},
+          ...ctx.signal ? { signal: ctx.signal } : {}
+        });
       }
     },
     {
@@ -128525,7 +128660,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const A = H.copy.archives;
     const meta2 = state.computerMeta && state.computerMeta.archives;
     if (name === H.archiveRemoveTool) {
-      const removed = meta2 && Array.isArray(meta2.archives) ? meta2.archives.filter((entry) => entry && entry.id === (args && args.archive_id))[0] : null;
+      const asked = args && args.request_id && meta2 && Array.isArray(meta2.requests) ? meta2.requests.filter((entry) => entry && entry.id === args.request_id)[0] : null;
+      const target = asked ? asked.archiveId : args && args.archive_id;
+      const removed = meta2 && Array.isArray(meta2.archives) ? meta2.archives.filter((entry) => entry && entry.id === target)[0] : null;
       return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
     }
     if (name === H.archiveDeclineTool) {
@@ -128565,6 +128702,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(list, archiveItem(archive, String(meta2.privateModel || ""), archiveSetting(meta2)));
     return list;
   }
+  function isolatedLine(cls, template, values) {
+    const line = el("p", cls);
+    for (const part of template.split(/(\{[a-z]+\})/)) {
+      const key2 = part.slice(1, -1);
+      if (part.charAt(0) === "{" && Object.prototype.hasOwnProperty.call(values, key2))
+        add(line, el("bdi", "", values[key2]));
+      else if (part)
+        add(line, doc2.createTextNode(part));
+    }
+    return line;
+  }
+  function archiveFullPath(request2) {
+    const path = typeof request2.path === "string" ? request2.path : "";
+    return path ? isolatedLine("muted archive-facts request-path", H.copy.archives.fullPath, { path }) : null;
+  }
   function archiveRequestItem(request2) {
     const A = H.copy.archives;
     const item = el("li", "archive request");
@@ -128573,8 +128725,23 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       item.className += " landed";
     const key2 = "archive-request:" + request2.id;
     const where2 = typeof request2.where === "string" ? request2.where : "";
+    if (request2.kind === "remove") {
+      item.setAttribute("data-request", "remove");
+      add(item, where2 ? isolatedLine("", A.removeRequestLine, { name: request2.name, where: where2 }) : isolatedLine("", A.removeRequestLineNoWhere, { name: request2.name }));
+      add(item, archiveFullPath(request2));
+      add(item, el("p", "muted", A.removeRequestNote));
+      add(item, add(el("div", "archive-actions"), fixControl({
+        label: A.remove,
+        tool: H.archiveRemoveTool,
+        args: { request_id: request2.id },
+        destructive: true,
+        confirmText: fill2(A.removeConfirm, { name: request2.name })
+      }, key2 + ":remove", "plain", true), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
+      return item;
+    }
     if (request2.status === "pending") {
-      add(item, el("p", "", fill2(A.requestLine, { name: request2.name, where: where2 })));
+      add(item, isolatedLine("", A.requestLine, { name: request2.name, where: where2 }));
+      add(item, archiveFullPath(request2));
       add(item, add(el("div", "archive-actions"), fixControl({ label: A.approve, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":approve", "plain", false), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
@@ -136253,6 +136420,7 @@ function createEmailSourceWorker(options = {}) {
         releaseTickets.delete(ticket);
   };
   const consultAsk = options.consultAsk;
+  const archiveImportAgent = options.archiveImportAgent;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
   const currentReadwiseSync = options.currentReadwiseSync ?? (() => options.readwiseConnectorStoreSync);
@@ -136378,6 +136546,20 @@ function createEmailSourceWorker(options = {}) {
             throw new EmailSourceWorkerError(501, "consult_ask_not_supported", "Private source worker does not support anonymous questions.");
           }
           return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
+        }
+        if (request.method === "POST" && url.pathname.startsWith(`${basePath}/archive-import/`)) {
+          if (!archiveImportAgent) {
+            throw new EmailSourceWorkerError(501, "archive_import_not_supported", "Importing archives is not set up in this engine.");
+          }
+          const record5 = await parseObjectBody(request);
+          const action = url.pathname.slice(`${basePath}/archive-import/`.length);
+          if (action === "start")
+            return json(archiveImportAgent.start(record5.path));
+          if (action === "status")
+            return json(archiveImportAgent.status(record5.archive_id));
+          if (action === "remove")
+            return json(archiveImportAgent.remove(record5.archive_id));
+          throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json();
@@ -137579,12 +137761,14 @@ function createEmailSourceWorker(options = {}) {
           if (url.pathname === "/dashboard/archive-import/remove") {
             return await withDashboardGrantMutation(async () => {
               const archiveId = asOptionalString(record5.archive_id);
-              if (!archiveId)
-                throw new EmailSourceWorkerError(400, "invalid_request", "archive_id is required.");
+              const requestId = asOptionalString(record5.request_id);
+              if (archiveId === undefined === (requestId === undefined)) {
+                throw new EmailSourceWorkerError(400, "invalid_request", "Give either archive_id or request_id.");
+              }
               if (record5.acknowledge !== true) {
                 throw new EmailSourceWorkerError(400, "remove_confirmation_required", "Confirm that Remove deletes everything Olympus made from this archive, and leaves the file itself where it is.");
               }
-              return json(archiveImports.remove(archiveId));
+              return json(archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId));
             });
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
@@ -149824,6 +150008,302 @@ var init_runtime2 = __esm(() => {
   init_store2();
 });
 
+// src/workers/archive-import/agent.ts
+import { posix as posix5 } from "node:path";
+function archivesOpenTarget() {
+  const target = { kind: "archives" };
+  return { target: openTargetPath(target), url: olympusOpenUrl(target), page: openPageUrl(target) };
+}
+function fill2(template, values) {
+  let out = template;
+  for (const [key2, value2] of Object.entries(values))
+    out = out.split(`{${key2}}`).join(value2);
+  return out;
+}
+function messages(n) {
+  return n === 1 ? DASHBOARD_ARCHIVE_COPY.items.one : DASHBOARD_ARCHIVE_COPY.items.many.replace("{n}", String(n));
+}
+function kindLine(kinds, entry) {
+  const words2 = kinds[entry.kind] ?? kinds.other;
+  const gap = entry.count === 1 ? words2.one : words2.many.replace("{n}", String(entry.count));
+  return {
+    kind: entry.kind,
+    count: entry.count,
+    ...entry.file ? { file: entry.file } : {},
+    line: entry.file ? fill2(DASHBOARD_ARCHIVE_COPY.gapInFile, { file: entry.file, gap }) : gap
+  };
+}
+function summaryOf2(entry, stopped) {
+  const copy = DASHBOARD_ARCHIVE_COPY;
+  if (entry.countsUnavailable && entry.status !== "stopped" && entry.status !== "removing") {
+    const read = entry.status === "importing" ? `${fill2(copy.importingLineUncounted, { percent: String(entry.percent ?? 0) })}. ` : "";
+    return `${read}${copy.countsUnavailable.why} ${copy.countsUnavailable.fix}`;
+  }
+  const items = messages(entry.items);
+  const held = entry.items > 0 && entry.status !== "removing" ? ` ${fill2(copy.judgedLine, { judged: String(entry.judged), held: String(entry.held) })}.` : "";
+  switch (entry.status) {
+    case "importing":
+      return `${fill2(copy.importingLine, { percent: String(entry.percent ?? 0), items })}.${held}`;
+    case "imported":
+      return `${fill2(copy.importedLineNoTime, { items })}.${held}`;
+    case "stopped":
+      return `Stopped: ${stopped?.why ?? ""} ${stopped?.fix ?? ""}`.trim();
+    case "removing":
+      return copy.removingLine;
+  }
+}
+function archiveOf(entry) {
+  const copy = DASHBOARD_ARCHIVE_COPY;
+  let stopped;
+  if (entry.status === "stopped") {
+    const words2 = copy.stopped[entry.stop?.code ?? ""] ?? copy.stopped.other;
+    stopped = {
+      code: entry.stop?.code ?? "other",
+      ...entry.stop?.file ? { file: entry.stop.file } : {},
+      why: fill2(words2.why, { file: entry.stop?.file ?? copy.thisFile }),
+      fix: words2.fix
+    };
+  }
+  return {
+    archive_id: entry.id,
+    name: entry.name,
+    format: entry.format,
+    where: entry.where,
+    status: entry.status,
+    ...entry.countsUnavailable ? { counts_unavailable: true } : { messages: entry.items, judged: entry.judged, waiting_for_private_model: entry.held },
+    ...entry.status === "importing" && entry.percent !== undefined ? { progress_percent: entry.percent } : {},
+    ...entry.earliest ? { earliest: entry.earliest } : {},
+    ...entry.latest ? { latest: entry.latest } : {},
+    started_at: entry.startedAt,
+    ...entry.importedAt ? { imported_at: entry.importedAt } : {},
+    ...stopped ? { stopped } : {},
+    not_read: entry.gaps.map((gap) => kindLine(copy.gaps, gap)),
+    left_out: entry.skipped.map((gap) => kindLine(copy.gaps, gap)),
+    summary: summaryOf2(entry, stopped)
+  };
+}
+function requestOf(request) {
+  const copy = ARCHIVE_AGENT_COPY.request;
+  const kind = request.kind === "remove" ? "remove" : "import";
+  let state;
+  let note;
+  if (request.status === "pending") {
+    state = "waiting_for_approval";
+    note = kind === "remove" ? copy.removeWaiting : copy.importWaiting;
+  } else if (request.status === "checking") {
+    state = "checking";
+    note = copy.checking;
+  } else if (request.status === "already_imported") {
+    state = "already_imported";
+    note = copy.already;
+  } else {
+    state = "not_imported";
+    const reason = DASHBOARD_ARCHIVE_COPY.failed[request.code ?? ""] ?? DASHBOARD_ARCHIVE_COPY.failed.unreadable;
+    note = fill2(copy.failed, { reason });
+  }
+  return {
+    request_id: request.id,
+    kind,
+    name: request.name,
+    where: request.where,
+    origin: request.origin,
+    state,
+    ...request.archiveId ? { archive_id: request.archiveId } : {},
+    ...request.archiveName ? { archive_name: request.archiveName } : {},
+    note
+  };
+}
+function unreadableMessage(unreadable) {
+  const copy = DASHBOARD_ARCHIVE_COPY.unreadable;
+  const why = fill2(copy.why[unreadable.reason] ?? copy.why.other, { file: unreadable.file });
+  return `${why} ${copy.kept} ${copy.fix[unreadable.reason] ?? copy.fix.other}`;
+}
+function recordedPath(rootPath, chosenRelPath) {
+  return chosenRelPath ? posix5.join(rootPath, chosenRelPath) : rootPath;
+}
+function spelled(path) {
+  const composed = path.normalize("NFC");
+  return composed.length > 1 ? composed.replace(/\/+$/, "") || "/" : composed;
+}
+function unreadableStore(error2) {
+  return error2 instanceof ArchiveRecordFormError || error2 instanceof SyntaxError || typeof error2?.code === "string";
+}
+function createArchiveImportAgent(deps) {
+  return {
+    start(path) {
+      if (typeof path !== "string" || path.length === 0 || path.length > ARCHIVE_IMPORT_REQUEST_PATH_MAX || path.includes("\x00") || !path.startsWith("/")) {
+        return { ok: false, code: "invalid_path", message: ARCHIVE_AGENT_COPY.invalidPath };
+      }
+      const name = displayText(archivePathLabel(path));
+      const asked = spelled(path);
+      let records;
+      try {
+        records = deps.state.list();
+      } catch (error2) {
+        if (unreadableStore(error2)) {
+          return { ok: false, code: "archives_unreadable", message: ARCHIVE_AGENT_COPY.archivesUnreadable };
+        }
+        throw error2;
+      }
+      const record5 = records.filter((candidate) => spelled(recordedPath(candidate.root_path, candidate.chosen_rel_path)) === asked).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      const existing_record = record5 ? { archive_id: record5.archive_id, name: displayText(record5.label), state: record5.status } : undefined;
+      let entry;
+      try {
+        const checking = deps.requests.list().find((request) => request.kind === "import" && request.path === path && request.status === "checking");
+        if (checking) {
+          return {
+            ok: true,
+            status: "checking",
+            request_id: checking.request_id,
+            name,
+            message: fill2(ARCHIVE_AGENT_COPY.checking, { name })
+          };
+        }
+        entry = deps.requests.addPending(path);
+      } catch (error2) {
+        if (unreadableStore(error2)) {
+          return { ok: false, code: "requests_unreadable", message: ARCHIVE_AGENT_COPY.requestsUnreadable };
+        }
+        throw error2;
+      }
+      if (!entry)
+        return { ok: false, code: "too_many_requests", message: ARCHIVE_AGENT_COPY.tooMany };
+      return {
+        ok: false,
+        code: "needs_approval",
+        request_id: entry.request_id,
+        message: [
+          ...existing_record ? [fill2(ARCHIVE_AGENT_COPY.existingRecord[existing_record.state], { name: existing_record.name }), ARCHIVE_AGENT_COPY.existingNote] : [],
+          fill2(ARCHIVE_AGENT_COPY.needsApproval, { name })
+        ].join(" "),
+        open: archivesOpenTarget(),
+        ...existing_record ? { existing_record } : {}
+      };
+    },
+    status(archiveId) {
+      if (archiveId !== undefined && (typeof archiveId !== "string" || !isArchiveId(archiveId))) {
+        return { ok: false, code: "unknown_archive", message: ARCHIVE_AGENT_COPY.unknownArchive };
+      }
+      const meta2 = deps.view();
+      if (meta2.unreadable?.list === "archives") {
+        return {
+          ok: false,
+          code: "archives_unreadable",
+          reason: meta2.unreadable.reason,
+          message: unreadableMessage(meta2.unreadable)
+        };
+      }
+      const entries = archiveId === undefined ? meta2.archives : meta2.archives.filter((entry) => entry.id === archiveId);
+      if (archiveId !== undefined && entries.length === 0) {
+        return { ok: false, code: "unknown_archive", message: ARCHIVE_AGENT_COPY.unknownArchive };
+      }
+      const held = entries.some((entry) => entry.status !== "removing" && !entry.countsUnavailable && entry.held > 0);
+      const result = {
+        ok: true,
+        archives: entries.map(archiveOf),
+        private_model: meta2.privateModel
+      };
+      if (meta2.unreadable?.list === "requests") {
+        result.requests_unreadable = { reason: meta2.unreadable.reason, message: unreadableMessage(meta2.unreadable) };
+      } else {
+        const asked = archiveId === undefined ? meta2.requests : meta2.requests.filter((request) => request.archiveId === archiveId);
+        result.requests = asked.map(requestOf);
+      }
+      if (held)
+        result.private_model_note = ARCHIVE_AGENT_COPY.heldNote[meta2.privateModel];
+      if (meta2.notRunning) {
+        const copy = DASHBOARD_ARCHIVE_COPY.notRunning;
+        result.not_running = { setting: meta2.notRunning, message: `${copy.why[meta2.notRunning]} ${copy.fix[meta2.notRunning]}` };
+      }
+      return result;
+    },
+    remove(archiveId) {
+      if (typeof archiveId !== "string" || !isArchiveId(archiveId)) {
+        return { ok: false, code: "unknown_archive", message: ARCHIVE_AGENT_COPY.unknownArchive };
+      }
+      let record5;
+      try {
+        record5 = deps.state.get(archiveId);
+      } catch (error2) {
+        if (unreadableStore(error2)) {
+          return { ok: false, code: "archives_unreadable", message: ARCHIVE_AGENT_COPY.archivesUnreadable };
+        }
+        throw error2;
+      }
+      if (!record5)
+        return { ok: false, code: "unknown_archive", message: ARCHIVE_AGENT_COPY.unknownArchive };
+      const label = displayText(record5.label);
+      if (record5.status === "removing") {
+        return {
+          ok: true,
+          status: "removing",
+          archive_id: record5.archive_id,
+          name: label,
+          message: fill2(ARCHIVE_AGENT_COPY.removing, { name: label })
+        };
+      }
+      let entry;
+      try {
+        entry = deps.requests.addRemoval(record5.archive_id, record5.label);
+      } catch (error2) {
+        if (unreadableStore(error2)) {
+          return { ok: false, code: "requests_unreadable", message: ARCHIVE_AGENT_COPY.requestsUnreadable };
+        }
+        throw error2;
+      }
+      if (!entry)
+        return { ok: false, code: "too_many_requests", message: ARCHIVE_AGENT_COPY.tooMany };
+      return {
+        ok: false,
+        code: "needs_approval",
+        request_id: entry.request_id,
+        archive_id: record5.archive_id,
+        name: label,
+        message: fill2(ARCHIVE_AGENT_COPY.needsRemovalApproval, { name: label }),
+        open: archivesOpenTarget()
+      };
+    }
+  };
+}
+var ARCHIVE_AGENT_COPY;
+var init_agent = __esm(() => {
+  init_open_targets();
+  init_display_text();
+  init_vocabulary();
+  init_requests();
+  init_state();
+  ARCHIVE_AGENT_COPY = {
+    invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
+    tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
+    archivesUnreadable: "Olympus cannot read its list of imported archives right now, so it cannot tell what is imported. Nothing was deleted. Ask the person to open Archives on their computer's dashboard and choose See why.",
+    requestsUnreadable: "Olympus cannot read its list of imports waiting for an answer right now, so it did not record the request. Ask the person to open Archives on their computer's dashboard and choose See why.",
+    unknownArchive: "No archive with that id is imported. Call archive_import with status to list them.",
+    needsApproval: "Olympus imports a file only after the person approves it, and has not opened {name}. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Import on the request for {name}. Do not open, copy or read the file yourself, and do not ask again: call archive_import with status to see when it has been approved.",
+    needsRemovalApproval: "Olympus removes an imported archive only after the person approves it. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Remove on the request for {name}. Removing deletes everything Olympus made from it; the file itself stays where it is. Do not ask again: call archive_import with status to see when it is gone.",
+    checking: "The person approved {name} and Olympus is checking whether it is already imported. Call archive_import with status to see the result.",
+    existingRecord: {
+      imported: "Olympus has an earlier import from this same path: {name}.",
+      importing: "Olympus is importing {name} from this same path now.",
+      stopped: "An earlier import from this same path, {name}, stopped before it finished.",
+      removing: "Olympus is removing {name}, an earlier import from this same path."
+    },
+    existingNote: "A matching path does not show that this file is the one imported: it may have been replaced since, so Olympus recorded a request for the file as it is now. When the person approves, Olympus opens the file, compares it with what it already holds, and says if it is the same export.",
+    removing: "{name} is already being removed. Call archive_import with status to see when it is gone.",
+    heldNote: {
+      ready: DASHBOARD_ARCHIVE_COPY.heldWhy.ready,
+      waiting: DASHBOARD_ARCHIVE_COPY.heldWhy.waiting,
+      off: DASHBOARD_ARCHIVE_COPY.heldWhy.off
+    },
+    request: {
+      importWaiting: "Waiting for the person to choose Import or Decline on the dashboard.",
+      removeWaiting: "Waiting for the person to choose Remove or Decline on the dashboard.",
+      checking: "Olympus is checking whether this is already imported.",
+      already: "It is already imported.",
+      failed: "It was not imported: {reason}"
+    }
+  };
+});
+
 // src/workers/archive-import/removal.ts
 import { existsSync as existsSync75 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
@@ -149915,7 +150395,7 @@ var init_removal = __esm(() => {
 
 // src/workers/archive-import/dashboard.ts
 import { homedir as homedir65 } from "node:os";
-import { posix as posix5 } from "node:path";
+import { posix as posix6 } from "node:path";
 function archivePrivateModelFromSniffer(sniffer) {
   if (!sniffer)
     return "off";
@@ -149928,7 +150408,7 @@ function archiveImportScheduling(scheduler) {
   const selected = scheduler.sourceIds.map((sourceId) => sourceId.trim());
   return selected.length > 0 && !selected.includes(SCHEDULER_SOURCE_IDS.archiveImports) ? "not_selected" : "on";
 }
-function fill2(template, values) {
+function fill3(template, values) {
   let out = template;
   for (const [key2, value2] of Object.entries(values))
     out = out.split(`{${key2}}`).join(value2);
@@ -150000,7 +150480,8 @@ function createArchiveImportDashboard(options) {
       return "~";
     return path.startsWith(`${home2}/`) ? `~${path.slice(home2.length)}` : path;
   };
-  const where2 = (path) => shown(posix5.dirname(path));
+  const named = (text3) => displayText(text3);
+  const where2 = (path) => named(shown(posix6.dirname(path)));
   const refresh = () => {
     try {
       options.refreshScheduler();
@@ -150109,7 +150590,7 @@ function createArchiveImportDashboard(options) {
     }
   };
   const approvePath = (path, from) => {
-    const name = posix5.basename(path);
+    const name = named(posix6.basename(path));
     const requestId = from?.status === "pending" ? from.requestId : undefined;
     const answered = () => {
       if (from)
@@ -150117,7 +150598,7 @@ function createArchiveImportDashboard(options) {
     };
     const prepared = prepareArchiveImport({ state, path });
     if (prepared.kind === "unsupported") {
-      return refusal3("unsupported", fill2(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(", ") }));
+      return refusal3("unsupported", fill3(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(", ") }));
     }
     if (prepared.kind === "ambiguous")
       return refusal3("ambiguous", ARCHIVE_APPROVE_COPY.ambiguous);
@@ -150127,7 +150608,7 @@ function createArchiveImportDashboard(options) {
     }
     if (prepared.kind === "already_imported") {
       answered();
-      return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: prepared.archive.label };
+      return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
     let handed = false;
     try {
@@ -150143,7 +150624,7 @@ function createArchiveImportDashboard(options) {
           }
           if (result.kind === "already_imported") {
             answered();
-            return { ok: true, status: "already_imported", archive_id: result.archive.archive_id, name, archive_name: result.archive.label };
+            return { ok: true, status: "already_imported", archive_id: result.archive.archive_id, name, archive_name: named(result.archive.label) };
           }
           const code = result.kind === "unreadable" ? unreadableCode(result.code) : result.kind;
           return refusal3(code, ARCHIVE_APPROVE_COPY[code] ?? ARCHIVE_APPROVE_COPY.unreadable);
@@ -150187,7 +150668,7 @@ function createArchiveImportDashboard(options) {
     const byFile = record5.findings.gaps_by_file;
     if (record5.files.length < 2 || !byFile || Object.keys(byFile).length === 0)
       return tallies(record5.findings.gaps);
-    const fileName = (index) => posix5.basename(record5.files[index]?.rel_path || record5.label) || record5.label;
+    const fileName = (index) => named(posix6.basename(record5.files[index]?.rel_path || record5.label) || record5.label);
     const perFile = Object.entries(byFile).map(([index, kinds]) => ({ index: Number(index), kinds })).filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record5.files.length).sort((a, b) => a.index - b.index);
     const placed = {};
     for (const entry of perFile) {
@@ -150211,12 +150692,12 @@ function createArchiveImportDashboard(options) {
     const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly2(record5.date_range?.earliest);
     const latest = dateOnly2(record5.date_range?.latest);
-    const stopFile = record5.stop?.rel_path ? posix5.basename(record5.stop.rel_path) : undefined;
+    const stopFile = record5.stop?.rel_path ? named(posix6.basename(record5.stop.rel_path)) : undefined;
     return {
       id: record5.archive_id,
-      name: record5.label,
+      name: named(record5.label),
       format: getArchiveFormat(record5.format)?.label ?? record5.format,
-      where: where2(posix5.join(record5.root_path, record5.chosen_rel_path || ".")),
+      where: where2(posix6.join(record5.root_path, record5.chosen_rel_path || ".")),
       status: record5.status,
       items,
       judged: Math.max(0, items - held),
@@ -150232,20 +150713,55 @@ function createArchiveImportDashboard(options) {
       skipped: tallies(record5.findings.skipped)
     };
   };
-  const requestOf = (request, records) => {
+  const requestOf2 = (request, records) => {
     const archive = request.archive_id ? records.find((record5) => record5.archive_id === request.archive_id) : undefined;
+    if (request.kind === "remove") {
+      return {
+        id: request.request_id,
+        kind: "remove",
+        name: named(archive?.label ?? request.label),
+        where: archive ? where2(posix6.join(archive.root_path, archive.chosen_rel_path || ".")) : "",
+        ...archive ? { path: named(shown(posix6.join(archive.root_path, archive.chosen_rel_path || "."))) } : {},
+        origin: request.origin,
+        status: request.status,
+        archiveId: request.archive_id
+      };
+    }
     return {
       id: request.request_id,
-      name: request.label,
+      kind: "import",
+      name: named(request.label),
       where: where2(request.path),
+      path: named(shown(request.path)),
       origin: request.origin,
       status: request.status,
       ...request.archive_id ? { archiveId: request.archive_id } : {},
-      ...archive ? { archiveName: archive.label } : {},
+      ...archive ? { archiveName: named(archive.label) } : {},
       ...request.code ? { code: request.code } : {}
     };
   };
-  return {
+  const askingNow = (asked, records) => asked.filter((request) => request.kind !== "remove" || records.some((record5) => record5.archive_id === request.archive_id && record5.status !== "removing"));
+  const removeNow = (archiveId) => {
+    const record5 = state.get(archiveId);
+    if (!record5) {
+      for (const request of requests.list()) {
+        if (request.archive_id === archiveId && request.kind === "remove")
+          requests.remove(request.request_id);
+      }
+      return { ok: false, code: "unknown_archive", message: ARCHIVE_APPROVE_COPY.unknown_archive };
+    }
+    if (record5.status === "removing")
+      return { ok: false, code: "already_removing", message: ARCHIVE_APPROVE_COPY.already_removing };
+    requestArchiveRemoval(state, archiveId, options.now);
+    for (const request of requests.list()) {
+      if (request.archive_id === archiveId)
+        requests.remove(request.request_id);
+    }
+    refresh();
+    return { ok: true };
+  };
+  const api2 = {
+    agent: createArchiveImportAgent({ state, requests, view: () => api2.view() }),
     async browse(request) {
       const page2 = await options.browser.browse(request);
       return {
@@ -150278,6 +150794,8 @@ function createArchiveImportDashboard(options) {
         }
         if (!waiting || waiting.status !== "pending")
           return refusal3("not_waiting", ARCHIVE_APPROVE_COPY.not_waiting);
+        if (waiting.kind !== "import")
+          return refusal3("not_an_import", ARCHIVE_APPROVE_COPY.not_an_import);
         const resolved2 = await options.browser.resolvePath(waiting.path);
         if (!resolved2.ok)
           return { ok: false, code: resolved2.code, message: resolved2.message, ...resolved2.access ? { access: resolved2.access } : {} };
@@ -150301,18 +150819,20 @@ function createArchiveImportDashboard(options) {
       const blocked = notRunning();
       if (blocked && !blocked.ok)
         return { ok: false, code: blocked.code, message: blocked.message };
-      const record5 = state.get(archiveId);
-      if (!record5)
-        return { ok: false, code: "unknown_archive", message: ARCHIVE_APPROVE_COPY.unknown_archive };
-      if (record5.status === "removing")
-        return { ok: false, code: "already_removing", message: ARCHIVE_APPROVE_COPY.already_removing };
-      requestArchiveRemoval(state, archiveId, options.now);
-      for (const request of requests.list()) {
-        if (request.archive_id === archiveId)
-          requests.remove(request.request_id);
-      }
-      refresh();
-      return { ok: true };
+      return removeNow(archiveId);
+    },
+    approveRemoval(requestId) {
+      const request = requests.get(requestId);
+      if (!request || request.status !== "pending")
+        return { ok: false, code: "not_waiting", message: ARCHIVE_APPROVE_COPY.not_waiting };
+      if (request.kind !== "remove" || !request.archive_id)
+        return { ok: false, code: "not_a_removal", message: ARCHIVE_APPROVE_COPY.not_a_removal };
+      const blocked = notRunning();
+      if (blocked && !blocked.ok)
+        return { ok: false, code: blocked.code, message: blocked.message };
+      const result = removeNow(request.archive_id);
+      requests.remove(requestId);
+      return result;
     },
     view() {
       const model = options.privateModel();
@@ -150321,7 +150841,7 @@ function createArchiveImportDashboard(options) {
       try {
         records = state.list();
       } catch (error2) {
-        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path) } };
+        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
       }
       let asked;
       try {
@@ -150331,14 +150851,14 @@ function createArchiveImportDashboard(options) {
           ...base,
           archives: records.map(entryOf),
           requests: [],
-          unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path) }
+          unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
         };
       }
       const setting = scheduling();
       return {
         ...base,
         archives: records.map(entryOf),
-        requests: asked.map((request) => requestOf(request, records)),
+        requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
         ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
       };
     },
@@ -150373,8 +150893,13 @@ function createArchiveImportDashboard(options) {
         else
           attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
       }
-      for (const request of asked) {
-        if (request.origin === "agent" && request.status === "pending") {
+      for (const request of askingNow(asked, records)) {
+        if (request.origin !== "agent" || request.status !== "pending")
+          continue;
+        if (request.kind === "remove") {
+          const archive = records.find((record5) => record5.archive_id === request.archive_id);
+          attention.push({ kind: "removal", id: request.request_id, name: archive?.label ?? request.label });
+        } else {
           attention.push({ kind: "request", id: request.request_id, name: request.label });
         }
       }
@@ -150412,15 +150937,18 @@ function createArchiveImportDashboard(options) {
       closed = true;
     }
   };
+  return api2;
 }
 var ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY;
 var init_dashboard2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
+  init_agent();
   init_source_scheduler();
   init_manifest2();
   init_removal();
   init_start();
+  init_display_text();
   init_state();
   init_requests();
   ARCHIVE_APPROVE_COPY = {
@@ -150433,6 +150961,8 @@ var init_dashboard2 = __esm(() => {
     not_waiting: "This request was already answered.",
     checking: "Olympus is still checking this one.",
     unknown_archive: "This archive is no longer in the list.",
+    not_an_import: "This request is not an import.",
+    not_a_removal: "This request is not to remove an archive.",
     already_removing: "This archive is already being removed."
   };
   ARCHIVE_NOT_RUNNING_COPY = {
@@ -152388,7 +152918,7 @@ function createGmailMailScopeBrowser(options) {
       return {
         labels: labels.filter((label) => label.id && label.name && (label.type === "user" || SKIPPABLE_SYSTEM_LABELS.has(label.id))).slice(0, MAX_LISTED_LABELS).map((label) => ({ id: label.id, name: label.name, system: label.type !== "user" })).sort((left, right) => Number(left.system) - Number(right.system) || left.name.localeCompare(right.name)),
         categories,
-        sender_suggestions: [...tally2].filter(([, messages]) => messages >= 2).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, MAX_SENDER_SUGGESTIONS).map(([sender, messages]) => ({ sender, sample_messages: messages })),
+        sender_suggestions: [...tally2].filter(([, messages2]) => messages2 >= 2).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, MAX_SENDER_SUGGESTIONS).map(([sender, messages2]) => ({ sender, sample_messages: messages2 })),
         sample_size: sample.length,
         estimate: estimateMailScope({
           contentMessages: contentPage.resultSizeEstimate ?? contentPage.messages.length,
@@ -154257,24 +154787,24 @@ data:
           return this.createJsonErrorResponse(400, -32700, "Parse error: Invalid JSON");
         }
       }
-      let messages;
+      let messages2;
       try {
         if (Array.isArray(rawMessage)) {
-          messages = rawMessage.map((msg) => JSONRPCMessageSchema.parse(msg));
+          messages2 = rawMessage.map((msg) => JSONRPCMessageSchema.parse(msg));
         } else {
-          messages = [JSONRPCMessageSchema.parse(rawMessage)];
+          messages2 = [JSONRPCMessageSchema.parse(rawMessage)];
         }
       } catch {
         this.onerror?.(new Error("Parse error: Invalid JSON-RPC message"));
         return this.createJsonErrorResponse(400, -32700, "Parse error: Invalid JSON-RPC message");
       }
-      const isInitializationRequest = messages.some(isInitializeRequest);
+      const isInitializationRequest = messages2.some(isInitializeRequest);
       if (isInitializationRequest) {
         if (this._initialized && this.sessionId !== undefined) {
           this.onerror?.(new Error("Invalid Request: Server already initialized"));
           return this.createJsonErrorResponse(400, -32600, "Invalid Request: Server already initialized");
         }
-        if (messages.length > 1) {
+        if (messages2.length > 1) {
           this.onerror?.(new Error("Invalid Request: Only one initialization request is allowed"));
           return this.createJsonErrorResponse(400, -32600, "Invalid Request: Only one initialization request is allowed");
         }
@@ -154294,15 +154824,15 @@ data:
           return protocolError;
         }
       }
-      const hasRequests = messages.some(isJSONRPCRequest);
+      const hasRequests = messages2.some(isJSONRPCRequest);
       if (!hasRequests) {
-        for (const message2 of messages) {
+        for (const message2 of messages2) {
           this.onmessage?.(message2, { authInfo: options?.authInfo, requestInfo });
         }
         return new Response(null, { status: 202 });
       }
       const streamId2 = crypto.randomUUID();
-      const initRequest = messages.find((m) => isInitializeRequest(m));
+      const initRequest = messages2.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
         return new Promise((resolve17) => {
@@ -154312,12 +154842,12 @@ data:
               this._streamMapping.delete(streamId2);
             }
           });
-          for (const message2 of messages) {
+          for (const message2 of messages2) {
             if (isJSONRPCRequest(message2)) {
               this._requestToStreamMapping.set(message2.id, streamId2);
             }
           }
-          for (const message2 of messages) {
+          for (const message2 of messages2) {
             this.onmessage?.(message2, { authInfo: options?.authInfo, requestInfo });
           }
         });
@@ -154340,7 +154870,7 @@ data:
       if (this.sessionId !== undefined) {
         headers["mcp-session-id"] = this.sessionId;
       }
-      for (const message2 of messages) {
+      for (const message2 of messages2) {
         if (isJSONRPCRequest(message2)) {
           this._streamMapping.set(streamId2, {
             controller: streamController,
@@ -154356,7 +154886,7 @@ data:
         }
       }
       await this.writePrimingEvent(streamController, encoder, streamId2, clientProtocolVersion);
-      for (const message2 of messages) {
+      for (const message2 of messages2) {
         let closeSSEStream;
         let closeStandaloneSSEStream;
         if (isJSONRPCRequest(message2) && this._eventStore && clientProtocolVersion >= "2025-11-25") {
@@ -154749,6 +155279,7 @@ function importAttentionItem(entry) {
     case "stopped":
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
     case "request":
+    case "removal":
       return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words2.review, archives) };
     case "failed":
       return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
@@ -155127,7 +155658,7 @@ function importsAttention(input) {
   for (const entry of input) {
     if (!entry || typeof entry !== "object")
       continue;
-    if ((entry.kind === "stopped" || entry.kind === "request" || entry.kind === "failed" || entry.kind === "counts") && typeof entry.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
+    if ((entry.kind === "stopped" || entry.kind === "request" || entry.kind === "removal" || entry.kind === "failed" || entry.kind === "counts") && typeof entry.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
       out.push({ kind: entry.kind, id: entry.id, name: name(entry.name) });
     } else if (entry.kind === "held" && finite(entry.count) && entry.count > 0 && (entry.model === "off" || entry.model === "waiting")) {
       out.push({ kind: "held", count: count(entry.count), model: entry.model });
@@ -156030,7 +156561,7 @@ function chatgptPrivateAnswerProgram(config2) {
       node.textContent = text3;
     return node;
   }
-  function fill3(template, values) {
+  function fill4(template, values) {
     return template.replace(/\{(\w+)\}/g, (whole, key2) => (key2 in values) ? values[key2] : whole);
   }
   function button(label, key2, onClick, name) {
@@ -156094,7 +156625,7 @@ function chatgptPrivateAnswerProgram(config2) {
     toggle.type = "button";
     toggle.setAttribute("data-key", "sources");
     toggle.setAttribute("aria-expanded", sourcesOpen ? "true" : "false");
-    toggle.appendChild(doc2.createTextNode(fill3(T.sourcesToggle, { n: String(sources.length) })));
+    toggle.appendChild(doc2.createTextNode(fill4(T.sourcesToggle, { n: String(sources.length) })));
     toggle.appendChild(chevron());
     onActivate(toggle, toggleSources);
     wrap.appendChild(toggle);
@@ -156153,7 +156684,7 @@ function chatgptPrivateAnswerProgram(config2) {
     }
     if (current2.state === "model_downloading") {
       const known = current2.percent >= 0;
-      line.textContent = known ? fill3(T.downloading, { percent: String(current2.percent) }) : T.downloadingUnknown;
+      line.textContent = known ? fill4(T.downloading, { percent: String(current2.percent) }) : T.downloadingUnknown;
       if (known) {
         const bar = el("div", "bar");
         bar.setAttribute("role", "progressbar");
@@ -156206,7 +156737,7 @@ function chatgptPrivateAnswerProgram(config2) {
       view2.card.appendChild(sourcesView(shown.sources));
     const gaps = shown.unanswered.map((item) => item.trim()).filter(Boolean);
     if (gaps.length)
-      view2.card.appendChild(el("p", "gaps", fill3(T.unanswered, { list: gaps.join("; ") })));
+      view2.card.appendChild(el("p", "gaps", fill4(T.unanswered, { list: gaps.join("; ") })));
     return view2.card;
   }
   function render() {
@@ -157190,7 +157721,7 @@ function chatgptPrivateQuestionProgram(config2) {
     if (!question)
       return fail(T.empty, true);
     if (question.length > info.maxChars)
-      return fail(fill3(T.tooLong, { n: num(question.length), max: num(info.maxChars) }), true);
+      return fail(fill4(T.tooLong, { n: num(question.length), max: num(info.maxChars) }), true);
     if (!subtle || typeof window.fetch !== "function")
       return fail(T.generic, false);
     const mine = ++run2;
@@ -157370,7 +157901,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const count2 = el("div", "q-count");
     const limit = current2.maxChars;
     const recount = () => {
-      count2.textContent = fill3(T.count, { n: num(draft.length), max: num(limit) });
+      count2.textContent = fill4(T.count, { n: num(draft.length), max: num(limit) });
       count2.classList.toggle("over", draft.length > limit);
     };
     field.addEventListener("input", () => {
@@ -157503,7 +158034,7 @@ function chatgptPrivateQuestionProgram(config2) {
     }
     card.appendChild(text3);
     const how = shown.level === "strict" ? T.howStrict : shown.cleanup === "as_written" ? T.howAsWritten : shown.cleanup === "custom" ? T.howCustom : T.howLightCleanup;
-    const foot = [shown.model ? fill3(T.answeredBy, { model: shown.model }) : "", how].filter(Boolean).join(" · ");
+    const foot = [shown.model ? fill4(T.answeredBy, { model: shown.model }) : "", how].filter(Boolean).join(" · ");
     card.appendChild(el("p", "q-foot", foot));
     if (shown.network === "visible")
       card.appendChild(el("p", "q-foot warn", T.networkVisible));
@@ -157540,7 +158071,7 @@ function chatgptPrivateQuestionProgram(config2) {
   function num(value2) {
     return value2.toLocaleString("en-US");
   }
-  function fill3(text3, values) {
+  function fill4(text3, values) {
     return text3.replace(/\{(\w+)\}/g, (match, key2) => (key2 in values) ? values[key2] : match);
   }
   function render() {
@@ -172559,9 +173090,11 @@ async function archiveDecline(options, args, context2) {
 }
 async function archiveRemove(options, args, context2) {
   const keys = Object.keys(args);
-  if (keys.length !== 1 || keys[0] !== "archive_id" || !archiveArg(args.archive_id))
-    return refused2("archive_id is required.", "invalid_params");
-  const answer = await archiveRoute(options, "remove", { archive_id: args.archive_id, acknowledge: true }, context2);
+  const byArchive = keys.length === 1 && keys[0] === "archive_id" && archiveArg(args.archive_id);
+  const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
+  if (!byArchive && !byRequest)
+    return refused2("Give an archive id or a request id.", "invalid_params");
+  const answer = await archiveRoute(options, "remove", { ...byArchive ? { archive_id: args.archive_id } : { request_id: args.request_id }, acknowledge: true }, context2);
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Removing." }], structuredContent: { status: "removing" } };
@@ -175662,6 +176195,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
     sourceAnswerReleaseCheck: createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow"),
+    archiveImportAgent: archiveImportDashboard.agent,
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
       store: waitingQuestionStore,
       connectionId: anonymousInboxConnectionId(caller),
@@ -181596,6 +182130,7 @@ function printHelp() {
   console.log("  olympus argus complete <prompt> [--lane fast|deep]");
   console.log("  olympus source answer <question>");
   console.log("  olympus ask <question> [--level strict|standard] [--cleanup as_written|light_cleanup|custom] [--remember true] [--model <zkapi-model>]");
+  console.log("  olympus archive start --path <path> | status [--archive-id <id>] | remove --archive-id <id>");
   console.log("  olympus source index status");
   console.log("  olympus source index search <query> --corpus-id <corpus>");
   console.log("  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]");

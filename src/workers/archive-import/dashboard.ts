@@ -27,6 +27,7 @@ import type {
   ComputerArchivesMeta,
 } from '../chatgpt/dashboard-contract.ts';
 import type { LocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
+import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
 import { archiveFileDigestSteps, findProbableCopies, verifyArchiveManifest } from './manifest.ts';
 import { requestArchiveRemoval } from './removal.ts';
@@ -42,6 +43,7 @@ import type {
   DashboardImportedArchives,
   DashboardImportsUnreadableReason,
 } from '../source-dashboard.ts';
+import { displayText } from '../dashboard/display-text.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, type ArchiveImportRecord } from './state.ts';
 import {
   ArchiveImportRequestStore,
@@ -100,7 +102,18 @@ export interface ArchiveImportDashboard {
   approve(request: { key: string } | { requestId: string }): Promise<ArchiveApproveResult>;
   decline(requestId: string): ArchiveSimpleResult;
   remove(archiveId: string): ArchiveSimpleResult;
+  /**
+   * The person's approval of an agent's request to remove an archive: the
+   * same removal Remove runs, for the archive the request names.
+   */
+  approveRemoval(requestId: string): ArchiveSimpleResult;
   view(): ComputerArchivesMeta;
+  /**
+   * What an agent may do (agent.ts): ask for an import or a removal, and
+   * read the same list. It approves and removes nothing; only the methods
+   * above, behind the dashboard's control routes, do.
+   */
+  readonly agent: ArchiveImportAgent;
   /**
    * The Archives card's connection: how many archives, whether one is
    * moving, and what needs the person. Never throws: a record that cannot
@@ -163,6 +176,8 @@ export const ARCHIVE_APPROVE_COPY = {
   not_waiting: 'This request was already answered.',
   checking: 'Olympus is still checking this one.',
   unknown_archive: 'This archive is no longer in the list.',
+  not_an_import: 'This request is not an import.',
+  not_a_removal: 'This request is not to remove an archive.',
   already_removing: 'This archive is already being removed.',
 } as const;
 
@@ -258,7 +273,11 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     if (path === home) return '~';
     return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
   };
-  const where = (path: string): string => shown(posix.dirname(path));
+  // What the dashboard, a Needs you line and an agent are told of a name, a folder or a path:
+  // asked for by whoever chose it, so every character that cannot be seen is written out
+  // (display-text.ts). The stored path is untouched, and is what the disk is asked for.
+  const named = (text: string): string => displayText(text);
+  const where = (path: string): string => named(shown(posix.dirname(path)));
 
   const refresh = (): void => {
     try {
@@ -392,7 +411,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
    * its path is resolved.
    */
   const approvePath = (path: string, from?: { requestId: string; status: 'pending' | 'failed' }): ArchiveApproveResult => {
-    const name = posix.basename(path);
+    const name = named(posix.basename(path));
     // An agent's request becomes the import or its check; Try again starts afresh.
     const requestId = from?.status === 'pending' ? from.requestId : undefined;
     const answered = (): void => {
@@ -409,7 +428,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
     if (prepared.kind === 'already_imported') {
       answered();
-      return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: prepared.archive.label };
+      return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
     // From here the approval moves into the record or the checks, under the
     // approvals' exclusion; the root is closed or handed to its check.
@@ -427,7 +446,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           }
           if (result.kind === 'already_imported') {
             answered();
-            return { ok: true, status: 'already_imported', archive_id: result.archive.archive_id, name, archive_name: result.archive.label };
+            return { ok: true, status: 'already_imported', archive_id: result.archive.archive_id, name, archive_name: named(result.archive.label) };
           }
           const code = result.kind === 'unreadable' ? unreadableCode(result.code) : result.kind;
           return refusal(code, ARCHIVE_APPROVE_COPY[code as keyof typeof ARCHIVE_APPROVE_COPY] ?? ARCHIVE_APPROVE_COPY.unreadable);
@@ -482,7 +501,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const gapsOf = (record: ArchiveImportRecord): ComputerArchiveEntry['gaps'] => {
     const byFile = record.findings.gaps_by_file;
     if (record.files.length < 2 || !byFile || Object.keys(byFile).length === 0) return tallies(record.findings.gaps);
-    const fileName = (index: number): string => posix.basename(record.files[index]?.rel_path || record.label) || record.label;
+    const fileName = (index: number): string => named(posix.basename(record.files[index]?.rel_path || record.label) || record.label);
     const perFile = Object.entries(byFile)
       .map(([index, kinds]) => ({ index: Number(index), kinds }))
       .filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record.files.length)
@@ -510,10 +529,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly(record.date_range?.earliest);
     const latest = dateOnly(record.date_range?.latest);
-    const stopFile = record.stop?.rel_path ? posix.basename(record.stop.rel_path) : undefined;
+    const stopFile = record.stop?.rel_path ? named(posix.basename(record.stop.rel_path)) : undefined;
     return {
       id: record.archive_id,
-      name: record.label,
+      name: named(record.label),
       format: getArchiveFormat(record.format)?.label ?? record.format,
       where: where(posix.join(record.root_path, record.chosen_rel_path || '.')),
       status: record.status,
@@ -534,20 +553,70 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
 
   const requestOf = (request: ArchiveImportRequest, records: readonly ArchiveImportRecord[]): ComputerArchiveRequest => {
     const archive = request.archive_id ? records.find((record) => record.archive_id === request.archive_id) : undefined;
+    if (request.kind === 'remove') {
+      // A removal names the archive, not a path: its name and folder are the archive's own.
+      return {
+        id: request.request_id,
+        kind: 'remove',
+        name: named(archive?.label ?? request.label),
+        where: archive ? where(posix.join(archive.root_path, archive.chosen_rel_path || '.')) : '',
+        ...(archive ? { path: named(shown(posix.join(archive.root_path, archive.chosen_rel_path || '.'))) } : {}),
+        origin: request.origin,
+        status: request.status,
+        archiveId: request.archive_id!,
+      };
+    }
     return {
       id: request.request_id,
-      name: request.label,
+      kind: 'import',
+      name: named(request.label),
       where: where(request.path),
+      // The whole path, as asked, so the person can read exactly what they approve.
+      path: named(shown(request.path)),
       origin: request.origin,
       // A check no process is running (a restart came between) is started again by resume().
       status: request.status,
       ...(request.archive_id ? { archiveId: request.archive_id } : {}),
-      ...(archive ? { archiveName: archive.label } : {}),
+      ...(archive ? { archiveName: named(archive.label) } : {}),
       ...(request.code ? { code: request.code } : {}),
     };
   };
 
-  return {
+  /**
+   * A request to remove an archive that is gone, or already being removed,
+   * asks the person nothing: it is left out of every list, and the next
+   * answer or removal clears it from the file.
+   */
+  const askingNow = (asked: readonly ArchiveImportRequest[], records: readonly ArchiveImportRecord[]): ArchiveImportRequest[] =>
+    asked.filter((request) => request.kind !== 'remove'
+      || records.some((record) => record.archive_id === request.archive_id && record.status !== 'removing'));
+
+  /**
+   * Removes one archive: marks it removing, drops what pointed at it, and
+   * hands the scheduler its removal task. The one place anything is removed
+   * (Remove on an archive, and the approval of an agent's request).
+   */
+  const removeNow = (archiveId: string): ArchiveSimpleResult => {
+    const record = state.get(archiveId);
+    if (!record) {
+      for (const request of requests.list()) {
+        if (request.archive_id === archiveId && request.kind === 'remove') requests.remove(request.request_id);
+      }
+      return { ok: false, code: 'unknown_archive', message: ARCHIVE_APPROVE_COPY.unknown_archive };
+    }
+    if (record.status === 'removing') return { ok: false, code: 'already_removing', message: ARCHIVE_APPROVE_COPY.already_removing };
+    requestArchiveRemoval(state, archiveId, options.now);
+    // A finished check pointing at it, and any request to remove it, say nothing true any more.
+    for (const request of requests.list()) {
+      if (request.archive_id === archiveId) requests.remove(request.request_id);
+    }
+    refresh();
+    return { ok: true };
+  };
+
+  const api: ArchiveImportDashboard = {
+    agent: createArchiveImportAgent({ state, requests, view: () => api.view() }),
+
     async browse(request) {
       const page = await options.browser.browse(request);
       return {
@@ -581,6 +650,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           return approvePath(resolved.path, { requestId: waiting.request_id, status: 'failed' });
         }
         if (!waiting || waiting.status !== 'pending') return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
+        // A request to remove an archive is answered by approveRemoval, never read as a path.
+        if (waiting.kind !== 'import') return refusal('not_an_import', ARCHIVE_APPROVE_COPY.not_an_import);
         const resolved = await options.browser.resolvePath(waiting.path);
         if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
         return approvePath(resolved.path, { requestId: waiting.request_id, status: 'pending' });
@@ -600,18 +671,23 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     },
 
     remove(archiveId) {
+      // Nothing is removed that would never run.
       const blocked = notRunning();
       if (blocked && !blocked.ok) return { ok: false, code: blocked.code, message: blocked.message };
-      const record = state.get(archiveId);
-      if (!record) return { ok: false, code: 'unknown_archive', message: ARCHIVE_APPROVE_COPY.unknown_archive };
-      if (record.status === 'removing') return { ok: false, code: 'already_removing', message: ARCHIVE_APPROVE_COPY.already_removing };
-      requestArchiveRemoval(state, archiveId, options.now);
-      // A finished check pointing at it says nothing true any more.
-      for (const request of requests.list()) {
-        if (request.archive_id === archiveId) requests.remove(request.request_id);
-      }
-      refresh();
-      return { ok: true };
+      return removeNow(archiveId);
+    },
+
+    approveRemoval(requestId) {
+      const request = requests.get(requestId);
+      if (!request || request.status !== 'pending') return { ok: false, code: 'not_waiting', message: ARCHIVE_APPROVE_COPY.not_waiting };
+      if (request.kind !== 'remove' || !request.archive_id) return { ok: false, code: 'not_a_removal', message: ARCHIVE_APPROVE_COPY.not_a_removal };
+      // The request stays for when the setting is on again: an answer that did nothing is not an answer.
+      const blocked = notRunning();
+      if (blocked && !blocked.ok) return { ok: false, code: blocked.code, message: blocked.message };
+      const result = removeNow(request.archive_id);
+      // Answered either way: the request does not stay for an archive that cannot be removed again.
+      requests.remove(requestId);
+      return result;
     },
 
     view() {
@@ -621,7 +697,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       try {
         records = state.list();
       } catch (error) {
-        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path) } };
+        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path), list: 'archives' } };
       }
       let asked: ArchiveImportRequest[];
       try {
@@ -631,14 +707,14 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           ...base,
           archives: records.map(entryOf),
           requests: [],
-          unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path) },
+          unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path), list: 'requests' },
         };
       }
       const setting = scheduling();
       return {
         ...base,
         archives: records.map(entryOf),
-        requests: asked.map((request) => requestOf(request, records)),
+        requests: askingNow(asked, records).map((request) => requestOf(request, records)),
         // Any archive here: its import or removal would not run, and neither would Remove.
         ...(setting !== 'on' && records.length > 0 ? { notRunning: setting } : {}),
       };
@@ -671,8 +747,13 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         if (tally) counted.set(record.archive_id, tally);
         else attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
       }
-      for (const request of asked) {
-        if (request.origin === 'agent' && request.status === 'pending') {
+      for (const request of askingNow(asked, records)) {
+        if (request.origin !== 'agent' || request.status !== 'pending') continue;
+        // A removal names the archive as it is now; an import, the file as asked.
+        if (request.kind === 'remove') {
+          const archive = records.find((record) => record.archive_id === request.archive_id);
+          attention.push({ kind: 'removal', id: request.request_id, name: archive?.label ?? request.label });
+        } else {
           attention.push({ kind: 'request', id: request.request_id, name: request.label });
         }
       }
@@ -716,4 +797,5 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       closed = true;
     },
   };
+  return api;
 }
