@@ -46,6 +46,10 @@ interface PanelState {
   computerRow?: boolean;
   /** A Needs-you style source row with no control. */
   bareNeedRow?: boolean;
+  /** Disconnect leaves the page instead of asking. */
+  disconnectLeaves?: boolean;
+  /** Connect leaves for this address (default /dashboard?connect). */
+  connectAt?: string;
   /** The page logs a console error while it loads. */
   loadLogs?: boolean;
 }
@@ -96,12 +100,12 @@ class PanelDriver implements JourneyDriver {
       if (this.state.syncLogs) this.events.console.push('TypeError: x is not a function');
       this.state.line = this.state.undefinedText ? 'Found undefined items' : 'Checking Readwise…';
     });
-    on('menu:readwise.library:1', () => { if (this.state.noQuestion) this.state.connected = false; else this.state.confirming = true; });
+    on('menu:readwise.library:1', () => { if (this.state.disconnectLeaves) { this.at = '/dashboard?away'; this.gone = true; return; } if (this.state.noQuestion) this.state.connected = false; else this.state.confirming = true; });
     on('menu:readwise.library:1:yes', () => { this.state.connected = false; this.state.confirming = false; });
     on('menu:readwise.library:1:no', () => { this.state.confirming = false; if (this.state.cancelDisconnects) this.state.connected = false; });
     on('computer:keys', () => { this.at = '/dashboard?keys'; this.gone = true; });
     on('primary:readwise.library', () => {
-      if (this.state.connectLeaves) { this.at = '/dashboard?connect'; this.gone = true; return; }
+      if (this.state.connectLeaves) { this.at = this.state.connectAt ?? '/dashboard?connect'; this.gone = true; return; }
       if (this.state.connectOpens) this.opened.push(this.state.connectOpens);
     });
     on('primary:gmail.email', () => { this.opened.push('https://accounts.google.com/o/oauth2'); });
@@ -333,6 +337,29 @@ describe('exploring the Sources section', () => {
     const check = exploreChecks(result).find((entry) => entry.id === 'explore.populated')!;
     expect(check.status).toBe('fail');
     expect(check.detail).toContain('console error while loading');
+  });
+
+  test('a control that must show an outcome fails when it leaves the dashboard instead; one made to leave must go to a page of Olympus\'s own', async () => {
+    const leaves = new PanelDriver({ disconnectLeaves: true });
+    const result = await explore({ driver: leaves, seeds: [populated(leaves)], inventory: inventory(), ...quick() });
+    const check = exploreChecks(result).find((entry) => entry.id === 'explore.populated')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('must stay on the page');
+
+    const elsewhere = new PanelDriver({ connectLeaves: true, connectAt: 'https://evil.example/x' });
+    const away = await explore({ driver: elsewhere, seeds: [disconnected(elsewhere)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(away).find((entry) => entry.id === 'explore.disconnected')!.detail).toContain('not Olympus\'s own');
+
+    const fine = new PanelDriver({ connectLeaves: true });
+    const ok = await explore({ driver: fine, seeds: [disconnected(fine)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(ok).find((entry) => entry.id === 'explore.disconnected')!.status).toBe('pass');
+  });
+
+  test('the privacy-settings link of a stalled Mac folder is listed for Files on this computer, unreachable on the VM', () => {
+    const entry = buildInventory().find((control) => control.kind === 'privacy-settings');
+    expect(entry).toMatchObject({ sourceId: 'local.files', label: '^(Open privacy settings)$' });
+    expect(typeof entry!.unreachable).toBe('string');
+    expect(kindOf('source:local.files:privacy-settings', 'Open privacy settings')).toBe('privacy-settings');
   });
 
   test('the press bound is per seed: a later seed still presses', async () => {

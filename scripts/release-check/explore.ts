@@ -94,6 +94,8 @@ const ALWAYS_ALLOWED_REQUESTS: RegExp[] = [/\/favicon\.ico(\?|$)/];
 const ALWAYS_ALLOWED_CONSOLE: RegExp[] = [/favicon/i];
 /** A refusal the product shows on purpose (a source that cannot be reached): the engine answers the tool call with an error the panel words itself. */
 const REFUSAL_REQUESTS: RegExp[] = [/\/dashboard\/tools\/call/];
+/** The kinds of control that open a page of their own: leaving the dashboard is their outcome. Every other kind must stay and show what it did. */
+const LEAVES = new Set<ControlKind>(['connect', 'reconnect', 'scope', 'check-again', 'privacy-settings', 'other']);
 const OWN_HOSTS = /^https:\/\/(www\.)?olympusplugin\.ai\//;
 
 const keyed = (key: string): { css: string } => ({ css: `[data-key="${key.replace(/"/g, '\\"')}"]` });
@@ -419,6 +421,11 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       const outcomes: Outcome[] = [];
       if (!info) findings.push('the control could not be pressed');
       const parent = item.parentKind;
+      // A press may leave the dashboard only where that is what the control is for (it opens a page of its own), and then only for the dashboard's own pages or Olympus's.
+      if (left) {
+        if (!LEAVES.has(kind)) findings.push(`pressing "${control.name}" left the dashboard for ${at || 'another page'}; a ${kind} control must stay on the page and show its outcome`);
+        else if (!/^\/dashboard(\/|\?|#|$)/.test(at) && !OWN_HOSTS.test(at)) findings.push(`pressing "${control.name}" left the dashboard for a page that is not Olympus's own: ${at.slice(0, 80) || 'an unknown page'}`);
+      }
       const expectation = left ? undefined : (kind === 'confirm' && parent ? AFTER_CONFIRM[parent]?.({ ...context, parent }) : EXPECTATIONS[kind]?.(context));
       if (expectation) outcomes.push(expectation);
       // Something has to happen: the words, the controls, the address, a menu, a window or a request.

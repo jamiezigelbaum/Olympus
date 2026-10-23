@@ -589,8 +589,17 @@ describe('Secrets floor: linear-time on adversarial input', () => {
       // slack absorbs timer noise on small inputs, and the absolute cap still
       // catches a linear but pathologically slow pattern. Shared CI runners
       // are several times slower than a workstation, so a 1 s budget flaked.
-      const smallMs = time(small[index]![1]);
-      const largeMs = time(large[index]![1]);
+      // Timer and GC noise only ever adds time, so take the fastest of up to
+      // three runs per size (after one untimed warm-up) and stop as soon as the
+      // ratio holds. A genuinely quadratic pattern fails every attempt.
+      time(small[index]![1]);
+      let smallMs = Infinity;
+      let largeMs = Infinity;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        smallMs = Math.min(smallMs, time(small[index]![1]));
+        largeMs = Math.min(largeMs, time(large[index]![1]));
+        if (largeMs < 3 * smallMs + 150 && largeMs < 5000) break;
+      }
       expect([name, largeMs < 3 * smallMs + 150]).toEqual([name, true]);
       expect([name, largeMs < 5000]).toEqual([name, true]);
     });

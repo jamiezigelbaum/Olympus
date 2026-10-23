@@ -307,9 +307,14 @@ describe('visual baselines', () => {
       const name = screenName(screen.id, 1280, 'light');
       const names = [{ name, screen, width: 1280, theme: 'light' }];
       const changed = png(100, 100, (x) => (x < 20 ? [0, 0, 0] : [250, 250, 250]));
-      const before = approvalDigestOf({ design_review: { id: 'a' }, reviewed_states: [{ id: 'panel', rendered_html_sha256: '1' }] });
-      const after = approvalDigestOf({ design_review: { id: 'a' }, reviewed_states: [{ id: 'panel', rendered_html_sha256: '2' }] });
+      const state = { id: 'panel', approved_by: 'owner', approved_on: '2026-10-13', rendered_html_sha256: '1', pending_review: { candidate_rendered_html_sha256: 'c1' } };
+      const before = approvalDigestOf({ design_review: { id: 'a', approved_by: 'owner' }, reviewed_states: [state] });
+      // A routine re-pin (a pending candidate digest) is not an approval.
+      expect(approvalDigestOf({ design_review: { id: 'a', approved_by: 'owner' }, reviewed_states: [{ ...state, pending_review: { candidate_rendered_html_sha256: 'c2' } }] })).toBe(before);
+      // A change to the owner's top-level record is, and so is a state's own sign-off (a newly approved rendering).
+      const after = approvalDigestOf({ design_review: { id: 'b', approved_by: 'owner' }, reviewed_states: [state] });
       expect(before).not.toBe(after);
+      expect(approvalDigestOf({ design_review: { id: 'a', approved_by: 'owner' }, reviewed_states: [{ ...state, approved_on: '2026-10-23', rendered_html_sha256: '2' }] })).not.toBe(before);
       const setUp = (actual: Buffer): void => {
         writeFileSync(join(actualDir, `${name}.png`), actual);
         writeFileSync(join(baselinesDir, `${name}.png`), base);
@@ -336,6 +341,14 @@ describe('visual baselines', () => {
       rmSync(join(baselinesDir, APPROVAL_FILE));
       expect(visualChecks(compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: after, names }))[0]!.status).toBe('fail');
 
+      // A record in the first formula (it also hashed the rendered digests) matches nothing: the changed look fails as an ordinary difference, and nothing is rewritten.
+      setUp(changed);
+      writeFileSync(join(baselinesDir, APPROVAL_FILE), JSON.stringify({ approvalDigest: 'a'.repeat(64) }));
+      const legacy = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: after, names });
+      expect(visualChecks(legacy)[0]!.status).toBe('fail');
+      expect(readFileSync(join(baselinesDir, `${name}.png`)).equals(base)).toBe(true);
+      expect(JSON.parse(readFileSync(join(baselinesDir, APPROVAL_FILE), 'utf8')).approvalDigest).toBe('a'.repeat(64));
+
       // A newer approval does not excuse an unreadable picture.
       setUp(base.subarray(0, 40));
       const broken = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: after, names });
@@ -357,34 +370,34 @@ describe('visual baselines', () => {
       const recorded = (): string => JSON.parse(readFileSync(join(baselinesDir, APPROVAL_FILE), 'utf8')).approvalDigest;
       const setUp = (): void => {
         for (const item of names) { writeFileSync(join(actualDir, `${item.name}.png`), base); writeFileSync(join(baselinesDir, `${item.name}.png`), base); }
-        writeFileSync(join(baselinesDir, APPROVAL_FILE), JSON.stringify({ approvalDigest: 'old' }));
+        writeFileSync(join(baselinesDir, APPROVAL_FILE), JSON.stringify({ approvalDigest: 'v3:old' }));
       };
-      const look = (): ReturnType<typeof compareScreens> => compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names });
+      const look = (): ReturnType<typeof compareScreens> => compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'v3:new', names });
 
       setUp();
       look(); // every screen still matches
-      expect(recorded()).toBe('new');
+      expect(recorded()).toBe('v3:new');
 
       setUp();
       rmSync(join(actualDir, `${names[1]!.name}.png`)); // a screen did not come back
       look();
-      expect(recorded()).toBe('old');
+      expect(recorded()).toBe('v3:old');
 
       setUp();
       writeFileSync(join(actualDir, `${names[1]!.name}.png`), base.subarray(0, 40)); // unreadable
       look();
-      expect(recorded()).toBe('old');
+      expect(recorded()).toBe('v3:old');
 
       setUp();
       rmSync(join(baselinesDir, `${names[1]!.name}.png`)); // no reference
       look();
-      expect(recorded()).toBe('old');
+      expect(recorded()).toBe('v3:old');
 
       // The machine returned no screens at all: nothing was compared, so the approval is not used up.
       setUp();
       const expected = names.map((item) => item.name);
-      compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names: [], expected });
-      expect(recorded()).toBe('old');
+      compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'v3:new', names: [], expected });
+      expect(recorded()).toBe('v3:old');
 
       // An earlier screen differs under the newer approval but a later one is missing: no reference is refreshed, the difference fails,
       // and the approval stays for a full retry.
@@ -392,17 +405,17 @@ describe('visual baselines', () => {
       const changed = png(100, 100, (x) => (x < 20 ? [0, 0, 0] : [250, 250, 250]));
       writeFileSync(join(actualDir, `${names[0]!.name}.png`), changed);
       rmSync(join(actualDir, `${names[1]!.name}.png`));
-      const partial = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names, expected });
+      const partial = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'v3:new', names, expected });
       expect(readFileSync(join(baselinesDir, `${names[0]!.name}.png`)).equals(base)).toBe(true);
       expect(visualChecks(partial)[0]!.status).toBe('fail');
-      expect(recorded()).toBe('old');
+      expect(recorded()).toBe('v3:old');
 
       // The same change with every screen back is refreshed and the approval is used up.
       writeFileSync(join(actualDir, `${names[1]!.name}.png`), base);
-      const full = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names, expected });
+      const full = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'v3:new', names, expected });
       expect(visualChecks(full)[0]!.status).toBe('warn');
       expect(readFileSync(join(baselinesDir, `${names[0]!.name}.png`)).equals(changed)).toBe(true);
-      expect(recorded()).toBe('new');
+      expect(recorded()).toBe('v3:new');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

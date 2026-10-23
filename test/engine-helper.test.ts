@@ -154,6 +154,13 @@ describe('engine status knows about the helper', () => {
     const using = await report(home, fake.exec);
     expect(using.helper).toMatchObject({ installed: true, in_use: true });
     expect(using.missing.join(' ')).not.toContain('helper app');
+    // The helper app is deleted while the agent's plist still launches through it.
+    rmSync(enginePaths(home).helperAppPath!, { recursive: true, force: true });
+    const gone = await report(home, fake.exec);
+    expect(using.missing.join(' ')).not.toContain('install-helper');
+    expect(gone.ok).toBe(false);
+    expect(gone.helper).toMatchObject({ installed: false, in_use: true, missing_but_referenced: true });
+    expect(gone.missing.join(' ')).toContain('olympus engine install-helper');
   });
 });
 

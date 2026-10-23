@@ -2377,6 +2377,7 @@ class SyncFileLeaseOwner {
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID2();
@@ -2394,7 +2395,10 @@ async function acquireFileLease(targetPath, options) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
     }
-    await removeStaleLease(targetPath, lockPath, options);
+    if (await removeStaleLease(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
+      lateTakeoverRetry ||= Date.now() >= deadline;
+      continue;
+    }
     if (Date.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
     await sleep(options.pollIntervalMs);
@@ -2403,6 +2407,7 @@ async function acquireFileLease(targetPath, options) {
 function acquireFileLeaseSync(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   mkdirSync3(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID2();
@@ -2420,45 +2425,51 @@ function acquireFileLeaseSync(targetPath, options) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
     }
-    removeStaleLeaseSync(targetPath, lockPath, options);
+    if (removeStaleLeaseSync(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
+      lateTakeoverRetry ||= Date.now() >= deadline;
+      continue;
+    }
     if (Date.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
   }
 }
 async function removeStaleLease(targetPath, lockPath, options) {
-  await withAsyncCommitGuard(targetPath, lockPath, options, async () => {
+  return withAsyncCommitGuard(targetPath, lockPath, options, async () => {
     const observed = await readLeaseRecord(lockPath);
     if (!await leaseIsStale(lockPath, observed, options.staleAfterMs))
-      return;
+      return false;
     const confirmed = await readLeaseRecord(lockPath);
     if (observed && confirmed?.token !== observed.token)
-      return;
+      return false;
     await unlink(lockPath).catch((error) => {
       if (!isNodeErrorWithCode(error, "ENOENT"))
         throw error;
     });
+    return true;
   });
 }
 function removeStaleLeaseSync(targetPath, lockPath, options) {
-  withSyncCommitGuard(targetPath, lockPath, options, () => {
+  return withSyncCommitGuard(targetPath, lockPath, options, () => {
     const observed = readLeaseRecordSync(lockPath);
     if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs))
-      return;
+      return false;
     const confirmed = readLeaseRecordSync(lockPath);
     if (observed && confirmed?.token !== observed.token)
-      return;
+      return false;
     try {
       unlinkSync(lockPath);
     } catch (error) {
       if (!isNodeErrorWithCode(error, "ENOENT"))
         throw error;
     }
+    return true;
   });
 }
 async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
   const guardPath = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   const token = randomUUID2();
   let descriptor;
   while (!descriptor) {
@@ -2479,7 +2490,10 @@ async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
           });
         throw error;
       }
-      await removeAbandonedCommitGuard(guardPath, options.staleAfterMs);
+      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
+        lateTakeoverRetry ||= Date.now() >= deadline;
+        continue;
+      }
       if (Date.now() >= deadline)
         throw new FileLeaseBusyError(targetPath);
       await sleep(options.pollIntervalMs);
@@ -2503,6 +2517,7 @@ async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
 function withSyncCommitGuard(targetPath, lockPath, options, callback) {
   const guardPath = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   const token = randomUUID2();
   let descriptor;
   while (descriptor === undefined) {
@@ -2520,7 +2535,10 @@ function withSyncCommitGuard(targetPath, lockPath, options, callback) {
       }
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
-      removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs);
+      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
+        lateTakeoverRetry ||= Date.now() >= deadline;
+        continue;
+      }
       if (Date.now() >= deadline)
         throw new FileLeaseBusyError(targetPath);
       sleepSync(options.pollIntervalMs);
@@ -2547,32 +2565,33 @@ async function removeAbandonedCommitGuard(path, staleAfterMs) {
   const observed = await readLeaseRecord(path);
   if (observed) {
     if (recordedProcessInstanceIsAlive(observed))
-      return;
+      return false;
     const confirmed = await readLeaseRecord(path);
     if (confirmed?.token !== observed.token)
-      return;
+      return false;
   } else {
     const age = await leaseAgeMs(path);
     if (age === undefined || age < staleAfterMs)
-      return;
+      return false;
   }
   await unlink(path).catch((error) => {
     if (!isNodeErrorWithCode(error, "ENOENT"))
       throw error;
   });
+  return true;
 }
 function removeAbandonedCommitGuardSync(path, staleAfterMs) {
   const observed = readLeaseRecordSync(path);
   if (observed) {
     if (recordedProcessInstanceIsAlive(observed))
-      return;
+      return false;
     const confirmed = readLeaseRecordSync(path);
     if (confirmed?.token !== observed.token)
-      return;
+      return false;
   } else {
     const age = leaseAgeMsSync(path);
     if (age === undefined || age < staleAfterMs)
-      return;
+      return false;
   }
   try {
     unlinkSync(path);
@@ -2580,6 +2599,7 @@ function removeAbandonedCommitGuardSync(path, staleAfterMs) {
     if (!isNodeErrorWithCode(error, "ENOENT"))
       throw error;
   }
+  return true;
 }
 async function leaseIsStale(lockPath, observed, staleAfterMs) {
   if (!observed) {
@@ -13424,7 +13444,7 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -13613,6 +13633,8 @@ var init_vocabulary = __esm(() => {
       scope_pending: "Paused until you choose folders",
       scope_root_missing: DASHBOARD_MISSING_FOLDER,
       scope_root_permission_needed: DASHBOARD_FOLDER_NEEDS_PERMISSION,
+      scope_root_helper_needed: DASHBOARD_FOLDER_NEEDS_HELPER,
+      scope_root_unreadable: DASHBOARD_FOLDER_UNREADABLE,
       provider_unavailable: "Paused: {source} isn't responding; Olympus will retry",
       model_downloading: "Waiting for the search model to finish downloading"
     },

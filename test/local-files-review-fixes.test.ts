@@ -157,6 +157,38 @@ describe('one unreadable corner does not stop deletions elsewhere', () => {
     expect(titles(f.store, 'txt')).toEqual(['stays.txt']);
   });
 
+  test('a complete walk on a case-keeping volume does not remove a case-only sibling root', async () => {
+    const f = fixture((home) => join(home, 'proj'));
+    writeFileSync(join(f.chosen, 'here.txt'), 'a');
+    const sibling = join(f.home, 'PROJ');
+    const at = (locatorUri: string) => {
+      const providerItemId = localFilesItemId(locatorUri);
+      return {
+        identity: {
+          family: 'file' as const, provider: 'local_files', accountScope: 'this_computer',
+          providerItemId, localItemId: `this_computer:${providerItemId}`,
+        },
+        locatorUri,
+      };
+    };
+    // The store's range folds ASCII case, so it also returns the sibling root's rows.
+    const rows = [at(`${sibling}/other.txt`), at(join(f.chosen, 'vanished.txt'))];
+    const connector = createLocalFilesSourceConnector({
+      connectorId: 'walk',
+      root: f.chosen,
+      scope: f.scope,
+      volumes: f.volumes,
+      store: {
+        activeIdentityForLocatorIfIndexed: () => undefined,
+        activeItemsUnderLocatorIfIndexed: (input: { limit: number }) => rows.slice(0, input.limit),
+      },
+    });
+    const items = [];
+    for await (const page of connector.listItems({})) items.push(...page.items);
+    expect(items.filter((item) => item.metadata['deleted'] === true).map((item) => item.metadata['locatorUri']))
+      .toEqual([join(f.chosen, 'vanished.txt')]);
+  });
+
   test('a listing that fails part way is not taken as complete', async () => {
     const f = fixture((home) => join(home, 'proj'));
     writeFileSync(join(f.chosen, 'a.txt'), '1');
@@ -312,5 +344,35 @@ describe('replay', () => {
     expect(items.filter((item) => item.metadata['deleted'] === true).length).toBe(7);
     expect(new Set(items.map((item) => item.identity.providerItemId)).size).toBe(7);
     expect(readdirSync(join(f.base, 'watch')).length).toBeGreaterThan(0);
+  });
+
+  // The store's locator range ignores ASCII case; on a volume that keeps case
+  // `/gone` and `/Gone` are two folders, so deleting one keeps the other.
+  const rowAt = (locatorUri: string) => {
+    const providerItemId = localFilesItemId(locatorUri);
+    return {
+      identity: {
+        family: 'file' as const, provider: 'local_files', accountScope: 'this_computer',
+        providerItemId, localItemId: `this_computer:${providerItemId}`,
+      },
+      locatorUri,
+    };
+  };
+
+  test('a deleted folder on a case-keeping volume leaves its case-only sibling indexed', async () => {
+    const f = fixture((home) => join(home, 'proj'));
+    const gone = join(f.chosen, 'gone');
+    const sibling = join(f.chosen, 'Gone');
+    const rows = [rowAt(`${sibling}/kept.txt`), rowAt(`${gone}/removed.txt`)];
+    const store = {
+      // Folded like the store: the sibling's identity answers for `gone`.
+      activeIdentityForLocatorIfIndexed: () => rowAt(sibling).identity,
+      activeItemsUnderLocatorIfIndexed: (input: { limit: number }) => rows.slice(0, input.limit),
+    };
+    const hub = fakeHub(() => [{ type: 'delete', path: gone }]);
+    cleanups.push(() => hub.close());
+    const items = await replay({ f, root: f.chosen, hub, store, deletedDescendantBatch: 1 });
+    expect(items.filter((item) => item.metadata['deleted'] === true).map((item) => item.metadata['locatorUri']))
+      .toEqual([`${gone}/removed.txt`]);
   });
 });
