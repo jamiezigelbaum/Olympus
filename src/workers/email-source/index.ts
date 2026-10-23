@@ -268,6 +268,7 @@ import {
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../../core/this-computer.ts';
+import { dataDeleteCustody, deleteOlympusDataWithCustody, type LifecyclePathContext } from '../../data-lifecycle.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -585,6 +586,22 @@ export interface EmailSourceWorkerOptions {
      * than being handed a path list that would bypass that fence.
      */
     pairingSessionPathContext?: OlympusPathContext;
+    /**
+     * Where Delete indexed data resolves the source's stores: the same
+     * resolvers `olympus data delete --source` uses. Production leaves it
+     * undefined (process.env, real home); a test points it at a temporary home.
+     */
+    dataLifecyclePathContext?: LifecyclePathContext;
+    /**
+     * How Delete indexed data gets the worker to reopen its stores. Deleting a
+     * source's files while the worker runs leaves its open SQLite handles on
+     * deleted files, and search would keep serving the deleted rows until the
+     * worker restarts. `canRestart` says whether a supervisor restarts this
+     * worker (no side effect; checked BEFORE anything is deleted); `request`
+     * schedules the restart after the response is sent. Absent: the route
+     * refuses with `delete_reopen_unavailable` rather than leave stale handles.
+     */
+    workerRestart?: { canRestart: () => boolean; request: () => boolean };
     /**
      * The registry mutator Unpair uses to drop a handle.
      *
@@ -2355,6 +2372,101 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               });
             },
           );
+          });
+        }
+
+        // Delete indexed data: removes what Olympus indexed from a source that
+        // is already disconnected (owner request, 2026-10-23). The custody rule is
+        // the CLI's (`olympus data delete --source`): Disconnect first, which
+        // takes the source out of the scheduler before any store byte goes.
+        // Like Disconnect it refuses while a read for the source runs and runs
+        // under the grant lock, so a concurrent Connect cannot interleave. The
+        // worker holds the source's SQLite files open, so after the delete it
+        // is restarted to reopen them; with no supervisor to do that the route
+        // refuses BEFORE deleting rather than leave stale handles serving
+        // deleted rows.
+        if (request.method === 'POST' && url.pathname === '/dashboard/delete-source-data') {
+          return await withDashboardGrantMutation(async () => {
+          if (!sourceDashboard) {
+            throw new EmailSourceWorkerError(
+              501,
+              'source_dashboard_not_supported',
+              'Private source worker does not have the source dashboard configured.',
+            );
+          }
+          const record = await parseObjectBody(request);
+          const sourceId = record.source_id === 'local.files'
+            ? 'local.files' as const
+            : parseDashboardDisconnectSource(record.source_id);
+          if (record.acknowledge !== true) {
+            throw new EmailSourceWorkerError(
+              400,
+              'delete_confirmation_required',
+              'Confirm that deleting indexed data cannot be undone and leaves the source\'s files and accounts untouched.',
+            );
+          }
+          const restart = sourceDashboard.workerRestart;
+          if (!restart || !restart.canRestart()) {
+            throw new EmailSourceWorkerError(
+              501,
+              'delete_reopen_unavailable',
+              'Olympus cannot restart its worker to reopen its stores here, so it will not delete indexed data while it is running. Nothing was deleted.',
+            );
+          }
+          const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
+          const pathContext: LifecyclePathContext = sourceDashboard.dataLifecyclePathContext ?? { env: process.env };
+          return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+            const busy = () => dashboardManualSyncRuns.has(sourceId)
+              || (sourceScheduler !== undefined
+                && dashboardDisconnectHasRunningRead(sourceScheduler, new Set([sourceId] as V04PublicSourceId[])));
+            if (busy()) {
+              throw new EmailSourceWorkerError(
+                409,
+                'delete_source_busy',
+                'This source is finishing a read. Retry deleting its indexed data after the current read completes.',
+              );
+            }
+            const custodyInput = {
+              sourceId,
+              connectedRegistry: readConnectedHandleRegistry(registryPath),
+              thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
+            };
+            const custody = dataDeleteCustody(custodyInput);
+            if (!custody.ready) {
+              throw custody.observed === 'connected'
+                ? new EmailSourceWorkerError(409, 'delete_source_connected', 'Disconnect this source before deleting its indexed data.')
+                : new EmailSourceWorkerError(409, 'delete_unavailable', 'Olympus cannot confirm this source is disconnected, so it did not delete anything.');
+            }
+            let removedCount = 0;
+            let failed = false;
+            try {
+              removedCount = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext }).removed.length;
+            } catch {
+              failed = true;
+            }
+            // Whatever the delete did, some stores may already be gone: the
+            // worker reopens them either way.
+            const restarting = restart.request();
+            if (failed) {
+              throw new EmailSourceWorkerError(
+                500,
+                'delete_failed',
+                'Olympus could not finish deleting this source\'s indexed data. Retry; the worker is restarting to reopen its stores.',
+              );
+            }
+            return json({
+              ok: true,
+              source_id: sourceId,
+              removed_count: removedCount,
+              worker_restarting: restarting,
+              policy: {
+                indexed_data_deleted: true,
+                source_files_untouched: true,
+                provider_grant_revoked: false,
+                raw_runtime_secrets_exposed: false,
+              },
+            });
+          });
           });
         }
 

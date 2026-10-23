@@ -8,13 +8,14 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { PNG } from 'pngjs';
+import { findChange, outline } from '../scripts/release-check/visual-boxes.ts';
 import { journeyChecks, runJourney, type ElementInfo, type Journey, type JourneyDriver, type PageEvents } from '../scripts/release-check/journey.ts';
 import { PROBE_SOURCE, describeTarget, type WireTarget } from '../scripts/release-check/probe.ts';
 import { JOURNEYS, selectJourneys } from '../scripts/release-check/journeys.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../src/workers/dashboard/vocabulary.ts';
 import { DEFAULT_TOLERANCE, SCREENS, compareImages, APPROVAL_FILE, approvalDigestOf, compareScreens, maskScript, normaliseDynamicText, screenName, visualChecks } from '../scripts/release-check/visual.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
-import { buildReport, renderHtml, type MachineReport } from '../scripts/release-check/report.ts';
+import { buildReport, renderHtml, visualSection, type MachineReport } from '../scripts/release-check/report.ts';
 
 /** Runs page-side source in a happy-dom window the way Runtime.evaluate does in a browser (happy-dom has no eval of its own). */
 function evalIn(window: Window, code: string): unknown {
@@ -417,6 +418,53 @@ describe('visual baselines', () => {
     expect(window.document.querySelector('#waiting + p[data-pa-none]')).not.toBeNull();
     expect(window.document.querySelector('section.pasection[aria-labelledby="waiting"] > #intro')).not.toBeNull();
     expect(css).not.toMatch(/waiting"\] > p/);
+  });
+
+  test('change boxes: an inserted band is boxed exactly, a same-size change is boxed, identical pictures get no box, and the report shows them', () => {
+    const rows = (heights: Array<[number, number]>): Buffer => png(100, heights.reduce((sum, [h]) => sum + h, 0), (_x, y) => {
+      let top = 0;
+      for (const [h, shade] of heights) { if (y < top + h) return [shade, shade, shade]; top += h; }
+      return [0, 0, 0];
+    });
+    const before = PNG.sync.read(rows([[40, 250], [30, 200], [30, 250]]));
+    const inserted = PNG.sync.read(rows([[40, 250], [33, 60], [30, 200], [30, 250]]));
+    const added = findChange(before, inserted)!;
+    expect(added.newBoxes).toEqual([{ x: 0, y: 40, w: 100, h: 33 }]);
+    expect(added.oldBoxes).toEqual([{ x: 0, y: 40, w: 100, h: 0 }]);
+    expect(added.caption).toBe('33 px added at y=40; the rest is identical');
+    expect(findChange(inserted, before)!.caption).toBe('33 px removed at y=40; the rest is identical');
+
+    const same = PNG.sync.read(rows([[40, 250], [30, 200], [30, 250]]));
+    expect(findChange(before, same)).toBeUndefined();
+    const edited = PNG.sync.read(png(100, 100, (x, y) => (y < 40 ? [250, 250, 250] : y < 70 ? (x >= 10 && x < 30 && y >= 50 && y < 60 ? [0, 0, 0] : [200, 200, 200]) : [250, 250, 250])));
+    const change = findChange(before, edited)!;
+    expect(change.newBoxes).toEqual([{ x: 10, y: 50, w: 20, h: 10 }]);
+    expect(change.caption).toContain('1 changed region');
+
+    const drawn = outline(before, added.oldBoxes);
+    expect(drawn.data[(35 * 100 + 50) * 4]).toBe(230); // the red edge, on the old picture
+    expect(before.data[(35 * 100 + 50) * 4]).not.toBe(230); // the original is untouched
+
+    const dir = mkdtempSync(join(tmpdir(), 'rc-visual-'));
+    try {
+      const actualDir = join(dir, 'actual');
+      const baselinesDir = join(dir, 'baselines');
+      const outDir = join(dir, 'out');
+      for (const folder of [actualDir, baselinesDir, outDir]) mkdirSync(folder, { recursive: true });
+      const screen = SCREENS[0]!;
+      const name = screenName(screen.id, 1280, 'light');
+      writeFileSync(join(baselinesDir, `${name}.png`), PNG.sync.write(before));
+      writeFileSync(join(actualDir, `${name}.png`), PNG.sync.write(inserted));
+      const run = compareScreens({ actualDir, baselinesDir, outDir, update: false, names: [{ name, screen, width: 1280, theme: 'light' }] });
+      const shown = run.results[0]!.change!;
+      expect(shown.caption).toBe('33 px added at y=40; the rest is identical');
+      for (const file of [shown.baselineBoxed, shown.actualBoxed, shown.cropBaseline, shown.cropActual]) expect(existsSync(join(outDir, file))).toBe(true);
+      const html = visualSection(run.results);
+      expect(html).toContain('33 px added at y=40');
+      expect(html).toContain('zoomed on the change');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('selectJourneys refuses ids it does not know', () => {

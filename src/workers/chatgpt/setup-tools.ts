@@ -32,6 +32,7 @@ import type {
 } from '../../control-ui-contract.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
   MODEL_RETRY_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
@@ -56,6 +57,7 @@ import { ModelChoiceRefusal, type ChatGptModelChoice } from './model-choice.ts';
 import {
   ChatGptSurfaceError,
   connectSourceToolResult,
+  deleteSourceDataToolResult,
   disconnectToolResult,
   modelRetryToolResult,
   modelSetToolResult,
@@ -119,6 +121,12 @@ export interface ChatGptSetupBackend {
   approveMail(input: { accountGeneration: string; expectedRevision: string; draft: OlympusMailScopeDraft }): Promise<{ scopeRevision: string; started: boolean }>;
   savedMailDraft(): OlympusMailScopeDraft | undefined;
   disconnect(sourceId: ChatGptDisconnectSourceId): Promise<void>;
+  /**
+   * Deletes what Olympus indexed from a source that is already disconnected
+   * (the engine refuses a connected or busy one). `restarting` is whether the
+   * engine's worker is restarting so it stops serving the deleted data.
+   */
+  deleteSourceData(sourceId: ChatGptDisconnectSourceId): Promise<{ restarting: boolean }>;
   /**
    * Sync now: starts one source's sync through the dashboard's own route and
    * answers without waiting for it (`busy` when one is running, `too_soon`
@@ -276,6 +284,22 @@ export const DISCONNECT_SOURCE_TOOL: ToolDefinition = {
   _meta: WIDGET_ONLY,
 };
 
+export const DELETE_SOURCE_DATA_TOOL: ToolDefinition = {
+  name: DELETE_SOURCE_DATA_TOOL_NAME,
+  title: 'Delete indexed data for a source',
+  description: 'For the Olympus panel: delete everything Olympus indexed from a source that is already disconnected (search results, summaries and its privacy records). The files and accounts themselves are not touched. Cannot be undone.',
+  inputSchema: {
+    type: 'object',
+    properties: { source_id: { type: 'string', enum: [...DISCONNECT_SOURCE_IDS] } },
+    required: ['source_id'],
+    additionalProperties: false,
+  },
+  // App-only and destructive: the owner confirms in the panel; the model never deletes.
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  securitySchemes: OAUTH2_REQUIRED,
+  _meta: WIDGET_ONLY,
+};
+
 export const MODEL_SET_TOOL: ToolDefinition = {
   name: MODEL_SET_TOOL_NAME,
   title: 'Choose Olympus models',
@@ -388,6 +412,7 @@ export const SETUP_TOOLS: readonly ToolDefinition[] = [
   SCOPE_LIST_TOOL,
   SCOPE_SET_TOOL,
   DISCONNECT_SOURCE_TOOL,
+  DELETE_SOURCE_DATA_TOOL,
   MODEL_SET_TOOL,
   MODEL_RETRY_TOOL,
   PRIVACY_GET_TOOL,
@@ -438,6 +463,11 @@ export async function callSetupTool(
         const sourceId = oneOf(args.source_id, DISCONNECT_SOURCE_IDS);
         await backend.disconnect(sourceId);
         return disconnectToolResult({ status: 'disconnected', source_id: sourceId });
+      }
+      case DELETE_SOURCE_DATA_TOOL_NAME: {
+        const sourceId = oneOf(args.source_id, DISCONNECT_SOURCE_IDS);
+        const { restarting } = await backend.deleteSourceData(sourceId);
+        return deleteSourceDataToolResult({ status: 'deleted', source_id: sourceId, restarting });
       }
       case MODEL_SET_TOOL_NAME: {
         const choice: ChatGptModelChoice = {};
@@ -873,6 +903,12 @@ const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   disconnect_scheduler_refresh_not_supported: 'disconnect_incomplete',
   invalid_request: 'invalid_params',
   disconnect_confirmation_required: 'invalid_params',
+  delete_confirmation_required: 'invalid_params',
+  delete_source_connected: 'delete_needs_disconnect',
+  delete_source_busy: 'source_busy',
+  delete_reopen_unavailable: 'delete_unavailable',
+  delete_unavailable: 'delete_unavailable',
+  delete_failed: 'delete_incomplete',
 };
 
 function surfaceError(error: unknown): ChatGptSurfaceError {

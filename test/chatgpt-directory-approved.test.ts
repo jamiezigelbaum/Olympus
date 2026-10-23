@@ -34,7 +34,7 @@ import {
   APPROVED_TOOLS,
 } from '../connect-relay/server/directory/approved.ts';
 import { relayMcpResponse } from '../connect-relay/server/relay-mcp.ts';
-import { DIRECTORY_TOOL_NAMES } from '../connect-relay/shared/directory-tools.ts';
+import { DIRECTORY_TOOL_NAMES, isDirectoryTool } from '../connect-relay/shared/directory-tools.ts';
 import generatedSurface from '../connect-relay/server/generated/chatgpt-tools.json';
 import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
 import { defaultConfig } from '../src/core/config.ts';
@@ -251,8 +251,9 @@ describe('/openai/mcp lists what the surface decides, as submitted', () => {
       ({ answerModel, readOnly } = state);
       const onMcp = await listTools(connect('mcp'));
       const onDirectory = await listTools(connect('directory'));
-      expect(names(onDirectory)).toEqual(names(onMcp));
-      expect(onDirectory).toEqual(approvedNamed(names(onMcp)) as unknown as Tool[]);
+      // /mcp-only tools (Delete indexed data) are not on the pinned listing.
+      expect(names(onDirectory)).toEqual(names(onMcp).filter(isDirectoryTool));
+      expect(onDirectory).toEqual(approvedNamed(names(onDirectory)) as unknown as Tool[]);
       // /mcp keeps the current definitions.
       expect(onMcp).toEqual(CHATGPT_TOOLS.filter((tool) => names(onMcp).includes(tool.name)) as unknown as Tool[]);
     }

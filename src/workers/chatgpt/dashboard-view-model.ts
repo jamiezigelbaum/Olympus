@@ -66,6 +66,7 @@ import {
   MODEL_RETRY_TOOL_NAME,
   PRIVACY_GET_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   SYNC_SOURCE_TOOL_NAME,
   type ChatGptDisconnectSourceId,
@@ -412,10 +413,26 @@ function sourceEntry(
     if (fix) menu.push(fix);
   }
   // A source on this computer has no sign-in; Disconnect only stops reading it.
-  if (status !== 'Off' && (DISCONNECT_SOURCE_IDS.has(definition.source_id) || definition.connect_action.kind === 'this_computer')) {
+  const disconnectable = DISCONNECT_SOURCE_IDS.has(definition.source_id) || definition.connect_action.kind === 'this_computer';
+  // Not connected, whatever its status says: a source disconnected while its
+  // index still holds items reads Needs you (connected-but-broken,
+  // dashboardStatusResolution), but there is no connection left to disconnect.
+  const notConnected = !connecting && (card.connection.state === 'not_connected' || card.connection.state === 'needs_setup');
+  if (status !== 'Off' && !notConnected && disconnectable) {
     menu.push({
       label: CHATGPT_SETUP_LABELS.disconnect,
       tool: DISCONNECT_SOURCE_TOOL_NAME,
+      args: { source_id: definition.source_id as ChatGptDisconnectSourceId },
+      destructive: true,
+    });
+  }
+  // Delete indexed data (owner, 2026-10-23): only once the source is
+  // disconnected (the engine enforces it too) and there is indexed data left
+  // to delete. A source whose index is empty has nothing to offer.
+  if (notConnected && disconnectable && card.coverage.indexed_items > 0) {
+    menu.push({
+      label: CHATGPT_SETUP_LABELS.deleteData,
+      tool: DELETE_SOURCE_DATA_TOOL_NAME,
       args: { source_id: definition.source_id as ChatGptDisconnectSourceId },
       destructive: true,
     });

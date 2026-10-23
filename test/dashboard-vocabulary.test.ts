@@ -215,17 +215,16 @@ describe('status precedence', () => {
     expect(dashboardIsConnectedSource(source)).toBe(false);
   });
 
-  test('a disconnected source with indexed data is connected-but-broken, not Off', () => {
-    // A revoked or deleted handle drops connection.state back to a
-    // never-connected value while the corpus still holds items. That source
-    // stays on home in Needs you rather than vanishing from every surface.
+  test('a disconnected source with indexed data is Off, disconnected on purpose with its data kept', () => {
+    // No grant at all (owner ruling, 2026-10-23): neutral, not a problem. An
+    // expired grant that is still present reads reauth_required instead.
     const source = card({
       connection: { state: 'not_connected', label: 'not connected' },
       answer_readiness: { state: 'disconnected', label: 'Connect this source' },
     });
     expect(source.coverage.indexed_items).toBeGreaterThan(0);
-    expect(dashboardStatus({ source })).toBe('Needs you');
-    expect(dashboardIsConnectedSource(source)).toBe(true);
+    expect(dashboardStatus({ source })).toBe('Off');
+    expect(dashboardIsConnectedSource(source)).toBe(false);
   });
 
   test('a chat source connected on its own sync evidence is never grouped Needs you', () => {
@@ -621,15 +620,28 @@ describe('sub-line grammar', () => {
   // Owner note, 2026-09-01: "not connected — Set up" on a source holding 4,000
   // files read as a demand to set up something already set up. A source that
   // HAS data and reads not-connected has lost a connection it once had.
-  test('a data-bearing unconnected source says the connection was lost', () => {
+  test('a data-bearing unconnected source says it is disconnected with its data kept', () => {
     expect(dashboardSubLine(card({
       configured: false,
       connection: { state: 'not_connected', label: 'not connected' },
-    }))).toBe('signed out');
+    }))).toBe('Disconnected · indexed data kept');
     expect(dashboardSubLine(card({
       configured: false,
       connection: { state: 'needs_setup', label: 'not connected' },
-    }))).toBe('signed out');
+    }))).toBe('Disconnected · indexed data kept');
+  });
+
+  // PR #455 review: only a clean disconnect reads calm. Custody that is not
+  // settled keeps its own warning and stays Needs you.
+  test('an unreadable registry or an unfinished unpair keeps its warning over kept data', () => {
+    for (const label of ['connection state unreadable', 'unpair state unreadable', 'Unpair incomplete — manual cleanup required']) {
+      const source = card({ configured: false, connection: { state: 'not_connected', label } });
+      expect(dashboardStatus({ source })).toBe('Needs you');
+      expect(dashboardAttentionLine(source)).toBe(label);
+      expect(dashboardSubLine(source)).not.toBe('Disconnected · indexed data kept');
+    }
+    const clean = card({ configured: false, connection: { state: 'not_connected', label: 'not connected' } });
+    expect(dashboardStatus({ source: clean })).toBe('Off');
   });
 });
 

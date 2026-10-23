@@ -116,6 +116,21 @@ export type DashboardConnectionState =
  * first check" said something the phases never said (clean-install rehearsal,
  * 2026-09-05).
  */
+/**
+ * Unconnected labels that say custody is NOT settled: the handle registry or
+ * the unpair record could not be read, or an unpair left files behind. A
+ * source with indexed data in one of these keeps its warning; only a clean
+ * "not connected" / "unpaired" reads Disconnected, indexed data kept.
+ */
+export const DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = 'connection state unreadable';
+export const DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = 'unpair state unreadable';
+export const DASHBOARD_UNPAIR_INCOMPLETE_LABEL = 'Unpair incomplete — manual cleanup required';
+export const DASHBOARD_UNSETTLED_CUSTODY_LABELS: ReadonlySet<string> = new Set([
+  DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
+  DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
+  DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
+]);
+
 export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync';
 
 /**
@@ -3525,9 +3540,9 @@ function connectionStateFromDefinition(
     // is NOT named here — this model is served to the read-only token, which is
     // promised no paths; the control-session refusal names it instead.
     const label = unpaired.state === 'unpair_state_unreadable'
-      ? 'unpair state unreadable'
+      ? DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL
       : unpaired.state === 'unpair_incomplete'
-        ? 'Unpair incomplete — manual cleanup required'
+        ? DASHBOARD_UNPAIR_INCOMPLETE_LABEL
         : 'unpaired';
     return {
       state: 'not_connected',
@@ -3568,7 +3583,7 @@ function connectionStateFromDefinition(
   // which is also the repair path — while the label says what is actually
   // known. Silently reporting an unreadable file as a disconnected source
   // would send an owner to reconnect a source that never left.
-  const notConnectedLabel = registryUnreadable ? 'connection state unreadable' : 'not connected';
+  const notConnectedLabel = registryUnreadable ? DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL : 'not connected';
   if (!connected && !reauthRequired && action.kind === 'needs_setup') {
     // "needs one-time setup" was a status that read as a demand for a source
     // nobody had asked for. The state is the same one every unconnected source

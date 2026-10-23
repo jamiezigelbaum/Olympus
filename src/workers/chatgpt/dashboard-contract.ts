@@ -414,6 +414,12 @@ export const CONNECT_SOURCE_TOOL_NAME = 'olympus_connect_source';
 export const SCOPE_LIST_TOOL_NAME = 'olympus_scope_list';
 export const SCOPE_SET_TOOL_NAME = 'olympus_scope_set';
 export const DISCONNECT_SOURCE_TOOL_NAME = 'olympus_disconnect_source';
+/**
+ * App-only, `/mcp` only (never on the directory endpoint, whose listing is
+ * pinned): deletes what Olympus indexed from a source that is already
+ * disconnected.
+ */
+export const DELETE_SOURCE_DATA_TOOL_NAME = 'olympus_delete_source_data';
 export const MODEL_SET_TOOL_NAME = 'olympus_model_set';
 /**
  * App-only: restarts a built-in model's install (`{model: 'embedding' |
@@ -557,6 +563,7 @@ export const PANEL_TOOL_NAMES = [
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
   MODEL_RETRY_TOOL_NAME,
   'olympus_privacy_get',
@@ -752,6 +759,17 @@ export interface SyncSourceResult {
 export interface DisconnectSourceResult {
   status: 'disconnected';
   source_id: ChatGptDisconnectSourceId;
+}
+
+/**
+ * `olympus_delete_source_data {source_id}` (destructive: the UI confirms). The
+ * source must already be disconnected. `restarting`: the engine's worker is
+ * restarting so it stops serving the deleted data from files it still held open.
+ */
+export interface DeleteSourceDataResult {
+  status: 'deleted';
+  source_id: ChatGptDisconnectSourceId;
+  restarting: boolean;
 }
 
 /**
