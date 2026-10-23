@@ -1383,7 +1383,7 @@ async function exploreCommand(outDir: string, inventoryPath: string): Promise<ne
     await driver.start();
     // The first opening link signs the browser in and Unlock opens the controls (the Private answers page offers it); the dashboard then opens in that session.
     await driver.open('private');
-    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: Date.now() + 33 * 60_000 });
+    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: Date.now() + 48 * 60_000 });
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
   } finally {

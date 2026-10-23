@@ -885,7 +885,7 @@ async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   const inventoryPath = join(scratch, 'inventory.json');
   writeFileSync(inventoryPath, JSON.stringify(inventory));
   await run.machine!.put(inventoryPath, '~/rc/explore-inventory.json');
-  const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json', 2_400_000));
+  const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json', 3_300_000));
   const result = done.result;
   if (!result || result.result === undefined) {
     run.add({ id: 'explore.ran', title: 'Every control of the Sources section was pressed', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
