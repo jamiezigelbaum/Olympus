@@ -126,7 +126,10 @@ describe('Delete indexed data for a paired-session source (Telegram, WhatsApp): 
     const { row, model } = rowFor(sourceId, 'unpaired');
     expect(row.status).toBe('Off');
     expect(row.detail).toBe('Disconnected · indexed data kept');
-    expect(row.menu).toEqual([{ label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: { source_id: sourceId }, destructive: true }]);
+    expect(row.menu).toEqual([{
+      label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: { source_id: sourceId }, destructive: true,
+      deletesCopies: sourceId === 'telegram.messages' ? 'messages' : 'messages_and_media',
+    }]);
     expect(JSON.stringify(model.needsYou)).not.toContain(sourceId);
   });
 
@@ -158,6 +161,22 @@ describe('Delete indexed data for a paired-session source (Telegram, WhatsApp): 
     expect(del.properties.source_id.enum).toEqual(expect.arrayContaining(['telegram.messages', 'whatsapp.personal.messages']));
     expect(dis.properties.source_id.enum).not.toContain('telegram.messages');
     expect(dis.properties.source_id.enum).not.toContain('whatsapp.personal.messages');
+  });
+
+  test('the raw-copies flag survives the response builder for Delete only, as a fixed value; other sources carry none', () => {
+    const { model } = rowFor('whatsapp.personal.messages', 'unpaired');
+    const kept = copyDashboardViewModel(model).sources.find((source) => source.id === 'whatsapp.personal.messages')!;
+    expect(kept.menu![0]!.deletesCopies).toBe('messages_and_media');
+    const forge = (tool: string, value: unknown) => copyDashboardViewModel({
+      ...model,
+      sources: model.sources.map((source) => (source.id === 'whatsapp.personal.messages'
+        ? { ...source, menu: [{ label: 'x', tool, args: { source_id: 'whatsapp.personal.messages' }, destructive: true, deletesCopies: value as never }] }
+        : source)),
+    }).sources.find((source) => source.id === 'whatsapp.personal.messages')!.menu![0]!.deletesCopies;
+    expect(forge('olympus_delete_source_data', 'anything else')).toBeUndefined();
+    expect(forge('olympus_disconnect_source', 'messages')).toBeUndefined();
+    const dropbox = buildChatGptDashboardViewModel(viewWith({ connection: { state: 'not_connected', label: 'not connected', action: { kind: 'oauth', source: 'dropbox' } as DashboardSourceCard['connection']['action'], handles: [] }, coverage: WITH_DATA }), { now: NOW });
+    expect(JSON.stringify(dropbox.sources.find((source) => source.id === 'dropbox.files')!.menu)).not.toContain('deletesCopies');
   });
 
   test('the response builder passes the two chat ids for Delete only', () => {

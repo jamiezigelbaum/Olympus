@@ -443,6 +443,7 @@ function sourceEntry(
       tool: DELETE_SOURCE_DATA_TOOL_NAME,
       args: { source_id: definition.source_id as ChatGptDeleteSourceId },
       destructive: true,
+      ...(definition.raw_message_copies ? { deletesCopies: definition.raw_message_copies } : {}),
     });
   }
   return {

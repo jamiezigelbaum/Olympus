@@ -1432,6 +1432,13 @@ export interface DashboardSupportedSourceDefinition {
   connect_kind: DashboardSourceConnectKind;
   answer_capable_without_sync?: boolean;
   /**
+   * Olympus keeps its own copy of the raw messages (and, where named, their
+   * media) outside the search index, so deleting this source's indexed data
+   * also removes those copies and its confirmation says so. Declared per
+   * capability, read by the Delete control; never inferred from a source name.
+   */
+  raw_message_copies?: 'messages' | 'messages_and_media';
+  /**
    * True when this provider hands over the item's text with the item, so the
    * extraction phase has no separate pass to run.
    *
@@ -1746,6 +1753,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     connect_kind: 'pairing',
     // A message arrives as its own text.
     content_arrives_extracted: true,
+    raw_message_copies: 'messages',
     connect_action: {
       kind: 'guided_session',
       source: 'telegram',
@@ -1768,6 +1776,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     // A message arrives as its own text; voice notes are transcribed by their
     // own lane, which reports through the same read count this flag defers to.
     content_arrives_extracted: true,
+    raw_message_copies: 'messages_and_media',
     connect_action: {
       kind: 'guided_session',
       source: 'whatsapp',

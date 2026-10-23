@@ -407,6 +407,7 @@ function copyFix(fix: DashboardFix): DashboardFix {
   if (href) out.href = href;
   if (fix?.disabledReason) out.disabledReason = text(fix.disabledReason);
   if (fix?.destructive === true) out.destructive = true;
+  if (tool === DELETE_SOURCE_DATA_TOOL_NAME && (fix?.deletesCopies === 'messages' || fix?.deletesCopies === 'messages_and_media')) out.deletesCopies = fix.deletesCopies;
   if (fix?.openHref === true && href) out.openHref = true;
   return out;
 }
@@ -1316,6 +1317,7 @@ type SurfaceOnlyErrorCode =
   | 'sync_unavailable'
   | 'disconnect_incomplete'
   | 'delete_needs_disconnect'
+  | 'delete_needs_unpair'
   | 'delete_unavailable'
   | 'delete_incomplete';
 
@@ -1349,6 +1351,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   sync_unavailable: 'Olympus can\'t check this source from here right now. It keeps checking on its own.',
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   delete_needs_disconnect: 'Disconnect this source first, then delete its indexed data.',
+  delete_needs_unpair: 'Unpair this source first, then delete its indexed data.',
   delete_incomplete: 'Olympus couldn\'t finish deleting this source\'s indexed data. Try again; the engine is reopening its stores.',
   delete_unavailable: 'Olympus can\'t delete this source\'s indexed data from here right now. Nothing was deleted. Try again in a moment.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',

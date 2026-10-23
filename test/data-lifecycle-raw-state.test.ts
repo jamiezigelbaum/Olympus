@@ -152,7 +152,7 @@ describe('lifecycle covers the raw WhatsApp state beside the connector store', (
   });
 });
 
-describe('lifecycle names Telegram capture continuity without widening deletion', () => {
+describe('lifecycle names Telegram capture state: the raw copy goes with a delete, the pairing login does not', () => {
   test('export reports the spool, cursor, gateway state, and Telethon session as manual preservation', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-telegram-preservation-'));
     const homeDir = join(dir, 'home');
@@ -168,8 +168,22 @@ describe('lifecycle names Telegram capture continuity without widening deletion'
         join(dataHome, 'olympus', 'telegram', 'telegram.personal.session'),
       ]));
 
+      // Only what exists is listed; lay the artifacts down.
+      for (const dirPath of [join(dataHome, 'olympus', 'telegram-capture', 'spool'), join(stateHome, 'olympus', 'telegram-capture-gateway')]) {
+        mkdirSync(dirPath, { recursive: true });
+        writeFileSync(join(dirPath, 'x'), 'raw');
+      }
+      mkdirSync(join(stateHome, 'olympus', 'telegram-spool-drain'), { recursive: true });
+      writeFileSync(join(stateHome, 'olympus', 'telegram-spool-drain', 'cursor.json'), '{}');
+      mkdirSync(join(dataHome, 'olympus', 'telegram'), { recursive: true });
+      writeFileSync(join(dataHome, 'olympus', 'telegram', 'telegram.personal.session'), 'login');
       const dryRun = deleteOlympusData({ sourceId: 'telegram.messages', homeDir, dryRun: true });
-      expect(dryRun.removed).not.toContain(join(dataHome, 'olympus', 'telegram-capture', 'spool'));
+      expect(dryRun.removed).toEqual(expect.arrayContaining([
+        join(dataHome, 'olympus', 'telegram-capture', 'spool'),
+        join(stateHome, 'olympus', 'telegram-spool-drain', 'cursor.json'),
+        join(stateHome, 'olympus', 'telegram-capture-gateway'),
+      ]));
+      // The pairing login is Unpair's, never a data delete's.
       expect(dryRun.removed).not.toContain(join(dataHome, 'olympus', 'telegram', 'telegram.personal.session'));
     } finally {
       rmSync(dir, { recursive: true, force: true });

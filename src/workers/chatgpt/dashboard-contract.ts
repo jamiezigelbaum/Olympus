@@ -56,6 +56,12 @@ export interface DashboardFix {
   disabledReason?: string;
   /** The UI confirms first; matches the tool's destructive annotation. */
   destructive?: boolean;
+  /**
+   * Delete indexed data only: this source also keeps Olympus's own copies of
+   * the raw messages (and media), which the delete removes, so the
+   * confirmation says so. A fixed enum; the UI owns the words.
+   */
+  deletesCopies?: 'messages' | 'messages_and_media';
 }
 
 export interface DashboardItem {

@@ -32538,6 +32538,8 @@ var init_vocabulary = __esm(() => {
     sourcePaused: "Paused",
     syncChecking: "Checking…",
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
+    deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
+    deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataDone: "Indexed data deleted",
     disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -35004,7 +35006,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         const run = action;
         wrap.className = "fix confirm";
         const sourceWords = source ? String(source.label || "") : "";
-        const named = sourceWords && fix.tool === config.deleteDataTool ? fill2(P.deleteDataConfirm, { source: sourceWords }) : sourceWords && fix.tool === config.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
+        const named = sourceWords && fix.tool === config.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) : sourceWords && fix.tool === config.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
         add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
           render(key2);
@@ -38699,6 +38701,7 @@ var init_page = __esm(() => {
     "sync_unavailable",
     "disconnect_incomplete",
     "delete_needs_disconnect",
+    "delete_needs_unpair",
     "delete_unavailable",
     "delete_incomplete",
     "models_not_ready",

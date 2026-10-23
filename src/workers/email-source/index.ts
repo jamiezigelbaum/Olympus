@@ -2436,14 +2436,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             };
             const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
             if (!custody.ready) {
-              throw custody.observed === 'connected' || custody.observed === 'paired'
-                ? new EmailSourceWorkerError(
-                  409,
-                  'delete_source_connected',
-                  custody.observed === 'paired'
-                    ? 'Unpair this source before deleting its indexed data.'
-                    : 'Disconnect this source before deleting its indexed data.',
-                )
+              throw custody.observed === 'paired'
+                ? new EmailSourceWorkerError(409, 'delete_source_paired', 'Unpair this source before deleting its indexed data.')
+                : custody.observed === 'connected'
+                ? new EmailSourceWorkerError(409, 'delete_source_connected', 'Disconnect this source before deleting its indexed data.')
                 : custody.observed === 'unpair_incomplete' || custody.observed === 'unpair_state_unreadable'
                   ? new EmailSourceWorkerError(409, 'delete_unavailable', 'Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.')
                   : new EmailSourceWorkerError(409, 'delete_unavailable', 'Olympus cannot confirm this source is disconnected, so it did not delete anything.');

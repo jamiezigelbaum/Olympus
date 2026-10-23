@@ -71,7 +71,7 @@ export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
  */
 export const CHATGPT_INLINE_ERROR_CODES = [
   'sign_in_failed', 'source_not_connected', 'source_busy', 'sync_unavailable', 'disconnect_incomplete',
-  'delete_needs_disconnect', 'delete_unavailable', 'delete_incomplete',
+  'delete_needs_disconnect', 'delete_needs_unpair', 'delete_unavailable', 'delete_incomplete',
   'models_not_ready', 'connect_unavailable', 'already_connected',
 ] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;

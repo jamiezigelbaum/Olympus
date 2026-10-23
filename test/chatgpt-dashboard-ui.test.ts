@@ -1134,6 +1134,41 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
     expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataDone);
   });
 
+  test('a source that keeps raw message copies says the delete removes them (and media where it has them)', () => {
+    const chat = (copies: 'messages' | 'messages_and_media', id: string, label: string): DashboardViewModelV1['sources'][number] => ({
+      id, label, group: 'local', status: 'Off', detail: 'Disconnected · indexed data kept',
+      menu: [{ label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: { source_id: id }, destructive: true, deletesCopies: copies }],
+    });
+    for (const [copies, id, label, key] of [
+      ['messages', 'telegram.messages', 'Telegram', 'deleteDataConfirmMessages'],
+      ['messages_and_media', 'whatsapp.personal.messages', 'WhatsApp', 'deleteDataConfirmMessagesMedia'],
+    ] as const) {
+      const host = mount();
+      host.push({ structuredContent: model({ sources: [chat(copies, id, label)] }) });
+      host.button('Delete indexed data').click();
+      const words = DASHBOARD_CHATGPT_PAGE_COPY[key].split('{source}').join(label);
+      expect(words).toContain('its own copies of your messages');
+      expect(host.text()).toContain(words);
+    }
+    expect(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataConfirmMessagesMedia).toContain('voice notes and media');
+    expect(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataConfirm).not.toContain('copies of your messages');
+  });
+
+  test('a still-paired session source is told to Unpair, not Disconnect', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+    host.button('Delete indexed data').click();
+    host.button('Yes, delete indexed data').click();
+    host.respond('tools/call', {
+      isError: true,
+      content: [{ type: 'text', text: 'Unpair this source first, then delete its indexed data.' }],
+      structuredContent: { error: 'delete_needs_unpair' },
+    });
+    await sleep(0);
+    expect(host.text()).toContain('Unpair this source first');
+    expect(host.text()).not.toContain('Disconnect this source first');
+  });
+
   test('an unexpected error is never reported as deleted', async () => {
     const host = mount();
     host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });

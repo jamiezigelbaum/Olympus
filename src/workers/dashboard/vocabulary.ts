@@ -1701,6 +1701,13 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    * tells the reader the indexed data stays and can be deleted afterwards.
    */
   deleteDataConfirm: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.',
+  /**
+   * The same, for a source where Olympus also keeps its own copy of the raw
+   * messages outside the search index: the delete removes those too, so the
+   * confirmation says it. Chosen by the Fix's `deletesCopies`, never by name.
+   */
+  deleteDataConfirmMessages: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.',
+  deleteDataConfirmMessagesMedia: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.',
   deleteDataDone: 'Indexed data deleted',
   disconnectConfirm: 'Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),

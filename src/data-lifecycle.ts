@@ -326,7 +326,14 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         defaultInternalTelegramConnectorStoreDbPath(envForContext(context)),
         defaultProtectedTelegramConnectorStoreDbPath(envForContext(context)),
       ],
-      preservationOnlyPaths: (context) => telegramPreservationOnlyPaths(envForContext(context)),
+      // The capture spool is Olympus's own copy of every captured message's
+      // text, and the drain cursor and gateway state only record how far the
+      // capture has written into it (forward cursors, counters), so a delete
+      // that left them would keep the raw text and resume from stale marks. The
+      // pairing login itself is NOT here: it is the Unpair's, and a re-pair
+      // needs the account, not these.
+      rawStatePaths: (context) => telegramCaptureStatePaths(envForContext(context)),
+      preservationOnlyPaths: (context) => telegramPairingSessionPaths({ env: envForContext(context) }),
       pairingSessionPaths: (context) => telegramPairingSessionPaths({ env: envForContext(context) }),
     },
     {
@@ -507,7 +514,7 @@ function whatsappRawStatePaths(env: Record<string, string | undefined>): string[
   ])];
 }
 
-function telegramPreservationOnlyPaths(env: Record<string, string | undefined>): string[] {
+function telegramCaptureStatePaths(env: Record<string, string | undefined>): string[] {
   const home = env.HOME?.trim() || homedir();
   const dataHome = env.XDG_DATA_HOME?.trim() || join(home, '.local', 'share');
   const stateHome = env.XDG_STATE_HOME?.trim() || join(home, '.local', 'state');
@@ -520,12 +527,7 @@ function telegramPreservationOnlyPaths(env: Record<string, string | undefined>):
     || join(stateHome, 'olympus', 'telegram-spool-drain');
   const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim()
     || join(drainStateDir, 'cursor.json');
-  return [...new Set([
-    spoolDir,
-    cursorPath,
-    gatewayStateDir,
-    ...telegramPairingSessionPaths({ env }),
-  ])];
+  return [...new Set([spoolDir, cursorPath, gatewayStateDir])];
 }
 
 export function exportOlympusData(options: {
@@ -831,20 +833,28 @@ export function dataDeleteCustody(options: {
     const connected = (lane !== undefined
       && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider))
       || (options.thisComputerSources?.includes(source!.sourceId) ?? false);
+    const pairingPaths = source!.pairingSessionPaths?.(options);
     if (connected) {
-      return {
-        requirement: 'source_disconnected',
-        ready: false,
-        observed: 'connected',
-        next_action: 'Use Disconnect in the local dashboard, then rerun the CLI delete.',
-      };
+      // A paired-session source ends with Unpair, not Disconnect.
+      return pairingPaths
+        ? {
+            requirement: 'source_disconnected',
+            ready: false,
+            observed: 'paired',
+            next_action: 'Use Unpair in the local dashboard, then rerun the CLI delete.',
+          }
+        : {
+            requirement: 'source_disconnected',
+            ready: false,
+            observed: 'connected',
+            next_action: 'Use Disconnect in the local dashboard, then rerun the CLI delete.',
+          };
     }
     // A paired-session source (Telegram, WhatsApp) has no handle to disconnect
     // and its card infers a live session from sync evidence, so "no handle" is
     // not "disconnected". Only a CLEAN Unpair is: the unpaired record says
     // `unpaired` and no pairing artifact is left on disk. Anything else is a
     // pairing that is live, half-removed, or whose state cannot be read.
-    const pairingPaths = source!.pairingSessionPaths?.(options);
     if (pairingPaths) {
       const read = options.unpairedSources;
       if (!read || read.status === 'unreadable') {

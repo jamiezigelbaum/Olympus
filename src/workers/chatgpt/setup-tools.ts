@@ -908,6 +908,7 @@ const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   disconnect_confirmation_required: 'invalid_params',
   delete_confirmation_required: 'invalid_params',
   delete_source_connected: 'delete_needs_disconnect',
+  delete_source_paired: 'delete_needs_unpair',
   delete_source_busy: 'source_busy',
   delete_reopen_unavailable: 'delete_unavailable',
   delete_unavailable: 'delete_unavailable',

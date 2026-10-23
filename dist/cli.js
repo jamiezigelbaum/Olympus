@@ -61563,7 +61563,8 @@ function lifecycleSourceSpecs() {
         defaultInternalTelegramConnectorStoreDbPath(envForContext(context2)),
         defaultProtectedTelegramConnectorStoreDbPath(envForContext(context2))
       ],
-      preservationOnlyPaths: (context2) => telegramPreservationOnlyPaths(envForContext(context2)),
+      rawStatePaths: (context2) => telegramCaptureStatePaths(envForContext(context2)),
+      preservationOnlyPaths: (context2) => telegramPairingSessionPaths({ env: envForContext(context2) }),
       pairingSessionPaths: (context2) => telegramPairingSessionPaths({ env: envForContext(context2) })
     },
     {
@@ -61656,7 +61657,7 @@ function whatsappRawStatePaths(env) {
     ...transcribeMediaDir ? [transcribeMediaDir] : []
   ])];
 }
-function telegramPreservationOnlyPaths(env) {
+function telegramCaptureStatePaths(env) {
   const home2 = env.HOME?.trim() || homedir38();
   const dataHome = env.XDG_DATA_HOME?.trim() || join58(home2, ".local", "share");
   const stateHome = env.XDG_STATE_HOME?.trim() || join58(home2, ".local", "state");
@@ -61664,12 +61665,7 @@ function telegramPreservationOnlyPaths(env) {
   const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join58(stateHome, "olympus", "telegram-capture-gateway");
   const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim() || join58(stateHome, "olympus", "telegram-spool-drain");
   const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join58(drainStateDir, "cursor.json");
-  return [...new Set([
-    spoolDir,
-    cursorPath,
-    gatewayStateDir,
-    ...telegramPairingSessionPaths({ env })
-  ])];
+  return [...new Set([spoolDir, cursorPath, gatewayStateDir])];
 }
 function exportOlympusData(options) {
   const destination = requirePath(options.destination, "--output");
@@ -61862,15 +61858,20 @@ function dataDeleteCustody(options) {
     }
     const lane = publicCapability.doctor_lane;
     const connected = lane !== undefined && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider) || (options.thisComputerSources?.includes(source.sourceId) ?? false);
+    const pairingPaths = source.pairingSessionPaths?.(options);
     if (connected) {
-      return {
+      return pairingPaths ? {
+        requirement: "source_disconnected",
+        ready: false,
+        observed: "paired",
+        next_action: "Use Unpair in the local dashboard, then rerun the CLI delete."
+      } : {
         requirement: "source_disconnected",
         ready: false,
         observed: "connected",
         next_action: "Use Disconnect in the local dashboard, then rerun the CLI delete."
       };
     }
-    const pairingPaths = source.pairingSessionPaths?.(options);
     if (pairingPaths) {
       const read = options.unpairedSources;
       if (!read || read.status === "unreadable") {
@@ -74254,6 +74255,8 @@ var init_vocabulary = __esm(() => {
     sourcePaused: "Paused",
     syncChecking: "Checking…",
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
+    deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
+    deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataDone: "Indexed data deleted",
     disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -78212,6 +78215,7 @@ var init_source_dashboard = __esm(() => {
       trust_domain: "internal",
       connect_kind: "pairing",
       content_arrives_extracted: true,
+      raw_message_copies: "messages",
       connect_action: {
         kind: "guided_session",
         source: "telegram",
@@ -78232,6 +78236,7 @@ var init_source_dashboard = __esm(() => {
       trust_domain: "secure_local",
       connect_kind: "pairing",
       content_arrives_extracted: true,
+      raw_message_copies: "messages_and_media",
       connect_action: {
         kind: "guided_session",
         source: "whatsapp",
@@ -125978,7 +125983,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         const run2 = action;
         wrap.className = "fix confirm";
         const sourceWords2 = source ? String(source.label || "") : "";
-        const named = sourceWords2 && fix.tool === config2.deleteDataTool ? fill2(P.deleteDataConfirm, { source: sourceWords2 }) : sourceWords2 && fix.tool === config2.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords2 }) : "";
+        const named = sourceWords2 && fix.tool === config2.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords2 }) : sourceWords2 && fix.tool === config2.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords2 }) : "";
         add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run2, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
           render(key2);
@@ -129673,6 +129678,7 @@ var init_page = __esm(() => {
     "sync_unavailable",
     "disconnect_incomplete",
     "delete_needs_disconnect",
+    "delete_needs_unpair",
     "delete_unavailable",
     "delete_incomplete",
     "models_not_ready",
@@ -134736,7 +134742,7 @@ function createEmailSourceWorker(options = {}) {
               };
               const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
               if (!custody.ready) {
-                throw custody.observed === "connected" || custody.observed === "paired" ? new EmailSourceWorkerError(409, "delete_source_connected", custody.observed === "paired" ? "Unpair this source before deleting its indexed data." : "Disconnect this source before deleting its indexed data.") : custody.observed === "unpair_incomplete" || custody.observed === "unpair_state_unreadable" ? new EmailSourceWorkerError(409, "delete_unavailable", "Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.") : new EmailSourceWorkerError(409, "delete_unavailable", "Olympus cannot confirm this source is disconnected, so it did not delete anything.");
+                throw custody.observed === "paired" ? new EmailSourceWorkerError(409, "delete_source_paired", "Unpair this source before deleting its indexed data.") : custody.observed === "connected" ? new EmailSourceWorkerError(409, "delete_source_connected", "Disconnect this source before deleting its indexed data.") : custody.observed === "unpair_incomplete" || custody.observed === "unpair_state_unreadable" ? new EmailSourceWorkerError(409, "delete_unavailable", "Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.") : new EmailSourceWorkerError(409, "delete_unavailable", "Olympus cannot confirm this source is disconnected, so it did not delete anything.");
               }
               const captureKind = sourceId === "telegram.messages" ? "telegram" : sourceId === "whatsapp.personal.messages" ? "whatsapp" : undefined;
               if (captureKind && sourceDashboard.stopMessagingCapture) {
@@ -145464,7 +145470,8 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
       label: DASHBOARD_CHATGPT_SETUP_LABELS.deleteData,
       tool: DELETE_SOURCE_DATA_TOOL_NAME,
       args: { source_id: definition.source_id },
-      destructive: true
+      destructive: true,
+      ...definition.raw_message_copies ? { deletesCopies: definition.raw_message_copies } : {}
     });
   }
   return {
@@ -148727,6 +148734,8 @@ function copyFix(fix) {
     out.disabledReason = text3(fix.disabledReason);
   if (fix?.destructive === true)
     out.destructive = true;
+  if (tool === DELETE_SOURCE_DATA_TOOL_NAME && (fix?.deletesCopies === "messages" || fix?.deletesCopies === "messages_and_media"))
+    out.deletesCopies = fix.deletesCopies;
   if (fix?.openHref === true && href)
     out.openHref = true;
   return out;
@@ -149583,6 +149592,7 @@ var init_response_builder = __esm(() => {
     sync_unavailable: "Olympus can't check this source from here right now. It keeps checking on its own.",
     disconnect_incomplete: "Olympus couldn't finish disconnecting this source. Try again.",
     delete_needs_disconnect: "Disconnect this source first, then delete its indexed data.",
+    delete_needs_unpair: "Unpair this source first, then delete its indexed data.",
     delete_incomplete: "Olympus couldn't finish deleting this source's indexed data. Try again; the engine is reopening its stores.",
     delete_unavailable: "Olympus can't delete this source's indexed data from here right now. Nothing was deleted. Try again in a moment.",
     picker_unavailable: "Olympus could not list this source right now. Try again shortly.",
@@ -150356,6 +150366,7 @@ var init_setup_tools = __esm(() => {
     disconnect_confirmation_required: "invalid_params",
     delete_confirmation_required: "invalid_params",
     delete_source_connected: "delete_needs_disconnect",
+    delete_source_paired: "delete_needs_unpair",
     delete_source_busy: "source_busy",
     delete_reopen_unavailable: "delete_unavailable",
     delete_unavailable: "delete_unavailable",

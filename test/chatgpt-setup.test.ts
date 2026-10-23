@@ -592,6 +592,7 @@ describe('setup tools over the remote handler', () => {
         ['disconnectError', 'source_not_connected', 'olympus_disconnect_source', { source_id: 'dropbox.files' }, 'isn\'t connected'],
         ['disconnectError', 'disconnect_source_busy', 'olympus_disconnect_source', { source_id: 'dropbox.files' }, 'finishing a read'],
         ['deleteError', 'delete_source_connected', 'olympus_delete_source_data', { source_id: 'dropbox.files' }, 'Disconnect this source first'],
+        ['deleteError', 'delete_source_paired', 'olympus_delete_source_data', { source_id: 'telegram.messages' }, 'Unpair this source first'],
         ['deleteError', 'delete_reopen_unavailable', 'olympus_delete_source_data', { source_id: 'dropbox.files' }, 'Nothing was deleted'],
         ['deleteError', 'delete_failed', 'olympus_delete_source_data', { source_id: 'dropbox.files' }, 'couldn\'t finish deleting'],
       ];

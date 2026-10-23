@@ -187,7 +187,7 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     const wa = specs.find((entry) => entry.sourceId === 'whatsapp.personal.messages')!;
     const files = {
       tgStore: tg.connectorStorePaths!(context)[0]!,
-      tgSpool: tg.preservationOnlyPaths!(context)[0]!,
+      tgSpool: tg.rawStatePaths!(context)[0]!,
       tgSession: tg.pairingSessionPaths!(context)[0]!,
       waStore: wa.connectorStorePaths!(context)[0]!,
       waSpool: wa.rawStatePaths!(context)[0]!,
@@ -234,14 +234,14 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
       body: JSON.stringify(body),
     }));
 
-  test('after a clean Unpair, Telegram\'s stores go; its capture spool and cursor stay', async () => {
+  test('after a clean Unpair, Telegram\'s stores and its raw capture copy go', async () => {
     const f = fixture();
     try {
       const response = await post(f.worker, { source_id: 'telegram.messages', acknowledge: true });
       expect(response.status).toBe(200);
       expect(existsSync(f.files.tgStore)).toBe(false);
-      // Raw capture is not indexed data and is deliberately left (preservation-only).
-      expect(existsSync(f.files.tgSpool)).toBe(true);
+      // Olympus's raw copy of the messages goes with the index.
+      expect(existsSync(f.files.tgSpool)).toBe(false);
       // WhatsApp is a different source: untouched.
       expect(existsSync(f.files.waStore)).toBe(true);
       expect(f.stops).toEqual(['telegram']);
@@ -268,10 +268,10 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
   });
 
   test.each([
-    ['never unpaired (still paired, no record)', { unpaired: 'none' as const }, 'delete_source_connected'],
+    ['never unpaired (still paired, no record)', { unpaired: 'none' as const }, 'delete_source_paired'],
     ['the unpair is incomplete', { unpaired: 'incomplete' as const }, 'delete_unavailable'],
     ['the unpair record is unreadable', { unpaired: 'unreadable' as const }, 'delete_unavailable'],
-    ['the session file is still on disk', { sessionOnDisk: true }, 'delete_source_connected'],
+    ['the session file is still on disk', { sessionOnDisk: true }, 'delete_source_paired'],
     ['capture has not confirmed it stopped', { stopThrows: true }, 'delete_unavailable'],
   ] as const)('refuses and deletes nothing when %s', async (_name, options, code) => {
     const f = fixture(options as never);
@@ -295,7 +295,8 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     try {
       const response = await post(f.worker, { source_id: 'telegram.messages', acknowledge: true });
       expect(response.status).toBe(409);
-      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_source_connected' } });
+      // A session source ends with Unpair: the refusal says so, not Disconnect.
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_source_paired', message: expect.stringContaining('Unpair') } });
       expect(existsSync(f.files.tgStore)).toBe(true);
       expect(f.restarts.requested).toBe(0);
     } finally {

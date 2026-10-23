@@ -813,7 +813,7 @@ export function chatgptDashboardClient(
         // Delete and Disconnect say in the source's name what they do and do not touch.
         const sourceWords = source ? String(source.label || '') : '';
         const named = sourceWords && fix.tool === config.deleteDataTool
-          ? fill(P.deleteDataConfirm, { source: sourceWords })
+          ? fill(fix.deletesCopies === 'messages_and_media' ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === 'messages' ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords })
           : sourceWords && fix.tool === config.disconnectTool
             ? fill(P.disconnectConfirm, { source: sourceWords })
             : '';
