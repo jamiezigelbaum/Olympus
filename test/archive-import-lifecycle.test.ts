@@ -235,11 +235,23 @@ describe('archive import passes', () => {
     expect(firstCursor).not.toBe(secondCursor);
   });
 
-  // Needs the classifier's content hold (PR1); flip to `test` when it lands.
-  test.todo('with the private model stopped, an import puts no content in the Personal or Public stores and embeds nothing there', async () => {
+  // The private model is stopped here: no judge runs, so every item stays held.
+  test('with the private model stopped, an import puts no content in the Personal or Public stores and embeds nothing there', async () => {
     const f = fixture();
     const archiveId = f.start('Inbox.mbox', mbox(Array.from({ length: 3 }, (_, index) => mail(index))));
     await importAll(f.runtime, archiveId);
+    expect(itemsByArchive(f.env).get(archiveId)?.size).toBe(3);
+    // The content is all in the Private store, waiting for the judge.
+    const secure = new Database(archiveConnectorStoreDbPath('secure_local', 'email', f.env), { readonly: true });
+    try {
+      const held = secure.query(`
+        SELECT COUNT(DISTINCT i.item_pk) AS n FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE i.account_scope = ? AND c.bounded_text LIKE '%harbour log%'
+      `).get(archiveId) as { n: number };
+      expect(held.n).toBe(3);
+    } finally {
+      secure.close();
+    }
     for (const domain of ['internal', 'public_safe'] as const) {
       const path = archiveConnectorStoreDbPath(domain, 'email', f.env);
       if (!existsSync(path)) continue;
