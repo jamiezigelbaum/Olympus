@@ -1,0 +1,139 @@
+# Import an archive
+
+Status: plan, owner direction 2026-10-23. Nothing is built yet. Where this page
+and the code differ, the code is current.
+
+## Outcome
+
+A new user can point Olympus at an old export (a mail export, a Reflect or
+Roam export; chat exports later) and search it like any other source. There
+is one way to do it: **Import an archive** in the dashboard. Agents call the
+same operation, so "have your AI do it" and "click the button" import the
+same way, with the same privacy and the same status.
+
+## Owner decisions (2026-10-23)
+
+- **One entry point.** One "Import an archive" action, not a row per format.
+- **Olympus detects the format.** The user picks a file or folder; they never
+  say "this is Roam".
+- **Mail archives first** (mbox), because old mail is the largest gap and no
+  importer exists.
+- **Reflect and Roam move onto the public product.** Their connectors exist
+  but are on the public-surface allowlist as leftovers.
+- **Reviewed** by Astra (Codex, high) on 2026-10-23. Its five findings are
+  folded in: per-archive identity and removal, bounded streaming reads,
+  file-version-bound cursors, collision-safe mail identity, and the
+  Reflect/Roam privacy-default conflict. WhatsApp and Telegram exports move
+  out of this plan.
+
+## Where things stand
+
+| Format | Today |
+|---|---|
+| Mail (mbox) | Nothing. Gmail items come from the Gmail API's JSON, not raw messages, so there is no MIME parser to reuse. |
+| WhatsApp chat export | Parser and connector exist (`workers/whatsapp/connector.ts`, `parseWhatsAppChatExport`) and are tested, but nothing in the product calls them. Live WhatsApp capture is wired separately. |
+| Telegram Desktop export | Nothing. Telegram in the product is live capture only (`telegram-messages/capture-spool-connector.ts`). |
+| Reflect export | Connector exists (`workers/reflect/connector.ts`), unwired, allowlisted. |
+| Roam export | Connector exists (`workers/roam/connector.ts`), unwired, allowlisted. |
+
+`source-family.ts` already models this: ingest mode `archive_import`,
+credential kind `archive_path`, custodian `archive_importer`. Reflect and Roam
+are declared there as `planned`.
+
+## Shape
+
+An archive is a source with no account and no live updates. Each imported
+archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
+
+| Piece | What it is |
+|---|---|
+| Format registry | One registry of archive formats (`core/archive-formats.ts`, pure data like `core/file-scope-sources.ts`). Each entry: format id, label, a `detect(path)` probe, the source family, and a connector factory. Adding a format adds one entry and one thin connector. Nothing downstream branches on format. |
+| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect and Roam by their JSON shape (the connectors already parse liberally). No match: say so and list what is supported. Two matches: ask. |
+| Connectors | Thin `SourceConnector`s (contracts.ts), one per format. Pages honour the `done` / `truncated` rule in contracts.ts. |
+| Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. Today Reflect uses one constant connector id (`reflect/connector.ts:87`) and the store keys resume on it (`connector-store/local-index.ts:11083`); that changes when Reflect moves onto the registry. |
+| Cursor | Position in the archive, bound to the input file's identity (device, inode, size, mtime). A large import resumes after a restart; if an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
+| Picker | The local-files picker (`workers/local-files/scope-browser.ts`), extended to offer files as well as folders in a "choose one file or folder" mode (today it lists folders only, `scope-browser.ts:121`). |
+| Reading | Only the chosen path, through the scope-safe reader (`core/scope-safe-fs.ts`), so no symlink escape. `ScopeRoot.readFile` loads a whole file, so archive reading adds a bounded streaming read on `openRelative`, with a per-message size cap. |
+| Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Until an item is judged, it is held as Private (the fail-closed prior). |
+| Removal | Per archive, not per source. Lifecycle delete today removes a whole source's store (`data-lifecycle.ts:657`) and Reflect has one store for the whole family (`data-lifecycle.ts:404`), so removing one import that way would erase the others. Remove cancels and fences that archive's running work, deletes its items, chunks, vectors and derived data (including private answers built from it, `data-lifecycle.ts:691`), and never touches the user's file. |
+| Operation | One operation, `archive_import` (start, status, remove), on the public tool lists, CLI, and MCP. The dashboard calls the same operation. |
+| Dashboard | An "Archives" source showing each import: format, file name, item count, date range, progress, gaps (unreadable messages, skipped attachments), and Remove. Every problem has a route to exactly what failed. |
+
+### Mail (mbox), first
+
+- **Formats covered:** Google Takeout (`.mbox` file), Apple Mail "Export
+  Mailbox" (`.mbox` folder), Thunderbird (mbox files, often no extension). They
+  share one connector. Maildir and `.eml` folders come later on the same entry.
+- **Parsing:** stream the file, split on `From ` lines (handling the
+  `>From` quoting variants), and parse each message with a proven MIME library
+  rather than our own. Candidate: `postal-mime` (no dependencies, runs in Bun).
+  Check its licence and size before adding it.
+- **Items:** one `RawItem` per message, `family: 'email'`, `mimeType:
+  'message/rfc822'`, metadata shaped like Gmail's (subject, from, to, date,
+  thread) so answers treat imported and live mail alike. Gmail labels from
+  `X-Gmail-Labels` are kept as labels.
+- **Identity:** `Message-ID` plus a hash of the whole message, so two
+  different messages that share headers never merge. Re-importing the same
+  export is detected by the file's identity and offered as "already imported",
+  rather than relying on message ids: store identity includes `accountScope`
+  (`connector-store/local-index.ts:13447`), so a second import under a new
+  archive id would otherwise duplicate everything.
+- **Attachments:** named on the message, bytes not read in the first version,
+  shown as an honest gap (the same posture as Gmail today). Reading them
+  through the shared extraction machinery is a follow-up.
+- **Size:** exports can be tens of GB. Streaming with a byte-offset cursor;
+  never load the file.
+
+### Reflect and Roam, promoted
+
+Register both in the format registry, wire them into the scheduler and public
+source ids, and remove their five entries from
+`config/public-surface-allowlist.json`. Re-check both connectors against a
+current export from each app first; they were written before the shared
+tier classifier and may need their classification signals updated.
+
+Their privacy defaults disagree today: the family postures say `internal`/S3
+(`source-family.ts:241`, Personal), the connectors default to `secure_local`
+(`reflect/connector.ts:53`, `roam/connector.ts:62`, Private). Items are tiered
+per item from privacy settings plus the judge either way; the prior before
+judging stays Private, and the postures are corrected to match.
+
+## Later, not in this plan
+
+- **WhatsApp chat export.** Its connector cannot join as is: it reads every
+  `.txt` and `.zip` in a folder (`whatsapp/connector.ts:321`), so a chat's
+  parent folder would import neighbouring chats, and its plain reads bypass
+  the scope-safe reader. It needs explicit selected-file inputs and safe reads
+  first.
+- **Telegram Desktop export** (`result.json`): a new connector.
+- Both would import as snapshots alongside live capture, with the dashboard
+  keeping "imported archive" and "live capture" apart, as the release plan
+  requires. They wait until mail import, resume and removal work.
+
+## Order
+
+1. Format registry, detection, archive identity and checkpoints, per-archive
+   removal, `archive_import` operation, Archives source in the dashboard,
+   with Reflect as the first format (its connector exists, so this proves the
+   spine without new parsing).
+2. Mail (mbox), with the streaming reader and file-selecting picker.
+3. Roam onto the registry; all Reflect and Roam allowlist entries removed.
+
+Each step is one PR with focused tests on synthetic fixtures (never real
+exports), plus the held-out eval where the step changes the source pipeline.
+
+## Open questions
+
+- **Imported mail that overlaps live Gmail.** A Takeout export of the same
+  account duplicates mail that live Gmail already indexed. Matching on
+  `Message-ID` across sources is a spine question; the first version may
+  accept duplicates and show both.
+- **Copy or reference.** The first version reads the file in place. If the
+  user moves or deletes it, the import is already finished and stays; a
+  re-import needs the file again.
+
+## Done when
+
+A fresh install on Mac and on Linux can import a synthetic mbox, Reflect and
+Roam export through the dashboard and through the agent tool, see each as a
+snapshot with counts and gaps, find cited answers from it, and remove it.
