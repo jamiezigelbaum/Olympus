@@ -2242,6 +2242,7 @@ import {
   mkdirSync as mkdirSync3,
   openSync as openSync3,
   readdirSync,
+  renameSync as renameSync3,
   readFileSync as readFileSync5,
   statSync as statSync4,
   unlinkSync,
@@ -2427,15 +2428,37 @@ function publishRecordExclusive(finalPath, token) {
   try {
     writeFileSync4(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
     fsyncSync2(descriptor);
-    linkSync(tempPath, finalPath);
+    (fileLeaseTestHooks.link ?? linkSync)(tempPath, finalPath);
   } catch (error) {
     closeSync3(descriptor);
     unlinkQuietSync(tempPath);
     if (isNodeErrorWithCode(error, "EEXIST"))
       return;
+    if (LINK_UNSUPPORTED_CODES.some((code) => isNodeErrorWithCode(error, code))) {
+      return createRecordExclusive(finalPath, token);
+    }
     throw error;
   }
   unlinkQuietSync(tempPath);
+  return descriptor;
+}
+function createRecordExclusive(finalPath, token) {
+  let descriptor;
+  try {
+    descriptor = openSync3(finalPath, "wx", 384);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "EEXIST"))
+      return;
+    throw error;
+  }
+  try {
+    writeFileSync4(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
+    fsyncSync2(descriptor);
+  } catch (error) {
+    closeSync3(descriptor);
+    unlinkQuietSync(finalPath);
+    throw error;
+  }
   return descriptor;
 }
 function unlinkQuietSync(path) {
@@ -2482,8 +2505,9 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
     if (/^\d{1,15}$/.test(suffix))
       highest = Math.max(highest, Number(suffix));
   }
+  const currentPath = `${guardBase}.${highest}`;
+  let needsRetirement = false;
   if (highest > 0) {
-    const currentPath = `${guardBase}.${highest}`;
     let text2;
     try {
       text2 = readFileSync5(currentPath, "utf8");
@@ -2492,27 +2516,49 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
         return "retry";
       throw error;
     }
-    const record = parseLeaseRecord(text2);
-    if (record) {
-      if (recordedProcessInstanceIsAlive(record))
-        return "busy";
-    } else {
-      const age = leaseAgeMsSync(currentPath);
-      if (age === undefined)
-        return "retry";
-      if (age < staleAfterMs)
-        return "busy";
+    if (!isRetiredGuardRecord(text2)) {
+      const record = parseLeaseRecord(text2);
+      if (record) {
+        if (recordedProcessInstanceIsAlive(record))
+          return "busy";
+      } else {
+        const age = leaseAgeMsSync(currentPath);
+        if (age === undefined)
+          return "retry";
+        if (age < staleAfterMs)
+          return "busy";
+      }
+      needsRetirement = true;
     }
     fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
   }
-  if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
-    return "busy";
   const path = `${guardBase}.${highest + 1}`;
   const descriptor = publishRecordExclusive(path, token);
   if (descriptor === undefined)
     return "retry";
   closeSync3(descriptor);
-  return { path, token };
+  const held = { path, token, barePath: undefined };
+  if (needsRetirement)
+    retireGuardFile(currentPath);
+  if (!claimBareGuard(guardBase, token, staleAfterMs)) {
+    releaseCommitGuard(held);
+    return "busy";
+  }
+  held.barePath = guardBase;
+  return held;
+}
+function claimBareGuard(guardBase, token, staleAfterMs) {
+  for (let attempt = 0;attempt < 3; attempt += 1) {
+    const descriptor = publishRecordExclusive(guardBase, token);
+    if (descriptor !== undefined) {
+      closeSync3(descriptor);
+      return true;
+    }
+    if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
+      return false;
+    unlinkQuietSync(guardBase);
+  }
+  return false;
 }
 function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
   let text2;
@@ -2529,14 +2575,35 @@ function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
   const age = leaseAgeMsSync(guardBase);
   return age !== undefined && age < staleAfterMs;
 }
-function releaseCommitGuard(held) {
-  if (readLeaseRecordSync(held.path)?.token !== held.token)
-    return;
+function isRetiredGuardRecord(text2) {
   try {
-    unlinkSync(held.path);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
+    const value = JSON.parse(text2);
+    return value.version === 1 && value.retired === true;
+  } catch {
+    return false;
+  }
+}
+function retireGuardFile(path) {
+  const tempPath = `${path}.tmp-${randomUUID2()}`;
+  try {
+    writeFileSync4(tempPath, JSON.stringify({ version: 1, retired: true }), { mode: 384, flag: "wx" });
+    renameSync3(tempPath, path);
+  } catch {
+    unlinkQuietSync(tempPath);
+  }
+}
+function releaseCommitGuard(held) {
+  for (const path of [held.barePath, held.path]) {
+    if (path === undefined)
+      continue;
+    if (readLeaseRecordSync(path)?.token !== held.token)
+      continue;
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT"))
+        throw error;
+    }
   }
 }
 async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
@@ -2915,7 +2982,7 @@ function sleepSync(ms) {
 function isNodeErrorWithCode(error, code) {
   return !!error && typeof error === "object" && "code" in error && error.code === code;
 }
-var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
+var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, LINK_UNSUPPORTED_CODES, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
 var init_file_lease = __esm(() => {
   DEFAULT_OPTIONS = {
     acquireTimeoutMs: 1e4,
@@ -2943,6 +3010,7 @@ var init_file_lease = __esm(() => {
     }
   };
   fileLeaseTestHooks = {};
+  LINK_UNSUPPORTED_CODES = ["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"];
   CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
   CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
 });
@@ -6702,7 +6770,7 @@ import {
   readFileSync as readFileSync18,
   readdirSync as readdirSync3,
   realpathSync as realpathSync4,
-  renameSync as renameSync3,
+  renameSync as renameSync4,
   rmSync as rmSync4,
   statSync as statSync13,
   symlinkSync,
@@ -24408,7 +24476,7 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { chmodSync as chmodSync6, closeSync as closeSync6, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync10, linkSync as linkSync2, mkdirSync as mkdirSync12, openSync as openSync5, readFileSync as readFileSync23, readlinkSync as readlinkSync4, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync7, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
+import { chmodSync as chmodSync6, closeSync as closeSync6, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync10, linkSync as linkSync2, mkdirSync as mkdirSync12, openSync as openSync5, readFileSync as readFileSync23, readlinkSync as readlinkSync4, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync6, rmSync as rmSync7, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
 import { createRequire as createRequire3 } from "node:module";
 import { basename as basename6, dirname as dirname21, join as join29, relative as relative4, resolve as resolve6, sep as sep5 } from "node:path";
 init_linux_engine_layout();
@@ -24426,7 +24494,7 @@ init_file_lease();
 init_linux_engine_layout();
 import { spawnSync as spawnSync5 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync10, lstatSync as lstatSync9, readdirSync as readdirSync7, readFileSync as readFileSync22, renameSync as renameSync4, statSync as statSync15 } from "node:fs";
+import { existsSync as existsSync10, lstatSync as lstatSync9, readdirSync as readdirSync7, readFileSync as readFileSync22, renameSync as renameSync5, statSync as statSync15 } from "node:fs";
 import { homedir as homedir12, platform as osPlatform } from "node:os";
 import { basename as basename5, dirname as dirname20, isAbsolute as isAbsolute18, join as join28, resolve as resolvePath2 } from "node:path";
 

@@ -1,4 +1,4 @@
-import { FileLeaseBusyError, isFileLeaseSidecarName, removeAbandonedLegacyCommitGuardSync, withFileLeaseSync } from './file-lease.ts';
+import { FileLeaseBusyError, isFileLeaseSidecarName, withFileLeaseSync } from './file-lease.ts';
 import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
@@ -553,8 +553,7 @@ function withLegacyConsultLease<T>(layout: LinuxEngineLayout, run:()=>T): T {
   // Share the writer's stale-owner reclamation and compare-and-commit guard.
   // Holding the guard prevents takeover while the synchronous upgrade runs.
   const target=join(layout.home,'.olympus/consult.json');
-  // The old engine has released custody, so its abandoned bare guard goes too.
-  return withFileLeaseSync(target,lease=>lease.commit(()=>{const result=run();removeAbandonedLegacyCommitGuardSync(target);return result;}),{acquireTimeoutMs:100,pollIntervalMs:10});
+  return withFileLeaseSync(target,lease=>lease.commit(run),{acquireTimeoutMs:100,pollIntervalMs:10});
  } catch(error){
   if(error instanceof FileLeaseBusyError)throw new Error('Finish saving Olympus settings, then retry the upgrade. A settings writer is still running; nothing was migrated.');
   throw error;

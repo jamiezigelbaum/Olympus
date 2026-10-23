@@ -12,6 +12,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  renameSync,
   readFileSync,
   statSync,
   unlinkSync,
@@ -192,15 +193,37 @@ function publishRecordExclusive(finalPath, token) {
   try {
     writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
     fsyncSync(descriptor);
-    linkSync(tempPath, finalPath);
+    (fileLeaseTestHooks.link ?? linkSync)(tempPath, finalPath);
   } catch (error) {
     closeSync(descriptor);
     unlinkQuietSync(tempPath);
     if (isNodeErrorWithCode(error, "EEXIST"))
       return;
+    if (LINK_UNSUPPORTED_CODES.some((code) => isNodeErrorWithCode(error, code))) {
+      return createRecordExclusive(finalPath, token);
+    }
     throw error;
   }
   unlinkQuietSync(tempPath);
+  return descriptor;
+}
+function createRecordExclusive(finalPath, token) {
+  let descriptor;
+  try {
+    descriptor = openSync(finalPath, "wx", 384);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "EEXIST"))
+      return;
+    throw error;
+  }
+  try {
+    writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
+    fsyncSync(descriptor);
+  } catch (error) {
+    closeSync(descriptor);
+    unlinkQuietSync(finalPath);
+    throw error;
+  }
   return descriptor;
 }
 function unlinkQuietSync(path) {
@@ -247,8 +270,9 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
     if (/^\d{1,15}$/.test(suffix))
       highest = Math.max(highest, Number(suffix));
   }
+  const currentPath = `${guardBase}.${highest}`;
+  let needsRetirement = false;
   if (highest > 0) {
-    const currentPath = `${guardBase}.${highest}`;
     let text;
     try {
       text = readFileSync(currentPath, "utf8");
@@ -257,27 +281,49 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
         return "retry";
       throw error;
     }
-    const record = parseLeaseRecord(text);
-    if (record) {
-      if (recordedProcessInstanceIsAlive(record))
-        return "busy";
-    } else {
-      const age = leaseAgeMsSync(currentPath);
-      if (age === undefined)
-        return "retry";
-      if (age < staleAfterMs)
-        return "busy";
+    if (!isRetiredGuardRecord(text)) {
+      const record = parseLeaseRecord(text);
+      if (record) {
+        if (recordedProcessInstanceIsAlive(record))
+          return "busy";
+      } else {
+        const age = leaseAgeMsSync(currentPath);
+        if (age === undefined)
+          return "retry";
+        if (age < staleAfterMs)
+          return "busy";
+      }
+      needsRetirement = true;
     }
     fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
   }
-  if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
-    return "busy";
   const path = `${guardBase}.${highest + 1}`;
   const descriptor = publishRecordExclusive(path, token);
   if (descriptor === undefined)
     return "retry";
   closeSync(descriptor);
-  return { path, token };
+  const held = { path, token, barePath: undefined };
+  if (needsRetirement)
+    retireGuardFile(currentPath);
+  if (!claimBareGuard(guardBase, token, staleAfterMs)) {
+    releaseCommitGuard(held);
+    return "busy";
+  }
+  held.barePath = guardBase;
+  return held;
+}
+function claimBareGuard(guardBase, token, staleAfterMs) {
+  for (let attempt = 0;attempt < 3; attempt += 1) {
+    const descriptor = publishRecordExclusive(guardBase, token);
+    if (descriptor !== undefined) {
+      closeSync(descriptor);
+      return true;
+    }
+    if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
+      return false;
+    unlinkQuietSync(guardBase);
+  }
+  return false;
 }
 function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
   let text;
@@ -294,14 +340,35 @@ function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
   const age = leaseAgeMsSync(guardBase);
   return age !== undefined && age < staleAfterMs;
 }
-function releaseCommitGuard(held) {
-  if (readLeaseRecordSync(held.path)?.token !== held.token)
-    return;
+function isRetiredGuardRecord(text) {
   try {
-    unlinkSync(held.path);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
+    const value = JSON.parse(text);
+    return value.version === 1 && value.retired === true;
+  } catch {
+    return false;
+  }
+}
+function retireGuardFile(path) {
+  const tempPath = `${path}.tmp-${randomUUID()}`;
+  try {
+    writeFileSync(tempPath, JSON.stringify({ version: 1, retired: true }), { mode: 384, flag: "wx" });
+    renameSync(tempPath, path);
+  } catch {
+    unlinkQuietSync(tempPath);
+  }
+}
+function releaseCommitGuard(held) {
+  for (const path of [held.barePath, held.path]) {
+    if (path === undefined)
+      continue;
+    if (readLeaseRecordSync(path)?.token !== held.token)
+      continue;
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT"))
+        throw error;
+    }
   }
 }
 async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
@@ -680,7 +747,7 @@ function sleepSync(ms) {
 function isNodeErrorWithCode(error, code) {
   return !!error && typeof error === "object" && "code" in error && error.code === code;
 }
-var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
+var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, LINK_UNSUPPORTED_CODES, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
 var init_file_lease = __esm(() => {
   DEFAULT_OPTIONS = {
     acquireTimeoutMs: 1e4,
@@ -708,6 +775,7 @@ var init_file_lease = __esm(() => {
     }
   };
   fileLeaseTestHooks = {};
+  LINK_UNSUPPORTED_CODES = ["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"];
   CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
   CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
 });
@@ -721,7 +789,7 @@ import {
   lstatSync,
   mkdirSync as mkdirSync2,
   openSync as openSync2,
-  renameSync,
+  renameSync as renameSync2,
   rmSync,
   writeFileSync as writeFileSync2
 } from "node:fs";
@@ -756,7 +824,7 @@ function writePrivateFileAtomicSync(path, text, options = {}) {
     } finally {
       closeSync2(descriptor);
     }
-    renameSync(temp, path);
+    renameSync2(temp, path);
     options.onPublished?.();
   } catch (error) {
     try {
@@ -2324,7 +2392,7 @@ var init_http_timeout = __esm(() => {
 
 // src/workers/source-index/pinned-download.ts
 import { createHash } from "node:crypto";
-import { closeSync as closeSync3, createReadStream, existsSync as existsSync3, openSync as openSync3, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, writeSync } from "node:fs";
+import { closeSync as closeSync3, createReadStream, existsSync as existsSync3, openSync as openSync3, renameSync as renameSync3, rmSync as rmSync2, statSync as statSync4, writeSync } from "node:fs";
 async function downloadPinnedFile(options) {
   const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
   let hash = createHash(algorithm);
@@ -2464,7 +2532,7 @@ async function downloadPinnedFile(options) {
     if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
       throw mismatch(`${url} did not match its pinned checksum; nothing was installed.`);
     }
-    renameSync2(partial, target);
+    renameSync3(partial, target);
   } catch (cause) {
     close();
     if (discard || !options.keepPartial)
@@ -2737,7 +2805,7 @@ import {
   mkdirSync as mkdirSync4,
   openSync as openSync4,
   readFileSync as readFileSync5,
-  renameSync as renameSync3,
+  renameSync as renameSync4,
   rmSync as rmSync3,
   statSync as statSync5,
   writeFileSync as writeFileSync3,
@@ -2816,7 +2884,7 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
       checkedAt: (options.now?.() ?? new Date).toISOString()
     })}
 `, { mode: 384 });
-    renameSync3(temporary, path);
+    renameSync4(temporary, path);
   } catch {
     if (temporary)
       rmSync3(temporary, { force: true });
@@ -2958,7 +3026,7 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     writeFileSync3(join5(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
-    renameSync3(staging, runtimeDir);
+    renameSync4(staging, runtimeDir);
   } catch (error) {
     rmSync3(staging, { recursive: true, force: true });
     throw error;
@@ -3033,7 +3101,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
     writeFileSync3(join5(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
-    renameSync3(staging, runtimeDir);
+    renameSync4(staging, runtimeDir);
   } catch (error) {
     rmSync3(staging, { recursive: true, force: true });
     throw error;
@@ -3220,7 +3288,7 @@ class ProgressReporter {
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync3(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
-      renameSync3(temporary, this.statusPath);
+      renameSync4(temporary, this.statusPath);
     } catch {}
   }
 }
@@ -16877,7 +16945,7 @@ import {
   readFileSync as readFileSync14,
   readdirSync as readdirSync3,
   realpathSync as realpathSync2,
-  renameSync as renameSync4,
+  renameSync as renameSync5,
   rmSync as rmSync5,
   rmdirSync,
   statSync as statSync8,
@@ -41050,7 +41118,7 @@ import {
   existsSync as existsSync17,
   mkdirSync as mkdirSync14,
   readFileSync as readFileSync16,
-  renameSync as renameSync5,
+  renameSync as renameSync6,
   rmSync as rmSync6,
   writeFileSync as writeFileSync7
 } from "node:fs";
@@ -41282,7 +41350,7 @@ function writeCatalogCache(path, catalog) {
       models
     }, null, 2)}
 `, { mode: 384 });
-    renameSync5(tempPath, path);
+    renameSync6(tempPath, path);
   } catch {} finally {
     rmSync6(tempPath, { force: true });
   }

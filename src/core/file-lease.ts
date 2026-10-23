@@ -7,6 +7,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  renameSync,
   readFileSync,
   statSync,
   unlinkSync,
@@ -341,6 +342,8 @@ export const fileLeaseTestHooks: {
   afterLeaseJudgedStale?: () => void;
   /** After a guard acquirer judged the current guard abandoned, before it publishes its own. */
   afterGuardJudgedAbandoned?: () => void;
+  /** Replaces link() so a test can make the filesystem refuse hard links. */
+  link?: (existingPath: string, newPath: string) => void;
 } = {};
 
 /**
@@ -358,14 +361,41 @@ function publishRecordExclusive(finalPath: string, token: string): number | unde
   try {
     writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), 'utf8');
     fsyncSync(descriptor);
-    linkSync(tempPath, finalPath);
+    (fileLeaseTestHooks.link ?? linkSync)(tempPath, finalPath);
   } catch (error) {
     closeSync(descriptor);
     unlinkQuietSync(tempPath);
     if (isNodeErrorWithCode(error, 'EEXIST')) return undefined;
+    // Some filesystems (certain network and FUSE mounts) refuse hard links.
+    // Only that refusal falls back to plain exclusive creation, which is still
+    // exclusive but not whole-or-absent; every other error is real.
+    if (LINK_UNSUPPORTED_CODES.some((code) => isNodeErrorWithCode(error, code))) {
+      return createRecordExclusive(finalPath, token);
+    }
     throw error;
   }
   unlinkQuietSync(tempPath);
+  return descriptor;
+}
+
+const LINK_UNSUPPORTED_CODES = ['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'];
+
+function createRecordExclusive(finalPath: string, token: string): number | undefined {
+  let descriptor: number;
+  try {
+    descriptor = openSync(finalPath, 'wx', 0o600);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, 'EEXIST')) return undefined;
+    throw error;
+  }
+  try {
+    writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), 'utf8');
+    fsyncSync(descriptor);
+  } catch (error) {
+    closeSync(descriptor);
+    unlinkQuietSync(finalPath);
+    throw error;
+  }
   return descriptor;
 }
 
@@ -425,8 +455,11 @@ function unlinkIfStillTheObservedLease(
 }
 
 interface HeldCommitGuard {
+  /** The numbered guard this holder owns. */
   path: string;
   token: string;
+  /** The bare name older engines guard with, held alongside the numbered one. */
+  barePath: string | undefined;
 }
 
 type CommitGuardAttempt = HeldCommitGuard | 'busy' | 'retry';
@@ -437,11 +470,20 @@ type CommitGuardAttempt = HeldCommitGuard | 'busy' | 'retry';
  * highest-numbered file and a successor claims `n + 1` with an exclusive
  * link(). A crashed holder's file is therefore never deleted by anyone (a
  * check-then-unlink reclaim cannot be made atomic, and a stale observer could
- * delete a replacement guard); it is simply superseded, and a late observer's
- * claim of the same number fails with EEXIST. Only the live holder removes its
- * own file, at release. Files are never removed except by their own holder, so
- * the numbers stay a gapless run and a stale view can never name a free number
- * while a live guard sits above it. A crash while holding leaves one tiny file.
+ * delete a replacement guard); it is superseded, and a late observer's claim of
+ * the same number fails with EEXIST. Only the live holder removes its own file,
+ * at release. A claimant that supersedes an abandoned file first rewrites it
+ * as a retired record (temp file + rename, never an unlink, so the run stays
+ * gapless), so the abandoned file cannot read as live again if its PID is later
+ * reused. A crash while holding leaves one tiny file.
+ *
+ * Engines from before the series guard with the bare `<lock>.commit` name. A
+ * holder therefore also owns the bare name for its whole region: it claims the
+ * numbered guard first, then publishes the bare name exclusively. A live older
+ * holder makes the claim busy (the numbered claim is released again); an
+ * abandoned bare file is unlinked, which is safe because every current process
+ * serializes on the numbered guard before touching the bare name. The bare
+ * name is released first, then the numbered one.
  */
 function tryAcquireCommitGuardOnce(
   guardBase: string,
@@ -455,8 +497,9 @@ function tryAcquireCommitGuardOnce(
     const suffix = name.slice(prefix.length);
     if (/^\d{1,15}$/.test(suffix)) highest = Math.max(highest, Number(suffix));
   }
+  const currentPath = `${guardBase}.${highest}`;
+  let needsRetirement = false;
   if (highest > 0) {
-    const currentPath = `${guardBase}.${highest}`;
     let text: string;
     try {
       text = readFileSync(currentPath, 'utf8');
@@ -464,26 +507,46 @@ function tryAcquireCommitGuardOnce(
       if (isNodeErrorWithCode(error, 'ENOENT')) return 'retry';
       throw error;
     }
-    const record = parseLeaseRecord(text);
-    if (record) {
-      if (recordedProcessInstanceIsAlive(record)) return 'busy';
-    } else {
-      // Not written by this code (publication is atomic); keep the age rule.
-      const age = leaseAgeMsSync(currentPath);
-      if (age === undefined) return 'retry';
-      if (age < staleAfterMs) return 'busy';
+    if (!isRetiredGuardRecord(text)) {
+      const record = parseLeaseRecord(text);
+      if (record) {
+        if (recordedProcessInstanceIsAlive(record)) return 'busy';
+      } else {
+        // Not written by this code (publication is atomic); keep the age rule.
+        const age = leaseAgeMsSync(currentPath);
+        if (age === undefined) return 'retry';
+        if (age < staleAfterMs) return 'busy';
+      }
+      needsRetirement = true;
     }
     fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
   }
-  // An engine from before the numbered series guards with the bare name; a
-  // live one still excludes this claim. An abandoned one is never removed
-  // here (see removeAbandonedLegacyCommitGuardSync).
-  if (legacyCommitGuardIsLive(guardBase, staleAfterMs)) return 'busy';
   const path = `${guardBase}.${highest + 1}`;
   const descriptor = publishRecordExclusive(path, token);
   if (descriptor === undefined) return 'retry';
   closeSync(descriptor);
-  return { path, token };
+  const held: HeldCommitGuard = { path, token, barePath: undefined };
+  // Persist the predecessor's retirement before this claim can ever be released.
+  if (needsRetirement) retireGuardFile(currentPath);
+  if (!claimBareGuard(guardBase, token, staleAfterMs)) {
+    releaseCommitGuard(held);
+    return 'busy';
+  }
+  held.barePath = guardBase;
+  return held;
+}
+
+function claimBareGuard(guardBase: string, token: string, staleAfterMs: number): boolean {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const descriptor = publishRecordExclusive(guardBase, token);
+    if (descriptor !== undefined) {
+      closeSync(descriptor);
+      return true;
+    }
+    if (legacyCommitGuardIsLive(guardBase, staleAfterMs)) return false;
+    unlinkQuietSync(guardBase);
+  }
+  return false;
 }
 
 function legacyCommitGuardIsLive(guardBase: string, staleAfterMs: number): boolean {
@@ -501,29 +564,35 @@ function legacyCommitGuardIsLive(guardBase: string, staleAfterMs: number): boole
   return age !== undefined && age < staleAfterMs;
 }
 
-/**
- * Remove the bare `<lock>.commit` an engine from before the numbered series
- * left behind when its owner is gone. Call only inside `lease.commit()` on a
- * lease for `targetPath`, once the older engine can no longer run (an upgrade
- * after it released custody): current code never claims the bare name, so the
- * held guard excludes every other remover and nothing can recreate it.
- */
-export function removeAbandonedLegacyCommitGuardSync(targetPath: string, staleAfterMs = DEFAULT_OPTIONS.staleAfterMs): void {
-  const guardBase = commitGuardPathFor(lockPathFor(targetPath));
-  if (legacyCommitGuardIsLive(guardBase, staleAfterMs)) return;
+function isRetiredGuardRecord(text: string): boolean {
   try {
-    unlinkSync(guardBase);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
+    const value = JSON.parse(text) as Record<string, unknown>;
+    return value.version === 1 && value.retired === true;
+  } catch {
+    return false;
+  }
+}
+
+function retireGuardFile(path: string): void {
+  const tempPath = `${path}.tmp-${randomUUID()}`;
+  try {
+    writeFileSync(tempPath, JSON.stringify({ version: 1, retired: true }), { mode: 0o600, flag: 'wx' });
+    renameSync(tempPath, path);
+  } catch {
+    // Best effort: without it the predecessor is just as it was before.
+    unlinkQuietSync(tempPath);
   }
 }
 
 function releaseCommitGuard(held: HeldCommitGuard): void {
-  if (readLeaseRecordSync(held.path)?.token !== held.token) return;
-  try {
-    unlinkSync(held.path);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
+  for (const path of [held.barePath, held.path]) {
+    if (path === undefined) continue;
+    if (readLeaseRecordSync(path)?.token !== held.token) continue;
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
+    }
   }
 }
 

@@ -4041,6 +4041,7 @@ import {
   mkdirSync as mkdirSync3,
   openSync as openSync4,
   readdirSync,
+  renameSync as renameSync4,
   readFileSync as readFileSync7,
   statSync as statSync5,
   unlinkSync,
@@ -4226,15 +4227,37 @@ function publishRecordExclusive(finalPath, token) {
   try {
     writeFileSync4(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
     fsyncSync2(descriptor);
-    linkSync(tempPath, finalPath);
+    (fileLeaseTestHooks.link ?? linkSync)(tempPath, finalPath);
   } catch (error) {
     closeSync4(descriptor);
     unlinkQuietSync(tempPath);
     if (isNodeErrorWithCode(error, "EEXIST"))
       return;
+    if (LINK_UNSUPPORTED_CODES.some((code) => isNodeErrorWithCode(error, code))) {
+      return createRecordExclusive(finalPath, token);
+    }
     throw error;
   }
   unlinkQuietSync(tempPath);
+  return descriptor;
+}
+function createRecordExclusive(finalPath, token) {
+  let descriptor;
+  try {
+    descriptor = openSync4(finalPath, "wx", 384);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "EEXIST"))
+      return;
+    throw error;
+  }
+  try {
+    writeFileSync4(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
+    fsyncSync2(descriptor);
+  } catch (error) {
+    closeSync4(descriptor);
+    unlinkQuietSync(finalPath);
+    throw error;
+  }
   return descriptor;
 }
 function unlinkQuietSync(path) {
@@ -4281,8 +4304,9 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
     if (/^\d{1,15}$/.test(suffix))
       highest = Math.max(highest, Number(suffix));
   }
+  const currentPath = `${guardBase}.${highest}`;
+  let needsRetirement = false;
   if (highest > 0) {
-    const currentPath = `${guardBase}.${highest}`;
     let text2;
     try {
       text2 = readFileSync7(currentPath, "utf8");
@@ -4291,27 +4315,49 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
         return "retry";
       throw error;
     }
-    const record = parseLeaseRecord(text2);
-    if (record) {
-      if (recordedProcessInstanceIsAlive(record))
-        return "busy";
-    } else {
-      const age = leaseAgeMsSync(currentPath);
-      if (age === undefined)
-        return "retry";
-      if (age < staleAfterMs)
-        return "busy";
+    if (!isRetiredGuardRecord(text2)) {
+      const record = parseLeaseRecord(text2);
+      if (record) {
+        if (recordedProcessInstanceIsAlive(record))
+          return "busy";
+      } else {
+        const age = leaseAgeMsSync(currentPath);
+        if (age === undefined)
+          return "retry";
+        if (age < staleAfterMs)
+          return "busy";
+      }
+      needsRetirement = true;
     }
     fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
   }
-  if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
-    return "busy";
   const path = `${guardBase}.${highest + 1}`;
   const descriptor = publishRecordExclusive(path, token);
   if (descriptor === undefined)
     return "retry";
   closeSync4(descriptor);
-  return { path, token };
+  const held = { path, token, barePath: undefined };
+  if (needsRetirement)
+    retireGuardFile(currentPath);
+  if (!claimBareGuard(guardBase, token, staleAfterMs)) {
+    releaseCommitGuard(held);
+    return "busy";
+  }
+  held.barePath = guardBase;
+  return held;
+}
+function claimBareGuard(guardBase, token, staleAfterMs) {
+  for (let attempt = 0;attempt < 3; attempt += 1) {
+    const descriptor = publishRecordExclusive(guardBase, token);
+    if (descriptor !== undefined) {
+      closeSync4(descriptor);
+      return true;
+    }
+    if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
+      return false;
+    unlinkQuietSync(guardBase);
+  }
+  return false;
 }
 function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
   let text2;
@@ -4328,25 +4374,35 @@ function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
   const age = leaseAgeMsSync(guardBase);
   return age !== undefined && age < staleAfterMs;
 }
-function removeAbandonedLegacyCommitGuardSync(targetPath, staleAfterMs = DEFAULT_OPTIONS.staleAfterMs) {
-  const guardBase = commitGuardPathFor(lockPathFor(targetPath));
-  if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
-    return;
+function isRetiredGuardRecord(text2) {
   try {
-    unlinkSync(guardBase);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
+    const value = JSON.parse(text2);
+    return value.version === 1 && value.retired === true;
+  } catch {
+    return false;
+  }
+}
+function retireGuardFile(path) {
+  const tempPath = `${path}.tmp-${randomUUID3()}`;
+  try {
+    writeFileSync4(tempPath, JSON.stringify({ version: 1, retired: true }), { mode: 384, flag: "wx" });
+    renameSync4(tempPath, path);
+  } catch {
+    unlinkQuietSync(tempPath);
   }
 }
 function releaseCommitGuard(held) {
-  if (readLeaseRecordSync(held.path)?.token !== held.token)
-    return;
-  try {
-    unlinkSync(held.path);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
+  for (const path of [held.barePath, held.path]) {
+    if (path === undefined)
+      continue;
+    if (readLeaseRecordSync(path)?.token !== held.token)
+      continue;
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT"))
+        throw error;
+    }
   }
 }
 async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
@@ -4725,7 +4781,7 @@ function sleepSync(ms) {
 function isNodeErrorWithCode(error, code) {
   return !!error && typeof error === "object" && "code" in error && error.code === code;
 }
-var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
+var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, LINK_UNSUPPORTED_CODES, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
 var init_file_lease = __esm(() => {
   DEFAULT_OPTIONS = {
     acquireTimeoutMs: 1e4,
@@ -4753,6 +4809,7 @@ var init_file_lease = __esm(() => {
     }
   };
   fileLeaseTestHooks = {};
+  LINK_UNSUPPORTED_CODES = ["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"];
   CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
   CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
 });
@@ -14791,7 +14848,7 @@ var init_pairing_session_paths = __esm(() => {
 });
 
 // src/core/messaging-pairing.ts
-import { chmodSync as chmodSync3, existsSync as existsSync16, lstatSync as lstatSync12, mkdirSync as mkdirSync10, readFileSync as readFileSync22, renameSync as renameSync4, rmSync as rmSync7 } from "node:fs";
+import { chmodSync as chmodSync3, existsSync as existsSync16, lstatSync as lstatSync12, mkdirSync as mkdirSync10, readFileSync as readFileSync22, renameSync as renameSync5, rmSync as rmSync7 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { createHash as createHash8 } from "node:crypto";
 import { homedir as homedir16 } from "node:os";
@@ -15007,7 +15064,7 @@ async function buildWhatsAppBridge(input) {
     return false;
   }
   chmodSync3(temporary, 448);
-  renameSync4(temporary, input.outputPath);
+  renameSync5(temporary, input.outputPath);
   return true;
 }
 async function observeBunExit(exited, timeoutMs) {
@@ -27242,7 +27299,7 @@ import {
   readFileSync as readFileSync26,
   readdirSync as readdirSync4,
   realpathSync as realpathSync7,
-  renameSync as renameSync6,
+  renameSync as renameSync7,
   rmSync as rmSync10,
   rmdirSync,
   statSync as statSync13,
@@ -27297,7 +27354,7 @@ function writeMediaCacheFile(dir, bytes, mimeType) {
     const temporary = join32(dir, `.${sha256}.${randomUUID6()}.tmp`);
     writeFileSync8(temporary, bytes, { mode: 384 });
     chmodSync8(temporary, 384);
-    renameSync6(temporary, path);
+    renameSync7(temporary, path);
   }
   return { path, sha256, mimeType, stagingHolder };
 }
@@ -49595,7 +49652,7 @@ import {
   existsSync as existsSync33,
   mkdirSync as mkdirSync20,
   readFileSync as readFileSync30,
-  renameSync as renameSync7
+  renameSync as renameSync8
 } from "node:fs";
 import { dirname as dirname34 } from "node:path";
 import { Database as Database8 } from "bun:sqlite";
@@ -49872,7 +49929,7 @@ function readLegacyRequestBudgetState(statePath, provider) {
 }
 function retireLegacyRequestBudgetState(statePath) {
   try {
-    renameSync7(statePath, `${statePath}.imported`);
+    renameSync8(statePath, `${statePath}.imported`);
   } catch (error) {
     if (error.code !== "ENOENT")
       throw error;
@@ -59172,7 +59229,7 @@ import {
   chmodSync as chmodSync14,
   existsSync as existsSync35,
   mkdirSync as mkdirSync24,
-  renameSync as renameSync8,
+  renameSync as renameSync9,
   statSync as statSync17,
   unlinkSync as unlinkSync3,
   writeFileSync as writeFileSync9
@@ -59422,7 +59479,7 @@ function writePrivateReport(pathValue, contents) {
   try {
     writeFileSync9(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync14(temporaryPath, 384);
-    renameSync8(temporaryPath, reportPath);
+    renameSync9(temporaryPath, reportPath);
     chmodSync14(reportPath, 384);
     if ((statSync17(reportPath).mode & 511) !== 384) {
       throw new Error("X bookmark diagnostic report permissions are not 0600.");
@@ -59849,7 +59906,7 @@ var init_live_sync2 = __esm(() => {
 import { createHash as createHash43, randomUUID as randomUUID14 } from "node:crypto";
 import {
   chmodSync as chmodSync15,
-  renameSync as renameSync9,
+  renameSync as renameSync10,
   rmSync as rmSync11,
   writeFileSync as writeFileSync10
 } from "node:fs";
@@ -60164,7 +60221,7 @@ function writeReceipt(pathValue, receipt) {
       mode: 384
     });
     chmodSync15(temporary, 384);
-    renameSync9(temporary, path);
+    renameSync10(temporary, path);
     chmodSync15(path, 384);
     return receipt;
   } catch (error) {
@@ -61615,7 +61672,7 @@ import {
   readdirSync as readdirSync7,
   readFileSync as readFileSync35,
   realpathSync as realpathSync10,
-  renameSync as renameSync10,
+  renameSync as renameSync11,
   rmSync as rmSync13,
   statSync as statSync19
 } from "node:fs";
@@ -62237,7 +62294,7 @@ function exportSqliteStore(options) {
     try {
       sqlite = inspectSqliteSnapshot(staging, sqlitePath, expectedStoreId);
       syncFileSync(staging);
-      renameSync10(staging, destination);
+      renameSync11(staging, destination);
     } catch (error) {
       rmSync13(staging, { force: true });
       throw error;
@@ -65574,7 +65631,7 @@ import {
   readFileSync as readFileSync37,
   readdirSync as readdirSync8,
   realpathSync as realpathSync11,
-  renameSync as renameSync11,
+  renameSync as renameSync12,
   rmSync as rmSync14,
   statSync as statSync20,
   symlinkSync,
@@ -65971,12 +66028,12 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
       try {
         lstatSync23(versionDir);
         old = join61(toolDir, `.old-${id}`);
-        renameSync11(versionDir, old);
+        renameSync12(versionDir, old);
       } catch (error) {
         if (error.code !== "ENOENT")
           throw error;
       }
-      renameSync11(staging, versionDir);
+      renameSync12(staging, versionDir);
       if (old)
         rmSync14(old, { recursive: true, force: true });
     });
@@ -70449,7 +70506,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 // src/core/engine-service.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { createHash as createHash50, randomBytes as randomBytes13 } from "node:crypto";
-import { existsSync as existsSync41, lstatSync as lstatSync25, readdirSync as readdirSync12, readFileSync as readFileSync41, renameSync as renameSync12, statSync as statSync22 } from "node:fs";
+import { existsSync as existsSync41, lstatSync as lstatSync25, readdirSync as readdirSync12, readFileSync as readFileSync41, renameSync as renameSync13, statSync as statSync22 } from "node:fs";
 import { homedir as homedir42, platform as osPlatform3 } from "node:os";
 import { basename as basename8, dirname as dirname45, isAbsolute as isAbsolute20, join as join65, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
@@ -71284,18 +71341,18 @@ async function rollbackEngineUnderFence(options = {}) {
 }
 function swapAppDirectories(paths) {
   const parking = `${paths.appDir}.rollback-${process.pid}-${randomBytes13(4).toString("hex")}`;
-  renameSync12(paths.appDir, parking);
+  renameSync13(paths.appDir, parking);
   try {
-    renameSync12(paths.previousAppDir, paths.appDir);
+    renameSync13(paths.previousAppDir, paths.appDir);
   } catch (error) {
-    renameSync12(parking, paths.appDir);
+    renameSync13(parking, paths.appDir);
     throw error;
   }
   try {
-    renameSync12(parking, paths.previousAppDir);
+    renameSync13(parking, paths.previousAppDir);
   } catch (error) {
-    renameSync12(paths.appDir, paths.previousAppDir);
-    renameSync12(parking, paths.appDir);
+    renameSync13(paths.appDir, paths.previousAppDir);
+    renameSync13(parking, paths.appDir);
     throw error;
   }
 }
@@ -71604,7 +71661,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync26, linkSync as linkSync2, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync42, readlinkSync as readlinkSync4, readdirSync as readdirSync13, realpathSync as realpathSync14, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
+import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync26, linkSync as linkSync2, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync42, readlinkSync as readlinkSync4, readdirSync as readdirSync13, realpathSync as realpathSync14, renameSync as renameSync14, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename9, dirname as dirname46, join as join66, relative as relative8, resolve as resolve12, sep as sep10 } from "node:path";
 import { userInfo } from "node:os";
@@ -71752,7 +71809,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
       if (i === retained)
         rmSync17(dest, { force: true });
       else if (existsSync42(dest))
-        renameSync13(dest, `${path}.${i + 1}`);
+        renameSync14(dest, `${path}.${i + 1}`);
     }
     copyFileSync(path, `${path}.1`, constants6.COPYFILE_EXCL);
     ftruncateSync(fd, 0);
@@ -72033,7 +72090,7 @@ function durableProgram(layout, source, transaction, options) {
       throw new Error(`Existing engine generation ${generation} failed identity verification.`);
     rmSync17(staging, { recursive: true });
   } else {
-    renameSync13(staging, generation);
+    renameSync14(staging, generation);
     syncDirectorySync(generations);
     lifecycleCheckpoint(options, "generation_renamed");
   }
@@ -72303,11 +72360,7 @@ function withLegacyConsultLease(layout, run) {
     return run();
   try {
     const target = join66(layout.home, ".olympus/consult.json");
-    return withFileLeaseSync(target, (lease) => lease.commit(() => {
-      const result = run();
-      removeAbandonedLegacyCommitGuardSync(target);
-      return result;
-    }), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
+    return withFileLeaseSync(target, (lease) => lease.commit(run), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
   } catch (error) {
     if (error instanceof FileLeaseBusyError)
       throw new Error("Finish saving Olympus settings, then retry the upgrade. A settings writer is still running; nothing was migrated.");
@@ -86911,7 +86964,7 @@ var init_privacy_profile = __esm(() => {
 
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash57 } from "node:crypto";
-import { chmodSync as chmodSync23, existsSync as existsSync53, mkdirSync as mkdirSync38, readFileSync as readFileSync51, renameSync as renameSync15, writeFileSync as writeFileSync17 } from "node:fs";
+import { chmodSync as chmodSync23, existsSync as existsSync53, mkdirSync as mkdirSync38, readFileSync as readFileSync51, renameSync as renameSync16, writeFileSync as writeFileSync17 } from "node:fs";
 import { homedir as homedir50 } from "node:os";
 import { dirname as dirname58, join as join80 } from "node:path";
 function domainTier(domain) {
@@ -86941,7 +86994,7 @@ function writeOwnerOnlyFile(path, text2) {
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync17(temp, text2, { mode: 384 });
   chmodSync23(temp, 384);
-  renameSync15(temp, path);
+  renameSync16(temp, path);
 }
 function updatePlan(statePath, planId, update) {
   const state = readTierMigrationState(statePath);
@@ -108898,7 +108951,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync25, existsSync as existsSync60, lstatSync as lstatSync33, mkdirSync as mkdirSync43, readFileSync as readFileSync58, renameSync as renameSync17, writeFileSync as writeFileSync20 } from "node:fs";
+import { chmodSync as chmodSync25, existsSync as existsSync60, lstatSync as lstatSync33, mkdirSync as mkdirSync43, readFileSync as readFileSync58, renameSync as renameSync18, writeFileSync as writeFileSync20 } from "node:fs";
 import { join as join91 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync43(stateDir, { recursive: true, mode: 448 });
@@ -108915,7 +108968,7 @@ function writePrivateFile(path, contents) {
   const temporary = `${path}.tmp.${process.pid}`;
   writeFileSync20(temporary, contents, { mode: 384 });
   chmodSync25(temporary, 384);
-  renameSync17(temporary, path);
+  renameSync18(temporary, path);
 }
 function loadOrCreateIdentity(stateDir) {
   const path = join91(ensureStateDir(stateDir), "install-key.pem");
@@ -109766,7 +109819,7 @@ import {
   openSync as openSync17,
   readFileSync as readFileSync59,
   readdirSync as readdirSync15,
-  renameSync as renameSync18,
+  renameSync as renameSync19,
   rmSync as rmSync22,
   statSync as statSync28,
   statfsSync,
@@ -110049,7 +110102,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
     writeFileSync21(join92(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync22(runtimeDir, { recursive: true, force: true });
-    renameSync18(staging, runtimeDir);
+    renameSync19(staging, runtimeDir);
   } catch (error2) {
     rmSync22(staging, { recursive: true, force: true });
     throw error2;
@@ -110181,7 +110234,7 @@ function refreshLock(lockPath, token) {
   try {
     const temporary = `${lockPath}.${process.pid}.tmp`;
     writeFileSync21(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
-    renameSync18(temporary, lockPath);
+    renameSync19(temporary, lockPath);
   } catch {}
 }
 function tryAcquireLock2(lockPath, token) {
@@ -110294,7 +110347,7 @@ class ProgressReporter2 {
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync21(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
-      renameSync18(temporary, this.statusPath);
+      renameSync19(temporary, this.statusPath);
     } catch {}
   }
 }
@@ -121110,7 +121163,7 @@ import {
   existsSync as existsSync63,
   mkdirSync as mkdirSync47,
   readFileSync as readFileSync63,
-  renameSync as renameSync19,
+  renameSync as renameSync20,
   rmSync as rmSync23,
   writeFileSync as writeFileSync22
 } from "node:fs";
@@ -121335,7 +121388,7 @@ function writeCatalogCache(path, catalog) {
       models
     }, null, 2)}
 `, { mode: 384 });
-    renameSync19(tempPath, path);
+    renameSync20(tempPath, path);
   } catch {} finally {
     rmSync23(tempPath, { force: true });
   }
@@ -168705,7 +168758,7 @@ init_open_targets();
 init_package_root();
 init_linux_engine_layout();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync18, lstatSync as lstatSync13, mkdirSync as mkdirSync11, readFileSync as readFileSync24, renameSync as renameSync5, rmSync as rmSync9, statSync as statSync12, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync18, lstatSync as lstatSync13, mkdirSync as mkdirSync11, readFileSync as readFileSync24, renameSync as renameSync6, rmSync as rmSync9, statSync as statSync12, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir18, platform as osPlatform2 } from "node:os";
 import { dirname as dirname20, isAbsolute as isAbsolute10, join as join28 } from "node:path";
 var OPEN_HANDLER_BUNDLE_ID = "ai.olympusplugin.open";
@@ -168844,7 +168897,7 @@ function installMac(options) {
     exec(LSREGISTER_PATH, ["-u", handlerPath]);
     rmSync9(handlerPath, { recursive: true, force: true });
   }
-  renameSync5(staging, handlerPath);
+  renameSync6(staging, handlerPath);
   const registered = exec(LSREGISTER_PATH, ["-f", handlerPath]).status === 0;
   return {
     ok: registered,
@@ -168988,7 +169041,7 @@ function home(options) {
 function writeAtomic(path, text2, mode) {
   const next = `${path}.olympus-next`;
   writeFileSync7(next, text2, { mode });
-  renameSync5(next, path);
+  renameSync6(next, path);
 }
 function must(result, what) {
   if (result.status === 0)
@@ -169042,7 +169095,7 @@ import {
   openSync as openSync16,
   readFileSync as readFileSync48,
   readdirSync as readdirSync14,
-  renameSync as renameSync14,
+  renameSync as renameSync15,
   rmSync as rmSync18,
   statSync as statSync25,
   writeFileSync as writeFileSync16
@@ -169336,10 +169389,10 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   try {
     if (existsSync50(workingDirectory)) {
       replacedPath = join76(versionsDir, `.olympus-replaced-${basename11(workingDirectory)}-${randomUUID20()}`);
-      renameSync14(workingDirectory, replacedPath);
+      renameSync15(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
-    renameSync14(staging, workingDirectory);
+    renameSync15(staging, workingDirectory);
     published = true;
     chmodSync21(workingDirectory, 365);
     syncDirectory2(workingDirectory);
@@ -169349,7 +169402,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
       if (published && existsSync50(workingDirectory))
         removeStagingTree(workingDirectory);
       if (replacedPath && existsSync50(replacedPath) && !existsSync50(workingDirectory)) {
-        renameSync14(replacedPath, workingDirectory);
+        renameSync15(replacedPath, workingDirectory);
       }
       syncDirectory2(versionsDir);
     } catch (rollbackError) {
@@ -171048,7 +171101,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync17 } from "node:child_process";
-import { existsSync as existsSync58, lstatSync as lstatSync32, mkdirSync as mkdirSync42, mkdtempSync as mkdtempSync4, renameSync as renameSync16, rmSync as rmSync20 } from "node:fs";
+import { existsSync as existsSync58, lstatSync as lstatSync32, mkdirSync as mkdirSync42, mkdtempSync as mkdtempSync4, renameSync as renameSync17, rmSync as rmSync20 } from "node:fs";
 import { homedir as homedir55 } from "node:os";
 import { join as join88, resolve as resolve13 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -171142,7 +171195,7 @@ function installEngineHelper(options = {}) {
       throw new OperationError("config_error", `The copied helper app's signature does not verify: ${copyCheck.stderr.trim().split(`
 `)[0] ?? ""}`);
     }
-    const rename2 = options.rename ?? renameSync16;
+    const rename2 = options.rename ?? renameSync17;
     const aside = join88(staging, "previous.app");
     if (replaced)
       rename2(target, aside);
