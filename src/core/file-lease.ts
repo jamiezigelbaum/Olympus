@@ -342,6 +342,8 @@ export const fileLeaseTestHooks: {
   afterLeaseJudgedStale?: () => void;
   /** After a guard acquirer judged the current guard abandoned, before it publishes its own. */
   afterGuardJudgedAbandoned?: () => void;
+  /** After a bare-guard claimant judged an older engine's guard abandoned, before it re-confirms and unlinks. */
+  afterBareGuardJudgedAbandoned?: () => void;
   /** Replaces link() so a test can make the filesystem refuse hard links. */
   link?: (existingPath: string, newPath: string) => void;
 } = {};
@@ -543,19 +545,46 @@ function claimBareGuard(guardBase: string, token: string, staleAfterMs: number):
       closeSync(descriptor);
       return true;
     }
-    if (legacyCommitGuardIsLive(guardBase, staleAfterMs)) return false;
+    const observed = observeBareGuard(guardBase);
+    if (observed === undefined) continue;
+    if (legacyCommitGuardIsLive(guardBase, staleAfterMs, observed.text)) return false;
+    // An older engine may reclaim the same abandoned file and publish its own
+    // live guard at the same moment: unlink only if the file is still the one
+    // judged abandoned (same inode, same bytes). The old protocol's own
+    // unconditional unlink leaves a residual window no new-side check closes.
+    fileLeaseTestHooks.afterBareGuardJudgedAbandoned?.();
+    const again = observeBareGuard(guardBase);
+    if (again === undefined) continue;
+    if (again.ino !== observed.ino || again.dev !== observed.dev || again.text !== observed.text) continue;
     unlinkQuietSync(guardBase);
   }
   return false;
 }
 
-function legacyCommitGuardIsLive(guardBase: string, staleAfterMs: number): boolean {
-  let text: string;
+function observeBareGuard(guardBase: string): { ino: number; dev: number; text: string } | undefined {
   try {
-    text = readFileSync(guardBase, 'utf8');
+    const before = statSync(guardBase);
+    const text = readFileSync(guardBase, 'utf8');
+    const after = statSync(guardBase);
+    if (before.ino !== after.ino || before.dev !== after.dev) return undefined;
+    return { ino: after.ino, dev: after.dev, text };
   } catch (error) {
-    if (isNodeErrorWithCode(error, 'ENOENT')) return false;
+    if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
     throw error;
+  }
+}
+
+function legacyCommitGuardIsLive(guardBase: string, staleAfterMs: number, observedText?: string): boolean {
+  let text: string;
+  if (observedText !== undefined) {
+    text = observedText;
+  } else {
+    try {
+      text = readFileSync(guardBase, 'utf8');
+    } catch (error) {
+      if (isNodeErrorWithCode(error, 'ENOENT')) return false;
+      throw error;
+    }
   }
   const record = parseLeaseRecord(text);
   if (record) return recordedProcessInstanceIsAlive(record);

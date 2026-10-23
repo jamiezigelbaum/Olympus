@@ -319,20 +319,47 @@ function claimBareGuard(guardBase, token, staleAfterMs) {
       closeSync(descriptor);
       return true;
     }
-    if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
+    const observed = observeBareGuard(guardBase);
+    if (observed === undefined)
+      continue;
+    if (legacyCommitGuardIsLive(guardBase, staleAfterMs, observed.text))
       return false;
+    fileLeaseTestHooks.afterBareGuardJudgedAbandoned?.();
+    const again = observeBareGuard(guardBase);
+    if (again === undefined)
+      continue;
+    if (again.ino !== observed.ino || again.dev !== observed.dev || again.text !== observed.text)
+      continue;
     unlinkQuietSync(guardBase);
   }
   return false;
 }
-function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
-  let text;
+function observeBareGuard(guardBase) {
   try {
-    text = readFileSync(guardBase, "utf8");
+    const before = statSync(guardBase);
+    const text = readFileSync(guardBase, "utf8");
+    const after = statSync(guardBase);
+    if (before.ino !== after.ino || before.dev !== after.dev)
+      return;
+    return { ino: after.ino, dev: after.dev, text };
   } catch (error) {
     if (isNodeErrorWithCode(error, "ENOENT"))
-      return false;
+      return;
     throw error;
+  }
+}
+function legacyCommitGuardIsLive(guardBase, staleAfterMs, observedText) {
+  let text;
+  if (observedText !== undefined) {
+    text = observedText;
+  } else {
+    try {
+      text = readFileSync(guardBase, "utf8");
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ENOENT"))
+        return false;
+      throw error;
+    }
   }
   const record = parseLeaseRecord(text);
   if (record)

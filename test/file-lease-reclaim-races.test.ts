@@ -20,6 +20,7 @@ const roots: string[] = [];
 afterEach(() => {
   delete fileLeaseTestHooks.afterGuardJudgedAbandoned;
   delete fileLeaseTestHooks.afterLeaseJudgedStale;
+  delete fileLeaseTestHooks.afterBareGuardJudgedAbandoned;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -326,5 +327,20 @@ describe('a long guarded section (the Linux upgrade holds the guard across pre-s
       expect(() => withFileLeaseSync(path, () => 'taken', stale)).toThrow(FileLeaseBusyError);
       expect(tokenIn(`${path}.lock`)).toBe(owner);
     }), { ...stale, acquireTimeoutMs: 1_000 });
+  });
+});
+
+describe('an older engine reclaiming the bare guard at the same moment', () => {
+  test('its fresh live guard is never deleted and this claim stays out', () => {
+    const path = target();
+    writeFileSync(`${path}.lock.commit`, record('abandoned-old', DEAD_PID), { mode: 0o600 });
+    fileLeaseTestHooks.afterBareGuardJudgedAbandoned = () => {
+      delete fileLeaseTestHooks.afterBareGuardJudgedAbandoned;
+      // The older engine's own reclaim: unlink, then a fresh live guard.
+      rmSync(`${path}.lock.commit`);
+      writeFileSync(`${path}.lock.commit`, record('live-old', process.pid), { mode: 0o600 });
+    };
+    expect(() => withFileLeaseSync(path, (lease) => lease.commit(() => 'entered'), options)).toThrow(FileLeaseBusyError);
+    expect(tokenIn(`${path}.lock.commit`)).toBe('live-old');
   });
 });
