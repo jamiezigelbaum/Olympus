@@ -20,6 +20,7 @@ import type { SecretLocationsIndex } from '../classification/secret-locations.ts
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { registerArchiveFormatConnectors } from './format-connectors.ts';
 import { createArchiveTierLane, type ArchiveTierLane } from './lane.ts';
+import { startArchiveImport, type ArchiveImportStart } from './start.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './state.ts';
 import { archiveConnectorStoreDbPaths } from './store.ts';
 
@@ -41,6 +42,10 @@ export interface ArchiveImportRuntime {
    * The private inbox, opened for one removal (the caller closes it); undefined when there is none.
    */
   openWaitingQuestions(): WaitingQuestionStore | undefined;
+  /**
+   * Starts importing the canonical path the person approved (start.ts).
+   */
+  start(path: string): ArchiveImportStart;
 }
 
 export interface ArchiveImportRuntimeOptions {
@@ -113,5 +118,6 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
         ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
       return existsSync(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
+    start: (path) => startArchiveImport({ state, path }),
   };
 }

@@ -831,14 +831,6 @@ export class SourceScheduler {
     return false;
   }
 
-  /** Whether this one task is executing (one archive's import, not its whole source). */
-  hasExecutingTaskId(taskId: string): boolean {
-    for (const state of this.executingStates) {
-      if (state.task.id === taskId) return true;
-    }
-    return false;
-  }
-
   status(now: Date = this.now()): SourceSchedulerStatus {
     return {
       kind: 'source_scheduler_status',

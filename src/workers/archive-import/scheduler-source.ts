@@ -36,6 +36,31 @@ export function archiveImportTaskId(archiveId: string): string {
   return `${SCHEDULER_SOURCE_IDS.archiveImports}_pull.${schedulerScopeHash(archiveId)}`;
 }
 
+/**
+ * How often a running pass re-reads the record to learn the archive is being removed.
+ */
+export const ARCHIVE_IMPORT_STATUS_CHECK_MS = 1_000;
+
+/**
+ * False from the moment the record says the archive is no longer importing
+ * (a removal was asked for), read at most once per ARCHIVE_IMPORT_STATUS_CHECK_MS.
+ */
+function stillImporting(runtime: ArchiveImportRuntime, archiveId: string, now: () => number = Date.now): () => boolean {
+  let checkedAt = now();
+  let importing = true;
+  return () => {
+    if (!importing) return false;
+    if (now() - checkedAt < ARCHIVE_IMPORT_STATUS_CHECK_MS) return true;
+    checkedAt = now();
+    try {
+      importing = runtime.state.get(archiveId)?.status === 'importing';
+    } catch {
+      importing = false;
+    }
+    return importing;
+  };
+}
+
 export interface ArchiveImportsSchedulerSourceInput {
   runtime: ArchiveImportRuntime;
   config: OlympusConfig;
@@ -91,13 +116,14 @@ export function createArchiveImportsSchedulerSource(
           return {
             status: outcome.kind === 'removed' || outcome.kind === 'progress' ? 'progress' : 'idle',
             counts: { ...counts, removal_complete: Number(outcome.kind === 'removed') },
-            ...(outcome.kind === 'progress' || outcome.kind === 'waiting_for_import' ? { continueSoon: true } : {}),
+            ...(outcome.kind === 'progress' ? { continueSoon: true } : {}),
           };
         }
         const outcome = await pullArchiveImport({
           state: input.runtime.state,
           lane,
           archiveId,
+          shouldContinue: stillImporting(input.runtime, archiveId),
           ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
         });
         return {

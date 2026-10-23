@@ -251,8 +251,9 @@ async function messageOutcome(input: ArchiveConnectorInput, span: MboxMessageSpa
     dateHeader ? `Date: ${dateHeader}` : undefined,
   ].filter(Boolean).join('\n');
   const body = email.text?.trim() || (email.html ? stripHtml(email.html) : '');
-  let text = [summary, body].filter((part) => part !== '').join('\n\n')
-    || (attachments.lines.length > 0 ? attachments.lines.join('\n') : `Subject: ${subject}`);
+  // Attachments are named (never read), so a question about one finds its message.
+  let text = [summary, body, attachments.lines.join('\n')].filter((part) => part !== '').join('\n\n')
+    || `Subject: ${subject}`;
   if (text.length > MBOX_MAX_ITEM_TEXT_CHARS) {
     text = text.slice(0, MBOX_MAX_ITEM_TEXT_CHARS);
     findings.push({ kind: MBOX_FINDINGS.textCut });

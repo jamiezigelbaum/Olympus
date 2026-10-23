@@ -9,17 +9,18 @@
  * middle (the record stays `removing`, and the next run starts over; every
  * step is idempotent):
  *
- * 1. The record is marked `removing`: no pass imports it any more.
- * 2. Wait while this archive's own import task is running.
- * 3. In the set ledger, every copy of its items is superseded, so no store
+ * 1. The record is marked `removing`: no pass imports it any more (a pass
+ *    already running sees it and stops at the next message). The removal
+ *    runs as the archive's own scheduler task, so never beside its import.
+ * 2. In the set ledger, every copy of its items is superseded, so no store
  *    serves them from that moment, and every decision, override, history and
  *    proposal row is deleted, so no move, re-judge or migration acts on them.
  *    Its questions to the private model go too.
- * 4. Answers waiting in the private inbox that read its items are deleted.
- * 5. Each store's rows, in bounded steps.
- * 6. The superseded copies (the mark that hid the rows), the resume point,
+ * 3. Answers waiting in the private inbox that read its items are deleted.
+ * 4. Each store's rows, in bounded steps.
+ * 5. The superseded copies (the mark that hid the rows), the resume point,
  *    the secret-locations entries, and the inbox once more.
- * 7. The record.
+ * 6. The record.
  */
 import { existsSync } from 'node:fs';
 import type { WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
@@ -41,7 +42,6 @@ export const ARCHIVE_REMOVAL_STEPS_PER_RUN = 50;
 export type ArchiveRemovalOutcome =
   | { kind: 'removed'; counts: ArchiveRemovalCounts }
   | { kind: 'progress'; counts: ArchiveRemovalCounts }
-  | { kind: 'waiting_for_import' }
   | { kind: 'not_removing'; status?: ArchiveImportRecord['status'] };
 
 export interface ArchiveRemovalCounts {
@@ -58,10 +58,6 @@ export interface ArchiveRemovalOptions {
   state: ArchiveImportStateStore;
   lane: ArchiveTierLane;
   archiveId: string;
-  /**
-   * Whether this archive's import task is running right now (the scheduler knows).
-   */
-  importRunning?: () => boolean;
   /**
    * Opens the private inbox for this removal; undefined when there is none.
    */
@@ -129,7 +125,6 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
     return record ? { kind: 'not_removing', status: record.status } : { kind: 'not_removing' };
   }
   if (record.family !== options.lane.family) throw new Error('This archive belongs to another family\'s stores.');
-  if (options.importRunning?.() === true) return { kind: 'waiting_for_import' };
 
   const provider = record.provider;
   const accountScope = record.archive_id;
@@ -137,15 +132,15 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts();
 
-  // 3: hidden everywhere, and out of every later pass's reach.
+  // 2: hidden everywhere, and out of every later pass's reach.
   const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
   counts.decisions_removed += withdrawn.items;
   counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);
-  // 4: answers that read these items.
+  // 3: answers that read these items.
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
 
-  // 5: each store's rows, bounded.
+  // 4: each store's rows, bounded.
   const connectorId = archiveConnectorId(record.archive_id);
   const stepItems = Math.max(1, options.stepItems ?? ARCHIVE_REMOVAL_STEP_ITEMS);
   let steps = Math.max(1, options.stepsPerRun ?? ARCHIVE_REMOVAL_STEPS_PER_RUN);
@@ -160,13 +155,13 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
     }
   }
 
-  // 6: the marks, the resume point and the side stores.
+  // 5: the marks, the resume point and the side stores.
   lane.ledger.deleteAccountScopeCopies(provider, accountScope);
   lane.ledger.deleteSetCursor(archiveTierSetId(lane.family), connectorId);
   counts.secret_locations_removed += lane.secretLocations?.removeAccountScope(provider, accountScope) ?? 0;
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
 
-  // 7: nothing derived from the archive is left.
+  // 6: nothing derived from the archive is left.
   options.state.delete(record.archive_id);
   return { kind: 'removed', counts };
 }
