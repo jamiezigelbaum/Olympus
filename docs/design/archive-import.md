@@ -24,7 +24,9 @@ same way, with the same privacy and the same status.
 - **Reviewed** by Astra (Codex, high) on 2026-10-23. Its five findings are
   folded in: per-archive identity and removal, bounded streaming reads,
   file-version-bound cursors, collision-safe mail identity, and the
-  Reflect/Roam privacy-default conflict.
+  Reflect/Roam privacy-default conflict. A second round added WhatsApp
+  message identity, bounded parsing of chat exports and zips, and the
+  snapshot-beside-live acceptance cases.
 - **WhatsApp and Telegram exports are in scope** (owner, 2026-10-23), after
   mail.
 
@@ -113,6 +115,17 @@ Both are in scope. They come after mail because they reuse the same spine
   reader. It changes to read exactly the selected files through the
   scope-safe reader. Picking a folder of exports imports each chat in it, as
   the user chose.
+- **WhatsApp message identity.** Today an id hashes chat, time, sender and
+  position only (`whatsapp/connector.ts:298`), so a `.txt` and a `.zip`
+  export of the same chat in one folder can overwrite messages whose text
+  differs. Ids gain the source file (or zip member) identity and a hash of
+  the message text. Test with an overlapping-export fixture.
+- **Bounded parsing.** The parser splits the whole text and keeps every
+  message (`whatsapp/connector.ts:155`), and zip entries are inflated whole
+  (`whatsapp/connector.ts:397`). Both become incremental: line-by-line
+  parsing, streaming inflate, with limits on expanded bytes and zip members.
+  Hitting a limit fails visibly, naming the file. The same rule applies to
+  Telegram's `result.json` (streaming JSON) and to any zip a format accepts.
 - **Telegram Desktop export** ("Export chat history", JSON format,
   `result.json` plus media folders). A new thin connector: one item per
   message, chats as threads, media named as gaps at first, like mail
@@ -151,3 +164,9 @@ exports), plus the held-out eval where the step changes the source pipeline.
 A fresh install on Mac and on Linux can import a synthetic mbox, Reflect,
 Roam, WhatsApp and Telegram export through the dashboard and through the agent tool, see each as a
 snapshot with counts and gaps, find cited answers from it, and remove it.
+
+For WhatsApp and Telegram, also on the same candidate as a supported live
+connection (`V0_4_RELEASE.md`, "Qualification action"): the dashboard shows
+the connected scope and the history the export covers, tells stale live
+capture apart from a successful empty import, and removing the archive leaves
+live capture running and its items in place.
