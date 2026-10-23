@@ -233,6 +233,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     return options.inventory.find((entry) => entry.sourceId === source && entry.kind === kind && new RegExp(entry.label, 'i').test(control.name))?.id;
   };
   const inScope = (control: PanelControl): boolean => control.rowKind !== '' && ['button', 'summary', 'a'].includes(control.tag);
+  /** A control the machine can press without leaving the throwaway install in a state it cannot restore, or starting a sign-in at a real provider. */
+  const drivable = (control: PanelControl): boolean => {
+    return options.inventory.some((entry) => entry.sourceLabel === control.rowName && entry.unreachable === undefined);
+  };
 
   const settle = async (): Promise<void> => {
     const until = now() + settleMs;
@@ -314,6 +318,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       queue.push({ path, ...(parentKind ? { parentKind } : {}) });
     };
     for (const control of base.filter(inScope)) {
+      // Only the source the machine can drive (its stand-in): another source's Connect would start a real sign-in at its provider.
+      if (!drivable(control)) continue;
       if (control.menuKey && control.tag !== 'summary') enqueue([`summary:${control.menuKey}`, control.key]);
       else enqueue([control.key]);
     }
@@ -328,6 +334,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       queue.sort((a, b) => orderKey(a) - orderKey(b));
       const item = queue.shift()!;
       const started = now();
+      try {
       if (dirty) {
         const again = await seed.apply().catch((error: unknown) => ({ ok: false, detail: String(error) }));
         if (!again.ok) { steps.push(failureStep(steps.length + 1, item.path, `the seed could not be applied again: ${again.detail}`)); failedHere += 1; break; }
@@ -372,9 +379,16 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       const settling = (async () => { for (let i = 0; i < 6; i++) { await sleep(250); pagesMax = Math.max(pagesMax, await driver.pages()); } })();
       await settle();
       await settling;
-      const afterControls = await panelControls(driver);
-      const afterText = await panelText(driver);
-      const afterOpen = await openDetails(driver);
+      // A press may leave the dashboard (a control that opens a page of its own): the panel is then gone, which is an outcome, not a crash.
+      let afterControls: PanelControl[] = [];
+      let afterText = '';
+      let afterOpen: Array<{ key: string; open: boolean }> = [];
+      let left = false;
+      try {
+        afterControls = await panelControls(driver);
+        afterText = await panelText(driver);
+        afterOpen = await openDetails(driver);
+      } catch { left = true; }
       const events = driver.drainEvents();
       const openedWindows = await windowsOpened();
       const at = await driver.where().catch(() => '');
@@ -390,14 +404,14 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       const outcomes: Outcome[] = [];
       if (!info) findings.push('the control could not be pressed');
       const parent = item.parentKind;
-      const expectation = (kind === 'confirm' && parent ? AFTER_CONFIRM[parent]?.({ ...context, parent }) : EXPECTATIONS[kind]?.(context));
+      const expectation = left ? undefined : (kind === 'confirm' && parent ? AFTER_CONFIRM[parent]?.({ ...context, parent }) : EXPECTATIONS[kind]?.(context));
       if (expectation) outcomes.push(expectation);
       // Something has to happen: the words, the controls, the address, a menu, a window or a request.
-      const changed = afterText !== beforeText || JSON.stringify(afterControls.map((c) => [c.key, c.visible, c.disabled])) !== JSON.stringify(controlsNow.map((c) => [c.key, c.visible, c.disabled]))
+      const changed = left || afterText !== beforeText || JSON.stringify(afterControls.map((c) => [c.key, c.visible, c.disabled])) !== JSON.stringify(controlsNow.map((c) => [c.key, c.visible, c.disabled]))
         || JSON.stringify(afterOpen) !== JSON.stringify(beforeOpen) || at !== '/dashboard' || openedWindows.length > 0 || pagesAfter !== pagesBefore || events.requests.length + events.console.length > 0;
       if (!changed) findings.push(`pressing "${control.name}" did nothing: nothing on the page changed`);
       // The rules about what is shown.
-      findings.push(...await pageFindings(driver, afterControls).catch(() => []));
+      if (!left) findings.push(...await pageFindings(driver, afterControls).catch(() => []));
       // Errors the page logged, except a refusal the product makes on purpose.
       const refusal = seed.id === 'failed' || kind === 'confirm' || kind === 'delete-data';
       const requests = events.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)) && !(refusal && REFUSAL_REQUESTS.some((rule) => rule.test(request.url))));
@@ -414,7 +428,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         n: steps.length + 1, name: `${control.rowName ? `${control.rowName}: ` : ''}${control.name || control.key}${item.path.length > 1 ? ` (after ${item.path.slice(0, -1).join(', ')})` : ''}`,
         action: `press ${control.tag} "${control.name}" [${control.key}] from the "${seed.id}" page`,
         expected: outcomes.length > 0 ? outcomes.map((outcome) => outcome.expected).join('; ') : 'something happens, and the generic rules hold',
-        actual: outcomes.length > 0 ? outcomes.map((outcome) => outcome.actual).join('; ') : (changed ? 'the page changed' : 'nothing changed'),
+        actual: left ? `the press left the dashboard for ${at || 'another page'}` : outcomes.length > 0 ? outcomes.map((outcome) => outcome.actual).join('; ') : (changed ? 'the page changed' : 'nothing changed'),
         ok, ms: now() - started, at: at.replace(/token=[^&#]*/g, 'token=…'),
         consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests: requests.map((request) => `${request.text} -> ${request.status || 'failed'}`), findings: [...new Set(findings)].slice(0, 10),
       };
@@ -431,6 +445,12 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       if ((seed.resetAfter ?? []).includes(kind) || kind === 'confirm') dirty = true;
       if (kind === 'confirm' && parent && lastKinds.has(parent)) destroyed = true;
+      } catch (error) {
+        // The page or the browser failed under a press: that press fails, with the reason, and the exploration goes on.
+        steps.push(failureStep(steps.length + 1, item.path, `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`));
+        failedHere += 1;
+        dirty = true;
+      }
     }
     traces.push({ id: `explore-${seed.id}`, title: `Pressing every control in the Sources section, from the ${seed.title} state`, source: 'bounded exploration (layer 3 of the release-testing design)', ok: steps.every((step) => step.ok), steps, ms: steps.reduce((sum, step) => sum + step.ms, 0) });
     seeds.push({ id: seed.id, title: seed.title, produced: true, detail: applied.detail, pressed: pressedHere, failed: failedHere });
@@ -442,7 +462,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     const found = foundIds.get(entry.id);
     const base = { id: entry.id, sourceLabel: entry.sourceLabel, kind: entry.kind, label: entry.label.replace(/^\^\(|\)\$$/g, '').replace(/\\/g, ''), destructive: entry.destructive, seeds: entry.seeds };
     if (found?.pressed) return { ...base, status: 'pressed' as const, detail: `pressed from: ${[...found.seeds].join(', ')}` };
-    if (entry.unreachable) return { ...base, status: 'missed' as const, detail: `unreachable on a throwaway machine: ${entry.unreachable}` };
+    if (entry.unreachable) return { ...base, status: 'missed' as const, detail: `${found ? 'found on the page, not pressed' : 'unreachable'} on a throwaway machine: ${entry.unreachable}` };
     if (found?.disabled) return { ...base, status: 'missed' as const, detail: 'found, but disabled in every state it showed (it says why; a disabled control is not pressed)' };
     if (found) return { ...base, status: 'missed' as const, detail: 'found but not pressed (the press bound was reached or its seed was not applied again)' };
     const needed = entry.seeds.filter((id) => seedFailures.has(id));

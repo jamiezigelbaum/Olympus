@@ -36,6 +36,10 @@ interface PanelState {
   bareProblem?: boolean;
   /** Pressing Sync now makes a text with undefined in it. */
   undefinedText?: boolean;
+  /** Also show Gmail's row, whose Connect would start a real sign-in. */
+  gmailRow?: boolean;
+  /** Connect leaves the dashboard for another page (the panel is gone). */
+  connectLeaves?: boolean;
 }
 
 /** A panel with one source, Readwise, that behaves the way the dashboard's does: a row, a ⋯ menu, a question before Disconnect. */
@@ -66,7 +70,8 @@ class PanelDriver implements JourneyDriver {
           <details class="menu" data-open-key="menu:readwise.library" ${s.menuOpen ? 'open' : ''}><summary data-key="summary:menu:readwise.library">⋯<span class="sr">More actions for Readwise</span></summary><div class="menu-panel"><span class="fix">${sync}</span>${disconnect}</div></details></li>`
       : `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">Not connected</p></div><div class="source-actions"><span class="fix"><button data-key="primary:readwise.library">Connect</button></span></div></li>`;
     const need = s.bareProblem ? '<ul><li class="row need"><div class="need-body"><p class="row-text">Readwise is stuck</p></div></li></ul>' : '';
-    this.panel.document.body.innerHTML = `<main><h2>Sources</h2>${need}<ul>${row}</ul></main>`;
+    const gmail = s.gmailRow ? '<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Gmail</span></p></div><div class="source-actions"><span class="fix"><button data-key="primary:gmail.email">Connect</button></span></div></li>' : '';
+    this.panel.document.body.innerHTML = `<main><h2>Sources</h2>${need}<ul>${row}${gmail}</ul></main>`;
     evalIn(this.panel, PROBE_SOURCE);
     this.host.document.body.innerHTML = '<iframe id="olympus-panel"></iframe>';
     evalIn(this.host, PROBE_SOURCE);
@@ -85,13 +90,18 @@ class PanelDriver implements JourneyDriver {
     on('menu:readwise.library:1:yes', () => { this.state.connected = false; this.state.confirming = false; });
     on('menu:readwise.library:1:no', () => { this.state.confirming = false; });
     on('primary:readwise.library', () => {
+      if (this.state.connectLeaves) { this.at = '/dashboard?connect'; this.gone = true; return; }
       if (this.state.connectOpens) this.opened.push(this.state.connectOpens);
     });
+    on('primary:gmail.email', () => { this.opened.push('https://accounts.google.com/o/oauth2'); });
   }
+  at = '/dashboard';
+  gone = false;
   /** What window.open was called with (the page-side recorder reads this through the stubbed __rcOpened). */
   readonly opened: string[] = [];
   async hasPanel(): Promise<boolean> { return true; }
   async probe(frame: 'host' | 'panel', call: string): Promise<unknown> {
+    if (frame === 'panel' && this.gone) throw new Error('the dashboard panel is not on the page');
     if (call.includes('openedWindows')) return frame === 'panel' ? [...this.opened] : [];
     if (call.includes('watchWindows')) return 0;
     return evalIn(frame === 'host' ? this.host : this.panel, call);
@@ -108,9 +118,9 @@ class PanelDriver implements JourneyDriver {
   async go(): Promise<void> { this.reset(); }
   async reload(): Promise<void> { this.reset(); }
   /** A fresh page: the server's state (connected or not) stays; the page's own (menu open, question asked, windows opened) starts over. */
-  private reset(): void { this.state.menuOpen = false; this.state.confirming = false; this.opened.length = 0; this.render(); }
+  private reset(): void { this.state.menuOpen = false; this.state.confirming = false; this.opened.length = 0; this.at = '/dashboard'; this.gone = false; this.render(); }
   async setViewport(): Promise<void> {}
-  async where(): Promise<string> { return '/dashboard'; }
+  async where(): Promise<string> { return this.at; }
   async pages(): Promise<number> { return this.pagesOpen; }
   async screenshot(): Promise<boolean> { return true; }
   drainEvents(): PageEvents { const out = this.events; this.events = { console: [], requests: [] }; return out; }
@@ -247,6 +257,36 @@ describe('exploring the Sources section', () => {
     const result = await explore({ driver, seeds: [failedSeed], inventory: inventory(), ...quick() });
     expect(exploreChecks(result).find((entry) => entry.id === 'explore.failed')).toMatchObject({ status: 'warn' });
     expect(result.coverage.find((entry) => entry.id === 'readwise.library:reconnect')?.detail).toContain('its seed could not be produced');
+  });
+
+  test('only the source the machine can drive is pressed; another source\'s Connect is found, counted, and left alone, with the reason', async () => {
+    const driver = new PanelDriver({ gmailRow: true });
+    const result = await explore({ driver, seeds: [disconnected(driver)], inventory: inventory(), ...quick() });
+    expect(driver.pressed).not.toContain('primary:gmail.email');
+    expect(driver.pressed).toContain('primary:readwise.library');
+    const gmail = result.coverage.find((entry) => entry.id === 'gmail.email:connect')!;
+    expect(gmail.status).toBe('missed');
+    expect(gmail.detail).toContain('found on the page, not pressed');
+    expect(result.summary.found).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a press that leaves the dashboard is an outcome, not a crash: it is recorded with where it went, and the exploration goes on', async () => {
+    const driver = new PanelDriver({ connectLeaves: true });
+    const result = await explore({ driver, seeds: [disconnected(driver), populated(driver)], inventory: inventory(), ...quick() });
+    const left = result.traces[0]!.steps.find((step) => /Connect/.test(step.name))!;
+    expect(left.actual).toContain('left the dashboard');
+    expect(left.ok).toBe(true);
+    expect(result.seeds.map((seed) => seed.produced)).toEqual([true, true]);
+  });
+
+  test('a failure while judging one press fails that press, with the reason, and the next press still runs', async () => {
+    const driver = new PanelDriver();
+    const original = driver.pages.bind(driver);
+    let calls = 0;
+    driver.pages = async () => { if (++calls === 1) throw new Error('the browser went away'); return original(); };
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    expect(result.traces[0]!.steps.some((step) => step.actual.includes('the press could not be judged'))).toBe(true);
+    expect(result.summary.presses).toBeGreaterThan(1);
   });
 
   test('the press bound stops the exploration and says so', async () => {
