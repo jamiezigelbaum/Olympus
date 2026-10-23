@@ -5,13 +5,13 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { EXPECTATIONS, exploreChecks, explore, type Seed } from '../scripts/release-check/explore.ts';
+import { EXPECTATIONS, exploreChecks, explore, auditAccessibility, type AxeViolation, type Seed } from '../scripts/release-check/explore.ts';
 import { buildInventory, setLiteral } from '../scripts/release-check/explore-inventory.ts';
 import { kindOf } from '../scripts/release-check/explore-kinds.ts';
 import type { ElementInfo, JourneyDriver, PageEvents } from '../scripts/release-check/journey.ts';
 import { describeBody } from '../scripts/release-check/journey-driver.ts';
 import { PROBE_SOURCE, type WireTarget } from '../scripts/release-check/probe.ts';
-import { exploreSection } from '../scripts/release-check/report.ts';
+import { exploreSection, accessibilitySection } from '../scripts/release-check/report.ts';
 
 function evalIn(window: Window, code: string): unknown {
   const globals = window as unknown as { __rc?: unknown };
@@ -67,6 +67,9 @@ class PanelDriver implements JourneyDriver {
   pagesOpen = 1;
   state: PanelState = { connected: true, menuOpen: false, confirming: false, line: 'Synced 5 min ago', connectOpens: 'https://olympusplugin.ai/open/connect' };
   readonly pressed: string[] = [];
+  /** What the accessibility checker finds in each frame (a stand-in for axe-core, which needs a real browser's layout), or an error it throws. */
+  axe: { host: AxeViolation[]; panel: AxeViolation[]; throwsIn?: 'host' | 'panel' } = { host: [], panel: [] };
+  injected: Array<'host' | 'panel'> = [];
   constructor(initial: Partial<PanelState> = {}) {
     Object.assign(this.state, initial);
     const place = function (this: any) {
@@ -125,6 +128,11 @@ class PanelDriver implements JourneyDriver {
     if (frame === 'panel' && this.gone) throw new Error('the dashboard panel is not on the page');
     if (this.stale > 0 && frame === 'panel' && call.includes('__rc.controls') && this.state.staleLogs) this.events.console.push('TypeError: engine restarting');
     if (this.stale > 0 && frame === 'panel' && call.includes('__rc.controls') && --this.stale === 0) { this.state.connected = false; this.render(); }
+    if (call.includes('typeof window.axe')) { this.injected.push(frame); return 'loaded'; }
+    if (call.includes('window.axe.run')) {
+      if (this.axe.throwsIn === frame) throw new Error('a page script failed: axe could not run');
+      return { version: '4.14.0', violations: this.axe[frame] };
+    }
     if (call.includes('openedWindows')) return frame === 'panel' ? [...this.opened] : [];
     if (call.includes('watchWindows')) return 0;
     return evalIn(frame === 'host' ? this.host : this.panel, call);
@@ -217,6 +225,50 @@ describe('exploring the Sources section', () => {
     expect(exploreChecks(result).find((check) => check.id === 'explore.coverage')?.status).toBe('warn');
     expect(exploreChecks(result).find((check) => check.id === 'explore.accessibility')?.status).toBe('skip');
     expect(exploreSection(result)).toContain('MISSED');
+  });
+
+  test('without the accessibility checker the audit is skipped and says why; with it, serious and critical violations fail and the rest are reported', async () => {
+    const violation = (impact: AxeViolation['impact'], rule: string): AxeViolation => ({ rule, impact, help: `${rule} help`, helpUrl: `https://dequeuniversity.com/rules/axe/4.14/${rule}`, nodeCount: 2, nodes: [{ target: 'li.source > button', html: '<button>x</button>', summary: 'Fix any of the following' }] });
+    const skipped = new PanelDriver();
+    const skippedResult = await explore({ driver: skipped, seeds: [populated(skipped)], inventory: inventory(), ...quick() });
+    expect(skippedResult.accessibility.status).toBe('skipped');
+    expect(skipped.injected).toEqual([]);
+
+    const clean = new PanelDriver();
+    clean.axe = { host: [], panel: [violation('moderate', 'region'), violation('minor', 'landmark-one-main')] };
+    const cleanResult = await explore({ driver: clean, seeds: [populated(clean), disconnected(clean)], inventory: inventory(), axeSource: '/* axe */', ...quick() });
+    // Each seeded state is audited in the host page and in the panel; the script is put in each frame before the run.
+    expect(cleanResult.accessibility.status === 'ran' && cleanResult.accessibility.states.map((entry) => `${entry.state}/${entry.frame}`)).toEqual(['populated/host', 'populated/panel', 'disconnected/host', 'disconnected/panel']);
+    expect(clean.injected).toEqual(['host', 'panel', 'host', 'panel']);
+    const cleanCheck = exploreChecks(cleanResult).find((check) => check.id === 'explore.accessibility')!;
+    expect(cleanCheck.status).toBe('pass');
+    expect(cleanCheck.detail).toContain('4 lesser violation(s)');
+
+    const bad = new PanelDriver();
+    bad.axe = { host: [], panel: [violation('serious', 'color-contrast')] };
+    const badResult = await explore({ driver: bad, seeds: [populated(bad)], inventory: inventory(), axeSource: '/* axe */', ...quick() });
+    const badCheck = exploreChecks(badResult).find((check) => check.id === 'explore.accessibility')!;
+    expect(badCheck.status).toBe('fail');
+    expect(badCheck.detail).toContain('color-contrast (serious, populated/panel): 2 element(s), e.g. li.source > button');
+    expect(exploreSection(badResult)).toContain('color-contrast');
+    // The accessibility audit does not disturb the presses: the seeded page and every control still pass their own checks.
+    expect(exploreChecks(badResult).find((check) => check.id === 'explore.populated')!.status).toBe('pass');
+
+    const critical = new PanelDriver();
+    critical.axe = { host: [violation('critical', 'button-name')], panel: [] };
+    expect(exploreChecks(await explore({ driver: critical, seeds: [populated(critical)], inventory: inventory(), axeSource: '/* axe */', ...quick() })).find((check) => check.id === 'explore.accessibility')!.status).toBe('fail');
+  });
+
+  test('a frame the checker cannot audit fails the audit (a page that was not checked is not a page that passed)', async () => {
+    const driver = new PanelDriver();
+    driver.axe = { host: [], panel: [], throwsIn: 'panel' };
+    const audited = await auditAccessibility(driver, '/* axe */', 'populated');
+    expect(audited.states.find((entry) => entry.frame === 'panel')?.error).toContain('axe could not run');
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), axeSource: '/* axe */', ...quick() });
+    const check = exploreChecks(result).find((entry) => entry.id === 'explore.accessibility')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('could not audit populated/panel');
+    expect(accessibilitySection(result.accessibility)).toContain('NOT AUDITED');
   });
 
   test('the menu opens, and an after-confirm outcome is checked: the row offers Connect again', async () => {

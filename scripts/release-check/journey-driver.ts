@@ -88,6 +88,12 @@ export class CdpJourneyDriver implements JourneyDriver {
       const known = this.requests.get(String(params?.requestId));
       if (known && /^https?:/.test(known.url)) this.events.requests.push({ url: known.url, status: 0, text: `${known.method} ${pathOf(known.url)}`, detail: `${String(params?.errorText ?? 'failed')} at ${new Date().toISOString()} after ${Date.now() - known.startedAt} ms${known.body ? `; ${known.body}` : ''}` });
     });
+    // A native dialog (alert, confirm, prompt, leave-the-page) would stop the page and every call to it. The product has none; one that opens is
+    // dismissed and recorded as an error, so the press that caused it fails with what it said.
+    cdp.on('Page.javascriptDialogOpening', (params) => {
+      this.events.console.push(`a browser dialog opened (${String(params?.type ?? 'dialog')}): ${String(params?.message ?? '').replace(/\s+/g, ' ').slice(0, 160)}`);
+      void cdp.send('Page.handleJavaScriptDialog', { accept: false }).catch(() => undefined);
+    });
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Network.enable');

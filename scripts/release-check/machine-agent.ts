@@ -37,6 +37,8 @@ import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
 import { explore, type Seed } from './explore.ts';
 import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
+import { explorePages } from './explore-pages.ts';
+import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 
 export { ISOLATED_BROWSER_FLAGS } from './browser.ts';
@@ -1352,7 +1354,8 @@ function readwiseSeeds(config: AgentConfig): Seed[] {
   ];
 }
 
-async function exploreCommand(outDir: string, inventoryPath: string): Promise<never> {
+async function exploreCommand(outDir: string, inventoryPath: string, pagesInventoryPath?: string): Promise<never> {
+  const startedAt = Date.now();
   const browser = findBrowser();
   if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
   rmSync(outDir, { recursive: true, force: true });
@@ -1383,7 +1386,14 @@ async function exploreCommand(outDir: string, inventoryPath: string): Promise<ne
     await driver.start();
     // The first opening link signs the browser in and Unlock opens the controls (the Private answers page offers it); the dashboard then opens in that session.
     await driver.open('private');
-    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: Date.now() + 48 * 60_000 });
+    // The accessibility checker's script, put on the machine by the orchestrator beside the inventory; without it the audit is skipped and says so.
+    const axePath = join(WORKDIR, 'axe.min.js');
+    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: startedAt + 45 * 60_000, ...(existsSync(axePath) ? { axeSource: readFileSync(axePath, 'utf8') } : {}) });
+    // The computer's other pages, in the same signed-in browser, after the Sources section (Lock ends the session, so it comes last).
+    if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
+      const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
+      result = { ...result, pages: await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 75 * 60_000 }) };
+    }
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
   } finally {
@@ -1609,7 +1619,7 @@ async function main(): Promise<void> {
     case 'screenshots': return await screenshots(flag('--out'));
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
     case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'));
-    case 'explore': return await exploreCommand(flag('--out'), flag('--inventory'));
+    case 'explore': return await exploreCommand(flag('--out'), flag('--inventory'), process.argv.includes('--pages-inventory') ? flag('--pages-inventory') : undefined);
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();

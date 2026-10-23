@@ -9,6 +9,7 @@ import type { Difference } from './upgrade.ts';
 import type { JourneyTrace } from './journey.ts';
 import type { VisualResult } from './visual.ts';
 import type { ExploreResult } from './explore.ts';
+import type { PagesResult } from './explore-pages.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -319,13 +320,32 @@ export function traceSections(traces: readonly JourneyTrace[] | undefined): stri
 }
 
 /** Coverage of the bounded exploration: what the source says the page can offer, what was found and pressed, and why each miss. */
+/** The other dashboard pages: per page what was found, pressed and validated, then the coverage against the templates. */
+export function pagesSection(pages: PagesResult | undefined): string {
+  if (!pages) return '';
+  const c = pages.coverage;
+  const list = pages.pages.map((page) => `<li>${escapeHtml(page.title)} <span class="muted">(${escapeHtml(page.path)})</span>: ${page.found} found, ${page.pressed} pressed, ${page.validated} link(s) to other sites validated, ${page.skipped} named and not pressed, ${page.failed} broke a rule or an outcome${page.error ? ` <strong>${escapeHtml(page.error)}</strong>` : ''}</li>`).join('');
+  const rows = c.entries.map((entry) => `<tr><td><span class="badge ${entry.status === 'pressed' ? 'pass' : 'warn'}">${entry.status.toUpperCase()}</span></td><td>${escapeHtml(entry.file.split('/').pop() ?? entry.file)}</td><td>${escapeHtml(entry.label)}</td><td class="muted">${escapeHtml(entry.detail)}</td></tr>`).join('');
+  return `<h3>Control exploration: the other dashboard pages</h3><p><strong>${c.listed}</strong> controls listed from the page templates (${c.unmatchable} more carry no fixed name); <strong>${c.found}</strong> found, <strong>${c.pressed}</strong> pressed, <strong>${c.missed}</strong> missed (${pages.presses} presses in all). Coverage is advisory; the rules are blocking.</p><ul>${list}</ul><table class="checks"><thead><tr><th></th><th>Template</th><th>Control</th><th>Pressed, or why not</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 export function exploreSection(explore: ExploreResult | undefined): string {
   if (!explore) return '';
   const s = explore.summary;
   const rows = explore.coverage.map((entry) => `<tr><td><span class="badge ${entry.status === 'pressed' ? 'pass' : 'warn'}">${entry.status === 'pressed' ? 'PRESSED' : 'MISSED'}</span></td><td>${escapeHtml(entry.sourceLabel)}</td><td>${escapeHtml(entry.label)}${entry.destructive ? ' <span class="muted">(destructive)</span>' : ''}</td><td>${escapeHtml(entry.kind)}</td><td class="muted">${escapeHtml(entry.detail)}</td></tr>`).join('');
   const seeds = explore.seeds.map((seed) => `<li>${escapeHtml(seed.title)}: ${seed.produced ? `${seed.pressed} pressed, ${seed.failed} broke a rule or an outcome <span class="muted">(${escapeHtml(seed.detail)})</span>` : `<strong>not produced</strong>: ${escapeHtml(seed.detail)}`}</li>`).join('');
   const unlisted = explore.unlisted.length > 0 ? `<p>Found on the page but not named by the source-derived list (${explore.unlisted.length}):</p><ul>${explore.unlisted.map((entry) => `<li>${escapeHtml(entry.rowName)}: ${escapeHtml(entry.label || entry.key)} <span class="muted">[${escapeHtml(entry.key)}]${entry.pressed ? '' : ' not pressed'}</span></li>`).join('')}</ul>` : '';
-  return `<h3>Control exploration: the Sources section</h3><p><strong>${s.listed}</strong> controls listed from the product's source; <strong>${s.found}</strong> found on the page, <strong>${s.pressed}</strong> pressed, <strong>${s.missed}</strong> missed (${s.presses} presses in all). Coverage is advisory; the rules are blocking.</p><ul>${seeds}</ul><table class="checks"><thead><tr><th></th><th>Source</th><th>Control</th><th>Kind</th><th>Pressed, or why not</th></tr></thead><tbody>${rows}</tbody></table>${unlisted}<p class="muted">Accessibility audit: ${escapeHtml(explore.accessibility.reason)}</p>`;
+  return `<h3>Control exploration: the Sources section</h3><p><strong>${s.listed}</strong> controls listed from the product's source; <strong>${s.found}</strong> found on the page, <strong>${s.pressed}</strong> pressed, <strong>${s.missed}</strong> missed (${s.presses} presses in all). Coverage is advisory; the rules are blocking.</p><ul>${seeds}</ul><table class="checks"><thead><tr><th></th><th>Source</th><th>Control</th><th>Kind</th><th>Pressed, or why not</th></tr></thead><tbody>${rows}</tbody></table>${unlisted}${accessibilitySection(explore.accessibility)}${pagesSection(explore.pages)}`;
+}
+
+/** The accessibility audit: each violation, where it was, and the elements it names. */
+export function accessibilitySection(accessibility: ExploreResult['accessibility']): string {
+  if (accessibility.status === 'skipped') return `<p class="muted">Accessibility audit: ${escapeHtml(accessibility.reason)}</p>`;
+  const rows = accessibility.states.flatMap((entry) => (entry.error
+    ? [`<tr><td><span class="badge fail">NOT AUDITED</span></td><td>${escapeHtml(entry.state)} / ${escapeHtml(entry.frame)}</td><td colspan="3">${escapeHtml(entry.error)}</td></tr>`]
+    : entry.violations.map((violation) => `<tr><td><span class="badge ${violation.impact === 'serious' || violation.impact === 'critical' ? 'fail' : 'warn'}">${escapeHtml(violation.impact.toUpperCase())}</span></td><td>${escapeHtml(entry.state)} / ${escapeHtml(entry.frame)}</td><td><a href="${escapeHtml(violation.helpUrl)}">${escapeHtml(violation.rule)}</a>: ${escapeHtml(violation.help)}</td><td>${violation.nodeCount}</td><td class="muted">${violation.nodes.map((node) => `<code>${escapeHtml(node.target)}</code> ${escapeHtml(node.html)}${node.summary ? ` — ${escapeHtml(node.summary)}` : ''}`).join('<br>')}</td></tr>`)));
+  return `<h4>Accessibility audit (axe-core ${escapeHtml(accessibility.version)})</h4><p class="muted">${accessibility.states.length} page state(s) audited; serious and critical violations block, the rest are reported.</p>`
+    + (rows.length > 0 ? `<table class="checks"><thead><tr><th>Impact</th><th>Page state / frame</th><th>Rule</th><th>Elements</th><th>First elements</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p>No violations.</p>');
 }
 
 /** The screens against their approved pictures: the approved one, this run's, and what differs. */
