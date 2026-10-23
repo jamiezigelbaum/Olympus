@@ -1276,6 +1276,7 @@ var init_public_surface = __esm(() => {
     "source_watch_cancel",
     "olympus_doctor",
     "ask_anonymously",
+    "archive_import",
     "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
@@ -1287,7 +1288,8 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "archive_import"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -1297,7 +1299,8 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "archive_import"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
@@ -32812,6 +32815,9 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
+    removeRequestLineNoWhere: "An agent asked to remove {name}.",
+    removeRequestNote: "Removing deletes everything Olympus made from it. The file itself stays where it is.",
     approve: "Import",
     decline: "Decline",
     checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
@@ -32840,6 +32846,7 @@ var init_vocabulary = __esm(() => {
     needsYou: {
       stopped: "An import stopped: {name}",
       request: "An agent asked to import {name}",
+      removal: "An agent asked to remove {name}",
       failed: "An import did not start: {name}",
       counts: "Olympus can't count the messages in {name}",
       scheduler: {
@@ -35729,7 +35736,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const A = H.copy.archives;
     const meta = state.computerMeta && state.computerMeta.archives;
     if (name === H.archiveRemoveTool) {
-      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry) => entry && entry.id === (args && args.archive_id))[0] : null;
+      const asked = args && args.request_id && meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === args.request_id)[0] : null;
+      const target = asked ? asked.archiveId : args && args.archive_id;
+      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry) => entry && entry.id === target)[0] : null;
       return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
     }
     if (name === H.archiveDeclineTool) {
@@ -35777,6 +35786,19 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       item.className += " landed";
     const key2 = "archive-request:" + request2.id;
     const where = typeof request2.where === "string" ? request2.where : "";
+    if (request2.kind === "remove") {
+      item.setAttribute("data-request", "remove");
+      add(item, el("p", "", where ? fill2(A.removeRequestLine, { name: request2.name, where }) : fill2(A.removeRequestLineNoWhere, { name: request2.name })));
+      add(item, el("p", "muted", A.removeRequestNote));
+      add(item, add(el("div", "archive-actions"), fixControl({
+        label: A.remove,
+        tool: H.archiveRemoveTool,
+        args: { request_id: request2.id },
+        destructive: true,
+        confirmText: fill2(A.removeConfirm, { name: request2.name })
+      }, key2 + ":remove", "plain", true), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
+      return item;
+    }
     if (request2.status === "pending") {
       add(item, el("p", "", fill2(A.requestLine, { name: request2.name, where })));
       add(item, add(el("div", "archive-actions"), fixControl({ label: A.approve, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":approve", "plain", false), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
@@ -44793,6 +44815,34 @@ init_store2();
 
 // src/workers/archive-import/dashboard.ts
 init_archive_formats();
+
+// src/workers/archive-import/agent.ts
+init_open_targets();
+init_vocabulary();
+var ARCHIVE_AGENT_COPY = {
+  invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
+  tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
+  archivesUnreadable: "Olympus cannot read its list of imported archives right now, so it cannot tell what is imported. Nothing was deleted. Ask the person to open Archives on their computer's dashboard and choose See why.",
+  requestsUnreadable: "Olympus cannot read its list of imports waiting for an answer right now, so it did not record the request. Ask the person to open Archives on their computer's dashboard and choose See why.",
+  unknownArchive: "No archive with that id is imported. Call archive_import with status to list them.",
+  needsApproval: "Olympus imports a file only after the person approves it, and has not opened {name}. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Import on the request for {name}. Do not open, copy or read the file yourself, and do not ask again: call archive_import with status to see when it has been approved.",
+  needsRemovalApproval: "Olympus removes an imported archive only after the person approves it. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Remove on the request for {name}. Removing deletes everything Olympus made from it; the file itself stays where it is. Do not ask again: call archive_import with status to see when it is gone.",
+  checking: "The person approved {name} and Olympus is checking whether it is already imported. Call archive_import with status to see the result.",
+  alreadyImported: "{name} is already imported, so Olympus did not import it again. Call archive_import with status for its state.",
+  removing: "{name} is already being removed. Call archive_import with status to see when it is gone.",
+  heldNote: {
+    ready: DASHBOARD_ARCHIVE_COPY.heldWhy.ready,
+    waiting: DASHBOARD_ARCHIVE_COPY.heldWhy.waiting,
+    off: DASHBOARD_ARCHIVE_COPY.heldWhy.off
+  },
+  request: {
+    importWaiting: "Waiting for the person to choose Import or Decline on the dashboard.",
+    removeWaiting: "Waiting for the person to choose Remove or Decline on the dashboard.",
+    checking: "Olympus is checking whether this is already imported.",
+    already: "It is already imported.",
+    failed: "It was not imported: {reason}"
+  }
+};
 
 // src/workers/archive-import/removal.ts
 init_sniffer_store();
