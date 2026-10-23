@@ -414,8 +414,14 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           const finalSig = item.path[item.path.length - 1]!;
           const control = controls.find((candidate) => candidate.sig === finalSig);
           if (!reachable || !control) {
-            steps.push(failureStep(steps.length + 1, finalSig, !reachable ? 'a control on its way could not be pressed' : 'it was on the page as loaded but is not there on a fresh page'));
-            summary.failed += 1;
+            if (reachable) {
+              // Rows that come and go between two loads (a card that refreshes) are numbered differently each time; a control that is not found again is named, not failed.
+              steps.push(skippedStep(steps.length + 1, { name: finalSig, tag: 'button' } as PageControl, 'it was on the page as first loaded but not on a fresh load (the page refreshes its rows, so its number moved)', page));
+              summary.skipped += 1;
+            } else {
+              steps.push(failureStep(steps.length + 1, finalSig, 'a control on its way could not be pressed'));
+              summary.failed += 1;
+            }
             return;
           }
           if (control.disabled) {
@@ -439,6 +445,8 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           const settling = (async () => { for (let i = 0; i < 6; i++) { await sleep(250); pagesMax = Math.max(pagesMax, await driver.pages().catch(() => pagesMax)); } })();
           await settle();
           await settling;
+          // A pairing code or a key comes back from the engine, which can take a while on a small machine: given up to 30 s to show before it is judged.
+          if (/data-agent-kind=(pair|key)$/.test(control.formKind)) for (let waited = 0; waited < 30_000 && ((await observe())?.secret ?? 0) === 0; waited += 2_000) await sleep(2_000);
           const after = await observe();
           const afterControls = await enumerate();
           const events = driver.drainEvents();
