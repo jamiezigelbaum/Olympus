@@ -93,6 +93,17 @@ describe('Files on this computer', () => {
     expect(engine.local.items).toBe(0);
   });
 
+  test('a state told to stop stops at its next call or wait, before it changes anything more', async () => {
+    const engine = new FakeEngine();
+    const controller = new AbortController();
+    const call = engine.ctx.call;
+    // Stopped while the folder is being indexed: the failed state must not go on to move the folder away.
+    engine.ctx.call = async (method, path, body) => { const reply = await call(method, path, body); if (path === '/dashboard/sync-now') controller.abort(); return reply; };
+    await expect(localFilesDriver(engine.ctx).states.failed!(controller.signal)).rejects.toThrow('stopped');
+    expect(engine.local.missing).toBe(false);
+    expect(existsSync(join(engine.home, LOCAL_FILES_FOLDER))).toBe(true);
+  });
+
   test('a picker that does not list the folder fails the state and says so', async () => {
     const engine = new FakeEngine();
     engine.local.refuseList = true;
