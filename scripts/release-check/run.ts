@@ -66,6 +66,7 @@ import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { buildInventory } from './explore-inventory.ts';
+import { buildPageInventory } from './explore-pages-inventory.ts';
 import { exploreChecks, type ExploreResult } from './explore.ts';
 import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type VisualResult } from './visual.ts';
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
@@ -883,7 +884,10 @@ async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   const inventoryPath = join(scratch, 'inventory.json');
   writeFileSync(inventoryPath, JSON.stringify(inventory));
   await run.machine!.put(inventoryPath, '~/rc/explore-inventory.json');
-  const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json', 2_400_000));
+  const pagesInventoryPath = join(scratch, 'pages-inventory.json');
+  writeFileSync(pagesInventoryPath, JSON.stringify(buildPageInventory()));
+  await run.machine!.put(pagesInventoryPath, '~/rc/explore-pages-inventory.json');
+  const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json --pages-inventory ~/rc/explore-pages-inventory.json', 3_000_000));
   const result = done.result;
   if (!result || result.result === undefined) {
     run.add({ id: 'explore.ran', title: 'Every control of the Sources section was pressed', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
@@ -903,7 +907,7 @@ async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   if (result.result === null) return;
   const explored = result.result as ExploreResult;
   run.stage.explore = explored;
-  (run.stage.traces ??= []).push(...explored.traces);
+  (run.stage.traces ??= []).push(...explored.traces, ...(explored.pages?.traces ?? []));
   for (const check of exploreChecks(explored)) run.add(check);
 }
 

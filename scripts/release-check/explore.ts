@@ -21,6 +21,7 @@ import { kindOf, type ControlKind, type SeedId } from './explore-kinds.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
+import { pagesChecks, type PagesResult } from './explore-pages.ts';
 
 export interface PanelControl {
   key: string;
@@ -88,6 +89,8 @@ export interface ExploreResult {
   summary: { listed: number; found: number; pressed: number; missed: number; unlisted: number; presses: number };
   /** Why there is no accessibility audit, or its result. */
   accessibility: { status: 'skipped'; reason: string };
+  /** The other dashboard pages (explore-pages.ts), when the machine crawled them. */
+  pages?: PagesResult;
 }
 
 const ALWAYS_ALLOWED_REQUESTS: RegExp[] = [/\/favicon\.ico(\?|$)/];
@@ -556,5 +559,6 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
     detail: `${s.listed} controls listed from the source; ${s.found} found on the page, ${s.pressed} pressed, ${s.missed} missed (reasons in the report); ${s.unlisted} found that the list does not name`,
   });
   checks.push({ id: 'explore.accessibility', title: 'Accessibility audit of the Sources section', status: 'skip', detail: result.accessibility.reason });
+  if (result.pages) checks.push(...pagesChecks(result.pages));
   return checks;
 }
