@@ -630,6 +630,19 @@ describe('sub-line grammar', () => {
       connection: { state: 'needs_setup', label: 'not connected' },
     }))).toBe('Disconnected · indexed data kept');
   });
+
+  // PR #455 review: only a clean disconnect reads calm. Custody that is not
+  // settled keeps its own warning and stays Needs you.
+  test('an unreadable registry or an unfinished unpair keeps its warning over kept data', () => {
+    for (const label of ['connection state unreadable', 'unpair state unreadable', 'Unpair incomplete — manual cleanup required']) {
+      const source = card({ configured: false, connection: { state: 'not_connected', label } });
+      expect(dashboardStatus({ source })).toBe('Needs you');
+      expect(dashboardAttentionLine(source)).toBe(label);
+      expect(dashboardSubLine(source)).not.toBe('Disconnected · indexed data kept');
+    }
+    const clean = card({ configured: false, connection: { state: 'not_connected', label: 'not connected' } });
+    expect(dashboardStatus({ source: clean })).toBe('Off');
+  });
 });
 
 describe('attention lines', () => {

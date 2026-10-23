@@ -73494,6 +73494,9 @@ function dashboardStatusResolution(input) {
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
   const queueStatus = DASHBOARD_QUEUE_HEALTH_STATUS[source.queue_health.label];
   if (connectionStatus === "Needs you" || connectionStatus === "Off") {
+    if (connectionStatus === "Off" && dashboardUnsettledWithData(source)) {
+      return { status: "Needs you", mappedUnknown: false };
+    }
     return { status: connectionStatus, mappedUnknown: false };
   }
   if (readinessStatus === "Needs you" || queueStatus === "Needs you") {
@@ -73523,7 +73526,7 @@ function dashboardStatus(input) {
 function dashboardIsConnectedSource(source) {
   if (!DASHBOARD_UNCONNECTED_STATES.has(source.connection.state))
     return true;
-  return source.connection.provider_refusal !== undefined;
+  return source.connection.provider_refusal !== undefined || dashboardUnsettledWithData(source);
 }
 function dashboardSubLine(source, options) {
   const status = dashboardStatus({ source, ...degradedInput(options?.degradedCredentials) });
@@ -73538,11 +73541,14 @@ function dashboardSubLine(source, options) {
     case "Fresh":
       return freshLine(source, options?.now ?? new Date);
     case "Off":
-      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
+      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
   }
 }
 function dashboardIsUnconnectedState(source) {
   return DASHBOARD_UNCONNECTED_STATES.has(source.connection.state);
+}
+function dashboardUnsettledWithData(source) {
+  return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
 }
 function dashboardAttentionLine(source, options) {
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
@@ -75875,7 +75881,10 @@ __export(exports_source_dashboard, {
   buildSourceDashboardViewModel: () => buildSourceDashboardViewModel,
   SqliteSourceDashboardHistory: () => SqliteSourceDashboardHistory,
   PUBLISHER_ADVANCED_BYO_SUMMARY: () => PUBLISHER_ADVANCED_BYO_SUMMARY,
+  DASHBOARD_UNSETTLED_CUSTODY_LABELS: () => DASHBOARD_UNSETTLED_CUSTODY_LABELS,
   DASHBOARD_UNREADABLE_ALARM_SHARE: () => DASHBOARD_UNREADABLE_ALARM_SHARE,
+  DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL: () => DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
+  DASHBOARD_UNPAIR_INCOMPLETE_LABEL: () => DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
   DASHBOARD_SUPPORTED_SOURCES: () => DASHBOARD_SUPPORTED_SOURCES,
   DASHBOARD_SENSITIVITY_TIERS: () => DASHBOARD_SENSITIVITY_TIERS,
   DASHBOARD_SAVED_SECRET_FIELD_VALUE: () => DASHBOARD_SAVED_SECRET_FIELD_VALUE,
@@ -75883,7 +75892,8 @@ __export(exports_source_dashboard, {
   DASHBOARD_NEEDS_REVIEW_REASONS: () => DASHBOARD_NEEDS_REVIEW_REASONS,
   DASHBOARD_MANUAL_SYNC_SHOWN_MS: () => DASHBOARD_MANUAL_SYNC_SHOWN_MS,
   DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS: () => DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS,
-  DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL: () => DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL
+  DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL: () => DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
+  DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL: () => DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL
 });
 import { mkdirSync as mkdirSync32 } from "node:fs";
 import { homedir as homedir44 } from "node:os";
@@ -76962,7 +76972,7 @@ function connectionStateFromDefinition(definition, registry, credentialHealth, c
   const connectedAtMs = activeHandles.map((handle) => Date.parse(handle.connectedAt)).filter((value2) => Number.isFinite(value2) && value2 <= now.getTime());
   const connectedAt = connectedAtMs.length > 0 ? { connected_at: new Date(Math.max(...connectedAtMs)).toISOString() } : {};
   if (unpaired !== undefined) {
-    const label = unpaired.state === "unpair_state_unreadable" ? "unpair state unreadable" : unpaired.state === "unpair_incomplete" ? "Unpair incomplete — manual cleanup required" : "unpaired";
+    const label = unpaired.state === "unpair_state_unreadable" ? DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL : unpaired.state === "unpair_incomplete" ? DASHBOARD_UNPAIR_INCOMPLETE_LABEL : "unpaired";
     return {
       state: "not_connected",
       label,
@@ -76987,7 +76997,7 @@ function connectionStateFromDefinition(definition, registry, credentialHealth, c
   if (reauthRequired) {
     return { state: "reauth_required", label: "reauth required", action, handles: handleIds };
   }
-  const notConnectedLabel = registryUnreadable ? "connection state unreadable" : "not connected";
+  const notConnectedLabel = registryUnreadable ? DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL : "not connected";
   if (!connected2 && !reauthRequired && action.kind === "needs_setup") {
     return {
       state: "needs_setup",
@@ -77951,7 +77961,7 @@ function titleCase(value2) {
 function round12(value2) {
   return Math.round(value2 * 10) / 10;
 }
-var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -77970,6 +77980,11 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
+    DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_INCOMPLETE_LABEL
+  ]);
   DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
     "credential_refresh_busy",
     "credential_session_latched"
@@ -145251,7 +145266,7 @@ function dashboardHonestStatus(status, progress) {
   return "Working";
 }
 function dashboardCredentialProblem(card, degraded) {
-  return card.connection.provider_refusal !== undefined || dashboardDegradationForSource(card, degraded) !== undefined || card.connection.state === "reauth_required";
+  return card.connection.provider_refusal !== undefined || dashboardDegradationForSource(card, degraded) !== undefined || card.connection.state === "reauth_required" || dashboardUnsettledWithData(card);
 }
 function dashboardRefusedFirstConnect(card) {
   return card.connection.provider_refusal !== undefined && (card.connection.state === "not_connected" || card.connection.state === "needs_setup") && card.coverage.indexed_items === 0;
@@ -164425,6 +164440,7 @@ async function main() {
     return "ready";
   };
   let requestModelReload = () => false;
+  let modelReloadInstalled = false;
   let modelReloadUnavailable = false;
   const modelSetup = new ModelSetupService({
     config: sovereigntyEngine.config,
@@ -166210,7 +166226,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         },
         stopMessagingCapture,
         workerRestart: {
-          canRestart: () => workerRestartsItself(workerLaunch, process.env),
+          canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
           request: () => requestModelReload()
         },
         corpusRegistry: sourceCorpusRegistry2,
@@ -167073,6 +167089,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     exit: (code) => process.exit(code)
   });
+  modelReloadInstalled = true;
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog("Dropbox connector-store storage", dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog("WhatsApp connector-store storage", whatsappConnectorStoreLane));

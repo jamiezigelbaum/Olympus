@@ -2181,6 +2181,10 @@ export async function main(): Promise<void> {
     return 'ready';
   };
   let requestModelReload: () => boolean = () => false;
+  // Set once the real reload is installed (after startup): until then a
+  // request is a no-op, so Delete indexed data must refuse rather than leave
+  // open handles serving deleted rows (PR #455 review).
+  let modelReloadInstalled = false;
   let modelReloadUnavailable = false;
   const modelSetup = new ModelSetupService({
     config: sovereigntyEngine.config,
@@ -4845,7 +4849,7 @@ export async function main(): Promise<void> {
             // change uses. `canRestart` has no side effect, so the route can
             // check it before deleting anything.
             workerRestart: {
-              canRestart: () => workerRestartsItself(workerLaunch, process.env),
+              canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
               request: () => requestModelReload(),
             },
             corpusRegistry: sourceCorpusRegistry,
@@ -5926,6 +5930,7 @@ export async function main(): Promise<void> {
     drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
+  modelReloadInstalled = true;
 
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));

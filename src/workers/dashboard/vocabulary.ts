@@ -14,7 +14,7 @@ import type {
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
 import type { DashboardSyncName } from '../source-dashboard.ts';
-import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL } from '../source-dashboard.ts';
+import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
@@ -214,7 +214,12 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
     // owner disconnected it and its data was kept (owner ruling, 2026-10-23).
     // It stays Off, worded "Disconnected · indexed data kept"; a grant that
     // is still present but expired or revoked reads reauth_required (Needs
-    // you), a degradation or a provider refusal, all decided above.
+    // you), a degradation or a provider refusal, all decided above. Custody
+    // that is not settled (registry or unpair record unreadable, an unpair
+    // that left files) keeps its warning: Needs you, with its own label.
+    if (connectionStatus === 'Off' && dashboardUnsettledWithData(source)) {
+      return { status: 'Needs you', mappedUnknown: false };
+    }
     return { status: connectionStatus, mappedUnknown: false };
   }
   if (readinessStatus === 'Needs you' || queueStatus === 'Needs you') {
@@ -290,7 +295,7 @@ export function dashboardIsConnectedSource(source: DashboardSourceCard): boolean
   // is exactly the report home exists to carry, and dropping the card because
   // the attempt never produced a handle would hide the failure on the page the
   // owner is looking at.
-  return source.connection.provider_refusal !== undefined;
+  return source.connection.provider_refusal !== undefined || dashboardUnsettledWithData(source);
 }
 
 /** Cards bucketed by status, in DASHBOARD_STATUS_ORDER, empty groups dropped. */
@@ -376,6 +381,7 @@ export function dashboardSubLine(
       // Not connected with indexed data left: disconnected on purpose, data
       // kept (owner ruling, 2026-10-23), not a lost sign-in.
       return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source)
+        && !dashboardUnsettledWithData(source)
         ? DASHBOARD_DISCONNECTED_DATA_KEPT
         : source.connection.label;
   }
@@ -383,6 +389,13 @@ export function dashboardSubLine(
 
 function dashboardIsUnconnectedState(source: DashboardSourceCard): boolean {
   return DASHBOARD_UNCONNECTED_STATES.has(source.connection.state);
+}
+
+/** Unconnected with indexed data, but custody is not settled (see DASHBOARD_UNSETTLED_CUSTODY_LABELS). */
+export function dashboardUnsettledWithData(source: DashboardSourceCard): boolean {
+  return source.coverage.indexed_items > 0
+    && dashboardIsUnconnectedState(source)
+    && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
 }
 
 /**
