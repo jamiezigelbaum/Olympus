@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  chmodSync, fstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, renameSync, linkSync,
+  appendFileSync, chmodSync, fstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, renameSync, linkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ScopeRoot, ScopeSafeError, resetScopeSafeNativeForTests, scopeSafeFsAvailable, scopeSafeNativeForTests,
+  SCOPE_FILE_MAX_RANGE_BYTES, ScopeRoot, ScopeSafeError, resetScopeSafeNativeForTests, scopeSafeFsAvailable, scopeSafeNativeForTests,
 } from '../src/core/scope-safe-fs.ts';
 
 const cleanups: Array<() => void> = [];
@@ -154,6 +154,100 @@ describe('scope-safe reader', () => {
       expect(devCode === 'escape' || devCode === 'none').toBe(true);
       // On every supported platform /dev is its own filesystem.
       expect(devCode).toBe('escape');
+    } finally {
+      scope.close();
+    }
+  });
+});
+
+describe('bounded range reads', () => {
+  test('reads ranges of the opened version, clamped at its end', () => {
+    const { root } = tree();
+    writeFileSync(join(root, 'big.txt'), '0123456789');
+    const scope = ScopeRoot.open(root);
+    const reader = scope.openFile('big.txt');
+    try {
+      expect(reader.size).toBe(10);
+      expect(Buffer.from(reader.readAt(0, 4)).toString()).toBe('0123');
+      expect(Buffer.from(reader.readAt(8, 100)).toString()).toBe('89');
+      expect(reader.readAt(10, 5).length).toBe(0);
+      expect(codeOf(() => reader.readAt(-1, 1))).toBe('io');
+      expect(codeOf(() => reader.readAt(0, SCOPE_FILE_MAX_RANGE_BYTES + 1))).toBe('too_large');
+    } finally {
+      reader.close();
+      scope.close();
+    }
+  });
+
+  test('a link at the name or on the way is refused', () => {
+    const { root, outside } = tree();
+    symlinkSync(join(outside, 'secret.txt'), join(root, 'link.txt'));
+    symlinkSync(outside, join(root, 'linked-dir'));
+    const scope = ScopeRoot.open(root);
+    try {
+      expect(codeOf(() => scope.openFile('link.txt'))).toBe('escape');
+      expect(codeOf(() => scope.openFile('linked-dir/secret.txt'))).toBe('escape');
+      expect(codeOf(() => scope.openFile('sub'))).toBe('not_regular');
+    } finally {
+      scope.close();
+    }
+  });
+
+  test('a replaced file is changed, and so is one that grew while open', () => {
+    const { root } = tree();
+    const scope = ScopeRoot.open(root);
+    try {
+      const first = scope.openFile('a.txt');
+      const seen = first.version;
+      first.close();
+      writeFileSync(join(root, 'a.new'), 'replacement');
+      renameSync(join(root, 'a.new'), join(root, 'a.txt'));
+      expect(codeOf(() => scope.openFile('a.txt', { expected: seen }))).toBe('changed');
+      expect(codeOf(() => scope.openFile('a.txt', { expected: { dev: seen.dev, ino: seen.ino } }))).toBe('changed');
+
+      const reader = scope.openFile('sub/b.txt');
+      try {
+        expect(Buffer.from(reader.readAt(0, 5)).toString()).toBe('bravo');
+        appendFileSync(join(root, 'sub', 'b.txt'), ' and more');
+        expect(codeOf(() => reader.readAt(0, 5))).toBe('changed');
+      } finally {
+        reader.close();
+      }
+      // The same file at a different size than the version seen is changed too.
+      const now = scope.openFile('sub/b.txt');
+      const version = now.version;
+      now.close();
+      expect(codeOf(() => scope.openFile('sub/b.txt', { expected: { ...version, size: version.size - 1 } }))).toBe('changed');
+    } finally {
+      scope.close();
+    }
+  });
+
+  test('a file replaced or removed at its name is no longer current, though its descriptor is unchanged', () => {
+    const { root } = tree();
+    const scope = ScopeRoot.open(root);
+    try {
+      const reader = scope.openFile('a.txt');
+      try {
+        reader.assertCurrent();
+        writeFileSync(join(root, 'a.new'), 'replacement');
+        renameSync(join(root, 'a.new'), join(root, 'a.txt'));
+        reader.assertUnchanged();
+        expect(codeOf(() => reader.assertCurrent())).toBe('changed');
+        rmSync(join(root, 'a.txt'));
+        expect(codeOf(() => reader.assertCurrent())).toBe('not_found');
+      } finally {
+        reader.close();
+      }
+    } finally {
+      scope.close();
+    }
+  });
+
+  test('crossing a mount point is refused', () => {
+    const scope = ScopeRoot.open('/');
+    try {
+      expect(codeOf(() => scope.openFile('dev/null'))).toBe('escape');
     } finally {
       scope.close();
     }

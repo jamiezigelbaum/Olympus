@@ -18559,6 +18559,47 @@ var init_store_sync2 = __esm(() => {
   });
 });
 
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_archive_formats();
+  init_linux_engine_layout();
+  init_source_corpus_registry();
+  init_connector_store();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
 // src/workers/source-ingestion-ledger.ts
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
@@ -19086,6 +19127,8 @@ var init_source_ingestion_ledger = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   init_store();
+  init_archive_formats();
+  init_store2();
   SOURCE_DEFINITIONS = {
     email: {
       label: "Email",

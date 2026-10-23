@@ -15063,6 +15063,44 @@ class TierLedger {
     `).get(setId, connectorId);
     return row ? { cursor: row.cursor, committedAt: row.committed_at } : undefined;
   }
+  deleteSetCursor(setId, connectorId) {
+    return this.db.query("DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?").run(setId, connectorId).changes > 0;
+  }
+  accountScopeCounts(provider, accountScope) {
+    const row = this.db.query(`
+      SELECT COUNT(*) AS items,
+        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+      FROM tier_items WHERE provider = ? AND account_scope = ?
+    `).get(provider, accountScope);
+    return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+  withdrawAccountScope(provider, accountScope) {
+    return this.db.transaction(() => {
+      const now = this.now().toISOString();
+      const copies = this.db.query(`
+        UPDATE tier_copies
+        SET copy_state = 'superseded',
+          superseded_by_generation = COALESCE(superseded_by_generation, generation + 1),
+          updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND copy_state <> 'superseded'
+      `).run(now, provider, accountScope).changes;
+      const items = this.db.query("DELETE FROM tier_items WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+      for (const table of [
+        "tier_history",
+        "tier_overrides",
+        "tier_migration_proposals",
+        "secret_side_store_debt",
+        "secret_side_store_scrubs",
+        "secret_redaction_retirement"
+      ]) {
+        this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
+      }
+      return { items, copies };
+    })();
+  }
+  deleteAccountScopeCopies(provider, accountScope) {
+    return this.db.query("DELETE FROM tier_copies WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+  }
   insertCopies(identity, plan, state, generation, now) {
     const insert = this.db.query(`
       INSERT INTO tier_copies (
@@ -17137,6 +17175,9 @@ class SecretLocationsIndex {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
   }
+  removeAccountScope(provider, accountScope) {
+    return this.db.query("DELETE FROM secret_locations WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+  }
   get(identity) {
     const row = this.db.query(`
       SELECT * FROM secret_locations
@@ -17664,6 +17705,9 @@ class TierSnifferStore {
       DELETE FROM sniffer_questions
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(...subjectParams(subject)).changes;
+  }
+  deleteAccountScopeQuestions(provider, accountScope) {
+    return this.db.query("DELETE FROM sniffer_questions WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
   }
   rekey(subject, pass, mapRevision) {
     this.db.query(`
@@ -23511,6 +23555,42 @@ var init_local_index = __esm(() => {
           by_prefix: exclusionCounts(tally).by_prefix
         };
       })();
+    }
+    purgeAccountScope(options) {
+      try {
+        return this.db.transaction(() => {
+          const limit = Math.max(1, Math.min(options.limit ?? 2000, 50000));
+          const doomed = this.db.query(`
+          SELECT item_pk FROM items WHERE provider = ? AND account_scope = ? ORDER BY item_pk LIMIT ?
+        `).all(options.provider, options.accountScope, limit).map((row) => row.item_pk);
+          const chunks = this.countRowsForItems("chunks", doomed);
+          for (const itemPk of doomed)
+            this.deleteFtsForItem(itemPk);
+          for (const batch of batched(doomed, 400)) {
+            const placeholders = batch.map(() => "?").join(", ");
+            this.db.query(`DELETE FROM chunk_embeddings WHERE item_pk IN (${placeholders})`).run(...batch);
+            this.db.query(`DELETE FROM chunks WHERE item_pk IN (${placeholders})`).run(...batch);
+            this.db.query(`DELETE FROM item_owners WHERE item_pk IN (${placeholders})`).run(...batch);
+            this.db.query(`DELETE FROM items WHERE item_pk IN (${placeholders})`).run(...batch);
+          }
+          const remaining = this.db.query("SELECT COUNT(*) AS count FROM items WHERE provider = ? AND account_scope = ?").get(options.provider, options.accountScope).count;
+          let syncRunsRemoved = 0;
+          if (remaining === 0 && options.connectorId) {
+            syncRunsRemoved = this.db.query(`
+            DELETE FROM sync_runs
+            WHERE connector_id = ?
+              AND NOT EXISTS (SELECT 1 FROM items i WHERE i.sync_run_id = sync_runs.sync_run_id)
+              AND NOT EXISTS (
+                SELECT 1 FROM item_owners o
+                WHERE o.first_seen_sync_run_id = sync_runs.sync_run_id OR o.last_seen_sync_run_id = sync_runs.sync_run_id
+              )
+          `).run(options.connectorId).changes;
+          }
+          return { itemsRemoved: doomed.length, chunksRemoved: chunks, remaining, syncRunsRemoved };
+        })();
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
     }
     stripMetadataOnlyRepresentations(options) {
       try {
@@ -39186,6 +39266,47 @@ var init_tier_set3 = __esm(() => {
   init_connector3();
 });
 
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_archive_formats();
+  init_linux_engine_layout();
+  init_source_corpus_registry();
+  init_connector_store();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
 // src/workers/source-ingestion-ledger.ts
 var SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
@@ -39205,6 +39326,8 @@ var init_source_ingestion_ledger = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   init_store();
+  init_archive_formats();
+  init_store2();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
   corpusPopulations = new WeakMap;
 });
@@ -42173,6 +42296,15 @@ init_waiting_private_questions();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_store();
+init_archive_formats();
+init_store2();
+
+// src/workers/archive-import/state.ts
+init_atomic_file();
+init_file_lease();
+init_linux_engine_layout();
+
+// src/data-lifecycle.ts
 init_google_connectors();
 init_telegram_messages();
 init_readwise();
@@ -42376,6 +42508,7 @@ var SOURCE_CODE_EXTENSIONS = new Set([
 // src/core/scope-safe-fs.ts
 import { createRequire as createRequire4 } from "node:module";
 var runtimeRequire2 = createRequire4(import.meta.url);
+var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 
 // src/workers/local-files/locations.ts
 init_paths();
@@ -42660,7 +42793,8 @@ var SCHEDULER_SOURCE_IDS = {
   readwise: "readwise.library",
   xBookmarks: "x.bookmarks",
   telegram: TELEGRAM_MESSAGES_SOURCE_ID,
-  whatsapp: WHATSAPP_PERSONAL_SOURCE_ID
+  whatsapp: WHATSAPP_PERSONAL_SOURCE_ID,
+  archiveImports: "archive.imports"
 };
 var SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500;
 class SourceSchedulerTaskFailure extends Error {
@@ -43701,6 +43835,371 @@ init_paths();
 init_scope();
 var DAY_MS = 24 * 60 * 60 * 1000;
 var PERMISSION_RETRY_MS = 10 * 60 * 1000;
+
+// src/workers/archive-import/runtime.ts
+init_archive_formats();
+init_remote_connections();
+init_waiting_private_questions();
+
+// node_modules/postal-mime/dist/esm/decode-strings.js
+var textEncoder = new TextEncoder;
+var base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+var base64Lookup = new Uint8Array(256);
+for (let i = 0;i < base64Chars.length; i++) {
+  base64Lookup[base64Chars.charCodeAt(i)] = i;
+}
+var charsetAliases = new Map([
+  ["iso88598i", "iso-8859-8"],
+  ["iso88598e", "iso-8859-8"],
+  ["shiftjis", "shift_jis"],
+  ["windows31j", "shift_jis"],
+  ["mskanji", "shift_jis"],
+  ["eucjp", "euc-jp"],
+  ["iso2022jp", "iso-2022-jp"],
+  ["iso2022jp1", "iso-2022-jp"],
+  ["iso2022jp2", "iso-2022-jp"],
+  ["junet", "iso-2022-jp"],
+  ["euckr", "euc-kr"],
+  ["uhc", "euc-kr"],
+  ["tis620", "windows-874"]
+]);
+var codePageAliases = new Map([
+  ["932", "shift_jis"],
+  ["936", "gbk"],
+  ["949", "euc-kr"],
+  ["950", "big5"],
+  ["874", "windows-874"],
+  ["51932", "euc-jp"],
+  ["50220", "iso-2022-jp"],
+  ["50221", "iso-2022-jp"],
+  ["50222", "iso-2022-jp"]
+]);
+var ENCODING_LABELS = new Set([
+  "unicode-1-1-utf-8 unicode11utf8 unicode20utf8 utf-8 utf8 x-unicode20utf8",
+  "866 cp866 csibm866 ibm866",
+  "csisolatin2 iso-8859-2 iso-ir-101 iso8859-2 iso88592 iso_8859-2 iso_8859-2:1987 l2 latin2",
+  "csisolatin3 iso-8859-3 iso-ir-109 iso8859-3 iso88593 iso_8859-3 iso_8859-3:1988 l3 latin3",
+  "csisolatin4 iso-8859-4 iso-ir-110 iso8859-4 iso88594 iso_8859-4 iso_8859-4:1988 l4 latin4",
+  "csisolatincyrillic cyrillic iso-8859-5 iso-ir-144 iso8859-5 iso88595 iso_8859-5 iso_8859-5:1988",
+  "arabic asmo-708 csiso88596e csiso88596i csisolatinarabic ecma-114 iso-8859-6 iso-8859-6-e",
+  "iso-8859-6-i iso-ir-127 iso8859-6 iso88596 iso_8859-6 iso_8859-6:1987",
+  "csisolatingreek ecma-118 elot_928 greek greek8 iso-8859-7 iso-ir-126 iso8859-7 iso88597 iso_8859-7",
+  "iso_8859-7:1987 sun_eu_greek",
+  "csiso88598e csisolatinhebrew hebrew iso-8859-8 iso-8859-8-e iso-ir-138 iso8859-8 iso88598 iso_8859-8",
+  "iso_8859-8:1988 visual",
+  "csiso88598i iso-8859-8-i logical",
+  "csisolatin6 iso-8859-10 iso-ir-157 iso8859-10 iso885910 l6 latin6",
+  "iso-8859-13 iso8859-13 iso885913",
+  "iso-8859-14 iso8859-14 iso885914",
+  "csisolatin9 iso-8859-15 iso8859-15 iso885915 iso_8859-15 l9",
+  "iso-8859-16",
+  "cskoi8r koi koi8 koi8-r koi8_r",
+  "koi8-ru koi8-u",
+  "csmacintosh mac macintosh x-mac-roman",
+  "dos-874 iso-8859-11 iso8859-11 iso885911 tis-620 windows-874",
+  "cp1250 windows-1250 x-cp1250",
+  "cp1251 windows-1251 x-cp1251",
+  "ansi_x3.4-1968 ascii cp1252 cp819 csisolatin1 ibm819 iso-8859-1 iso-ir-100 iso8859-1 iso88591",
+  "iso_8859-1 iso_8859-1:1987 l1 latin1 us-ascii windows-1252 x-cp1252",
+  "cp1253 windows-1253 x-cp1253",
+  "cp1254 csisolatin5 iso-8859-9 iso-ir-148 iso8859-9 iso88599 iso_8859-9 iso_8859-9:1989 l5 latin5",
+  "windows-1254 x-cp1254",
+  "cp1255 windows-1255 x-cp1255",
+  "cp1256 windows-1256 x-cp1256",
+  "cp1257 windows-1257 x-cp1257",
+  "cp1258 windows-1258 x-cp1258",
+  "x-mac-cyrillic x-mac-ukrainian",
+  "chinese csgb2312 csiso58gb231280 gb2312 gb_2312 gb_2312-80 gbk iso-ir-58 x-gbk",
+  "gb18030",
+  "big5 big5-hkscs cn-big5 csbig5 x-x-big5",
+  "cseucpkdfmtjapanese euc-jp x-euc-jp",
+  "csiso2022jp iso-2022-jp",
+  "csshiftjis ms932 ms_kanji shift-jis shift_jis sjis windows-31j x-sjis",
+  "cseuckr csksc56011987 euc-kr iso-ir-149 korean ks_c_5601-1987 ks_c_5601-1989 ksc5601 ksc_5601",
+  "windows-949",
+  "csiso2022kr hz-gb-2312 iso-2022-cn iso-2022-cn-ext iso-2022-kr replacement",
+  "x-user-defined"
+].join(" ").split(" "));
+var REPLACEMENT_LABELS = new Set([
+  "csiso2022kr",
+  "hz-gb-2312",
+  "iso-2022-cn",
+  "iso-2022-cn-ext",
+  "iso-2022-kr",
+  "replacement"
+]);
+var UTF16_LABELS = new Map([
+  ["utf-16", "utf-16"],
+  ["utf16", "utf-16"],
+  ["utf_16", "utf-16"],
+  ["utf-16le", "utf-16le"],
+  ["utf-16be", "utf-16be"]
+]);
+var decoders = new Map;
+var utf8Decoder = new TextDecoder;
+var UTF16_ENCODINGS = new Set(["utf-16le", "utf-16be"]);
+var UTF16_UNORDERED_LABELS = new Set(["utf-16"]);
+var ENCODED_WORD_PATTERN = "=\\?([^?\\s]+)\\?([QqBb])\\?([^?]*)\\?=";
+var ENCODED_WORD_REGEX = new RegExp(ENCODED_WORD_PATTERN, "g");
+var ENCODED_WORDS_ONLY_REGEX = new RegExp(`^(?:${ENCODED_WORD_PATTERN}\\s*)+$`);
+
+// node_modules/postal-mime/dist/esm/mime-node.js
+var headerDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
+var CONTENT_HEADERS = new Set([
+  "content-type",
+  "content-transfer-encoding",
+  "content-disposition",
+  "content-id",
+  "content-description"
+]);
+
+// node_modules/postal-mime/dist/esm/text-format.js
+var C1_ENTITY_REPLACEMENTS = new Map([
+  [128, 8364],
+  [130, 8218],
+  [131, 402],
+  [132, 8222],
+  [133, 8230],
+  [134, 8224],
+  [135, 8225],
+  [136, 710],
+  [137, 8240],
+  [138, 352],
+  [139, 8249],
+  [140, 338],
+  [142, 381],
+  [145, 8216],
+  [146, 8217],
+  [147, 8220],
+  [148, 8221],
+  [149, 8226],
+  [150, 8211],
+  [151, 8212],
+  [152, 732],
+  [153, 8482],
+  [154, 353],
+  [155, 8250],
+  [156, 339],
+  [158, 382],
+  [159, 376]
+]);
+var hexByte = (value) => value.toString(16).toUpperCase().padStart(2, "0");
+var PERCENT_ENCODED = Array.from({ length: 256 }, (_, byte) => "%" + hexByte(byte));
+
+// node_modules/postal-mime/dist/esm/postal-mime.js
+var ATTACHMENT_ENCODINGS = new Set(["arraybuffer", "base64", "utf8"]);
+var LINE_FEED = new Uint8Array([10]);
+var MAX_HEADERS_SIZE = 2 * 1024 * 1024;
+
+// src/workers/archive-import/mbox/connector.ts
+init_archive_formats();
+init_sender_rules();
+
+// src/workers/archive-import/mbox/split.ts
+var SEPARATOR2 = Buffer.from(`
+From `, "latin1");
+var FROM = Buffer.from("From ", "latin1");
+var LF = 10;
+var CR = 13;
+var GT = 62;
+var MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+var MIN_READ_BYTES = 1024 * 1024;
+
+class MboxFormatError extends Error {
+  offset;
+  constructor(offset) {
+    super("No message starts at this position of the mail file.");
+    this.name = "MboxFormatError";
+    this.offset = offset;
+  }
+}
+
+class MboxSplitter {
+  source;
+  maxMessageBytes;
+  buffer = Buffer.alloc(0);
+  bufferStart;
+  next_;
+  constructor(source, options = {}) {
+    this.source = source;
+    this.maxMessageBytes = Math.max(1, options.maxMessageBytes ?? MBOX_DEFAULT_MAX_MESSAGE_BYTES);
+    this.next_ = options.start ?? 0;
+    this.bufferStart = this.next_;
+  }
+  get position() {
+    return this.next_;
+  }
+  get done() {
+    return this.next_ >= this.source.size;
+  }
+  next() {
+    const start = this.next_;
+    if (start >= this.source.size)
+      return;
+    this.dropBefore(start);
+    this.ensure(start, FROM.length);
+    if (!this.bytesAt(start).subarray(0, FROM.length).equals(FROM))
+      throw new MboxFormatError(start);
+    let scanFrom = start + 1;
+    for (;; ) {
+      const found = this.indexOfSeparator(scanFrom);
+      if (found !== undefined) {
+        const end = found + 1;
+        this.next_ = end;
+        return this.span(start, end);
+      }
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return this.span(start, this.source.size);
+      }
+      if (buffered - start > this.maxMessageBytes)
+        return this.skipTooLarge(start);
+      scanFrom = Math.max(start + 1, buffered - SEPARATOR2.length + 1);
+      this.readMore(Math.max(MIN_READ_BYTES, this.buffer.length));
+    }
+  }
+  span(start, end) {
+    const length = end - start;
+    if (length > this.maxMessageBytes)
+      return { offset: start, length, tooLarge: true };
+    const bytes = this.bytesAt(start).subarray(0, length);
+    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), tooLarge: false };
+  }
+  skipTooLarge(start) {
+    let scanFrom = this.bufferStart + Math.max(0, this.buffer.length - SEPARATOR2.length + 1);
+    for (;; ) {
+      const keepFrom = Math.max(this.bufferStart, scanFrom - SEPARATOR2.length);
+      this.dropBefore(keepFrom);
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return { offset: start, length: this.source.size - start, tooLarge: true };
+      }
+      this.readMore(MIN_READ_BYTES);
+      const found = this.indexOfSeparator(Math.max(start + 1, scanFrom));
+      if (found !== undefined) {
+        this.next_ = found + 1;
+        return { offset: start, length: found + 1 - start, tooLarge: true };
+      }
+      scanFrom = Math.max(start + 1, this.bufferStart + this.buffer.length - SEPARATOR2.length + 1);
+    }
+  }
+  indexOfSeparator(fromOffset) {
+    const index = this.buffer.indexOf(SEPARATOR2, Math.max(0, fromOffset - this.bufferStart));
+    return index < 0 ? undefined : this.bufferStart + index;
+  }
+  bytesAt(offset) {
+    return this.buffer.subarray(offset - this.bufferStart);
+  }
+  dropBefore(offset) {
+    if (offset < this.bufferStart) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+      return;
+    }
+    const drop = offset - this.bufferStart;
+    if (drop >= this.buffer.length) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+    } else if (drop > 0) {
+      this.buffer = this.buffer.subarray(drop);
+      this.bufferStart = offset;
+    }
+  }
+  ensure(offset, length) {
+    while (this.bufferStart + this.buffer.length < Math.min(offset + length, this.source.size)) {
+      this.readMore(MIN_READ_BYTES);
+    }
+  }
+  readMore(length) {
+    const from = this.bufferStart + this.buffer.length;
+    const chunk = this.source.readAt(from, Math.min(length, Math.max(0, this.source.size - from)));
+    if (chunk.length === 0)
+      throw new MboxFormatError(from);
+    this.buffer = this.buffer.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([this.buffer, chunk]);
+  }
+}
+function stripSeparatorLines(bytes) {
+  const firstLineEnd = bytes.indexOf(LF);
+  let body = firstLineEnd < 0 ? Buffer.alloc(0) : bytes.subarray(firstLineEnd + 1);
+  const n = body.length;
+  if (n >= 4 && body[n - 4] === CR && body[n - 3] === LF && body[n - 2] === CR && body[n - 1] === LF) {
+    body = body.subarray(0, n - 2);
+  } else if (n >= 2 && body[n - 2] === LF && body[n - 1] === LF) {
+    body = body.subarray(0, n - 1);
+  } else if (n === 1 && body[0] === LF) {
+    body = body.subarray(0, 0);
+  }
+  return body;
+}
+function unquote(bytes) {
+  const out = [];
+  let copied = 0;
+  let lineStart = 0;
+  while (lineStart < bytes.length) {
+    if (bytes[lineStart] === GT) {
+      let index = lineStart;
+      while (index < bytes.length && bytes[index] === GT)
+        index += 1;
+      if (bytes.subarray(index, index + FROM.length).equals(FROM)) {
+        out.push(bytes.subarray(copied, lineStart));
+        copied = lineStart + 1;
+      }
+    }
+    const next = bytes.indexOf(LF, lineStart);
+    if (next < 0)
+      break;
+    lineStart = next + 1;
+  }
+  if (copied === 0)
+    return bytes;
+  out.push(bytes.subarray(copied));
+  return Buffer.concat(out);
+}
+
+// src/workers/archive-import/mbox/connector.ts
+var MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+var SKIPPED_LABELS = new Set(["spam", "trash"]);
+var decodableCharsets = new Map;
+
+// src/workers/archive-import/lane.ts
+init_tier_ledger();
+init_tiered_store_set();
+init_archive_formats();
+init_store2();
+var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
+  holdContentUntilJudged: true
+});
+
+// src/workers/archive-import/start.ts
+init_archive_formats();
+
+// src/workers/archive-import/manifest.ts
+init_archive_formats();
+var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+
+// src/workers/archive-import/runtime.ts
+init_store2();
+
+// src/workers/email-source/server.ts
+init_store2();
+
+// src/workers/archive-import/scheduler-source.ts
+init_embeddings();
+
+// src/workers/archive-import/removal.ts
+init_sniffer_store();
+init_store2();
+
+// src/workers/archive-import/sync.ts
+init_archive_formats();
+init_tiered_store_set();
+init_store2();
+
+// src/workers/archive-import/scheduler-source.ts
+init_store2();
 
 // src/workers/local-files/open-target.ts
 init_paths();

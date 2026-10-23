@@ -46,6 +46,9 @@ import {
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
+import { archiveImportFamilies } from './core/archive-formats.ts';
+import { archiveConnectorStoreDbPaths, archiveImportCorpora } from './workers/archive-import/store.ts';
+import { defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -82,7 +85,7 @@ import {
   whatsappStateDir as resolveWhatsAppStateDir,
 } from './core/pairing-session-paths.ts';
 import { artifactPresence, type UnpairedSourcesRead } from './workers/credential-broker/unpaired-sources.ts';
-import { createSourceCorpusRegistry } from './core/source-corpus-registry.ts';
+import { createSourceCorpusRegistry, withSourceCorpora, type SourceCorpusConfig } from './core/source-corpus-registry.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
@@ -132,6 +135,13 @@ export interface LifecycleSourceSpec {
    * deliver.
    */
   connectorStorePaths?(context?: LifecyclePathContext): string[];
+  /**
+   * Registry entries for this family's stores that the shipped roster does
+   * not list (stores created on first need). Deleting any source places
+   * the inbox answers that read them, instead of treating an answer it
+   * cannot place as the deleted source's.
+   */
+  registryCorpora?(): readonly SourceCorpusConfig[];
   /**
    * Raw ingest and session state a family keeps OUTSIDE its SQLite store.
    * WhatsApp is the only family whose complete plaintext corpus arrives this
@@ -296,6 +306,17 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       connectorStorePaths: (context) => localFilesTierConnectorStoreDbPaths(envForContext(context)),
       // The change snapshots that let a restart catch up without a rescan.
       rawStatePaths: (context) => [localFilesWatchDir(envForContext(context))],
+    },
+    {
+      // Connector stores only: one set per family, every archive's items in it.
+      sourceId: 'archive.imports',
+      label: 'Imported archives connector stores',
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      connectorStorePaths: (context) => archiveConnectorStoreDbPaths(archiveImportFamilies(), envForContext(context)),
+      registryCorpora: archiveImportCorpora,
+      // The record of each import (the chosen paths, file versions, progress).
+      // The person's own export files are never touched.
+      rawStatePaths: (context) => [defaultArchiveImportStatePath(envForContext(context))],
     },
     {
       sourceId: 'google_drive.docs',
@@ -715,7 +736,9 @@ export function deleteOlympusData(options: {
     if (existsSync(inboxPath)) {
       const inbox = openWaitingPrivateQuestionStore(inboxPath);
       try {
-        const registry = createSourceCorpusRegistry().list();
+        const registry = createSourceCorpusRegistry(
+          withSourceCorpora(undefined, lifecycleSourceSpecs().flatMap((spec) => spec.registryCorpora?.() ?? [])),
+        ).list();
         const corpora = registry.filter(c => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId)).map(c => c.corpusId);
         const count = inbox.deleteForCorpora(corpora, registry.map(c => c.corpusId));
         if (count > 0) removed.push(`${inboxPath} (private answers: ${count})`);
