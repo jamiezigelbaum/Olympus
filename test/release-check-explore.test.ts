@@ -237,12 +237,12 @@ describe('exploring the Sources section', () => {
     const clean = new PanelDriver();
     clean.axe = { host: [], panel: [violation('moderate', 'region'), violation('minor', 'landmark-one-main')] };
     const cleanResult = await explore({ driver: clean, seeds: [populated(clean), disconnected(clean)], inventory: inventory(), axeSource: '/* axe */', ...quick() });
-    // Each seeded state is audited in the host page and in the panel; the script is put in each frame before the run.
-    expect(cleanResult.accessibility.status === 'ran' && cleanResult.accessibility.states.map((entry) => `${entry.state}/${entry.frame}`)).toEqual(['populated/host', 'populated/panel', 'disconnected/host', 'disconnected/panel']);
-    expect(clean.injected).toEqual(['host', 'panel', 'host', 'panel']);
+    // Each seeded state is audited in the panel (the host page is the checker's own stand-in for ChatGPT); the script is put in the frame before the run.
+    expect(cleanResult.accessibility.status === 'ran' && cleanResult.accessibility.states.map((entry) => `${entry.state}/${entry.frame}`)).toEqual(['populated/panel', 'disconnected/panel']);
+    expect(clean.injected).toEqual(['panel', 'panel']);
     const cleanCheck = exploreChecks(cleanResult).find((check) => check.id === 'explore.accessibility')!;
     expect(cleanCheck.status).toBe('pass');
-    expect(cleanCheck.detail).toContain('4 lesser violation(s)');
+    expect(cleanCheck.detail).toContain('2 lesser violation(s)');
 
     const bad = new PanelDriver();
     bad.axe = { host: [], panel: [violation('serious', 'color-contrast')] };
@@ -255,7 +255,7 @@ describe('exploring the Sources section', () => {
     expect(exploreChecks(badResult).find((check) => check.id === 'explore.populated')!.status).toBe('pass');
 
     const critical = new PanelDriver();
-    critical.axe = { host: [violation('critical', 'button-name')], panel: [] };
+    critical.axe = { host: [], panel: [violation('critical', 'button-name')] };
     expect(exploreChecks(await explore({ driver: critical, seeds: [populated(critical)], inventory: inventory(), axeSource: '/* axe */', ...quick() })).find((check) => check.id === 'explore.accessibility')!.status).toBe('fail');
   });
 

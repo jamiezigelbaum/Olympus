@@ -230,14 +230,15 @@ const AXE_CALL = String.raw`(async () => {
 })()`;
 
 /**
- * Audits the page as it stands, in the host page and in the framed panel, with axe-core. The checker's script is put into the frame
+ * Audits the page as it stands with axe-core: the framed panel when there is one (the host page then is the checker's stand-in for ChatGPT), else the page itself. The checker's script is put into the frame
  * once (a frame that already has it keeps it) and run over the frame's own document; the panel is a separate document, so it is
  * audited by itself (`iframes: false`).
  */
 export async function auditAccessibility(driver: JourneyDriver, axeSource: string, state: string): Promise<{ version: string; states: AccessibilityState[] }> {
   const states: AccessibilityState[] = [];
   let version = '';
-  const frames: Array<'host' | 'panel'> = (await driver.hasPanel().catch(() => false)) ? ['host', 'panel'] : ['host'];
+  // With a panel, the host page is the checker's own stand-in for ChatGPT, not the product, so only the panel is audited.
+  const frames: Array<'host' | 'panel'> = (await driver.hasPanel().catch(() => false)) ? ['panel'] : ['host'];
   for (const frame of frames) {
     try {
       await driver.probe(frame, `if (typeof window.axe === 'undefined') {\n${axeSource}\n}\n'loaded'`);
@@ -311,7 +312,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     for (;;) {
       let text = '';
       try { text = await panelText(driver); } catch { /* the page is changing */ }
-      const busy = await driver.probe('panel', `!!document.querySelector('[aria-busy="true"]')`).catch(() => false);
+      // A source still checking its connection shows a disabled "Checking…" button; the page is not settled until that goes (or the settle bound passes).
+      const busy = await driver.probe('panel', `!!document.querySelector('[aria-busy="true"]') || [...document.querySelectorAll('button[disabled]')].some((b) => /^Checking/.test((b.textContent || '').trim()))`).catch(() => false);
       stable = text === last && busy !== true ? stable + 1 : 0;
       last = text;
       if (stable >= 2 || now() >= until) return;
@@ -455,7 +457,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       presses += 1;
       totalPresses += 1;
       pressedHere += 1;
-      if (listed) foundIds.get(listed)!.pressed = true;
+      if (listed) { const entry = foundIds.get(listed); if (entry) entry.pressed = true; }
       else for (const entry of unlisted.values()) if (entry.key === control.key && entry.rowName === control.rowName) entry.pressed = true;
       let pagesMax = pagesBefore;
       // Watched while the page settles: a window that opens and goes is still seen.
