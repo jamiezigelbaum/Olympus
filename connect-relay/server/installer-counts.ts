@@ -40,6 +40,9 @@ export function installerKind(uri: string): InstallerKind | undefined {
   return undefined;
 }
 
+/** About two years of rows, as the usage totals keep (the privacy policy's retention). */
+const MAX_DAYS = 800;
+
 function emptyDay(day: string): InstallerDay {
   return { day, macScript: 0, linuxScript: 0, release: 0, macUninstall: 0, linuxUninstall: 0 };
 }
@@ -63,7 +66,7 @@ export function addDownloads(days: InstallerDay[], log: string): InstallerDay[] 
     row[kind] += 1;
     byDay.set(day, row);
   }
-  return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
+  return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)).slice(-MAX_DAYS);
 }
 
 export function readInstallerCounts(path: string): InstallerDay[] {

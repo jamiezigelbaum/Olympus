@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../client/identity.ts';
 import { formatUsage, runAdmin } from '../server/admin.ts';
-import { countInstallers, installerKind, readInstallerCounts } from '../server/installer-counts.ts';
+import { addDownloads, countInstallers, installerKind, readInstallerCounts } from '../server/installer-counts.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { UsageLedger } from '../server/usage.ts';
 
@@ -154,5 +154,55 @@ describe('installer download counts', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('usage follow-ups', () => {
+  test('yesterday closes with its own totals when the first change after midnight is a registration', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-usage-'));
+    try {
+      let at = MIDDAY;
+      const registry = new MemoryInstallRegistry(100, () => at);
+      const [a, b] = installs(dir, 2);
+      registry.register(a!.installId, a!.publicKeySpki);
+      const usage = new UsageLedger(registry, () => false, undefined, () => at);
+      at = MIDDAY + DAY;
+      usage.tick();
+      registry.register(b!.installId, b!.publicKeySpki);
+      usage.registered(b!.installId, false);
+      const [yesterday, today] = usage.snapshot();
+      expect(yesterday).toMatchObject({ day: '2026-10-20', registered: 1 });
+      expect(today).toMatchObject({ day: '2026-10-21', registered: 2, newInstalls: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a failed internal mark changes nothing, so a retry writes it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-usage-'));
+    try {
+      const [a] = installs(dir, 1);
+      class Failing extends MemoryInstallRegistry {
+        fail = true;
+        protected override async append(): Promise<void> {
+          if (this.fail) throw new Error('disk full');
+        }
+      }
+      const registry = new Failing();
+      registry.register(a!.installId, a!.publicKeySpki);
+      await expect(registry.setInternal(a!.installId, true)).rejects.toThrow('disk full');
+      expect(registry.isInternal(a!.installId)).toBe(false);
+      registry.fail = false;
+      expect(await registry.setInternal(a!.installId, true)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('download counts keep about two years of days', () => {
+    const days = Array.from({ length: 900 }, (_, i) => ({ day: new Date(Date.UTC(2024, 0, 1) + i * DAY).toISOString().slice(0, 10), macScript: 1, linuxScript: 0, release: 0, macUninstall: 0, linuxUninstall: 0 }));
+    const kept = addDownloads(days, '');
+    expect(kept).toHaveLength(800);
+    expect(kept[kept.length - 1]!.day).toBe(days[899]!.day);
   });
 });

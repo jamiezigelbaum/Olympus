@@ -2,9 +2,8 @@
 # download log (server/installer-counts.ts). Installed by deploy/deploy.sh;
 # started hourly by olympus-installer-counts.timer.
 # Counts:  /var/lib/olympus-installer-counts/counts.json (no address, no headers)
-# After a rollback to a relay build without `count-installers`, the old binary
-# tries to start a relay as caddy, cannot create its state directory under
-# ProtectSystem=strict, and exits: the timer fails harmlessly until redeployed.
+# Runs the build that installed this unit (/usr/local/bin/olympus-installer-counts,
+# set by remote-install.sh), so a relay rollback does not stop the counting.
 
 [Unit]
 Description=Olympus installer download counts
@@ -13,7 +12,7 @@ Description=Olympus installer download counts
 Type=oneshot
 User=caddy
 Group=caddy
-ExecStart=/usr/local/bin/olympus-relay count-installers --log /var/log/caddy/olympus-installers.log --out /var/lib/olympus-installer-counts/counts.json
+ExecStart=/usr/local/bin/olympus-installer-counts count-installers --log /var/log/caddy/olympus-installers.log --out /var/lib/olympus-installer-counts/counts.json
 StateDirectory=olympus-installer-counts
 StateDirectoryMode=0755
 NoNewPrivileges=yes
