@@ -1224,11 +1224,12 @@ async function until<T>(read: () => Promise<T | undefined>, timeoutMs: number, e
   }
 }
 
-const cardSummary = (card: any): string => `connection ${String(card?.connection?.state ?? '?')}, ${String(card?.coverage?.indexed_items ?? '?')} indexed, status ${String(card?.status ?? card?.freshness?.status ?? '?')}${card?.connection?.provider_refusal ? ', refused by the provider' : ''}`;
+const cardSummary = (card: any): string => `connection ${String(card?.connection?.state ?? '?')}, ${String(card?.coverage?.indexed_items ?? '?')} indexed, answers ${String(card?.answer_readiness?.state ?? '?')}${card?.connection?.provider_refusal ? ', refused by the provider' : ''}`;
 
 /** The seeded states of the install the exploration starts from, produced through the dashboard's own routes and the stand-in. */
 function exploreSeeds(config: AgentConfig): Seed[] {
-  const connected = (card: any): boolean => !!card && card.connection?.state === 'connected';
+  // The card's connection reads `synced` once the source has been read; not connected, needs setup, awaiting consent and reauth are the others.
+  const connected = (card: any): boolean => !!card && !['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required'].includes(String(card.connection?.state ?? 'not_connected'));
   const connect = async (): Promise<void> => {
     const session = await ownerSession();
     await startFakeWith(config, config.fakeToken);
@@ -1257,7 +1258,7 @@ function exploreSeeds(config: AgentConfig): Seed[] {
         await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
         const card = await until(async () => {
           const now = await readwiseCard();
-          return now?.connection?.provider_refusal || now?.connection?.state === 'reauth_required' || /needs|fail/i.test(String(now?.status ?? '')) ? now : undefined;
+          return now?.connection?.provider_refusal || now?.connection?.state === 'reauth_required' || now?.answer_readiness?.state === 'needs_attention' ? now : undefined;
         }, 90_000);
         return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `a sync with a rejected key did not leave the source needing attention: ${cardSummary(await readwiseCard())}` };
       },

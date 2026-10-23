@@ -875,7 +875,7 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
  * block; the coverage is advisory. Destructive controls are pressed here only because this is the throwaway machine.
  */
 async function runExploreLeg(run: Run, outDir: string): Promise<void> {
-  if (run.options.skipExplore || run.options.skipJourneys) return;
+  if (run.options.skipExplore) return;
   const inventory = buildInventory();
   const scratch = join(outDir, '_explore');
   rmSync(scratch, { recursive: true, force: true });
