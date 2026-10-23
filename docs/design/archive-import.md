@@ -32,8 +32,9 @@ same way, with the same privacy and the same status.
   agent-started imports.
 - **WhatsApp and Telegram exports are in scope** (owner, 2026-10-23), after
   mail.
-- **Imported archives stay Private until the local model judges them**
-  (owner, 2026-10-23). Personal-first does not apply to them: it assumed a
+- **Imported archives stay Private until the private model judges them**
+  (owner, 2026-10-23): the local model, or Venice Private where there is no
+  local model, as for every source. Personal-first does not apply to them: it assumed a
   wait of minutes, and an import puts years of items in the queue at once.
 
 ## Where things stand
@@ -64,7 +65,7 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
 | Picker | The local-files picker (`workers/local-files/scope-browser.ts`), extended to offer files as well as folders in a "choose one file or folder" mode (today it lists folders only, `scope-browser.ts:121`). |
 | Reading | Only the chosen path, through the scope-safe reader (`core/scope-safe-fs.ts`), so no symlink escape. `ScopeRoot.readFile` loads a whole file, so archive reading adds a bounded streaming read on `openRelative`, with a per-message size cap. |
-| Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Importers set no source-level floor; each item gets its own tier. Until the local model judges an item, its content is held Private (below). |
+| Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Importers set no source-level floor; each item gets its own tier. Until the private model judges an item, its content is held Private (below). |
 | Removal | Per archive, not per source. Lifecycle delete today removes a whole source's store (`data-lifecycle.ts:657`) and Reflect has one store for the whole family (`data-lifecycle.ts:404`), so removing one import that way would erase the others. Remove cancels and fences that archive's running work, deletes its items, chunks, vectors and derived data (including private answers built from it, `data-lifecycle.ts:691`), and never touches the user's file. |
 | Operation | One operation, `archive_import` (start, status, remove), on the public tool lists, CLI, and MCP. The dashboard calls the same operation. An agent cannot import a path just by naming it: start needs a path the user approved, through the dashboard picker or a confirmation the user answers, the same approval the scope picker gives other sources. A prompt-injected or accidental tool call can at most ask. |
 | Dashboard | An "Archives" source showing each import: format, file name, item count, date range, progress, gaps (unreadable messages, skipped attachments), and Remove. Every problem has a route to exactly what failed. |
@@ -213,7 +214,7 @@ A fresh install on Mac and on Linux can import a synthetic mbox, Reflect,
 Roam, WhatsApp and Telegram export through the dashboard and through the agent tool, see each as a
 snapshot with counts and gaps, find cited answers from it, and remove it.
 No imported item's content is in a Personal store, or embedded by a cloud
-model, before its local judgment; cleared names may be, as above. A test
+model, before the private model judges it; cleared names may be, as above. A test
 imports with the private model stopped and checks this.
 
 For WhatsApp and Telegram, also on the same candidate as a supported live
