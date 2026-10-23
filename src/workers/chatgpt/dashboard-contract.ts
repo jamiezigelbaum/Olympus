@@ -519,8 +519,9 @@ export interface ComputerDashboardMeta {
   waitingPrivateQuestions?: number;
   /**
    * Imported archives and the imports waiting on the person, for the
-   * Archives row (archive-import/dashboard.ts). Names and folders of the
-   * person's files, so only ever in this meta, never sent through ChatGPT.
+   * Archives row (archive-import/dashboard.ts). The list, with the folders
+   * the person's files are in, is only ever in this meta; what needs the
+   * person reaches both surfaces as Needs you items, by name only.
    */
   archives?: ComputerArchivesMeta;
 }
@@ -536,6 +537,12 @@ export interface ComputerArchivesMeta {
    * not answering or not approved (`waiting`), or not set up at all (`off`).
    */
   privateModel: 'ready' | 'waiting' | 'off';
+  /**
+   * The list of imports (or of the imports asked for) cannot be read: why,
+   * as a closed code, and where it is kept (home folder shown as ~). The
+   * lists above are then what could still be read, or empty.
+   */
+  unreadable?: { reason: 'damaged' | 'unknown_form' | 'permission' | 'other'; file: string };
 }
 
 export interface ComputerArchiveEntry {
@@ -562,11 +569,14 @@ export interface ComputerArchiveEntry {
   importedAt?: string;
   /** Why it stopped (a closed code) and the file that did it. */
   stop?: { code: string; file?: string };
-  /** What could not be read fully, per closed kind, and what was left out on purpose. */
-  gaps: Array<{ kind: string; count: number }>;
+  /**
+   * What could not be read fully, per closed kind; for an archive of several
+   * files, per file too (`file`, its name). Where in a file is kept in the
+   * record, never shown.
+   */
+  gaps: Array<{ kind: string; count: number; file?: string }>;
+  /** What was left out on purpose, per closed kind. */
   skipped: Array<{ kind: string; count: number }>;
-  /** Exactly where some of the gaps are: a file of the archive and a byte offset in it. */
-  examples: Array<{ kind: string; file: string; offset: number }>;
 }
 
 export interface ComputerArchiveRequest {

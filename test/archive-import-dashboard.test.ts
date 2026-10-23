@@ -5,10 +5,14 @@
 // Decline, Remove, and the Archives row's list; the dashboard routes, which
 // only a control session reaches. Then one archive from the picker to the
 // Archives row and a search hit cited as imported mail, and back out, and an
-// import whose content stays held while the private model is stopped.
+// import whose content stays held while the private model is stopped. What
+// needs the person reaches the card (a stopped import, an agent's request,
+// held messages no model can judge, a list that cannot be read), and the
+// held count is the engine's own, before and after the private model judges.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isV04PublicDashboardRoute } from '../src/core/public-surface.ts';
@@ -19,7 +23,14 @@ import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
+import type { AnalystModel } from '../src/core/analyst.ts';
+import { appendClassificationLedgerEntry } from '../src/workers/classification-ledger.ts';
+import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { SNIFFER_PROMPT_VERSION } from '../src/workers/classification/sniffer.ts';
+import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
+import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
@@ -27,7 +38,7 @@ import { createArchiveImportDashboard, type ArchivePrivateModelState } from '../
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
-import { withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
+import { archiveConnectorStoreDbPath, withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
 import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
 import { createLocalFilesArchiveBrowser, createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
@@ -288,12 +299,16 @@ describe('the Archives row\'s list', () => {
     expect(entry.judged).toBe(0);
     expect(entry.importedAt).toEqual(expect.any(String));
     expect(entry.percent).toBeUndefined();
-    expect(f.dashboard.present()).toEqual({ archives: 1, importing: false });
-    // What was not read, and what was left out as live Gmail leaves it out, with exactly where.
+    // Held with no private model to judge them: the person's to set up.
+    expect(f.dashboard.present()).toEqual({ archives: 1, importing: false, attention: [{ kind: 'held', count: 3, model: 'off' }] });
+    // What was not read, and what was left out as live Gmail leaves it out, per kind.
     expect(entry.gaps).toEqual([{ kind: 'attachments_not_read', count: 1 }]);
     expect(entry.skipped).toEqual([{ kind: 'spam_or_trash', count: 1 }]);
-    // The third message starts where the first two end.
-    expect(entry.examples).toContainEqual({ kind: 'attachments_not_read', file: 'Takeout.mbox', offset: mbox([mail(0), mail(1)]).length });
+    // Exactly where stays in the record (the third message starts where the
+    // first two end), never on the dashboard.
+    expect(f.runtime.state.get(started.archive_id)!.findings.samples)
+      .toContainEqual({ kind: 'attachments_not_read', file_index: 0, offset: mbox([mail(0), mail(1)]).length });
+    expect(JSON.stringify(f.dashboard.view())).not.toContain('offset');
 
     expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
     expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'removing' });
@@ -309,7 +324,97 @@ describe('the Archives row\'s list', () => {
     writeFileSync(path, mbox([mail(0), mail(1), mail(2)]));
     await importAll(f.runtime, started.archive_id);
     expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'stopped', stop: { code: 'file_changed', file: 'Takeout.mbox' } });
+    // And the card has it as the person's to answer, by name.
+    expect(f.dashboard.present().attention).toEqual([{ kind: 'stopped', id: started.archive_id, name: 'Takeout.mbox' }]);
   });
+
+  test('an archive of several files says which file each gap is in; one file needs no name', async () => {
+    const f = fixture();
+    const started = await approveKey(f, f.write('Takeout.mbox', mbox([withAttachment(0), mail(1)])));
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, started.archive_id);
+    expect(f.dashboard.view().archives[0]!.gaps).toEqual([{ kind: 'attachments_not_read', count: 1 }]);
+    // The record keeps the gaps per file too.
+    expect(f.runtime.state.get(started.archive_id)!.findings.gaps_by_file).toEqual({ 0: { attachments_not_read: 1 } });
+    // The same record as a folder of two files, with a gap in the second.
+    const statePath = f.runtime.state.path;
+    const saved = JSON.parse(readFileSync(statePath, 'utf8'));
+    const record = saved.archives[0];
+    record.files = [{ ...record.files[0], rel_path: 'Exported.mbox/Inbox' }, { ...record.files[0], rel_path: 'Exported.mbox/Sent' }];
+    record.findings.gaps = { attachments_not_read: 1, message_too_large: 2 };
+    record.findings.gaps_by_file = { 0: { attachments_not_read: 1 }, 1: { message_too_large: 2 } };
+    writeFileSync(statePath, JSON.stringify(saved));
+    expect(f.dashboard.view().archives[0]!.gaps).toEqual([
+      { kind: 'attachments_not_read', count: 1, file: 'Inbox' },
+      { kind: 'message_too_large', count: 2, file: 'Sent' },
+    ]);
+  });
+});
+
+describe('what the imports need from the person', () => {
+  test('an agent\'s request waiting is the person\'s to answer; a healthy imported archive adds nothing', async () => {
+    const f = fixture();
+    const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0)])));
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, started.archive_id);
+    // Imported, the private model judging: nothing for the person.
+    expect(f.dashboard.present()).toEqual({ archives: 1, importing: false });
+    const requests = new ArchiveImportRequestStore({ path: archiveImportRequestsPath(f.runtime.state.path) });
+    const asked = requests.addPending(f.write('Other.mbox', mbox([mail(1)])))!;
+    expect(f.dashboard.present().attention).toEqual([{ kind: 'request', id: asked.request_id, name: 'Other.mbox' }]);
+    // The person's own approval while it is checked is not waiting on them.
+    expect(f.dashboard.decline(asked.request_id)).toEqual({ ok: true });
+    requests.addChecking(f.write('Mine.mbox', mbox([mail(2)])));
+    expect(f.dashboard.present()).toEqual({ archives: 1, importing: false });
+  });
+
+  test('held messages count only while no private model can judge them, and never while being removed', async () => {
+    const f = fixture({ model: 'waiting' });
+    const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0), mail(1)])));
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, started.archive_id);
+    expect(f.dashboard.present().attention).toEqual([{ kind: 'held', count: 2, model: 'waiting' }]);
+    f.setModel('ready');
+    expect(f.dashboard.present().attention).toBeUndefined();
+    f.setModel('off');
+    expect(f.dashboard.present().attention).toEqual([{ kind: 'held', count: 2, model: 'off' }]);
+    expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
+    expect(f.dashboard.present().attention).toBeUndefined();
+  });
+
+  for (const which of ['archives', 'requests'] as const) {
+    test(`a list of ${which === 'archives' ? 'imported archives' : 'imports asked for'} that cannot be read is said as such, never as none imported`, async () => {
+      const f = fixture();
+      const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0)])));
+      if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+      const path = which === 'archives' ? f.runtime.state.path : archiveImportRequestsPath(f.runtime.state.path);
+      // Damaged: not JSON at all. (The record is outside this home folder, so its whole path shows.)
+      writeFileSync(path, '{"version": 1, "archi');
+      expect(f.dashboard.present().attention).toEqual([{ kind: 'unreadable', reason: 'damaged' }]);
+      expect(f.dashboard.view().unreadable).toEqual({ reason: 'damaged', file: path });
+      // In a form this build does not read: a newer version, or damage that still parses.
+      writeFileSync(path, JSON.stringify({ version: 2 }));
+      expect(f.dashboard.present().attention).toEqual([{ kind: 'unreadable', reason: 'unknown_form' }]);
+      if (which === 'requests') {
+        // The archives still read: they are counted and listed.
+        expect(f.dashboard.present()).toMatchObject({ archives: 1, importing: true });
+        expect(f.dashboard.view().archives.map((entry) => entry.id)).toEqual([started.archive_id]);
+      }
+      // The card: not "no archives imported yet", Needs you, and no Import over it.
+      const card = buildSourceDashboardViewModel({
+        sourceIndexStatus: { kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], policy: {} } as never,
+        sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+        connectedHandleRegistry: { version: 1, handles: [] },
+        apiKeyAvailability: {},
+        importedArchives: f.dashboard.present(),
+      });
+      const archives = card.sources.find((entry) => entry.source_id === 'archive.imports')!;
+      expect(archives.connection.label).not.toBe('no archives imported yet');
+      const row = buildChatGptDashboardViewModel(card, {}).sources.find((source) => source.id === 'archive.imports')!;
+      expect(row.status).toBe('Needs you');
+      expect([row.primary, ...(row.menu ?? [])].filter(Boolean).map((fix) => fix!.label)).not.toContain('Import an archive');
+    });
+  }
 });
 
 describe('the dashboard routes', () => {
@@ -441,5 +546,123 @@ describe('one archive from the picker to a cited answer and back out', () => {
     expect(f.dashboard.view().archives).toEqual([]);
     expect(f.dashboard.present()).toEqual({ archives: 0, importing: false });
     expect(Bun.file(path).size).toBeGreaterThan(0);
+  });
+});
+
+/** A privacy-safe local lane for the engine's own sniffer service. */
+const SNIFFER_LANE: SnifferLane = {
+  kind: 'local',
+  modelId: 'fixture-archive-sniffer',
+  profileId: 'archive-sniffer',
+  profile: { provider: 'local-openai-compatible', trust: 'local', baseUrl: 'http://127.0.0.1:1/v1', model: 'fixture-archive-sniffer' },
+};
+
+/** A private model that judges every item Private (the sniffer's own words: personal or private). */
+function judgingModel(): AnalystModel & { calls: number } {
+  const model = {
+    calls: 0,
+    async complete(request: { prompt: string }) {
+      model.calls += 1;
+      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number });
+      const verdicts = items.map((item) => ({ i: item.i, tier: 'private', category: 'none', confidence: 0.9, ownRecord: false, privateKind: 'none' }));
+      return { text: JSON.stringify({ verdicts }), modelId: SNIFFER_LANE.modelId };
+    },
+  };
+  return model as unknown as AnalystModel & { calls: number };
+}
+
+describe('held counts against the engine', () => {
+  test('while no private model answers, the card counts exactly the held Private rows and nothing is Personal or Public; once it judges, the counts move', async () => {
+    // The engine's own classification inputs and sniffer queue, as the worker installs them.
+    const installed = new InstalledTierClassification({ env: {}, lane: SNIFFER_LANE });
+    registerInstalledTierClassification(installed);
+    cleanups.push(() => { registerInstalledTierClassification(undefined); installed.close(); });
+    const f = fixture({ model: 'waiting' });
+    const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0), mail(1), mail(2)])));
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, started.archive_id);
+    const lane = f.runtime.lane('email');
+    const scope = started.archive_id;
+
+    // Rows held Private with their embedding held, read off the set ledger itself.
+    const heldRows = (): number => {
+      const db = new Database(lane.ledger.dbPath, { readonly: true });
+      try {
+        return (db.query(`
+          SELECT COUNT(DISTINCT provider_item_id) AS n FROM tier_copies
+          WHERE account_scope = ? AND trust_domain = 'secure_local' AND copy_state = 'current' AND embed_hold = 1
+        `).get(scope) as { n: number }).n;
+      } finally {
+        db.close();
+      }
+    };
+    /** Message text in a Personal or Public store, and embeddings there. */
+    const outside = (): { text: number; embedded: number } => {
+      let text = 0;
+      let embedded = 0;
+      for (const domain of ['internal', 'public_safe'] as const) {
+        const path = archiveConnectorStoreDbPath(domain, 'email', f.env);
+        if (!existsSync(path)) continue;
+        const db = new Database(path, { readonly: true });
+        try {
+          text += (db.query(`
+            SELECT COUNT(*) AS n FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+            WHERE i.account_scope = ? AND c.bounded_text LIKE '%harbour log%'
+          `).get(scope) as { n: number }).n;
+          embedded += (db.query('SELECT COUNT(*) AS n FROM chunk_embeddings').get() as { n: number }).n;
+        } finally {
+          db.close();
+        }
+      }
+      return { text, embedded };
+    };
+
+    let entry = f.dashboard.view().archives[0]!;
+    expect(entry).toMatchObject({ status: 'imported', items: 3, judged: 0, held: 3 });
+    expect(heldRows()).toBe(entry.held);
+    expect(outside()).toEqual({ text: 0, embedded: 0 });
+    expect(f.dashboard.present().attention).toEqual([{ kind: 'held', count: 3, model: 'waiting' }]);
+
+    // The engine's sniffer service, its model not available yet: it asks nothing and nothing moves.
+    const ledgerPath = join(f.base, 'classification-ledger.jsonl');
+    await appendClassificationLedgerEntry(ledgerPath, {
+      recorded_at: new Date().toISOString(),
+      kind: 'classifier_model_decision',
+      what: 'Owner approved the fixture sniffer.',
+      model_id: SNIFFER_LANE.modelId,
+      prompt_version: SNIFFER_PROMPT_VERSION,
+      lane: SNIFFER_LANE.kind,
+      profile_id: SNIFFER_LANE.profileId,
+      approved_by: 'owner',
+      status: 'complete',
+    });
+    let available = false;
+    const model = judgingModel();
+    const service = new TierSnifferService({
+      installed,
+      lane: SNIFFER_LANE,
+      model,
+      stores: () => lane.set.openStores(),
+      classificationLedgerPath: ledgerPath,
+      modelAvailable: () => available,
+    });
+    cleanups.push(() => service.stop());
+    expect((await service.runOnce()).state).toBe('model_unavailable');
+    expect(model.calls).toBe(0);
+    expect(f.dashboard.view().archives[0]).toMatchObject({ judged: 0, held: 3 });
+    expect(heldRows()).toBe(3);
+
+    // The model answers: every message judged, none held, and the card stops asking.
+    available = true;
+    f.setModel('ready');
+    const ran = await service.runOnce();
+    expect(ran.state).toBe('ran');
+    expect(model.calls).toBeGreaterThan(0);
+    entry = f.dashboard.view().archives[0]!;
+    expect(entry).toMatchObject({ items: 3, judged: 3, held: 0 });
+    expect(heldRows()).toBe(entry.held);
+    expect(f.dashboard.present().attention).toBeUndefined();
+    // Judged Private, the content stays where it was: nothing Personal or Public.
+    expect(outside()).toEqual({ text: 0, embedded: 0 });
   });
 });

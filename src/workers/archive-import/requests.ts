@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
-import { isArchiveId } from './state.ts';
+import { ArchiveRecordFormError, isArchiveId } from './state.ts';
 
 /**
  * Requests an agent may leave waiting at once; one more is refused until the person answers.
@@ -98,7 +98,7 @@ function readRequests(path: string): PersistedRequests {
   if (!existsSync(path)) return { version: 1, requests: [] };
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
   if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.requests) || !parsed.requests.every(validRequest)) {
-    throw new Error('The archive import requests are not in a form this build reads.');
+    throw new ArchiveRecordFormError('The archive import requests are not in a form this build reads.');
   }
   return { version: 1, requests: parsed.requests as ArchiveImportRequest[] };
 }

@@ -30,7 +30,12 @@ import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
-import { buildSourceDashboardViewModel, type SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import {
+  buildSourceDashboardViewModel,
+  type DashboardImportAttention,
+  type DashboardImportedArchives,
+  type SourceDashboardViewModel,
+} from '../src/workers/source-dashboard.ts';
 import {
   COMPUTER_HOST_PAGE_CSP,
   dashboardHtmlRoutePage,
@@ -687,14 +692,18 @@ function localFilesPreview(state: string) {
  *   archives-failed      a choice that was not imported, and why
  *   archives-request     an agent asked to import a file: Import or Decline
  *   archives-importing   one archive 42% read, its messages held for the private model
- *   archives-imported    one archive imported, with what was not read and exactly where
+ *   archives-imported    one archive imported, with what was not read, per kind
  *   archives-waiting     imported, but no private model is set up: the route to set one up
  *   archives-stopped     the file changed during the import: what happened and what to do
  *   archives-removing    Remove pressed: everything Olympus made from it is being deleted
+ *   archives-unreadable  the list of imported archives cannot be read: See why, no Import
+ * A stopped import, an agent's request and held messages no private model
+ * can judge are each a Needs you line too (request, waiting, stopped).
  */
 const ARCHIVE_STATES = [
   'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
+  'archives-unreadable',
 ] as const;
 
 function archivesPreview(state: string): SourceDashboardViewModel {
@@ -720,12 +729,26 @@ function archivesPreview(state: string): SourceDashboardViewModel {
     sovereigntyEngine: engine,
     connectedHandleRegistry: registry([]),
     apiKeyAvailability: {},
-    importedArchives: {
-      archives: meta.archives.length,
-      importing: meta.archives.some((entry) => entry.status === 'importing' || entry.status === 'removing'),
-    },
+    importedArchives: previewImportedArchives(meta),
     now: NOW,
   });
+}
+
+/** The card's side of a preview list, as archive-import/dashboard.ts present() derives it. */
+function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedArchives {
+  const attention: DashboardImportAttention[] = [];
+  if (meta.unreadable) attention.push({ kind: 'unreadable', reason: meta.unreadable.reason });
+  for (const entry of meta.archives) if (entry.status === 'stopped') attention.push({ kind: 'stopped', id: entry.id, name: entry.name });
+  for (const request of meta.requests) {
+    if (request.origin === 'agent' && request.status === 'pending') attention.push({ kind: 'request', id: request.id, name: request.name });
+  }
+  const held = meta.archives.filter((entry) => entry.status !== 'removing').reduce((sum, entry) => sum + entry.held, 0);
+  if (meta.privateModel !== 'ready' && held > 0) attention.push({ kind: 'held', count: held, model: meta.privateModel });
+  return {
+    archives: meta.unreadable && meta.archives.length === 0 ? 0 : meta.archives.length,
+    importing: meta.archives.some((entry) => entry.status === 'importing' || entry.status === 'removing'),
+    ...(attention.length > 0 ? { attention } : {}),
+  };
 }
 
 /** The Archives row's list for an archives-* state: invented names, never anyone's files. */
@@ -746,7 +769,6 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
     importedAt: at(2 * 3600),
     gaps: [],
     skipped: [],
-    examples: [],
   };
   const archives: ComputerArchiveEntry[] = [];
   const requests: ComputerArchivesMeta['requests'] = [];
@@ -762,11 +784,6 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       held: state === 'archives-waiting' ? 48_210 : 20,
       gaps: [{ kind: 'message_too_large', count: 3 }, { kind: 'attachments_not_read', count: 112 }, { kind: 'charset_not_decoded', count: 1 }],
       skipped: [{ kind: 'spam_or_trash', count: 1_204 }],
-      examples: [
-        { kind: 'message_too_large', file: 'All mail Including Spam and Trash.mbox', offset: 1_873_204_118 },
-        { kind: 'message_too_large', file: 'All mail Including Spam and Trash.mbox', offset: 4_102_993_051 },
-        { kind: 'charset_not_decoded', file: 'All mail Including Spam and Trash.mbox', offset: 311_457_902 },
-      ],
     });
   } else if (state === 'archives-stopped') {
     const { importedAt: _importedAt, ...started } = takeout;
@@ -783,6 +800,11 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
     requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Inbox.mbox', where: '~/Desktop', origin: 'dashboard', status: 'failed', code: 'changed' });
   } else if (state === 'archives-request') {
     requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Takeout-2.mbox', where: '~/Downloads', origin: 'agent', status: 'pending' });
+  } else if (state === 'archives-unreadable') {
+    return {
+      sourceId: 'archive.imports', archives, requests, privateModel,
+      unreadable: { reason: 'damaged', file: '~/.local/share/openclaw/olympus/archive-imports.json' },
+    };
   }
   return { sourceId: 'archive.imports', archives, requests, privateModel };
 }

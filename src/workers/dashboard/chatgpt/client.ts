@@ -811,6 +811,15 @@ export function chatgptDashboardClient(
     } else if (fix.archiveImport === true && picker) {
       // Import an archive (computer only): the picker over this computer's files, in place.
       action = () => startArchivePick(key);
+    } else if (typeof fix.archiveFocus === 'string' && fix.archiveFocus) {
+      // A Needs you line about one archive or request (computer only): straight to it, in place.
+      action = () => focusArchive(String(fix.archiveFocus));
+    } else if (fix.archiveModels === true) {
+      // Held items (computer only): the private model under Models, in place.
+      action = () => {
+        state.open.models = true;
+        render('summary:models');
+      };
     } else if (picker && picker.handles(fix)) {
       // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
       action = () => {
@@ -993,7 +1002,7 @@ export function chatgptDashboardClient(
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
       // A warm box with an orange edge carries the state, so the row has no dot.
-      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(item.fix, key, 'warn', true, itemSource(item)));
+      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(archiveNeedFix(item), key, 'warn', true, itemSource(item)));
       add(list, add(el('li', 'row need'), body));
     });
     return add(section, list);
@@ -1089,10 +1098,11 @@ export function chatgptDashboardClient(
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
     }
     // A pause the row shows (not one a Sync now line stands in for) gets its See why.
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) : null);
     if (why) add(main, why);
-    // Landed on a source with nothing to see why about now: the row itself is outlined.
-    else if (state.landed && state.landed.id === id) row.className += ' landed';
+    // Landed on a source with nothing to see why about now: the row itself is
+    // outlined, or on the Archives row each archive and request that needs the person.
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives))) row.className += ' landed';
     if (archives) add(main, archiveList(archives));
     add(row, main);
     const controls = el('div', 'source-actions');
@@ -1149,6 +1159,73 @@ export function chatgptDashboardClient(
       : fix;
   }
 
+  /**
+   * On the computer a Needs you line about imports acts in place: an archive
+   * or a request is scrolled to and outlined, the unreadable list opens its
+   * See why, and held items open the private model under Models. Anywhere
+   * else (ChatGPT) the line's own link opens the computer's Archives row.
+   */
+  function archiveNeedFix(item: Any): Any {
+    const fix = item && item.fix;
+    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
+    const id = item && typeof item.id === 'string' ? item.id : '';
+    if (!fix || typeof fix.label !== 'string' || !meta || typeof meta !== 'object') return fix;
+    if (id === 'archives:held') return { label: fix.label, archiveModels: true };
+    if (id === 'archives:unreadable' || id.indexOf('archive:') === 0 || id.indexOf('archive-request:') === 0) return { label: fix.label, archiveFocus: id };
+    return fix;
+  }
+
+  /** Scroll to one archive or request (or the unreadable list's See why) and outline it briefly. */
+  function focusArchive(target: string): void {
+    const meta = state.computerMeta && state.computerMeta.archives;
+    const sourceId = meta && typeof meta.sourceId === 'string' ? meta.sourceId : '';
+    if (target === 'archives:unreadable') {
+      if (!sourceId) return;
+      state.open['why:' + sourceId] = true;
+      state.landed = { id: sourceId, until: Date.now() + H.landedMs };
+    } else state.landed = { id: target, until: Date.now() + H.landedMs };
+    render(target === 'archives:unreadable' ? 'summary:why:' + sourceId : '');
+    const node = root.querySelector('.landed') as HTMLElement | null;
+    if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center' });
+    const control = node ? node.querySelector('button, summary') as HTMLElement | null : null;
+    if (control && typeof control.focus === 'function') control.focus();
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector('.landed');
+      if (shown) shown.classList.remove('landed');
+    }, H.landedMs);
+  }
+
+  /** Whether an archive or a request on the Archives row needs the person now. */
+  function archiveNeeds(meta: Any): boolean {
+    return (Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && entry.status === 'stopped'))
+      || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && entry.status === 'pending' && entry.origin === 'agent'));
+  }
+
+  /** An item on the Archives row outlined: by its own Needs you line, or by an open link that landed on the row. */
+  function archiveLanded(own: string, needsPerson: boolean): boolean {
+    const landed = state.landed;
+    if (!landed) return false;
+    const meta = state.computerMeta && state.computerMeta.archives;
+    return landed.id === own || (needsPerson && !!meta && landed.id === meta.sourceId);
+  }
+
+  /** See why under the Archives row while its list cannot be read: why, what is kept, and what to do. */
+  function archiveUnreadable(meta: Any, id: string): HTMLElement | null {
+    const A = H.copy.archives;
+    const unreadable = meta.unreadable;
+    if (!unreadable || typeof unreadable !== 'object') return null;
+    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable.reason) ? String(unreadable.reason) : 'other';
+    const file = typeof unreadable.file === 'string' && unreadable.file ? unreadable.file : '';
+    const box = details('why:' + id, doc.createTextNode(P.seeWhy), 'why');
+    if (state.landed && state.landed.id === id) box.className += ' landed';
+    add(box, add(el('ul', 'plain'),
+      el('li', '', fill((A.unreadable.why as Any)[reason], { file: file || A.thisFile })),
+      el('li', '', A.unreadable.kept),
+      el('li', '', (A.unreadable.fix as Any)[reason])));
+    return box;
+  }
+
   /** An import being read, removed or checked keeps the page reading often. */
   function archivesMoving(): boolean {
     const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
@@ -1199,7 +1276,7 @@ export function chatgptDashboardClient(
   function validArchive(entry: Any): boolean {
     return !!entry && typeof entry.id === 'string' && !!entry.id && typeof entry.name === 'string'
       && ARCHIVE_STATUSES.indexOf(entry.status) >= 0
-      && Array.isArray(entry.gaps) && Array.isArray(entry.skipped) && Array.isArray(entry.examples);
+      && Array.isArray(entry.gaps) && Array.isArray(entry.skipped);
   }
 
   function validArchiveRequest(entry: Any): boolean {
@@ -1237,6 +1314,8 @@ export function chatgptDashboardClient(
   function archiveRequestItem(request: Any): HTMLElement {
     const A = H.copy.archives;
     const item = el('li', 'archive request');
+    item.setAttribute('data-request', String(request.status));
+    if (archiveLanded('archive-request:' + request.id, request.status === 'pending' && request.origin === 'agent')) item.className += ' landed';
     const key = 'archive-request:' + request.id;
     const where = typeof request.where === 'string' ? request.where : '';
     if (request.status === 'pending') {
@@ -1264,6 +1343,7 @@ export function chatgptDashboardClient(
     const A = H.copy.archives;
     const item = el('li', 'archive' + (archive.status === 'stopped' ? ' stopped' : ''));
     item.setAttribute('data-archive', archive.status);
+    if (archiveLanded('archive:' + archive.id, archive.status === 'stopped')) item.className += ' landed';
     add(item, add(el('p', 'archive-head'), el('span', 'archive-name', archive.name), el('span', 'ftag', (A.status as Any)[archive.status])));
     const facts: HTMLElement[] = [archive.format, archive.where]
       .filter((part: Any) => typeof part === 'string' && part)
@@ -1332,7 +1412,10 @@ export function chatgptDashboardClient(
     return block;
   }
 
-  /** What could not be read fully, per kind, and exactly where some of it is. */
+  /**
+   * What could not be read fully, per kind (for an archive of several files,
+   * which file each is in), then what was left out on purpose.
+   */
   function archiveWhy(archive: Any): HTMLElement | null {
     const A = H.copy.archives;
     const kinds = A.gaps as Any;
@@ -1341,18 +1424,12 @@ export function chatgptDashboardClient(
       .map((entry: Any) => {
         const words = kinds[entry.kind] || kinds.other;
         const n = wholeCount(entry.count);
-        return el('li', '', fill(n === 1 ? words.one : words.many, { n: count(n) }));
+        const gap = fill(n === 1 ? words.one : words.many, { n: count(n) });
+        return el('li', '', typeof entry.file === 'string' && entry.file ? fill(A.gapInFile, { file: entry.file, gap }) : gap);
       });
     if (!lines.length) return null;
     const box = details('archive-why:' + archive.id, doc.createTextNode(A.seeWhy), 'why');
-    add(box, add(el('ul', 'plain'), ...lines));
-    const what = A.exampleKinds as Any;
-    const examples = archive.examples
-      .filter((entry: Any) => entry && typeof entry.kind === 'string' && typeof entry.file === 'string' && entry.file
-        && typeof entry.offset === 'number' && isFinite(entry.offset) && entry.offset >= 0)
-      .map((entry: Any) => el('li', '', fill(A.example, { what: what[entry.kind] || what.other, file: entry.file, offset: count(entry.offset) })));
-    if (examples.length) add(box, el('p', 'why-head', A.examplesHeading), add(el('ul', 'plain files'), ...examples), el('p', 'why-note', A.examplesNote));
-    return box;
+    return add(box, add(el('ul', 'plain'), ...lines));
   }
 
   /**

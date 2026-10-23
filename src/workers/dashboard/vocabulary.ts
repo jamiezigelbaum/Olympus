@@ -10,6 +10,7 @@
 import type {
   DashboardAnswerLaneCard,
   DashboardConnectionState,
+  DashboardImportAttention,
   DashboardSourceCard,
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
@@ -206,6 +207,11 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
     };
   }
   if (unknownValue !== undefined) return unknownStatus(unknownValue);
+  // An import that stopped, a request waiting for an answer, imported items
+  // no private model can judge now, or a record that cannot be read: each is
+  // the person's to answer, whatever the imports' progress says (owner rule,
+  // 2026-10-10: nothing wrong without a route to exactly what).
+  if ((source.connection.imports_attention?.length ?? 0) > 0) return { status: 'Needs you', mappedUnknown: false };
 
   const connectionStatus = DASHBOARD_CONNECTION_STATE_STATUS[source.connection.state];
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
@@ -439,6 +445,9 @@ export function dashboardAttentionLine(
     default:
       break;
   }
+  // What an import source's imports need is one Needs you item each
+  // (dashboardImportAttentionSentence); the row keeps its own line.
+  if (source.connection.imports_attention?.length) return source.connection.label;
   if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return DASHBOARD_FOLDER_NEEDS_PERMISSION;
   if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return DASHBOARD_FOLDER_NEEDS_HELPER;
   if (source.schedule?.degraded_reason === 'scope_root_unreadable') return DASHBOARD_FOLDER_UNREADABLE;
@@ -1831,20 +1840,9 @@ export const DASHBOARD_ARCHIVE_COPY = {
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },
   },
-  /** Under the gaps: exactly where some are, a file of the archive and a byte offset in it. */
   seeWhy: 'See what was not read',
-  example: '{what}: {file}, at byte {offset}',
-  exampleKinds: {
-    message_too_large: 'A message too large to read',
-    message_unreadable: 'A message that could not be read',
-    charset_not_decoded: 'A message in a character set Olympus could not read',
-    attachments_not_read: 'An attachment not read',
-    text_cut: 'A message cut short',
-    spam_or_trash: 'A message in Spam or Trash',
-    other: 'An item not read fully',
-  },
-  examplesHeading: 'Where',
-  examplesNote: 'Each place is a byte count from the start of that file.',
+  /** A gap line for an archive of several files: which file it is in. */
+  gapInFile: '{file}: {gap}',
   remove: 'Remove',
   removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
   /** An agent's request, waiting for the person. */
@@ -1871,7 +1869,55 @@ export const DASHBOARD_ARCHIVE_COPY = {
   alreadyUnnamed: '{name} is already imported.',
   removing: 'Removing {name}.',
   declined: 'Declined.',
+  /**
+   * Under Needs you, one line each, with the way to exactly that archive or
+   * request (on the computer the line's button goes to it in place).
+   */
+  needsYou: {
+    stopped: 'An import stopped: {name}',
+    request: 'An agent asked to import {name}',
+    held: { one: '1 imported message waits for the private model', many: '{n} imported messages wait for the private model' },
+    unreadable: "Olympus can't read its list of imported archives",
+    seeWhy: 'See why',
+    review: 'Review',
+    setUp: 'Set up the private model',
+    check: 'Check the private model',
+  },
+  /** See why under the Archives row while its list cannot be read; {file} is where the list is kept. */
+  unreadable: {
+    why: {
+      damaged: '{file} is damaged, so Olympus cannot tell which archives it imported.',
+      unknown_form: '{file} was written by a newer version of Olympus, or it is damaged.',
+      permission: 'Your user account is not allowed to open {file}.',
+      other: 'Olympus could not open {file}.',
+    },
+    kept: 'Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.',
+    fix: {
+      damaged: 'Restore that file from a backup, or ask for help at olympusplugin.ai/support.',
+      unknown_form: 'Update Olympus, then open this page again.',
+      permission: 'Check that your user account can open that file, then open this page again.',
+      other: 'Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support.',
+    },
+  },
 } as const;
+
+/**
+ * The sentence one Needs you item about imports carries (both surfaces read
+ * the same words; names are the person's own file names).
+ */
+export function dashboardImportAttentionSentence(entry: DashboardImportAttention): string {
+  const words = DASHBOARD_ARCHIVE_COPY.needsYou;
+  switch (entry.kind) {
+    case 'stopped':
+      return words.stopped.replace('{name}', entry.name);
+    case 'request':
+      return words.request.replace('{name}', entry.name);
+    case 'held':
+      return entry.count === 1 ? words.held.one : words.held.many.replace('{n}', dashboardCount(entry.count));
+    case 'unreadable':
+      return words.unreadable;
+  }
+}
 
 export const DASHBOARD_COMPUTER_PANEL_COPY = {
   section: 'On this computer',

@@ -4,8 +4,12 @@
 // refusal stays in the picker with the engine's reason; each archive's state
 // renders with its way forward (Set up the private model, See what was not
 // read, Remove with confirmation); an agent's request waits for Import or
-// Decline. In ChatGPT the row's Import an archive opens the computer's
-// dashboard and no list is drawn. Every name here is invented.
+// Decline. What needs the person (a stopped import, an agent's request,
+// held messages no private model can judge, a list that cannot be read) is
+// a Needs you line on both surfaces: on the computer its button goes to that
+// archive or request in place; in ChatGPT it opens the computer's Archives
+// row. In ChatGPT the row's Import an archive opens the computer's dashboard
+// and no list is drawn. Every name here is invented.
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
@@ -107,6 +111,18 @@ async function mount(serve: Serve, options: { computer?: boolean; dashboard?: ()
   return page;
 }
 
+/** The preview state exactly: its card (with its Needs you lines) and its own list in the computer's meta. */
+function previewState(state: string) {
+  return previewDashboardToolResult(state, false) as { _meta: Record<string, any> };
+}
+
+/** The Needs you section's lines, by sentence. */
+function needsYou(page: Page): Map<string, Element> {
+  const heading = Array.from(page.doc.querySelectorAll('h2')).find((node) => node.textContent === 'Needs you');
+  const rows = heading ? Array.from(heading.parentElement!.querySelectorAll('li.row.need')) : [];
+  return new Map(rows.map((row) => [row.querySelector('.row-text')?.textContent ?? '', row]));
+}
+
 /** The dashboard tool's answer: the engine's own Archives row for a state, with this list in the computer's meta. */
 function dashboard(state: string, archives?: ComputerArchivesMeta) {
   const result = previewDashboardToolResult(state, false) as { _meta: Record<string, any> };
@@ -137,7 +153,6 @@ const ARCHIVE: ComputerArchiveEntry = {
   importedAt: '2026-10-22T09:00:00.000Z',
   gaps: [],
   skipped: [],
-  examples: [],
 };
 
 /** The same archive before it finished. */
@@ -278,13 +293,12 @@ describe('each archive under the Archives row', () => {
     expect(item.textContent).toContain(A.setUpPrivateModel);
   });
 
-  test('what was not read, per kind, and exactly where, behind See what was not read', async () => {
+  test('what was not read, per kind in plain words, behind See what was not read; never a byte offset', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([{
         ...ARCHIVE,
         gaps: [{ kind: 'message_too_large', count: 2 }, { kind: 'attachments_not_read', count: 1 }, { kind: 'something_new', count: 4 }],
         skipped: [{ kind: 'spam_or_trash', count: 30 }],
-        examples: [{ kind: 'message_too_large', file: ARCHIVE.name, offset: 1_048_576 }],
       }])),
     });
     const item = archiveItem(page, 'imported');
@@ -292,12 +306,30 @@ describe('each archive under the Archives row', () => {
     expect(why).not.toBeNull();
     expect(why.querySelector('summary')!.textContent).toBe(A.seeWhy);
     const lines = Array.from(why.querySelectorAll('ul.plain li')).map((node) => node.textContent);
-    expect(lines).toContain(fill(A.gaps.message_too_large.many, { n: '2' }));
-    expect(lines).toContain(A.gaps.attachments_not_read.one);
-    expect(lines).toContain(fill(A.gaps.other.many, { n: '4' }));
-    expect(lines).toContain(fill(A.gaps.spam_or_trash.many, { n: '30' }));
-    expect(lines).toContain(fill(A.example, { what: A.exampleKinds.message_too_large, file: ARCHIVE.name, offset: '1,048,576' }));
-    expect(why.textContent).toContain(A.examplesNote);
+    expect(lines).toEqual([
+      fill(A.gaps.message_too_large.many, { n: '2' }),
+      A.gaps.attachments_not_read.one,
+      fill(A.gaps.other.many, { n: '4' }),
+      fill(A.gaps.spam_or_trash.many, { n: '30' }),
+    ]);
+    expect(why.textContent).not.toContain('byte');
+  });
+
+  test('an archive of several files says which file each gap is in', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([{
+        ...ARCHIVE,
+        gaps: [
+          { kind: 'message_too_large', count: 2, file: 'Inbox' },
+          { kind: 'message_unreadable', count: 1, file: 'Sent' },
+        ],
+      }])),
+    });
+    const lines = Array.from(archiveItem(page, 'imported').querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gapInFile, { file: 'Inbox', gap: fill(A.gaps.message_too_large.many, { n: '2' }) }),
+      fill(A.gapInFile, { file: 'Sent', gap: A.gaps.message_unreadable.one }),
+    ]);
   });
 
   test('stopped: which file, what happened, and what to do', async () => {
@@ -389,6 +421,83 @@ describe('imports asked for', () => {
     expect(page.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: '9d4c3b2a-7f6e-4d8c-9b0a-4e5f6a7b8c93' } }]);
     // Dismiss only clears a finished check: no "Declined." line.
     expect(page.text()).not.toContain(A.declined);
+  });
+});
+
+describe('Needs you for imports', () => {
+  const TAKEOUT = 'All mail Including Spam and Trash.mbox';
+
+  /** The Archives row, and whether its dot is the Needs you one. */
+  function archivesRow(page: Page): Element {
+    const row = Array.from(page.doc.querySelectorAll('li.row.source')).find((node) => node.querySelector('.source-name')?.textContent === 'Archives');
+    if (!row) throw new Error(`no Archives row in: ${page.text()}`);
+    return row;
+  }
+
+  test('a stopped import: a Needs you line whose See why goes to that archive in place; the row is not green', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-stopped') });
+    const line = needsYou(page).get(fill(A.needsYou.stopped, { name: TAKEOUT }));
+    expect(line).toBeDefined();
+    expect(archivesRow(page).querySelector('.dot')!.className).toContain('tone-warn');
+    const before = page.sent.length;
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.seeWhy) as HTMLButtonElement).click();
+    await settle();
+    // In place: no tool, no link; the stopped archive itself is outlined.
+    expect(page.sent.slice(before).filter((message) => message.method === 'tools/call' || message.method === 'ui/open-link')).toEqual([]);
+    expect(archiveItem(page, 'stopped').className).toContain('landed');
+  });
+
+  test('an agent\'s request: a Needs you line whose Review goes to that request in place', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-request') });
+    const line = needsYou(page).get(fill(A.needsYou.request, { name: 'Takeout-2.mbox' }));
+    expect(line).toBeDefined();
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.review) as HTMLButtonElement).click();
+    await settle();
+    expect(page.doc.querySelector('li.archive.request[data-request="pending"]')!.className).toContain('landed');
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
+  });
+
+  test('held messages with no private model: a Needs you line that opens the private model in place', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-waiting') });
+    const line = needsYou(page).get(fill(A.needsYou.held.many, { n: '48,210' }));
+    expect(line).toBeDefined();
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.setUp) as HTMLButtonElement).click();
+    await settle();
+    expect((page.doc.querySelector('details[data-open-key="models"]') as HTMLDetailsElement | null)?.open).toBe(true);
+    expect(page.calls().map((call) => call.name).every((name) => name === DASHBOARD_TOOL_NAME)).toBe(true);
+  });
+
+  test('a list that cannot be read: never "no archives imported yet", no Import, and See why says why and what to do', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-unreadable') });
+    expect(page.text()).not.toMatch(/No archives imported yet/i);
+    expect(archivesRow(page).textContent).toMatch(/can't read the list of imported archives/i);
+    expect(page.hasButton(A.importAction)).toBe(false);
+    const line = needsYou(page).get(A.needsYou.unreadable);
+    expect(line).toBeDefined();
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.seeWhy) as HTMLButtonElement).click();
+    await settle();
+    const why = archivesRow(page).querySelector('details.why') as HTMLDetailsElement;
+    expect(why.open).toBe(true);
+    const file = '~/.local/share/openclaw/olympus/archive-imports.json';
+    expect(why.textContent).toContain(fill(A.unreadable.why.damaged, { file }));
+    expect(why.textContent).toContain(A.unreadable.kept);
+    expect(why.textContent).toContain(A.unreadable.fix.damaged);
+  });
+
+  test('an imported archive with everything judged adds nothing to Needs you', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-imported') });
+    expect([...needsYou(page).keys()].filter((sentence) => sentence.includes('import') || sentence.includes('archive'))).toEqual([]);
+  });
+
+  test('in ChatGPT the same lines open the computer\'s Archives row', async () => {
+    const result = previewState('archives-stopped');
+    const page = await mount({}, { computer: false, dashboard: () => ({ ...result, _meta: {} }) });
+    const line = needsYou(page).get(fill(A.needsYou.stopped, { name: TAKEOUT }));
+    expect(line).toBeDefined();
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.seeWhy) as HTMLButtonElement).click();
+    await settle();
+    const opened = page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url as string);
+    expect(opened).toEqual(['https://olympusplugin.ai/open/archives/']);
   });
 });
 

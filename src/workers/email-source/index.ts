@@ -215,6 +215,7 @@ import {
   type DashboardManualSync,
   type DashboardApiKeySource,
   type DashboardConnectSource,
+  type DashboardImportedArchives,
   type DashboardSyncSource,
   type DashboardThisComputerSource,
   type DashboardOAuthSource,
@@ -5447,13 +5448,16 @@ function sourceWatchNotSupported(): EmailSourceWorkerError {
 
 
 
-/** The Archives card's connection; nothing when the record cannot be read (the card then reads none imported). */
-function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): { importedArchives?: { archives: number; importing: boolean } } {
+/**
+ * The Archives card's connection. A failure to read it is said as such,
+ * never as no archives imported.
+ */
+function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): { importedArchives?: DashboardImportedArchives } {
   if (!archiveImports) return {};
   try {
     return { importedArchives: archiveImports.present() };
   } catch {
-    return {};
+    return { importedArchives: { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: 'other' }] } };
   }
 }
 

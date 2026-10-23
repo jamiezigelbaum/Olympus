@@ -48,6 +48,9 @@ function handStep(target: OpenTarget): string | undefined {
   if (target.kind === 'unreadable') {
     return `Under <strong>Sources</strong>, open <strong>See why</strong> under <strong>${OPEN_UNREADABLE_SOURCES[target.source].label}</strong>. It lists every file that can't be read, and each one opens.`;
   }
+  if (target.kind === 'archives') {
+    return 'Under <strong>Sources</strong>, find <strong>Archives</strong>. Each imported archive, and each import an agent asked for, says what it needs, with its own buttons.';
+  }
   return undefined;
 }
 

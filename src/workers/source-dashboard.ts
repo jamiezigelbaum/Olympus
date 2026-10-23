@@ -976,6 +976,11 @@ export interface DashboardSourceCard {
      * and the new connection uses the Desktop client.
      */
     google_signin_moved?: true;
+    /**
+     * An import source only (`archive_import`): what its imports need from the
+     * person. Any entry puts the source under Needs you.
+     */
+    imports_attention?: DashboardImportAttention[];
     /** Present only for a locally connected broker-backed v0.4 source. */
     disconnect?: DashboardDisconnectAction;
     /** Present only for a paired-session source that currently reads paired. */
@@ -1392,7 +1397,31 @@ export interface SourceDashboardBuildOptions {
 export interface DashboardImportedArchives {
   archives: number;
   importing: boolean;
+  /**
+   * What the imports need from the person, one entry each: an import that
+   * stopped, an agent's request waiting for an answer, imported items no
+   * private model can judge now, or the record of imports itself unreadable.
+   * Absent or empty: nothing.
+   */
+  attention?: DashboardImportAttention[];
 }
+
+/**
+ * One thing an import source needs from the person. Names are the person's
+ * own file names (the names rule: Personal); folders and content never ride
+ * here. The words are the dashboard's (vocabulary.ts DASHBOARD_ARCHIVE_COPY).
+ */
+export type DashboardImportAttention =
+  | { kind: 'stopped'; id: string; name: string }
+  | { kind: 'request'; id: string; name: string }
+  | { kind: 'held'; count: number; model: 'off' | 'waiting' }
+  | { kind: 'unreadable'; reason: DashboardImportsUnreadableReason };
+
+/**
+ * Why the record of imports (or of the imports asked for) cannot be read:
+ * damaged, in a form this build does not read, not allowed, or another error.
+ */
+export type DashboardImportsUnreadableReason = 'damaged' | 'unknown_form' | 'permission' | 'other';
 
 export interface DashboardPendingConnect {
   source: DashboardOAuthSource;
@@ -3693,6 +3722,8 @@ type DashboardSessionEvidence = 'in_cadence' | 'unconfirmed' | 'none';
 /** The labels an Archives card's connection can carry. */
 export const DASHBOARD_NO_ARCHIVES_LABEL = 'no archives imported yet';
 export const DASHBOARD_ARCHIVES_IMPORTING_LABEL = 'importing';
+/** The record of imports cannot be read: never "no archives imported yet". */
+export const DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives";
 
 export function dashboardArchivesImportedLabel(count: number): string {
   return count === 1 ? '1 archive imported' : `${count} archives imported`;
@@ -3701,16 +3732,22 @@ export function dashboardArchivesImportedLabel(count: number): string {
 /**
  * The Archives card's connection, from its imports: none yet, one still
  * importing (or being removed), or every one read. There is no account, so
- * nothing here can need reconnecting; a stopped import is on its own line in
- * the archive list, with what to do.
+ * nothing here can need reconnecting. What the imports need from the person
+ * rides along (`imports_attention`), and a record that cannot be read never
+ * reads as none imported: it says so instead.
  */
 function importedArchivesConnection(
   imported: DashboardImportedArchives | undefined,
-): Pick<DashboardSourceCard['connection'], 'state' | 'label'> {
+): Pick<DashboardSourceCard['connection'], 'state' | 'label' | 'imports_attention'> {
   const count = imported?.archives ?? 0;
-  if (count === 0) return { state: 'not_connected', label: DASHBOARD_NO_ARCHIVES_LABEL };
-  if (imported!.importing) return { state: 'syncing', label: DASHBOARD_ARCHIVES_IMPORTING_LABEL };
-  return { state: 'connected', label: dashboardArchivesImportedLabel(count) };
+  const attention = imported?.attention ?? [];
+  const extra = attention.length > 0 ? { imports_attention: attention.map((entry) => ({ ...entry })) } : {};
+  if (attention.some((entry) => entry.kind === 'unreadable')) {
+    return { state: 'connected', label: DASHBOARD_ARCHIVES_UNREADABLE_LABEL, ...extra };
+  }
+  if (count === 0) return { state: 'not_connected', label: DASHBOARD_NO_ARCHIVES_LABEL, ...extra };
+  if (imported!.importing) return { state: 'syncing', label: DASHBOARD_ARCHIVES_IMPORTING_LABEL, ...extra };
+  return { state: 'connected', label: dashboardArchivesImportedLabel(count), ...extra };
 }
 
 function sessionConnectionEvidence(

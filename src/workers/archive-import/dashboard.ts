@@ -36,7 +36,12 @@ import {
   type ArchiveImportStart,
   type PreparedArchiveImport,
 } from './start.ts';
-import { ARCHIVE_IMPORTS_SOURCE_ID, type ArchiveImportRecord } from './state.ts';
+import type {
+  DashboardImportAttention,
+  DashboardImportedArchives,
+  DashboardImportsUnreadableReason,
+} from '../source-dashboard.ts';
+import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, type ArchiveImportRecord } from './state.ts';
 import {
   ArchiveImportRequestStore,
   archiveImportRequestsPath,
@@ -63,9 +68,11 @@ export interface ArchiveImportDashboard {
   remove(archiveId: string): ArchiveSimpleResult;
   view(): ComputerArchivesMeta;
   /**
-   * Imports at least one archive, or holds one the person was asked about.
+   * The Archives card's connection: how many archives, whether one is
+   * moving, and what needs the person. Never throws: a record that cannot
+   * be read is an entry of its own, never none imported.
    */
-  present(): { archives: number; importing: boolean };
+  present(): DashboardImportedArchives;
   /**
    * Checks a restart interrupted, started again.
    */
@@ -141,6 +148,17 @@ function tallies(values: Readonly<Record<string, number>>): Array<{ kind: string
     .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
 }
 
+/**
+ * Why a record file could not be read, as the dashboard words it.
+ */
+function recordUnreadableReason(error: unknown): DashboardImportsUnreadableReason {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  if (code === 'EACCES' || code === 'EPERM') return 'permission';
+  if (error instanceof SyntaxError) return 'damaged';
+  if (error instanceof ArchiveRecordFormError) return 'unknown_form';
+  return 'other';
+}
+
 function unreadableCode(code: string): string {
   if (code === 'not_found') return 'not_found';
   if (code === 'permission_denied') return 'permission_denied';
@@ -162,11 +180,12 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   // Requests whose check runs in this process (a `checking` entry not here was left by a restart).
   const running = new Set<string>();
 
-  const where = (path: string): string => {
-    const folder = posix.dirname(path);
-    if (folder === home) return '~';
-    return folder.startsWith(`${home}/`) ? `~${folder.slice(home.length)}` : folder;
+  // A path with the home folder shown as ~.
+  const shown = (path: string): string => {
+    if (path === home) return '~';
+    return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
   };
+  const where = (path: string): string => shown(posix.dirname(path));
 
   const refresh = (): void => {
     try {
@@ -304,11 +323,25 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     return Math.max(0, Math.min(99, Math.floor((done / total) * 100)));
   };
 
+  /**
+   * The gaps, per kind; for an archive of several files, per file and kind
+   * when the record kept that. Offsets stay in the record.
+   */
+  const gapsOf = (record: ArchiveImportRecord): ComputerArchiveEntry['gaps'] => {
+    const byFile = record.findings.gaps_by_file;
+    if (record.files.length < 2 || !byFile || Object.keys(byFile).length === 0) return tallies(record.findings.gaps);
+    const fileName = (index: number): string => posix.basename(record.files[index]?.rel_path || record.label) || record.label;
+    return Object.entries(byFile)
+      .map(([index, kinds]) => ({ index: Number(index), kinds }))
+      .filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record.files.length)
+      .sort((a, b) => a.index - b.index)
+      .flatMap((entry) => tallies(entry.kinds).map((gap) => ({ ...gap, file: fileName(entry.index) })));
+  };
+
   const entryOf = (record: ArchiveImportRecord): ComputerArchiveEntry => {
     const { items, held } = counts(record);
     const earliest = dateOnly(record.date_range?.earliest);
     const latest = dateOnly(record.date_range?.latest);
-    const fileName = (index: number): string => posix.basename(record.files[index]?.rel_path || record.label) || record.label;
     const stopFile = record.stop?.rel_path ? posix.basename(record.stop.rel_path) : undefined;
     return {
       id: record.archive_id,
@@ -325,13 +358,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       startedAt: record.created_at,
       ...(record.completed_at ? { importedAt: record.completed_at } : {}),
       ...(record.status === 'stopped' && record.stop ? { stop: { code: record.stop.code, ...(stopFile ? { file: stopFile } : {}) } } : {}),
-      gaps: tallies(record.findings.gaps),
+      gaps: gapsOf(record),
       skipped: tallies(record.findings.skipped),
-      examples: record.findings.samples.slice(0, 20).map((sample) => ({
-        kind: sample.kind,
-        file: fileName(sample.file_index),
-        offset: sample.offset,
-      })),
     };
   };
 
@@ -406,20 +434,65 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
 
     view() {
       const model = options.privateModel();
-      const records = state.list();
+      const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID, privateModel: model };
+      let records: ArchiveImportRecord[];
+      try {
+        records = state.list();
+      } catch (error) {
+        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path) } };
+      }
+      let asked: ArchiveImportRequest[];
+      try {
+        asked = requests.list();
+      } catch (error) {
+        return {
+          ...base,
+          archives: records.map(entryOf),
+          requests: [],
+          unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path) },
+        };
+      }
       return {
-        sourceId: ARCHIVE_IMPORTS_SOURCE_ID,
+        ...base,
         archives: records.map(entryOf),
-        requests: requests.list().map((request) => requestOf(request, records)),
-        privateModel: model,
+        requests: asked.map((request) => requestOf(request, records)),
       };
     },
 
     present() {
-      const records = state.list();
+      let records: ArchiveImportRecord[];
+      try {
+        records = state.list();
+      } catch (error) {
+        return { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: recordUnreadableReason(error) }] };
+      }
+      const attention: DashboardImportAttention[] = [];
+      let asked: ArchiveImportRequest[] = [];
+      try {
+        asked = requests.list();
+      } catch (error) {
+        attention.push({ kind: 'unreadable', reason: recordUnreadableReason(error) });
+      }
+      for (const record of records) {
+        if (record.status === 'stopped') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
+      }
+      for (const request of asked) {
+        if (request.origin === 'agent' && request.status === 'pending') {
+          attention.push({ kind: 'request', id: request.request_id, name: request.label });
+        }
+      }
+      // Held content no private model can judge now: the person's to set up.
+      const model = options.privateModel();
+      if (model !== 'ready') {
+        const held = records
+          .filter((record) => record.status !== 'removing')
+          .reduce((sum, record) => sum + counts(record).held, 0);
+        if (held > 0) attention.push({ kind: 'held', count: held, model });
+      }
       return {
         archives: records.length,
         importing: records.some((record) => record.status === 'importing' || record.status === 'removing'),
+        ...(attention.length > 0 ? { attention } : {}),
       };
     },
 
