@@ -28,12 +28,26 @@ export interface DriverSetup {
 
 interface Context { id: number; frameId: string; isDefault: boolean }
 
+/** What a request carried, for a report: the tool a dashboard call named and its argument names (values only where short and not a secret). */
+export function describeBody(raw: unknown): string {
+  if (typeof raw !== 'string' || raw === '') return '';
+  try {
+    const body = JSON.parse(raw) as Record<string, unknown>;
+    const secret = /token|key|secret|password|auth|cookie|bearer/i;
+    const show = (value: unknown, name: string): string => (secret.test(name) ? '…' : typeof value === 'string' ? JSON.stringify(value.slice(0, 40)) : typeof value === 'number' || typeof value === 'boolean' ? String(value) : value === null ? 'null' : typeof value === 'object' ? '{…}' : '…');
+    return Object.entries(body).slice(0, 8).map(([name, value]) => {
+      if (value && typeof value === 'object' && !Array.isArray(value)) return `${name}={${Object.entries(value as Record<string, unknown>).slice(0, 8).map(([k, v]) => `${k}:${show(v, k)}`).join(', ')}}`;
+      return `${name}=${show(value, name)}`;
+    }).join(' ').slice(0, 300);
+  } catch { return ''; }
+}
+
 export class CdpJourneyDriver implements JourneyDriver {
   private readonly cdp: Cdp;
   private contexts: Context[] = [];
   private mainFrameId = '';
   private events: PageEvents = { console: [], requests: [] };
-  private readonly requests = new Map<string, { url: string; method: string }>();
+  private readonly requests = new Map<string, { url: string; method: string; body: string; startedAt: number }>();
   private origin = '';
   private width = 1280;
   private theme: 'light' | 'dark' = 'light';
@@ -63,16 +77,16 @@ export class CdpJourneyDriver implements JourneyDriver {
       const entry = params?.entry;
       if (entry?.level === 'error') this.events.console.push(`${String(entry.source ?? 'log')}: ${String(entry.text ?? '').slice(0, 300)}${entry.url ? ` (${String(entry.url).slice(0, 120)})` : ''}`);
     });
-    cdp.on('Network.requestWillBeSent', (params) => { this.requests.set(String(params?.requestId), { url: String(params?.request?.url ?? ''), method: String(params?.request?.method ?? 'GET') }); });
+    cdp.on('Network.requestWillBeSent', (params) => { this.requests.set(String(params?.requestId), { url: String(params?.request?.url ?? ''), method: String(params?.request?.method ?? 'GET'), body: describeBody(params?.request?.postData), startedAt: Date.now() }); });
     cdp.on('Network.responseReceived', (params) => {
       const status = Number(params?.response?.status ?? 0);
       const url = String(params?.response?.url ?? '');
-      if (status >= 400 && /^https?:/.test(url)) this.events.requests.push({ url, status, text: `${this.requests.get(String(params?.requestId))?.method ?? 'GET'} ${pathOf(url)}` });
+      if (status >= 400 && /^https?:/.test(url)) { const known = this.requests.get(String(params?.requestId)); this.events.requests.push({ url, status, text: `${known?.method ?? 'GET'} ${pathOf(url)}`, ...(known?.body ? { detail: known.body } : {}) }); }
     });
     cdp.on('Network.loadingFailed', (params) => {
       if (params?.canceled) return;
       const known = this.requests.get(String(params?.requestId));
-      if (known && /^https?:/.test(known.url)) this.events.requests.push({ url: known.url, status: 0, text: `${known.method} ${pathOf(known.url)}` });
+      if (known && /^https?:/.test(known.url)) this.events.requests.push({ url: known.url, status: 0, text: `${known.method} ${pathOf(known.url)}`, detail: `${String(params?.errorText ?? 'failed')} at ${new Date().toISOString()} after ${Date.now() - known.startedAt} ms${known.body ? `; ${known.body}` : ''}` });
     });
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');

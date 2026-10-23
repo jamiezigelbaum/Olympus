@@ -130,7 +130,7 @@ export interface PageEvents {
   /** Console errors and uncaught page errors since the last drain. */
   console: string[];
   /** Requests that failed or were answered 400 or above, as `GET /path -> 404`. */
-  requests: Array<{ url: string; status: number; text: string }>;
+  requests: Array<{ url: string; status: number; text: string; detail?: string }>;
 }
 
 export interface ElementInfo {
