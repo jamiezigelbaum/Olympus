@@ -932,7 +932,11 @@ function contentPass(args: {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
-      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && !held) reasons.push(PERSONAL_FIRST_REASON);
+      // A held lane never releases content before its judgment, even where
+      // an owner rule settled the names and the body still raised a question.
+      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
+        reasons.push(PERSONAL_FIRST_REASON);
+      }
       for (const flag of recordFlags) reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline) reasons.push(`content:borderline:${flag}`);
       reasons.push(`content:sniffer:${args.sniffer.id}:undecided`);

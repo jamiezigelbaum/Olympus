@@ -12843,8 +12843,9 @@ function contentPass(args) {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
-      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && !held)
+      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
         reasons.push(PERSONAL_FIRST_REASON);
+      }
       for (const flag of recordFlags)
         reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline)

@@ -149,6 +149,16 @@ test('Secrets, structured identifiers, owner rules, force rules, floors and over
   const ownerDecided = held({ signals: { title: 'Picnic list', path: '/Shared/picnic.txt' }, text: ORDINARY }, { rules: [prior] });
   expect(ownerDecided).toMatchObject({ contentTier: 'private', contentPending: false, state: 'current' });
   expect(ownerDecided.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
+  // The same owner prior, but the body raises a question the model has not
+  // answered yet: the content waits Private, never Personal-first.
+  const priorPersonal: OwnerTierRule = { id: 'owner-prior-personal', match: { kind: 'pathPrefix', value: '/Shared/' }, tier: 'private', strength: 'prior' };
+  const borderline = held(
+    { signals: { title: 'Notes', path: '/Shared/notes.txt' }, text: 'We discussed my medical treatment and therapy at length.' },
+    { rules: [priorPersonal] },
+  );
+  expect(borderline.contentPending).toBe(true);
+  expect(borderline.reasons).not.toContain(PERSONAL_FIRST_REASON);
+  expect(heldUntilJudged(borderline.reasons)).toBe(true);
   // A force rule fixes the tier.
   const force: OwnerTierRule = { id: 'owner-force', match: { kind: 'pathPrefix', value: '/Public/' }, tier: 'private', strength: 'force' };
   expect(held({ signals: { title: 'Picnic list', path: '/Public/picnic.txt' }, text: ORDINARY }, { rules: [force] }))
@@ -233,6 +243,21 @@ test('held content rests in Private with its embedding held; cleared names stay 
   await f.stores.internal.embedChunks({ provider: f.cloud });
   expect(f.cloud.inputs.some((input) => input.includes(BODY_MARKER) || input.includes('bananas'))).toBe(false);
   expect(contentQuestions()[0]).toMatchObject({ priority: HELD_UNTIL_JUDGED_PRIORITY });
+});
+
+test('an owner Personal rule on the names does not release content whose question waits', async () => {
+  const personalPrior: OwnerTierRule = { id: 'owner-files-personal', match: { kind: 'pathPrefix', value: '/Files/' }, tier: 'private', strength: 'prior' };
+  const f = lane({ ...HOLD, sniffer: waiting, rules: [personalPrior] });
+  const text = `We discussed my medical treatment and therapy at length. ${BODY_MARKER}`;
+  await syncOne(f, { id: 'therapy', name: 'Session notes', text });
+  const identity = identityOf('therapy');
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentPending: true });
+  expect(f.ledger.getCurrent(identity)?.reasons).not.toContain(PERSONAL_FIRST_REASON);
+  expect(f.ledger.copies(identity)).toContainEqual(expect.objectContaining({ trustDomain: 'secure_local', layers: 'content', embedHold: true }));
+  expect(f.stores.internal.searchItems(BODY_MARKER, 10)).toEqual([]);
+  expect(f.stores.internal.localContent(localId('therapy'))?.chunks ?? []).toEqual([]);
+  await f.stores.internal.embedChunks({ provider: f.cloud });
+  expect(f.cloud.inputs.some((input) => input.includes(BODY_MARKER) || input.includes('therapy'))).toBe(false);
 });
 
 test('with no private model at all, a held item stays held', async () => {

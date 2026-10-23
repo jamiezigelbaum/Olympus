@@ -19,6 +19,7 @@ import { Glob } from 'bun';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import ts from 'typescript';
 
 const repoRoot = join(import.meta.dir, '..');
 
@@ -59,21 +60,54 @@ function codeWithoutComments(source: string): string {
 }
 
 /**
- * Offsets where `name` is written rather than read. A read is a property
- * access (`x.name`, `x?.name`) that is not assigned to; anything else (an
- * object property, shorthand, destructuring target, string or computed key,
- * a declaration, a parameter) counts as a write.
+ * Offsets where `name` is written rather than read, from the TypeScript
+ * parser so no spelling of an assignment slips past. A read is a property
+ * access (`x.name`, `x?.name`) that is not, through any `!`, parentheses or
+ * type assertion, the target of an assignment, `++`/`--` or `delete`.
+ * Anything else that names it (an object property, shorthand, destructuring
+ * target, string or computed key, a declaration, a parameter) is a write.
  */
 function writesOf(code: string, name: string): number[] {
+  const source = ts.createSourceFile('guard.ts', code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const offsets: number[] = [];
-  const pattern = new RegExp(`(?<![A-Za-z0-9_$])${name}(?![A-Za-z0-9_$])`, 'g');
-  for (const match of code.matchAll(pattern)) {
-    const at = match.index!;
-    const before = code.slice(0, at).trimEnd();
-    const after = code.slice(at + name.length);
-    const read = before.endsWith('.') && !/^\s*(?:=(?!=)|\+=|-=|\|\|=|&&=|\?\?=)/.test(after);
-    if (!read) offsets.push(at);
-  }
+  const isWrapper = (node: ts.Node): boolean => ts.isNonNullExpression(node) || ts.isParenthesizedExpression(node)
+    || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node);
+  const isAssignment = (kind: ts.SyntaxKind): boolean =>
+    kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
+  const accessIsWritten = (access: ts.Node): boolean => {
+    let target = access;
+    while (target.parent && isWrapper(target.parent)) target = target.parent;
+    const parent = target.parent;
+    if (!parent) return false;
+    if (ts.isBinaryExpression(parent)) return parent.left === target && isAssignment(parent.operatorToken.kind);
+    if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) {
+      return parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken;
+    }
+    if (ts.isDeleteExpression(parent)) return true;
+    // A destructuring assignment target (`[x.name] = …`, `({ k: x.name } = …)`):
+    // climb the pattern literal and see whether it is the left of an `=`.
+    let pattern: ts.Node = target;
+    while (pattern.parent && (ts.isArrayLiteralExpression(pattern.parent) || ts.isObjectLiteralExpression(pattern.parent)
+      || ts.isPropertyAssignment(pattern.parent) || ts.isSpreadElement(pattern.parent) || isWrapper(pattern.parent))) {
+      pattern = pattern.parent;
+    }
+    if (pattern === target) return false;
+    const outer = pattern.parent;
+    return outer !== undefined && ts.isBinaryExpression(outer) && outer.left === pattern
+      && outer.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
+      if (node.text === name) {
+        const read = ts.isPropertyAccessExpression(node.parent) && node.parent.name === node && !accessIsWritten(node.parent);
+        if (!read) offsets.push(node.getStart(source));
+      }
+    } else if (ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) {
+      if (node.text.includes(name)) offsets.push(node.getStart(source));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
   return offsets;
 }
 
@@ -93,11 +127,20 @@ describe('holding content until judged is an archive import lane\'s choice alone
       `c.${LANE_OPTION} = true;`,
       `const c = { ['${LANE_OPTION}']: true };`,
       `Object.assign(c, JSON.parse('{"${LANE_OPTION}": true}'));`,
+      `c.${LANE_OPTION}! = true;`,
+      `(c.${LANE_OPTION} as boolean) = true;`,
+      `(<any>c).${LANE_OPTION} = true;`,
+      `c.${LANE_OPTION} ||= true;`,
+      `[c.${LANE_OPTION}] = [true];`,
+      `({ k: c.${LANE_OPTION} } = { k: true });`,
+      `c['${LANE_OPTION}'] = true;`,
     ]) expect(`${written} -> ${writesOf(written, LANE_OPTION).length}`).toBe(`${written} -> 1`);
     for (const readOnly of [
       `if (c.${LANE_OPTION} === true) hold();`,
       `const h = options?.${LANE_OPTION};`,
       `return set.${LANE_OPTION}\n  ?? false;`,
+      `const merged = { hold: set.${LANE_OPTION}, rest: [set.${LANE_OPTION}] };`,
+      `const h = c.${LANE_OPTION}!;`,
     ]) expect(`${readOnly} -> ${writesOf(readOnly, LANE_OPTION).length}`).toBe(`${readOnly} -> 0`);
   });
 
