@@ -16,6 +16,7 @@ var CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source";
 var SCOPE_LIST_TOOL_NAME = "olympus_scope_list";
 var SCOPE_SET_TOOL_NAME = "olympus_scope_set";
 var DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source";
+var DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data";
 var MODEL_SET_TOOL_NAME = "olympus_model_set";
 var MODEL_RETRY_TOOL_NAME = "olympus_model_retry";
 var SYNC_SOURCE_TOOL_NAME = "olympus_sync_source";
@@ -30,6 +31,7 @@ var PANEL_TOOL_NAMES = [
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
   MODEL_SET_TOOL_NAME,
   MODEL_RETRY_TOOL_NAME,
   "olympus_privacy_get",

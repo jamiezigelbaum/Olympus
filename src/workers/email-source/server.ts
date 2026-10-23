@@ -4841,6 +4841,13 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            // Delete indexed data: the same supervised restart a model-key
+            // change uses. `canRestart` has no side effect, so the route can
+            // check it before deleting anything.
+            workerRestart: {
+              canRestart: () => workerRestartsItself(workerLaunch, process.env),
+              request: () => requestModelReload(),
+            },
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),

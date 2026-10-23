@@ -80,7 +80,17 @@ export function withApprovedPages(result: ChatGptToolResult): ChatGptToolResult 
   // need not carry UI metadata. Identify the allowlisted dashboard payload.
   const structured = result.structuredContent;
   if (structured?.v === 1 && Array.isArray(structured.sources)) {
-    result = { ...result, structuredContent: dashboardForApprovedPage(structured as unknown as DashboardViewModelV1) as unknown as Record<string, unknown> };
+    const adapted = dashboardForApprovedPage(structured as unknown as DashboardViewModelV1);
+    // The submitted page runs a menu entry's tool as written, and a tool that
+    // is not on the directory listing (Delete indexed data ships on /mcp
+    // only) would be answered as an unknown tool: the entry is left out.
+    const sources = adapted.sources.map((source) => {
+      if (!source.menu) return source;
+      const { menu, ...row } = source;
+      const kept = menu.filter((fix) => !fix.tool || isDirectoryTool(fix.tool));
+      return kept.length > 0 ? { ...row, menu: kept } : row;
+    });
+    result = { ...result, structuredContent: { ...adapted, sources } as unknown as Record<string, unknown> };
   }
   const meta = result._meta;
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return result;

@@ -1680,6 +1680,15 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    * the engine's own (dashboardManualSyncLine), the same on both surfaces.
    */
   syncChecking: 'Checking…',
+  /**
+   * Delete indexed data (owner, 2026-10-23), for a source that is already
+   * disconnected. The confirmation says what goes and what does not, in the
+   * user's words; {source} is the source's name. Disconnect's confirmation
+   * tells the reader the indexed data stays and can be deleted afterwards.
+   */
+  deleteDataConfirm: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.',
+  deleteDataDone: 'Indexed data deleted',
+  disconnectConfirm: 'Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
   /**
    * The disclosure under a row whose files can't be read: counts and
@@ -1775,6 +1784,7 @@ export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   chooseFolders: 'Choose folders',
   chooseMail: 'Choose mail',
   disconnect: 'Disconnect',
+  deleteData: 'Delete indexed data',
   changeModels: 'Change',
 } as const;
 

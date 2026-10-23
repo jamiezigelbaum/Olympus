@@ -247,6 +247,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/embedding-priority' },
   { method: 'POST', path: '/dashboard/tools/call' },
   { method: 'POST', path: '/dashboard/disconnect' },
+  { method: 'POST', path: '/dashboard/delete-source-data' },
   { method: 'POST', path: '/dashboard/unpair' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as

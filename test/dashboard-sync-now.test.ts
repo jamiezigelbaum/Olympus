@@ -38,6 +38,47 @@ const SYNC_DROPBOX: DashboardFix = { label: 'Sync now', tool: 'olympus_sync_sour
 /* View model: the ⋯ menu and the promotion                           */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Delete indexed data in the ⋯ menu                                  */
+/* ------------------------------------------------------------------ */
+
+describe('Delete indexed data in the ⋯ menu', () => {
+  const NOT_CONNECTED = { state: 'not_connected', label: 'not connected', action: { kind: 'oauth', source: 'dropbox' } as DashboardSourceCard['connection']['action'], handles: [] } as DashboardSourceCard['connection'];
+  const DELETE_DROPBOX: DashboardFix = { label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: { source_id: 'dropbox.files' }, destructive: true };
+  const WITH_DATA = { indexed_items: 254, content_ready_items: 254, embedded_items: 254, needs_review_items: 0 };
+  const NO_DATA = { indexed_items: 0, content_ready_items: 0, embedded_items: 0, needs_review_items: 0 };
+
+  test('a disconnected source that still has indexed data offers it, destructively', () => {
+    const off = chatgptDropbox(viewWith({ connection: NOT_CONNECTED, coverage: WITH_DATA }));
+    // Disconnected with an index left behind reads Needs you / Reconnect today;
+    // the delete is the ⋯ menu's only entry (there is no connection to Disconnect).
+    expect(off.primary?.label).toBe('Reconnect');
+    expect(off.menu).toEqual([DELETE_DROPBOX]);
+    // Once its data is gone the row is the plain not-connected one.
+    const deleted = chatgptDropbox(viewWith({ connection: NOT_CONNECTED, coverage: NO_DATA }));
+    expect(deleted.status).toBe('Off');
+    expect(deleted.menu).toBeUndefined();
+  });
+
+  test('a disconnected source with nothing indexed, and a connected one, do not', () => {
+    expect(chatgptDropbox(viewWith({ connection: NOT_CONNECTED, coverage: NO_DATA })).menu).toBeUndefined();
+    const connected = chatgptDropbox(viewWith({ sync_now_available: true }));
+    expect(connected.status).toBe('Fresh');
+    expect(JSON.stringify(connected.menu)).not.toContain('olympus_delete_source_data');
+  });
+
+  test('the response builder keeps only a declared source on the entry and drops what a forged one adds', () => {
+    const copy = copyDashboardViewModel(buildChatGptDashboardViewModel(viewWith({ connection: NOT_CONNECTED, coverage: WITH_DATA }), { now: NOW }));
+    const row = copy.sources.find((source) => source.id === 'dropbox.files')!;
+    expect(row.menu).toEqual([DELETE_DROPBOX]);
+    const forged = copyDashboardViewModel({
+      ...copy,
+      sources: [{ ...row, menu: [{ label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: { source_id: 'reflect.notes', path: '/' }, destructive: true }] }],
+    });
+    expect(forged.sources[0]!.menu).toEqual([{ label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: {}, destructive: true }]);
+  });
+});
+
 describe('the ⋯ menu and the row button', () => {
   test('a connected source that can sync has Sync now first in its ⋯ menu', () => {
     const dropbox = chatgptDropbox(viewWith({ sync_now_available: true }));

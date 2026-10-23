@@ -858,6 +858,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_scope_list',
         'olympus_scope_set',
         'olympus_disconnect_source',
+        'olympus_delete_source_data',
         'olympus_model_set',
         'olympus_model_retry',
         'olympus_privacy_get',
@@ -870,8 +871,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
           expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
         } else {
           expect(tool.annotations?.readOnlyHint).toBe(false);
-          // Disconnecting, and a privacy save (which can remove protection), are destructive.
-          expect(tool.annotations?.destructiveHint).toBe(tool.name === 'olympus_disconnect_source' || tool.name === 'olympus_privacy_set');
+          // Disconnecting, deleting a source's indexed data, and a privacy save (which can remove protection), are destructive.
+          expect(tool.annotations?.destructiveHint).toBe(tool.name === 'olympus_disconnect_source' || tool.name === 'olympus_delete_source_data' || tool.name === 'olympus_privacy_set');
         }
       }
       const dashboard = tools.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;

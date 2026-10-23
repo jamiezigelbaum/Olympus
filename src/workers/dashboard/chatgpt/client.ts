@@ -36,6 +36,10 @@ export interface ChatGptDashboardClientConfig {
    * "Checking …" until the dashboard's `lastManualSync` carries the result.
    */
   syncTool: string;
+  /** Delete indexed data (olympus_delete_source_data): a disconnected source's indexed data, after a confirmation. */
+  deleteDataTool: string;
+  /** Disconnect (olympus_disconnect_source); its confirmation says the indexed data stays. */
+  disconnectTool: string;
   connection: typeof DASHBOARD_CHATGPT_CONNECTION_COPY;
   page: typeof DASHBOARD_CHATGPT_PAGE_COPY;
   statusTone: Record<DashboardStatus, DashboardStatusColorToken>;
@@ -426,6 +430,15 @@ export function chatgptDashboardClient(
         redraw();
         return;
       }
+      if (name === config.deleteDataTool) {
+        // Deleted: the row reads as a source with no data once the engine
+        // has reopened its stores (it restarts; the page re-reads until it
+        // answers). The brief result line stays until the next action.
+        refresh();
+        state.notice = P.deleteDataDone;
+        redraw();
+        return;
+      }
       if (name === H.unpairTool) {
         // Unpair says what it did, an incomplete removal included: keep its words on the page.
         const parts = result && Array.isArray(result.content) ? result.content : [];
@@ -795,9 +808,16 @@ export function chatgptDashboardClient(
       if (state.confirming === key) {
         const run = action;
         wrap.className = 'fix confirm';
+        // Delete and Disconnect say in the source's name what they do and do not touch.
+        const sourceWords = source ? String(source.label || '') : '';
+        const named = sourceWords && fix.tool === config.deleteDataTool
+          ? fill(P.deleteDataConfirm, { source: sourceWords })
+          : sourceWords && fix.tool === config.disconnectTool
+            ? fill(P.disconnectConfirm, { source: sourceWords })
+            : '';
         add(
           wrap,
-          el('span', 'reason strong', typeof fix.confirmText === 'string' && fix.confirmText ? fix.confirmText : P.confirmPrompt),
+          el('span', 'reason strong', typeof fix.confirmText === 'string' && fix.confirmText ? fix.confirmText : named || P.confirmPrompt),
           button(fill(P.confirm, { label: String(fix.label).toLowerCase() }), key + ':yes', run, 'danger'),
           button(P.cancel, key + ':no', () => {
             state.confirming = '';

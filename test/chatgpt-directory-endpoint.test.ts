@@ -325,9 +325,11 @@ describe('/openai/mcp serves the same surface, narrowed, as submitted', () => {
       const onMcp = (await result(await rpc('/mcp', def.access_token, 'tools/list'))).tools as Array<{ name: string }>;
       const onDirectory = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/list'))).tools as Array<{ name: string }>;
       expect(names(onDirectory)).toEqual(names(toolsForSurface(onMcp, 'directory')));
-      // Today the allowlist is every tool the surface lists.
-      expect(names(onDirectory)).toEqual(names(onMcp));
-      expect(onDirectory).toEqual(approved(names(onMcp)));
+      // New tools ship on /mcp only: Delete indexed data is listed there and not here.
+      expect(names(onMcp)).toContain('olympus_delete_source_data');
+      expect(names(onDirectory)).not.toContain('olympus_delete_source_data');
+      expect(names(onDirectory)).toEqual(names(onMcp).filter(isDirectoryTool));
+      expect(onDirectory).toEqual(approved(names(onDirectory)));
       expect(names(onMcp).includes('source_answer')).toBe(withModel);
     }
   });
@@ -374,7 +376,7 @@ describe('/openai/mcp serves the same surface, narrowed, as submitted', () => {
     const onDirectory = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/list'))).tools as Array<{ name: string }>;
     expect(names(onMcp)).toContain('olympus_privacy_get');
     expect(names(onDirectory)).not.toContain('olympus_privacy_get');
-    expect(names(onDirectory)).toEqual(names(onMcp).filter((name) => name !== 'olympus_privacy_get'));
+    expect(names(onDirectory)).toEqual(names(onMcp).filter((name) => name !== 'olympus_privacy_get' && isDirectoryTool(name)));
     expect(onDirectory).toEqual(approved(names(onDirectory)));
     const refused = await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/call', { name: 'olympus_privacy_get', arguments: {} }));
     const unknown = await result(await rpc('/mcp', def.access_token, 'tools/call', { name: 'no_such_tool', arguments: {} }));

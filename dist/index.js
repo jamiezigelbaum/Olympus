@@ -13638,6 +13638,9 @@ var init_vocabulary = __esm(() => {
     },
     sourcePaused: "Paused",
     syncChecking: "Checking…",
+    deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
+    deleteDataDone: "Indexed data deleted",
+    disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
     unreadableMore: DASHBOARD_UNREADABLE_MORE,
@@ -13653,6 +13656,7 @@ var init_vocabulary = __esm(() => {
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
+    deleteData: "Delete indexed data",
     changeModels: "Change"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
@@ -29859,6 +29863,7 @@ var OLYMPUS_TAB_TOOL_NAMES = [
   "olympus_scope_list",
   "olympus_scope_set",
   "olympus_disconnect_source",
+  "olympus_delete_source_data",
   "olympus_model_set",
   "olympus_model_retry",
   "olympus_privacy_get",

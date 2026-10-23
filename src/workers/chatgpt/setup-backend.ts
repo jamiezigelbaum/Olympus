@@ -240,6 +240,13 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       }
     },
 
+    async deleteSourceData(sourceId) {
+      // The engine route owns the rules: disconnected first, nothing reading,
+      // under the grant lock, and the worker reopening its stores afterwards.
+      const result = await post('/dashboard/delete-source-data', { source_id: sourceId, acknowledge: true });
+      return { restarting: result.worker_restarting === true };
+    },
+
     async syncSource(sourceId) {
       // The route starts the sync and answers at once (start-then-poll), so
       // this never waits on a provider, and never holds the grant lock past

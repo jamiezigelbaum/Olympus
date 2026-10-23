@@ -27,6 +27,8 @@ import {
   UNREADABLE_FILES_PAGE_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
   SYNC_SOURCE_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
+  DISCONNECT_SOURCE_TOOL_NAME,
 } from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
 import { privacyLogic } from '../shared-privacy-logic.ts';
@@ -69,6 +71,7 @@ export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
  */
 export const CHATGPT_INLINE_ERROR_CODES = [
   'sign_in_failed', 'source_not_connected', 'source_busy', 'sync_unavailable', 'disconnect_incomplete',
+  'delete_needs_disconnect', 'delete_unavailable', 'delete_incomplete',
   'models_not_ready', 'connect_unavailable', 'already_connected',
 ] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;
@@ -329,6 +332,8 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
   const config: ChatGptDashboardClientConfig = {
     toolName: DASHBOARD_TOOL_NAME,
     syncTool: SYNC_SOURCE_TOOL_NAME,
+    deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
+    disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,

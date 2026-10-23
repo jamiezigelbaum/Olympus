@@ -176,6 +176,7 @@ describe('setup backend', () => {
           return Response.json({ ok: true, authorization_url: 'https://www.dropbox.com/oauth2/authorize?state=s', expires_at: '2026-10-01T12:10:00.000Z' });
         }
         if (path === '/dashboard/disconnect') return Response.json({ error: { code: 'model_setup_required', message: S('WORKER_MESSAGE') } }, { status: 409 });
+        if (path === '/dashboard/delete-source-data') return Response.json({ ok: true, source_id: body.source_id, removed_count: 3, worker_restarting: true });
         if (path === '/dashboard/sync-now') {
           return Response.json(body.source === 'x'
             ? { ok: true, source: 'x', status: 'too_soon', status_message: S('WORKER_MESSAGE') }
@@ -208,6 +209,12 @@ describe('setup backend', () => {
       { path: '/dashboard/sync-now', body: { source: 'google-drive' } },
       { path: '/dashboard/sync-now', body: { source: 'x' } },
     ]);
+  });
+
+  test('Delete indexed data goes to its own route with the confirmation, and reports whether the worker is restarting', async () => {
+    const { instance, calls } = backend();
+    expect(await instance.deleteSourceData('dropbox.files')).toEqual({ restarting: true });
+    expect(calls).toEqual([{ path: '/dashboard/delete-source-data', body: { source_id: 'dropbox.files', acknowledge: true } }]);
   });
 
   test('worker refusals surface as their code, never their message', async () => {
@@ -254,6 +261,8 @@ interface FakeBackendState {
   /** A worker code startOAuth / disconnect fail with. */
   startError?: string;
   disconnectError?: string;
+  deleteError?: string;
+  deleted?: string[];
   /** Where the real privacy profile and tier rules live for this test. */
   privacyEnv?: Record<string, string>;
   pendingCount?: number;
@@ -339,6 +348,11 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
     savedMailDraft() { return savedDraft; },
     async disconnect() {
       if (state.disconnectError) throw new SetupBackendError(state.disconnectError);
+    },
+    async deleteSourceData(sourceId) {
+      if (state.deleteError) throw new SetupBackendError(state.deleteError);
+      (state.deleted ??= []).push(sourceId);
+      return { restarting: true };
     },
     async setModels(choice) {
       if (choice.answers === 'local') throw new ModelChoiceRefusal('model_not_configured');
@@ -577,11 +591,15 @@ describe('setup tools over the remote handler', () => {
         ['startError', 'oauth_handback_unavailable', 'olympus_connect_source', { source: 'gmail' }, 'can\'t be connected from ChatGPT'],
         ['disconnectError', 'source_not_connected', 'olympus_disconnect_source', { source_id: 'dropbox.files' }, 'isn\'t connected'],
         ['disconnectError', 'disconnect_source_busy', 'olympus_disconnect_source', { source_id: 'dropbox.files' }, 'finishing a read'],
+        ['deleteError', 'delete_source_connected', 'olympus_delete_source_data', { source_id: 'dropbox.files' }, 'Disconnect this source first'],
+        ['deleteError', 'delete_reopen_unavailable', 'olympus_delete_source_data', { source_id: 'dropbox.files' }, 'Nothing was deleted'],
+        ['deleteError', 'delete_failed', 'olympus_delete_source_data', { source_id: 'dropbox.files' }, 'couldn\'t finish deleting'],
       ];
       const texts = new Set<string>();
       for (const [field, code, tool, args, sentence] of cases) {
         delete backendState.startError;
         delete backendState.disconnectError;
+        delete backendState.deleteError;
         (backendState as unknown as Record<string, unknown>)[field] = code;
         const result = await call(client, tool, args);
         expect(result.isError).toBe(true);
@@ -900,6 +918,29 @@ describe('setup tools over the remote handler', () => {
       expect(result.structuredContent).toEqual({ status: 'disconnected', source_id: 'dropbox.files' });
       const { tools } = await client.listTools();
       expect(tools.find((tool) => tool.name === 'olympus_disconnect_source')?.annotations?.destructiveHint).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe('olympus_delete_source_data', () => {
+  test('is panel-only and destructive, takes only a declared source, and reports plainly', async () => {
+    const client = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      const tool = tools.find((entry) => entry.name === 'olympus_delete_source_data')!;
+      expect(tool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+      expect(tool._meta).toMatchObject({ ui: { visibility: ['app'] }, 'openai/visibility': 'private' });
+      expect(tool.inputSchema).toMatchObject({ required: ['source_id'], additionalProperties: false });
+      const result = await call(client, 'olympus_delete_source_data', { source_id: 'dropbox.files' });
+      expect(result.structuredContent).toEqual({ status: 'deleted', source_id: 'dropbox.files', restarting: true });
+      expect(result.content[0]!.text).toContain('Indexed data deleted for Dropbox');
+      expect(backendState.deleted).toEqual(['dropbox.files']);
+      // Not a declared source, or an extra argument: refused before the backend.
+      expect((await call(client, 'olympus_delete_source_data', { source_id: 'made.up' })).isError).toBe(true);
+      expect((await call(client, 'olympus_delete_source_data', { source_id: 'dropbox.files', path: '/' })).isError).toBe(true);
+      expect(backendState.deleted).toEqual(['dropbox.files']);
     } finally {
       await client.close();
     }
