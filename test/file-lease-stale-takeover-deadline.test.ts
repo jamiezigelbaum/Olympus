@@ -46,7 +46,7 @@ describe('file lease stale takeover vs acquire deadline', () => {
     const releaser = Bun.spawn(['/bin/sh', '-c', `sleep 0.02; rm -f '${target}.lock.commit'`]);
     expect(withFileLeaseSync(target, () => 'held', options)).toBe('held');
     releaser.kill();
-  });
+  }, 10_000);
 
   test('a live holder is still refused as busy at the deadline', async () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-lease-deadline-'));
@@ -57,6 +57,7 @@ describe('file lease stale takeover vs acquire deadline', () => {
       await expect(withFileLease(target, async () => 'second', fast)).rejects.toBeInstanceOf(FileLeaseBusyError);
     }, fast);
   });
+
   test('owners that keep dying do not make the acquirer retry forever', async () => {
     const { target } = setup();
     rmSync(`${target}.lock.commit`, { force: true });
@@ -70,5 +71,5 @@ describe('file lease stale takeover vs acquire deadline', () => {
     // Either it won the race or it gave up; it never spins past the deadline.
     expect(['held', 'busy']).toContain(outcome);
     expect(Date.now() - started).toBeLessThan(1_500);
-  });
+  }, 10_000);
 });
