@@ -90,18 +90,24 @@ export interface VisualRun {
 /** Where the references record which design approval they were taken under (beside the pictures). */
 export const APPROVAL_FILE = 'approval.json';
 
-/** Marks the formula behind a fingerprint. A record in any other form (the first formula also hashed every rendered digest) matches nothing. */
-export const APPROVAL_FORMAT = 'v2:';
+/** Marks the formula behind a fingerprint. A record in any other form (an earlier formula) matches nothing. */
+export const APPROVAL_FORMAT = 'v3:';
 
 /**
- * A short fingerprint of the owner's sign-off: the `design_review` record in `config/dashboard-design-review.json` (id, approved_by,
- * approved_on, approval, covers) and nothing else. The rendered digests beside it (`reviewed_states`) are re-pinned by routine dashboard
- * changes with no sign-off, so they are deliberately left out: only the owner's record moving counts as a new approval. A changed look
- * under a new fingerprint is an approved change; under the same one, a defect.
+ * A short fingerprint of the owner's sign-offs in `config/dashboard-design-review.json`: the top-level `design_review` record, and
+ * each reviewed state's own approval (`id`, `approved_by`, `approved_on`, `approval`, and its approved `rendered_html_sha256`), which is
+ * how a newly rendered state is signed off. Each state's `pending_review` is left out: its candidate digest is re-pinned by routine
+ * dashboard changes with no sign-off, as is the implementation guard. A changed look under a new fingerprint is an approved change;
+ * under the same one, a defect.
  */
 export function approvalDigestOf(review: unknown): string {
-  const r = (review ?? {}) as { design_review?: unknown };
-  return `${APPROVAL_FORMAT}${createHash('sha256').update(JSON.stringify({ design_review: r.design_review ?? null })).digest('hex')}`;
+  type State = { id?: unknown; approved_by?: unknown; approved_on?: unknown; approval?: unknown; rendered_html_sha256?: unknown };
+  const r = (review ?? {}) as { design_review?: unknown; reviewed_states?: State[] };
+  const states = (r.reviewed_states ?? []).map((state) => ({
+    id: state.id ?? null, approved_by: state.approved_by ?? null, approved_on: state.approved_on ?? null,
+    approval: state.approval ?? null, rendered_html_sha256: state.rendered_html_sha256 ?? null,
+  }));
+  return `${APPROVAL_FORMAT}${createHash('sha256').update(JSON.stringify({ design_review: r.design_review ?? null, states })).digest('hex')}`;
 }
 
 /** The fingerprint for the harness's own source (the review file beside it); undefined where there is no such file. */
