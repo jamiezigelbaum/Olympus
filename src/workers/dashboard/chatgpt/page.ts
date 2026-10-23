@@ -81,6 +81,9 @@ export const CHATGPT_DASHBOARD_REFRESH = {
   idleMs: 60_000,
   maxBackoffMs: 5 * 60_000,
   staleTickMs: 30_000,
+  /** After Delete indexed data: the engine restarts, so re-read soon, for a minute at most. */
+  settleMs: 2_000,
+  settleForMs: 60_000,
 } as const;
 
 const STATUS_TONE = Object.fromEntries(
