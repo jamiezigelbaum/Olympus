@@ -16151,6 +16151,7 @@ var init_delphi_scorer = __esm(() => {
 // src/workers/classification/sniffer-store.ts
 var init_sniffer_store = __esm(() => {
   init_sqlite_migrations();
+  init_tier_classifier();
 });
 
 // src/workers/classification/sniffer.ts
