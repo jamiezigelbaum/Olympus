@@ -28,7 +28,9 @@ export const DASHBOARD_UPDATE_COPY = {
 };
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
-export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.';
+export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).';
+export const DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.';
+export const DASHBOARD_FOLDER_UNREADABLE = 'Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
 
@@ -438,6 +440,8 @@ export function dashboardAttentionLine(
       break;
   }
   if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return DASHBOARD_FOLDER_NEEDS_PERMISSION;
+  if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return DASHBOARD_FOLDER_NEEDS_HELPER;
+  if (source.schedule?.degraded_reason === 'scope_root_unreadable') return DASHBOARD_FOLDER_UNREADABLE;
   if (source.schedule?.degraded_reason === 'scope_root_missing' || (source.schedule?.missing_folders?.length ?? 0) > 0) return DASHBOARD_MISSING_FOLDER;
   // "Paused" is said only of a real pause — Olympus parked the lane on a budget
   // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
@@ -1646,6 +1650,8 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     scope_pending: 'Paused until you choose folders',
     scope_root_missing: DASHBOARD_MISSING_FOLDER,
     scope_root_permission_needed: DASHBOARD_FOLDER_NEEDS_PERMISSION,
+    scope_root_helper_needed: DASHBOARD_FOLDER_NEEDS_HELPER,
+    scope_root_unreadable: DASHBOARD_FOLDER_UNREADABLE,
     provider_unavailable: 'Paused: {source} isn\'t responding; Olympus will retry',
     model_downloading: 'Waiting for the search model to finish downloading',
   },

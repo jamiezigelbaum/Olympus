@@ -22457,6 +22457,40 @@ var init_local_index = __esm(() => {
       }
       return matches;
     }
+    activeItemsDirectlyUnderRootIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return [];
+      if (!Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return [];
+      const rows = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= '/'
+        AND locator.normalized_locator < '0'
+        AND instr(substr(locator.normalized_locator, 2), '/') = 0
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, input.limit);
+      return rows.flatMap((row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : []);
+    }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
       if (!identity)
@@ -31875,11 +31909,28 @@ function isWithinScopePath(path, root) {
     return true;
   return path === root || path.startsWith(`${root}/`);
 }
-function scopePathsIgnoreCase(context2) {
+function scopePathsIgnoreCase(context2, scopePath) {
+  if (context2.volumeIgnoresCase) {
+    let volumeId;
+    let inside;
+    let known = true;
+    if (scopePath !== undefined) {
+      try {
+        ({ volumeId, path: inside } = splitScopePath(scopePath));
+      } catch {
+        known = false;
+      }
+    }
+    if (known) {
+      const decided = context2.volumeIgnoresCase(volumeId, inside);
+      if (decided !== undefined)
+        return decided;
+    }
+  }
   return (context2.platform ?? process.platform) === "darwin";
 }
 function foldScopePath(value, context2) {
-  return scopePathsIgnoreCase(context2) ? value.toLowerCase() : value;
+  return scopePathsIgnoreCase(context2, value) ? value.toLowerCase() : value;
 }
 function scopeParentPath(path) {
   if (path === "/")
@@ -32291,7 +32342,7 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Olympus cannot open a folder you chose. On a Mac, in System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine. Otherwise, make sure your user account can read the folder.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -32530,6 +32581,8 @@ var init_vocabulary = __esm(() => {
       scope_pending: "Paused until you choose folders",
       scope_root_missing: DASHBOARD_MISSING_FOLDER,
       scope_root_permission_needed: DASHBOARD_FOLDER_NEEDS_PERMISSION,
+      scope_root_helper_needed: DASHBOARD_FOLDER_NEEDS_HELPER,
+      scope_root_unreadable: DASHBOARD_FOLDER_UNREADABLE,
       provider_unavailable: "Paused: {source} isn't responding; Olympus will retry",
       model_downloading: "Waiting for the search model to finish downloading"
     },
@@ -39188,16 +39241,25 @@ var init_delphi = __esm(() => {
 import { existsSync as existsSync19, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync18 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname25, join as join32 } from "node:path";
-function permissionHostPresent(env) {
+function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
-    return true;
-  return env.OLYMPUS_ENGINE_HOST !== "1" && env.OLYMPUS_STANDALONE !== "1" && env.OLYMPUS_MANAGED_WORKER !== "1";
+    return "engine_helper";
+  if (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1")
+    return "engine_without_helper";
+  if (env.OLYMPUS_MANAGED_WORKER === "1")
+    return "managed_worker";
+  return "other";
+}
+function permissionHostPresent(env) {
+  const kind = permissionHostKind(env);
+  return kind === "engine_helper" || kind === "other";
 }
 
 class MacPermissions {
   platform;
   home;
   helperPresent;
+  hostKind;
   memoryPath;
   askTimeoutMs;
   list;
@@ -39209,6 +39271,7 @@ class MacPermissions {
     this.platform = options.platform ?? process.platform;
     this.home = options.home;
     this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
+    this.hostKind = options.hostKind ?? (options.helperPresent ? () => options.helperPresent() ? "engine_helper" : "engine_without_helper" : () => permissionHostKind(process.env));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8000;
     this.list = options.list ?? (async (path) => {
@@ -39236,6 +39299,25 @@ class MacPermissions {
   }
   hasHelper() {
     return this.helperPresent();
+  }
+  appName() {
+    return this.hostKind() === "engine_helper" ? ENGINE_APP : OTHER_APP;
+  }
+  helperNeededCopy(wholeComputer = false) {
+    if (this.hostKind() === "managed_worker") {
+      return wholeComputer ? MAC_ACCESS_COPY.needsHelperManagedWorkerWholeComputer : MAC_ACCESS_COPY.needsHelperManagedWorker;
+    }
+    return wholeComputer ? MAC_ACCESS_COPY.needsHelperWholeComputer : MAC_ACCESS_COPY.needsHelper;
+  }
+  isPrivacyRefusal(realPath, errno, volume) {
+    if (!this.active)
+      return false;
+    if (errno === "EACCES")
+      return false;
+    return errno === "EPERM" || this.guardOf(realPath, volume) !== undefined;
+  }
+  unreadableCopy() {
+    return this.active ? MAC_ACCESS_COPY.unreadable : MAC_ACCESS_COPY.unreadableLinux;
   }
   guardOf(realPath, volume) {
     if (!this.active)
@@ -39269,30 +39351,32 @@ class MacPermissions {
       return;
     return {
       state: this.hasHelper() ? "needs_permission" : "needs_helper",
-      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : MAC_ACCESS_COPY.needsHelper
+      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : this.helperNeededCopy()
     };
   }
   async open(guard) {
     if (!this.hasHelper()) {
-      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelper };
+      return { state: "needs_helper", message: this.helperNeededCopy() };
     }
     const answer = await this.ask(guard);
     if (answer === "granted")
       return;
     if (answer === "waiting")
       return { state: "waiting", message: MAC_ACCESS_COPY.waiting };
-    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+    if (answer === "unreadable")
+      return { state: "denied", message: this.unreadableCopy() };
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
   noteDenied(guard) {
     this.remember(guard, "denied");
-    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
   fullDiskAccessNote() {
     if (!this.active || this.hasFullDiskAccess())
       return;
     if (!this.hasHelper())
-      return { state: "needs_helper", message: MAC_ACCESS_COPY.needsHelperWholeComputer };
-    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL };
+      return { state: "needs_helper", message: this.helperNeededCopy(true) };
+    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
     for (const path of [join32(this.home, "Library", "Safari"), join32(this.home, "Library", "Application Support", "com.apple.TCC")]) {
@@ -39314,7 +39398,9 @@ class MacPermissions {
         this.remember(guard, "granted");
         return "granted";
       }, (error) => {
-        if (error.code === "EPERM" || error.code === "EACCES") {
+        if (error.code === "EACCES")
+          return "unreadable";
+        if (error.code === "EPERM") {
           this.remember(guard, "denied");
           return "denied";
         }
@@ -39369,7 +39455,7 @@ class MacPermissions {
     return loaded;
   }
 }
-var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER", FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders", SETTINGS_NAMES, PLACE_WORDS, MAC_ACCESS_COPY;
+var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER", FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders", SETTINGS_NAMES, PLACE_WORDS, ENGINE_APP = "Olympus Engine", OTHER_APP = "the app that runs Olympus (the one your Mac named when it asked)", MAC_ACCESS_COPY;
 var init_mac_permissions = __esm(() => {
   init_atomic_file();
   init_paths();
@@ -39394,8 +39480,12 @@ var init_mac_permissions = __esm(() => {
     waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
     needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
     needsHelperWholeComputer: 'To read the whole computer, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then open this list again.',
-    denied: (kind) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under Olympus Engine. Then choose Try again.`,
-    fullDiskAccess: "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save."
+    needsHelperManagedWorker: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
+    needsHelperManagedWorkerWholeComputer: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
+    denied: (kind, app = ENGINE_APP) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under ${app}. Then choose Try again.`,
+    fullDiskAccess: (app = ENGINE_APP) => app === ENGINE_APP ? "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save." : `To search your whole computer, ${app} needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch it on. If it is not in the list, add it with the plus button.`,
+    unreadable: "Your user account is not allowed to open this folder. In Finder, choose Get Info on it and check who may open it under Sharing & Permissions, then choose Try again.",
+    unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.'
   };
 });
 
@@ -39751,7 +39841,7 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash26 } from "node:crypto";
-import { existsSync as existsSync23, lstatSync as lstatSync10, mkdirSync as mkdirSync17, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync11, mkdirSync as mkdirSync17, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname28, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -43410,6 +43500,8 @@ var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "config_missing_folder_argument",
   "scope_root_missing",
   "scope_root_permission_needed",
+  "scope_root_helper_needed",
+  "scope_root_unreadable",
   "credential_missing",
   "credential_reauth_required",
   "credential_refresh_busy",
@@ -43590,7 +43682,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync20, readFileSync as readFileSync19, readdirSync as readdirSync4, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync20, lstatSync as lstatSync9, readFileSync as readFileSync19, readdirSync as readdirSync4, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -43642,6 +43734,7 @@ var CACHE_TTL_MS = 15000;
 class VolumeResolver {
   deps;
   cache;
+  caseByVolume = new Map;
   constructor(deps = {}) {
     this.deps = {
       ...deps,
@@ -43660,6 +43753,27 @@ class VolumeResolver {
   }
   refresh() {
     this.cache = undefined;
+  }
+  ignoresCase(volumeId, path) {
+    const home = this.deps.home;
+    const volume = volumeId === undefined ? this.volumeOf(path ?? home) : this.mountedVolume(volumeId);
+    if (!volume)
+      return;
+    const cacheKey = volume.primary ? `mount:${volume.mountPoint}` : volume.id;
+    if (this.caseByVolume.has(cacheKey))
+      return this.caseByVolume.get(cacheKey);
+    const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
+    const homeHere = volume.primary && isWithinScopePath(home, volume.mountPoint) && this.volumeOf(home).mountPoint === volume.mountPoint;
+    const places = homeHere ? [home, volume.mountPoint] : [volume.mountPoint];
+    let answer;
+    for (const place of places) {
+      answer = probe(place);
+      if (answer !== undefined)
+        break;
+    }
+    if (answer !== undefined)
+      this.caseByVolume.set(cacheKey, answer);
+    return answer;
   }
   volumeOf(realPath) {
     let best;
@@ -43742,6 +43856,33 @@ class VolumeResolver {
       return `lin-${uuid.toLowerCase()}`;
     return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
   }
+}
+function probeIgnoresCaseIn(dir) {
+  let names;
+  try {
+    names = readdirSync4(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const swapped = name.replace(/[a-zA-Z]/g, (letter) => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
+    if (swapped === name)
+      continue;
+    try {
+      const own3 = lstatSync9(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
+      try {
+        const other = lstatSync9(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
+        return other.ino === own3.ino && other.dev === own3.dev;
+      } catch (error) {
+        if (error.code === "ENOENT")
+          return false;
+        return;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return;
 }
 function labelFor2(mountPoint) {
   if (mountPoint === "/")
@@ -43827,7 +43968,7 @@ init_local_open();
 
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
-import { lstatSync as lstatSync9, readdirSync as readdirSync5, realpathSync as realpathSync7 } from "node:fs";
+import { lstatSync as lstatSync10, readdirSync as readdirSync5, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
 import { join as join34 } from "node:path";
 
@@ -44107,7 +44248,11 @@ function ancestorScopePaths(scopePath) {
 function createLocalFilesFolderScopeBrowser(options = {}) {
   const volumes = options.volumes ?? new VolumeResolver;
   const home = safeRealpath(options.home ?? options.context?.home ?? homedir22());
-  const context2 = options.context ?? { ...defaultExclusionContext(), home };
+  const context2 = options.context ?? {
+    ...defaultExclusionContext(),
+    home,
+    volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
+  };
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync5(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
@@ -44134,12 +44279,14 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       const code = error.code;
       if (code === "EACCES" || code === "EPERM") {
         const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
-        if (guard)
+        if (guard && code !== "EACCES")
           throw new AccessRefused(permissions.noteDenied(guard));
-        const fda = permissions.active && !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
-        if (fda)
-          throw new AccessRefused(fda);
-        throw new Error("Your computer does not let Olympus open this folder. Check who may open it in Finder (Get Info, then Sharing & Permissions), then try again.");
+        if (permissions.isPrivacyRefusal(realPath, code, volumes.volumeOf(realPath))) {
+          const fda = !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
+          if (fda)
+            throw new AccessRefused(fda);
+        }
+        throw new Error(permissions.unreadableCopy());
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
     }
@@ -44222,7 +44369,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         return real !== undefined && permissions.blocksReadWithoutHelper(real, volumes.volumeOf(real));
       });
       if (blocked)
-        throw new Error(MAC_ACCESS_COPY.needsHelper);
+        throw new Error(permissions.helperNeededCopy());
     },
     async validateSelections(selections) {
       const normalized = selections.map((selection) => ({ ...selection, key: normalizeScopePath(selection.key) }));
@@ -44234,7 +44381,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
           throw new Error("A selected disk is not connected right now.");
         let isFolder = false;
         try {
-          isFolder = lstatSync9(real).isDirectory();
+          isFolder = lstatSync10(real).isDirectory();
         } catch {
           isFolder = false;
         }
@@ -47062,7 +47209,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   }
   const directory = dirname28(readinessPath);
   mkdirSync17(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync10(directory);
+  const parent = lstatSync11(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }

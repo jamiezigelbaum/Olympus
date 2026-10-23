@@ -71,18 +71,48 @@ export function isWithinScopePath(path: string, root: string): boolean {
 }
 
 /**
- * Whether paths of this computer's file system ignore case. The volume list
- * does not say how each volume is formatted, so this follows the platform:
- * macOS volumes ignore case by default, Linux ones do not. One place, used by
- * both the default-off folders and the person's saved selections.
+ * Whether the volume holding `scopePath` ignores case. The one decision every
+ * path comparison makes (the person's saved selections, the folders that are
+ * off by default, watcher replay, and telling that an indexed item is gone).
+ *
+ * It follows the volume itself where the context can say (a disk formatted
+ * case-sensitive on a Mac, a case-insensitive USB stick on Linux), and the
+ * platform's usual format otherwise: macOS volumes ignore case by default,
+ * Linux ones do not.
  */
-export function scopePathsIgnoreCase(context: Pick<DefaultExclusionContext, 'platform'>): boolean {
+export function scopePathsIgnoreCase(
+  context: Pick<DefaultExclusionContext, 'platform' | 'volumeIgnoresCase'>,
+  scopePath?: string,
+): boolean {
+  if (context.volumeIgnoresCase) {
+    let volumeId: string | undefined;
+    let inside: string | undefined;
+    let known = true;
+    if (scopePath !== undefined) {
+      try { ({ volumeId, path: inside } = splitScopePath(scopePath)); } catch { known = false; }
+    }
+    if (known) {
+      // The path lets the resolver pick the mount that actually holds it: the
+      // computer's own volumes (root, home, Data) share one prefix-free form.
+      const decided = context.volumeIgnoresCase(volumeId, inside);
+      if (decided !== undefined) return decided;
+    }
+  }
   return (context.platform ?? process.platform) === 'darwin';
 }
 
-/** `value` as compared on this file system: lower-cased where case is ignored. */
-export function foldScopePath(value: string, context: Pick<DefaultExclusionContext, 'platform'>): string {
-  return scopePathsIgnoreCase(context) ? value.toLowerCase() : value;
+/** `value` as compared on its volume: lower-cased where case is ignored. */
+export function foldScopePath(value: string, context: Pick<DefaultExclusionContext, 'platform' | 'volumeIgnoresCase'>): string {
+  return scopePathsIgnoreCase(context, value) ? value.toLowerCase() : value;
+}
+
+/** True when `path` is `root` or lies under it, compared the way their volume compares names. */
+export function scopePathIsWithin(
+  path: string,
+  root: string,
+  context: Pick<DefaultExclusionContext, 'platform' | 'volumeIgnoresCase'>,
+): boolean {
+  return isWithinScopePath(foldScopePath(path, context), foldScopePath(root, context));
 }
 
 export function scopePathDepth(path: string): number {
@@ -138,6 +168,12 @@ export interface DefaultExclusionContext {
   /** Real roots of the local Dropbox folder, when the operator configured them. */
   syncedRoots?: readonly string[];
   platform?: NodeJS.Platform;
+  /**
+   * Whether the volume with this id (undefined: the computer's own) ignores
+   * case, when that is known. Undefined for "unknown": the platform's usual
+   * format is used.
+   */
+  volumeIgnoresCase?: (volumeId: string | undefined, path?: string) => boolean | undefined;
 }
 
 export function defaultExclusionContext(
