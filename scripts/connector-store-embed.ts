@@ -12,6 +12,8 @@
 // secure_local stores refuse non-local providers inside embedChunks (the
 // trust rule is enforced by the store, not this script).
 
+import { holdStoreCustodyShared } from '../src/core/store-custody.ts';
+import { resolveEmbeddingLedgerPath } from '../src/workers/embedding-ledger.ts';
 import { SOURCE_FAMILIES, SOURCE_TRUST_DOMAINS } from '../src/core/source-index/types.ts';
 import {
   LocalConnectorStore,
@@ -182,6 +184,7 @@ async function runConnectorStoreEmbed(argv: readonly string[]): Promise<{
 }
 
 if (import.meta.main) {
+  holdStoreCustodyShared();
   runConnectorStoreEmbed(process.argv.slice(2))
     .then((summary) => {
       console.log(JSON.stringify(summary, null, 2));

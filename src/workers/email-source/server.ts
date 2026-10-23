@@ -1,3 +1,4 @@
+import { holdStoreCustodyShared } from '../../core/store-custody.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -23,7 +24,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
+import { restartCoversEmbeddingDrain, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
@@ -1956,6 +1957,19 @@ export function createFileExtractionLocalVlmClientFromEnv(
 let workerLaunch: WorkerLaunch = {};
 
 /**
+ * Ask the engine host (this worker's parent) to restart itself. SIGUSR2 is the
+ * host's one "stop everything and exit for the supervisor to restart me"
+ * request (engine-host.ts); it is sent after the HTTP answer can finish.
+ */
+function requestEngineRestart(): boolean {
+  const timer = setTimeout(() => {
+    try { process.kill(process.ppid, 'SIGUSR2'); } catch { /* the host is gone; its supervisor restarts it */ }
+  }, 750);
+  timer.unref?.();
+  return true;
+}
+
+/**
  * The CLI's entry: the launch state runWorkerForeground validated (never an
  * ambient variable) rides into main() for the restart decision.
  */
@@ -1965,6 +1979,11 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
+  // Shared store custody for this worker's whole life, in every mode (run,
+  // foreground, managed, Gateway service): Delete indexed data takes it
+  // exclusive, so it cannot run under a live worker, and a worker that starts
+  // during a delete waits for it.
+  holdStoreCustodyShared();
   // Startup signals can close only this instance's listener/client. A second
   // foreground worker never revokes the engine host's epoch or runtime path.
   let closeDesktopBridge = () => {};
@@ -4937,12 +4956,14 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
-            // Delete indexed data: the same supervised restart a model-key
-            // change uses. `canRestart` has no side effect, so the route can
-            // check it before deleting anything.
+            // Delete indexed data: only the engine host restarts everything
+            // that holds a store open (worker and embedding drain) and applies
+            // the intent before starting either. Anywhere else the route
+            // answers 409 and deletes nothing. `canRestart` has no side
+            // effect, so the route can check it before recording anything.
             workerRestart: {
-              canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
-              request: () => requestModelReload(),
+              canRestart: () => restartCoversEmbeddingDrain(workerLaunch, process.env),
+              request: () => requestEngineRestart(),
             },
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,

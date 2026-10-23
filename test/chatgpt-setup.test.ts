@@ -935,8 +935,8 @@ describe('olympus_delete_source_data', () => {
       expect(tool._meta).toMatchObject({ ui: { visibility: ['app'] }, 'openai/visibility': 'private' });
       expect(tool.inputSchema).toMatchObject({ required: ['source_id'], additionalProperties: false });
       const result = await call(client, 'olympus_delete_source_data', { source_id: 'dropbox.files' });
-      expect(result.structuredContent).toEqual({ status: 'deleted', source_id: 'dropbox.files', restarting: true });
-      expect(result.content[0]!.text).toContain('Indexed data deleted for Dropbox');
+      expect(result.structuredContent).toEqual({ status: 'deleting', source_id: 'dropbox.files', restarting: true });
+      expect(result.content[0]!.text).toContain('Deleting the indexed data for Dropbox');
       expect(backendState.deleted).toEqual(['dropbox.files']);
       // Not a declared source, or an extra argument: refused before the backend.
       expect((await call(client, 'olympus_delete_source_data', { source_id: 'made.up' })).isError).toBe(true);
@@ -948,8 +948,8 @@ describe('olympus_delete_source_data', () => {
       expect(enumOf('olympus_delete_source_data')).toEqual(expect.arrayContaining(['telegram.messages', 'whatsapp.personal.messages']));
       expect(enumOf('olympus_disconnect_source')).not.toContain('telegram.messages');
       const telegram = await call(client, 'olympus_delete_source_data', { source_id: 'telegram.messages' });
-      expect(telegram.structuredContent).toEqual({ status: 'deleted', source_id: 'telegram.messages', restarting: true });
-      expect(telegram.content[0]!.text).toContain('Indexed data deleted for Telegram');
+      expect(telegram.structuredContent).toEqual({ status: 'deleting', source_id: 'telegram.messages', restarting: true });
+      expect(telegram.content[0]!.text).toContain('Deleting the indexed data for Telegram');
       expect((await call(client, 'olympus_disconnect_source', { source_id: 'telegram.messages' })).isError).toBe(true);
       expect(backendState.deleted).toEqual(['dropbox.files', 'telegram.messages']);
     } finally {

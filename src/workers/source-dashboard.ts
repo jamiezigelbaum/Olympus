@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../core/store-open.ts';
 import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
@@ -127,10 +128,39 @@ export const DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = 'connection state 
 export const DASHBOARD_UNPAIRED_LABEL = 'unpaired';
 export const DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = 'unpair state unreadable';
 export const DASHBOARD_UNPAIR_INCOMPLETE_LABEL = 'Unpair incomplete — manual cleanup required';
+/**
+ * Delete indexed data is applied by the restarted engine before it opens
+ * anything. Until it reports the data gone, the card says so; if the restart's
+ * re-check refused, the card says that and what to do.
+ */
+export type DashboardDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed' | 'holders_running' | 'connection_changed' | 'record_unreadable';
+export const DASHBOARD_DELETE_REFUSAL_CODES: ReadonlySet<string> = new Set<DashboardDeleteRefusal>([
+  'settings_changed', 'protected_path', 'not_disconnected', 'failed', 'holders_running', 'connection_changed', 'record_unreadable',
+]);
+export const DASHBOARD_DELETING_LABEL = 'Deleting indexed data…';
+export const DASHBOARD_DELETE_NOT_DONE_LABEL = 'Delete didn\'t run — check settings, then delete again';
+/**
+ * A delete that began and did not finish (owner, 2026-10-23): some of the
+ * source's indexed data is gone, its stores stay closed, and every start
+ * (or Try again) runs the delete again. A Needs you item with a plain reason.
+ */
+export const DASHBOARD_DELETE_UNFINISHED_LABEL = 'Delete didn\'t finish';
+export const DASHBOARD_DELETE_UNFINISHED_REASONS: Readonly<Record<DashboardDeleteRefusal, string>> = {
+  failed: 'Delete didn\'t finish: a file or database could not be removed. This source is paused and Olympus will try again at the next start. Choose Delete indexed data to try now.',
+  holders_running: 'Delete didn\'t finish: another part of Olympus still had this source\'s data open. This source is paused. Choose Delete indexed data to try again.',
+  settings_changed: 'Delete didn\'t finish: the folder settings changed after you asked. This source is paused. Check the settings, then choose Delete indexed data to try again.',
+  protected_path: 'Delete didn\'t finish: one of the places to remove is protected. This source is paused. Check the data-location settings, then choose Delete indexed data to try again.',
+  not_disconnected: 'Delete didn\'t finish: the source was connected again. This source is paused. Disconnect it, then choose Delete indexed data to try again.',
+  connection_changed: 'Delete didn\'t finish: the connection changed. This source is paused. Choose Delete indexed data to try again.',
+  record_unreadable: 'Delete didn\'t finish and Olympus could not read its note of what was left. This source is paused. Choose Delete indexed data to try again.',
+};
 export const DASHBOARD_UNSETTLED_CUSTODY_LABELS: ReadonlySet<string> = new Set([
   DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
   DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
   DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
+  DASHBOARD_DELETING_LABEL,
+  DASHBOARD_DELETE_NOT_DONE_LABEL,
+  DASHBOARD_DELETE_UNFINISHED_LABEL,
 ]);
 
 export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync';
@@ -809,6 +839,13 @@ export interface DashboardSourceCard {
     ingestion_enabled?: boolean;
   };
   setup?: DashboardSourceSetupStatus;
+  /**
+   * Delete indexed data, as an explicit state (not read back from the
+   * connection label, which later passes may rewrite): `pending` until the
+   * restarted engine has applied it, `refused` when its re-check did not.
+   * The reason is a closed code, never a path.
+   */
+  delete_state?: { state: 'pending' | 'refused' | 'unfinished'; reason?: DashboardDeleteRefusal };
   configured: boolean;
   freshness: {
     label: string;
@@ -1312,6 +1349,15 @@ export interface SourceDashboardBuildOptions {
    * of reporting an unreadable file as a disconnected source.
    */
   connectedHandleRegistryUnreadable?: boolean;
+  /**
+   * The record of sources connected on this computer exists but could not be
+   * read (malformed, wrong shape, another host's). Only the cards that connect
+   * through it (this-computer sources) read as "connection state unreadable";
+   * a broken file is never an intentional disconnect.
+   */
+  thisComputerStateUnreadable?: boolean;
+  /** Deletions recorded for the next start, by source id (pending-source-deletes.ts). */
+  sourceDeleteStates?: Readonly<Record<string, { state: 'pending' | 'refused' | 'unfinished'; reason?: DashboardDeleteRefusal }>>;
   /**
    * Paired-session sources this worker has itself unpaired, and whether the
    * removal finished.
@@ -1929,7 +1975,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
 
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
-    this.db = new Database(dbPath);
+    this.db = openStoreDatabase(dbPath);
     this.db.exec('PRAGMA busy_timeout = 10000;');
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
@@ -2287,7 +2333,8 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       now,
       ingestionRowForDefinition(definition, ingestionBySource),
       options.contentExtractionStallThresholdHours,
-      options.connectedHandleRegistryUnreadable === true,
+      options.connectedHandleRegistryUnreadable === true
+        || (definition.connect_action.kind === 'this_computer' && options.thisComputerStateUnreadable === true),
       unpairedSources.get(definition.source_id),
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
@@ -2304,6 +2351,23 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       ...(manualSync ? { last_manual_sync: { ...manualSync } } : {}),
       ...(unreadableFiles ? { unreadable_files: unreadableFiles } : {}),
     };
+    const deleteState = options.sourceDeleteStates?.[definition.source_id];
+    if (deleteState) {
+      card.delete_state = { state: deleteState.state, ...(deleteState.reason ? { reason: deleteState.reason } : {}) };
+      // A refusal because the source is (again) connected describes the delete,
+      // not the connection: the card keeps its real connection state, so
+      // Disconnect stays reachable, and the refusal rides in delete_state.
+      const refusedWhileConnected = deleteState.state === 'refused'
+        && (deleteState.reason === 'not_disconnected' || deleteState.reason === 'connection_changed');
+      if (!refusedWhileConnected) {
+        card.connection = {
+          ...card.connection,
+          state: 'not_connected',
+          label: deleteState.state === 'pending' ? DASHBOARD_DELETING_LABEL
+            : deleteState.state === 'unfinished' ? DASHBOARD_DELETE_UNFINISHED_LABEL : DASHBOARD_DELETE_NOT_DONE_LABEL,
+        };
+      }
+    }
     if (card.configured && options.sourceAccountBindings?.[definition.source_id as AccountBoundSourceId]?.purge_required) {
       card.account_change = {
         next_action: `${card.label} is now connected to a different account than the items already stored, so nothing syncs. `

@@ -1,3 +1,5 @@
+import { storeCustodyDirectory, storeCustodyLockPath } from './core/store-custody.ts';
+import { clearDeleteFenceEntry, fencePathSpellings, readDeleteFence, setDeleteFenceEntry, withDeleteFenceBypass } from './core/delete-fence.ts';
 import {
   SECRET_LOCATIONS_SQLITE_STORE_ID,
   TIER_LEDGER_SQLITE_STORE_ID,
@@ -27,6 +29,9 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
+import { getFileScopeSource } from './core/file-scope-sources.ts';
+import { resolveLinuxSecretPaths } from './core/linux-secret-backend.ts';
+import { defaultOlympusConfigDir } from './core/secret-store.ts';
 import {
   readSqliteSchemaVersion,
   runSqliteMigrations,
@@ -44,6 +49,13 @@ import {
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
+import { defaultSourceIngestionExclusionsPath } from './core/source-ingestion-exclusions.ts';
+import { workerSetupEnvPath } from './core/worker-auth.ts';
+import { defaultPrivacyProfilePath } from './workers/classification/privacy-profile.ts';
+import { defaultTierRulesPath } from './workers/classification/tier-rules.ts';
+import { resolveEmbeddingLedgerPath } from './workers/embedding-ledger.ts';
+import { resolveClassificationLedgerPath } from './workers/classification-ledger.ts';
+import { defaultSourceSchedulerStateDbPath } from './workers/source-scheduler-state.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
 import { archiveImportFamilies } from './core/archive-formats.ts';
@@ -87,6 +99,8 @@ import {
 } from './core/pairing-session-paths.ts';
 import { artifactPresence, type UnpairedSourcesRead } from './workers/credential-broker/unpaired-sources.ts';
 import { createSourceCorpusRegistry, withSourceCorpora, type SourceCorpusConfig } from './core/source-corpus-registry.ts';
+import { defaultFileExtractionJobsDbPath } from './workers/file-extraction/job-names.ts';
+import { LocalFileExtractionJobStore } from './workers/file-extraction/job-store.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
@@ -96,6 +110,11 @@ import type { ConnectedHandleRegistry } from './workers/credential-broker/connec
 export interface LifecyclePathContext {
   homeDir?: string;
   env?: Record<string, string | undefined>;
+  /**
+   * The handle registry the caller is actually running against (the worker's
+   * configured one), so the files beside it are protected wherever it lives.
+   */
+  registryPath?: string;
 }
 
 export interface LifecycleSourceSpec {
@@ -527,7 +546,7 @@ function legacySourceIndexPath(
 
 function olympusSharedDataFile(env: Record<string, string | undefined>, fileName: string): string {
   return join(
-    env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share'),
+    env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share'),
     'openclaw',
     'olympus',
     fileName,
@@ -729,10 +748,130 @@ export function verifyOlympusDataExport(options: { destination: string }): DataE
   return { ok: true, destination, artifactCount: verified.length, artifacts: verified };
 }
 
+/**
+ * What a per-source delete would remove, decided and checked now: the resolved
+ * target paths after containment and protection (every target, whatever its
+ * kind) and the target-safety checks, and the corpora the source owns. It
+ * changes nothing and throws when the delete would be refused. A deletion
+ * intent records this, and applying the intent re-derives it and refuses on
+ * any difference.
+ */
+export function planSourceDelete(options: { sourceId: string; verifiedPrimaries?: readonly string[] } & LifecyclePathContext): {
+  sourceId: string;
+  corpora: string[];
+  targets: string[];
+  /** External SQLite primaries proven to be Olympus stores by this check. */
+  verifiedPrimaries: string[];
+  /** Where each target really is (symlinks resolved) and the directory it hangs from. */
+  bindings: TargetBinding[];
+} {
+  const selectedSource = requireSource(options.sourceId);
+  const uniqueDeleteTargets = markRelocatedStores(uniqueTargets(sourceDeleteTargets(selectedSource, options)), options);
+  assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
+  const verifiedPrimaries = assertTargetsSafe(uniqueDeleteTargets, options.verifiedPrimaries);
+  const corpora = createSourceCorpusRegistry().list()
+    .filter((c) => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId))
+    .map((c) => c.corpusId)
+    .sort();
+  return {
+    sourceId: selectedSource.sourceId,
+    corpora,
+    targets: uniqueDeleteTargets.map((target) => resolve(target.path)).sort(),
+    verifiedPrimaries: [...new Set([...verifiedPrimaries, ...(options.verifiedPrimaries ?? []).map((path) => resolve(path))])].sort(),
+    bindings: targetBindings(uniqueDeleteTargets),
+  };
+}
+
+/**
+ * An approved target's real destination. A path is only a name: a symlinked
+ * Olympus root retargeted, or a directory above a target swapped, between the
+ * request and the restart leaves every recorded string intact while the delete
+ * would land on something else. The binding records the canonical destination
+ * and the identity (inode) of the nearest existing directory above it.
+ */
+export interface TargetBinding {
+  path: string;
+  real: string;
+  anchor: string;
+  anchor_ino: number;
+  /** Device of the anchor: an inode alone does not survive a mount being replaced. Absent in records from before it was kept. */
+  anchor_dev?: number;
+}
+
+function nearestExistingDirectory(path: string): string {
+  let current = dirname(resolve(path));
+  for (;;) {
+    try {
+      if (lstatSync(current).isDirectory() || existsSync(current)) return current;
+    } catch { /* keep climbing */ }
+    const parent = dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+}
+
+function identityOf(path: string): { ino: number; dev: number } {
+  try { const info = statSync(path); return { ino: info.ino, dev: info.dev }; } catch { return { ino: -1, dev: -1 }; }
+}
+
+export function targetBindings(targets: readonly DeleteTarget[]): TargetBinding[] {
+  return targets.map((target) => {
+    const anchor = nearestExistingDirectory(target.path);
+    const identity = identityOf(anchor);
+    return { path: resolve(target.path), real: canonicalPath(target.path), anchor, anchor_ino: identity.ino, anchor_dev: identity.dev };
+  }).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/** The first approved target whose real destination or anchor directory is no longer what was approved. */
+export function changedBinding(
+  expected: readonly TargetBinding[],
+  actual: readonly TargetBinding[],
+  removedPaths: readonly string[] = [],
+): string | undefined {
+  const now = new Map(actual.map((binding) => [binding.path, binding]));
+  for (const binding of expected) {
+    // A target this same delete already removed (or one inside a removed folder)
+    // is judged by the removal that took it, not by its vanished anchor.
+    if (removedPaths.some((removed) => binding.path === removed || binding.path.startsWith(`${removed}${sep}`))) continue;
+    const current = now.get(binding.path);
+    // The target must still resolve to the same real place, and the approved
+    // directory above it must still be the same directory.
+    const identity = identityOf(binding.anchor);
+    if (!current || current.real !== binding.real || identity.ino !== binding.anchor_ino
+      || (binding.anchor_dev !== undefined && identity.dev !== binding.anchor_dev)) {
+      return binding.path;
+    }
+  }
+  return undefined;
+}
+
 export function deleteOlympusData(options: {
   all?: boolean;
   sourceId?: string;
   dryRun?: boolean;
+  /** Primaries an earlier check of this same delete proved (see assertTargetsSafe). */
+  verifiedPrimaries?: readonly string[];
+  /** The destinations the owner's request approved; any change refuses before each removal. */
+  expectedBindings?: readonly TargetBinding[];
+  /**
+   * Called once, after every non-mutating preparation succeeded and before the
+   * first mutation. A failure before this point is a plain refusal (nothing
+   * changed, nothing fenced); from here on the delete has started and the
+   * source's stores stay fenced until it finishes.
+   */
+  onBegin?: () => void;
+} & LifecyclePathContext): DataDeleteResult {
+  // A started delete finishes through stores the fence keeps shut to everyone else.
+  return withDeleteFenceBypass(() => deleteOlympusDataFenced(options));
+}
+
+function deleteOlympusDataFenced(options: {
+  all?: boolean;
+  sourceId?: string;
+  dryRun?: boolean;
+  verifiedPrimaries?: readonly string[];
+  expectedBindings?: readonly TargetBinding[];
+  onBegin?: () => void;
 } & LifecyclePathContext): DataDeleteResult {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
@@ -747,14 +886,12 @@ export function deleteOlympusData(options: {
     : sourceDeleteTargets(selectedSource!, options);
   const removed: string[] = [];
   const missing: string[] = [];
-  const uniqueDeleteTargets = uniqueTargets(targets);
+  const uniqueDeleteTargets = markRelocatedStores(uniqueTargets(targets), options);
   // Before anything is removed or even checked one by one: a recursive raw-state
   // target must be provably Olympus's own and nobody else's (see
   // assertRawStateTargetsContained). A refusal here deletes nothing.
   assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
-  for (const target of uniqueDeleteTargets) {
-    if (existsSync(target.path)) assertDeleteTargetSafe(target);
-  }
+  assertTargetsSafe(uniqueDeleteTargets, options.verifiedPrimaries);
   // A source's photo copies live in the shared media cache. Every store's
   // references are read before anything is deleted; each copy is released
   // only once its stores are gone, and removed unless another source's store
@@ -765,14 +902,47 @@ export function deleteOlympusData(options: {
     ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [])
     : [];
   // Before anything is removed: a database that will not open fails the
-  // delete with every store still in place.
-  const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
+  // delete with every store still in place (a dry pass of the reset).
+  const resetPreview = selectedSource?.resetAccountState?.(options, true) ?? [];
+  const mutating = options.dryRun !== true;
+  const removedPaths: string[] = [];
+  // Every destructive step checks that the approved destinations are still
+  // where they were approved, so nothing is removed through a replaced folder.
+  const assertBound = () => {
+    if (!mutating || !options.expectedBindings) return;
+    const moved = changedBinding(options.expectedBindings, targetBindings(uniqueDeleteTargets), removedPaths);
+    if (moved) {
+      throw new OperationError(
+        'invalid_params',
+        `Refusing to delete ${moved}: it, or a directory above it, is not where it was when the delete was approved.`,
+        'Ask for the delete again once the folders are settled.',
+      );
+    }
+  };
+  if (mutating && selectedSource) {
+    // Last check before the first mutation, then the fence, then the caller's
+    // own record: from here the delete has started.
+    assertBound();
+    const home = resolveHome(options.homeDir);
+    const existing = readDeleteFence(home).entries.find((entry) => entry.source_id === selectedSource.sourceId);
+    setDeleteFenceEntry({
+      source_id: selectedSource.sourceId,
+      paths: fencePathSpellings(uniqueDeleteTargets.map((target) => target.sqlitePrimaryPath ?? target.path)
+        .concat(uniqueDeleteTargets.map((target) => target.path))),
+      verified_primaries: [...new Set([...(existing?.verified_primaries ?? []), ...(options.verifiedPrimaries ?? []).map((path) => resolve(path))])].sort(),
+      since: existing?.since ?? new Date().toISOString(),
+    }, home);
+    options.onBegin?.();
+  }
+  assertBound();
+  const reset = mutating ? selectedSource?.resetAccountState?.(options, false) ?? [] : resetPreview;
   // Erase dependent private answers before the source bytes. Pending
   // questions have no known dependency yet, so delete them too; their ids
   // disappear and generation-fenced in-flight completions cannot reinsert.
-  if (selectedSource && options.dryRun !== true) {
+  if (selectedSource && mutating) {
     const inboxPath = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(envForContext(options)));
     if (existsSync(inboxPath)) {
+      assertBound();
       const inbox = openWaitingPrivateQuestionStore(inboxPath);
       try {
         const registry = createSourceCorpusRegistry(
@@ -783,6 +953,21 @@ export function deleteOlympusData(options: {
         if (count > 0) removed.push(`${inboxPath} (private answers: ${count})`);
       } finally { inbox.close(); }
     }
+    // The shared file-extraction queue holds this source's job rows (file
+    // names, derivation metadata) outside its own stores. Cleared by corpus,
+    // from the registry, so no source is named here.
+    const jobsPath = defaultFileExtractionJobsDbPath(envForContext(options));
+    if (jobsPath !== ':memory:' && existsSync(jobsPath)) {
+      assertBound();
+      const corpora = createSourceCorpusRegistry().list()
+        .filter(c => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId))
+        .map(c => c.corpusId);
+      const jobs = new LocalFileExtractionJobStore(jobsPath);
+      try {
+        const count = jobs.deleteForCorpora(corpora);
+        if (count > 0) removed.push(`${jobsPath} (extraction jobs: ${count})`);
+      } finally { jobs.close(); }
+    }
   }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
@@ -790,11 +975,16 @@ export function deleteOlympusData(options: {
       continue;
     }
     removed.push(target.path);
-    if (options.dryRun !== true) {
+    if (mutating) {
+      assertBound();
       rmSync(target.path, { recursive: target.allowRecursive, force: true });
+      removedPaths.push(resolve(target.path));
     }
   }
+  assertBound();
   removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
+  // Finished: the stores are gone, so the fence has nothing left to keep shut.
+  if (mutating && selectedSource) clearDeleteFenceEntry(selectedSource.sourceId, resolveHome(options.homeDir));
 
   return {
     ok: true,
@@ -820,11 +1010,16 @@ export function deleteOlympusDataWithCustody(options: {
   all?: boolean;
   sourceId?: string;
   dryRun?: boolean;
+  verifiedPrimaries?: readonly string[];
+  expectedBindings?: readonly TargetBinding[];
+  onBegin?: () => void;
   connectedRegistry?: ConnectedHandleRegistry;
   unpairedSources?: UnpairedSourcesRead;
   artifactPresence?: (path: string) => 'gone' | 'present' | 'unknown';
   /** Source ids connected on this computer without a credential (see core/this-computer.ts). */
   thisComputerSources?: readonly string[];
+  /** The this-computer record exists but cannot be read: a this-computer source cannot be proven disconnected. */
+  thisComputerStateUnreadable?: boolean;
   workerState?: WorkerServiceState;
   /** A remote-access relay child is running (it would recreate its keys and keep forwarding). */
   relayRunning?: boolean;
@@ -869,11 +1064,40 @@ function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCust
   };
 }
 
+/**
+ * A running worker holds a source's stores open (and may be writing to them).
+ * Deleting under it leaves it serving deleted rows from files it no longer
+ * owns. The CLI has no authenticated channel to the engine's dashboard route,
+ * which is the path that waits for running requests, fences reads and
+ * restarts the worker to reopen its stores, so a per-source delete from the
+ * CLI is refused while one runs, naming that route. A preview mutates nothing
+ * and is always allowed.
+ */
+export function assertNoRunningWorkerForSourceDelete(input: {
+  sourceId: string;
+  dryRun: boolean;
+  engineLoaded: boolean;
+  workerState: WorkerServiceState;
+}): void {
+  // Destructive delete only after `inactive` or `missing` is positively
+  // established with no supervising engine; unknown, transitioning, failed
+  // (a deactivating unit, an inspection failure) all mean "cannot prove".
+  const provenStopped = !input.engineLoaded && (input.workerState === 'inactive' || input.workerState === 'missing');
+  if (input.dryRun || provenStopped) return;
+  throw new OperationError(
+    'invalid_params',
+    `Olympus is running or its state could not be confirmed stopped (${input.engineLoaded ? 'engine loaded' : input.workerState}), so it could keep serving ${input.sourceId} from the stores this delete removes. Nothing was deleted.`,
+    'Use Delete indexed data on the source in the Olympus dashboard (it also reopens the worker\'s stores), or run olympus engine stop (olympus worker stop for a legacy worker), then retry.',
+  );
+}
+
 export function dataDeleteCustody(options: {
   all?: boolean;
   sourceId?: string;
   connectedRegistry?: ConnectedHandleRegistry;
   thisComputerSources?: readonly string[];
+  /** The this-computer record exists but cannot be read: a this-computer source cannot be proven disconnected. */
+  thisComputerStateUnreadable?: boolean;
   /**
    * The durable unpaired-source record, read the way the dashboard reads it
    * (reconciled against the disk). Required for a paired-session source.
@@ -913,6 +1137,14 @@ export function dataDeleteCustody(options: {
     const connected = (lane !== undefined
       && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider))
       || (options.thisComputerSources?.includes(source!.sourceId) ?? false);
+    if (options.thisComputerStateUnreadable === true && getFileScopeSource(source!.sourceId)?.account === 'this_computer') {
+      return {
+        requirement: 'source_disconnected',
+        ready: false,
+        observed: 'unknown_registry',
+        next_action: 'Repair or remove the Olympus this-computer record (this-computer.json beside the handle registry), then retry.',
+      };
+    }
     const pairingPaths = source!.pairingSessionPaths?.(options);
     if (connected) {
       // A paired-session source ends with Unpair, not Disconnect.
@@ -1663,6 +1895,59 @@ function serviceUnitTarget(path: string): DeleteTarget {
   };
 }
 
+/**
+ * Check every existing target. An external SQLite file family is normally
+ * proven ours by opening its primary store. Once the primary has been removed
+ * (the delete removes it first), a surviving sidecar can no longer be proven
+ * that way, so the ownership the earlier, successful check recorded
+ * (`priorVerifiedPrimaries`) carries the cleanup to the end. Returns the
+ * primaries proven now, for the caller to record.
+ */
+const RELOCATING_ENV_NAME = /^OLYMPUS_[A-Z0-9_]*(_PATH|_DB|_CONFIG|_FILE|_DIR|_ROOT)$/;
+
+/**
+ * A database target that is not where its source keeps it by default (some
+ * override moved it, even to a spot inside an Olympus root) is only the
+ * source's own if its contents say so: it gets the same ownership/schema
+ * validation as one outside every root.
+ */
+function markRelocatedStores(targets: DeleteTarget[], context: LifecyclePathContext): DeleteTarget[] {
+  const env = envForContext(context);
+  const scrubbed: Record<string, string | undefined> = { ...env };
+  for (const name of Object.keys(scrubbed)) if (RELOCATING_ENV_NAME.test(name)) scrubbed[name] = undefined;
+  const defaults = new Set<string>();
+  for (const spec of lifecycleSourceSpecs()) {
+    try {
+      for (const target of sourceDeleteTargets(spec, { ...context, env: scrubbed })) {
+        if (target.sqliteStoreId) defaults.add(canonicalPath(target.sqlitePrimaryPath ?? target.path));
+      }
+    } catch { /* an unresolvable default marks nothing as default */ }
+  }
+  return targets.map((target) => target.sqliteStoreId
+    && target.externalSourcePath !== true
+    && !defaults.has(canonicalPath(target.sqlitePrimaryPath ?? target.path))
+    ? { ...target, externalSourcePath: true }
+    : target);
+}
+
+function assertTargetsSafe(targets: readonly DeleteTarget[], priorVerifiedPrimaries: readonly string[] = []): string[] {
+  const prior = new Set(priorVerifiedPrimaries.map((path) => resolve(path)));
+  const verified = new Set<string>();
+  for (const target of targets) {
+    if (!existsSync(target.path)) continue;
+    const primary = target.externalSourcePath === true && target.kind !== 'source_state_path' && target.kind !== 'known_root'
+      ? resolve(target.sqlitePrimaryPath ?? target.path)
+      : undefined;
+    if (primary && !existsSync(primary) && prior.has(primary)) {
+      assertRegularFileTarget(target.path);
+      continue;
+    }
+    assertDeleteTargetSafe(target);
+    if (primary) verified.add(primary);
+  }
+  return [...verified].sort();
+}
+
 function assertDeleteTargetSafe(target: DeleteTarget): void {
   if (target.kind === 'source_state_path') {
     // Raw state carries no Olympus schema marker to verify, so a state
@@ -1794,7 +2079,26 @@ function assertRawStateTargetsContained(
   selectedSource: LifecycleSourceSpec | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
-  if (stateTargets.length === 0) return;
+  // The store-custody lock must outlive every delete: a target that is, or
+  // contains, it would let the next opener lock a fresh file.
+  const custodyHome = resolveHome(context.homeDir);
+  const custodyLocks = [...new Set([
+    storeCustodyLockPath(custodyHome),
+    canonicalPath(storeCustodyLockPath(custodyHome)),
+    // The lock folder's own real place, should anything have made it a link.
+    join(canonicalPath(storeCustodyDirectory(custodyHome)), 'store-lifecycle.lock.db'),
+  ])];
+  for (const target of targets) {
+    for (const candidate of [resolve(target.path), canonicalPath(target.path)]) {
+      if (custodyLocks.some((custodyLock) => candidate === custodyLock || isStrictlyInside(custodyLock, candidate))) {
+        throw new OperationError(
+          'invalid_params',
+          `Refusing to delete ${target.path}: it holds the lock that keeps Olympus stores safe while they are deleted.`,
+          'Check the configured paths. Nothing was deleted.',
+        );
+      }
+    }
+  }
   const roots = knownOlympusDataRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
   const refuse = (path: string, why: string): never => {
     throw new OperationError(
@@ -1803,6 +2107,17 @@ function assertRawStateTargetsContained(
       'Check the configured state-directory values, then remove that directory by hand. Nothing was deleted.',
     );
   };
+  // Every file-like target too (stores, sidecars, policy files): a symbolic
+  // link in or above it must not lead the unlink somewhere else.
+  const fileTargets = targets.filter((target) => target.kind === 'source_sqlite'
+    || target.kind === 'source_sqlite_sidecar' || target.kind === 'policy_file');
+  for (const target of fileTargets) {
+    const lexical = resolve(target.path);
+    const root = roots.find((candidate) => isStrictlyInside(lexical, candidate.lexical));
+    if (!root) continue;
+    const expectedReal = join(root.real, relative(root.lexical, lexical));
+    if (canonicalPath(lexical) !== expectedReal) refuse(target.path, 'because it, or a directory above it, is a symbolic link');
+  }
   for (const target of stateTargets) {
     const lexical = resolve(target.path);
     const root = roots.find((candidate) => isStrictlyInside(lexical, candidate.lexical));
@@ -1818,9 +2133,22 @@ function assertRawStateTargetsContained(
     if (canonicalPath(lexical) !== expectedReal) refuse(target.path, 'because it, or a directory above it, is a symbolic link');
   }
   if (!selectedSource) return;
-  const home = resolveHome(context.homeDir);
   const own = new Set([selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
-  const protectedPaths = new Set<string>();
+  // Authoritative state (config, registry, secrets, shared stores) is protected
+  // unconditionally. A swept override is exempt only when the selected source
+  // itself reads that variable: removing it from the environment changes this
+  // source's own delete targets, so the path is provably its own.
+  const protectedPaths = new Set<string>(authoritativeStatePaths(context));
+  for (const override of sweptPathOverrides(context)) {
+    const withoutVar = { ...context, env: { ...envForContext(context), [override.name]: undefined } };
+    let ownsIt = false;
+    try {
+      const before = new Set(sourceDeleteTargets(selectedSource, withoutVar).map((target) => resolve(target.path)));
+      const after = new Set(sourceDeleteTargets(selectedSource, context).map((target) => resolve(target.path)));
+      ownsIt = after.has(override.path) && !before.has(override.path);
+    } catch { /* cannot prove it is the source's own: stays protected */ }
+    if (!ownsIt) protectedPaths.add(override.path);
+  }
   for (const other of lifecycleSourceSpecs()) {
     if (own.has(other.sourceId)) continue;
     for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
@@ -1828,16 +2156,10 @@ function assertRawStateTargetsContained(
     for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
-  for (const path of [
-    join(home, '.olympus', 'config.json'),
-    defaultSovereigntyConfigPathForHome(context.homeDir),
-    join(home, '.config', 'olympus', 'handles.json'),
-    join(home, '.config', 'olympus', 'handles.json.unpaired'),
-    ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
-    ...mediaCacheDeleteTargets(context).map((target) => target.path),
-  ]) protectedPaths.add(path);
-  const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve(path), canonicalPath(path)]);
-  for (const target of stateTargets) {
+  const protectedCanonical = withSqliteSidecars(protectedPaths).flatMap((path) => [resolve(path), canonicalPath(path)]);
+  // Every target, whatever its kind: a relocated index or policy file is just
+  // as able to point at the owner's config as a state directory is.
+  for (const target of targets) {
     const candidates = [resolve(target.path), canonicalPath(target.path)];
     for (const protectedPath of protectedCanonical) {
       for (const candidate of candidates) {
@@ -1850,6 +2172,135 @@ function assertRawStateTargetsContained(
     }
   }
 }
+
+/**
+ * The files Olympus cannot run without, resolved the way the running engine
+ * resolves them, overrides applied: the credential handle registry and every
+ * record and lock beside it, the this-computer and unpaired records, the
+ * owner config, the secret store and its key, the remote-connections store and
+ * the media cache. A recursive raw-state delete must never reach any of them,
+ * whatever directory an override points it at. Both the configured and the
+ * default locations are named, since either may be the live one.
+ */
+function authoritativeStatePaths(context: LifecyclePathContext): string[] {
+  const home = resolveHome(context.homeDir);
+  const env = envForContext(context);
+  const registries = new Set<string>([join(home, '.config', 'olympus', 'handles.json')]);
+  const configuredRegistry = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
+  if (configuredRegistry) registries.add(resolve(configuredRegistry));
+  if (context.registryPath?.trim()) registries.add(resolve(context.registryPath));
+  const files = new Set<string>();
+  for (const registry of registries) {
+    const dir = dirname(registry);
+    for (const path of [
+      registry,
+      `${registry}.grant-custody`,
+      `${registry}.grant-epoch.json`,
+      `${registry}.unpaired`,
+      join(dir, 'this-computer.json'),
+      join(dir, 'source-account-bindings.json'),
+      join(dir, 'mail-source-scopes.json'),
+      join(dir, 'file-source-scopes.json'),
+      join(dir, 'messaging-capture.telegram.json'),
+      join(dir, 'messaging-capture.whatsapp.json'),
+      join(dir, 'pending-source-deletes.json'),
+    ]) {
+      files.add(path);
+      files.add(`${path}.lock`);
+    }
+  }
+  const configDirs = new Set<string>([join(home, '.config', 'olympus')]);
+  try { configDirs.add(defaultOlympusConfigDir(env)); } catch { /* an unresolvable layout adds nothing */ }
+  for (const dir of configDirs) {
+    for (const name of ['secrets.enc', 'secrets.key', 'secret-backend.json']) files.add(join(dir, name));
+  }
+  try {
+    for (const path of Object.values(resolveLinuxSecretPaths(env))) files.add(path);
+  } catch { /* not a Linux layout */ }
+  const configured = (name: string) => {
+    const value = env[name]?.trim();
+    return value ? [resolve(value)] : [];
+  };
+  for (const path of [
+    join(home, '.olympus', 'config.json'),
+    ...configured('OLYMPUS_CONFIG'),
+    ...configured('OLYMPUS_SOVEREIGNTY_CONFIG'),
+    ...configured('OLYMPUS_SOVEREIGNTY_CONFIG_PATH'),
+    defaultFileExtractionJobsDbPath(env),
+    ...authoritativeDefaultsFromConsumers(env),
+    defaultSovereigntyConfigPathForHome(context.homeDir),
+    defaultSovereigntyConfigPath(env),
+    ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
+    ...mediaCacheDeleteTargets(context).map((target) => target.path),
+  ]) files.add(path);
+  return [...files];
+}
+
+/**
+ * The one registry of shared authoritative files: each entry is a consumer's
+ * own resolver, so the protected set cannot drift from where the consumer
+ * really reads. A new authoritative resolver is added HERE; the test in
+ * test/authoritative-files.test.ts fails when an exported default/resolve path
+ * function exists that is neither listed here nor classified as something else.
+ */
+export const AUTHORITATIVE_FILE_RESOLVERS: ReadonlyArray<{ name: string; resolve: (env: Record<string, string | undefined>) => string }> = [
+  { name: 'workerSetupEnvPath', resolve: (env) => workerSetupEnvPath({ env }) },
+  { name: 'resolveEmbeddingLedgerPath', resolve: (env) => resolveEmbeddingLedgerPath(env) },
+  { name: 'resolveClassificationLedgerPath', resolve: (env) => resolveClassificationLedgerPath(env) },
+  { name: 'defaultSourceSchedulerStateDbPath', resolve: (env) => defaultSourceSchedulerStateDbPath(env) },
+  { name: 'defaultSourceIngestionExclusionsPath', resolve: (env) => defaultSourceIngestionExclusionsPath(env) },
+  { name: 'defaultPrivacyProfilePath', resolve: (env) => defaultPrivacyProfilePath(env) },
+  { name: 'defaultTierRulesPath', resolve: (env) => defaultTierRulesPath(env) },
+  { name: 'defaultXBookmarksApiUsageDbPath', resolve: (env) => defaultXBookmarksApiUsageDbPath(env) },
+];
+
+/**
+ * The default location of every shared authoritative file, from the resolver
+ * its consumer uses (not a copy of its layout), together with the file a
+ * relocating variable points at. A source-path override aimed at one of them
+ * is refused whatever the override variable's name is.
+ */
+function authoritativeDefaultsFromConsumers(env: Record<string, string | undefined>): string[] {
+  const out: string[] = [];
+  for (const entry of AUTHORITATIVE_FILE_RESOLVERS) {
+    try {
+      const path = resolve(entry.resolve(env));
+      out.push(path, `${path}-wal`, `${path}-shm`, `${path}-journal`, `${path}.lock`, `${path}.lock.db`);
+    } catch { /* an unresolvable layout adds nothing */ }
+  }
+  return out;
+}
+
+/**
+ * Every other file or store a deployment relocates by an OLYMPUS_* path
+ * variable (shared stores, ledgers, budget and broker state, drains), found by
+ * variable NAME so none can be forgotten. A relative value is resolved the way
+ * its consumer resolves it (against the working directory), so a relative
+ * override cannot slip past the overlap check.
+ */
+function sweptPathOverrides(context: LifecyclePathContext): Array<{ name: string; path: string }> {
+  const out: Array<{ name: string; path: string }> = [];
+  for (const [name, value] of Object.entries(envForContext(context))) {
+    if (!SHARED_PATH_ENV_NAME.test(name) || typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === ':memory:' || trimmed.startsWith('{')) continue;
+    out.push({ name, path: resolve(trimmed) });
+  }
+  return out;
+}
+
+const SQLITE_FILE = /\.(sqlite3?|db)$/;
+function withSqliteSidecars(paths: Iterable<string>): string[] {
+  const all = new Set<string>();
+  for (const path of paths) {
+    all.add(path);
+    if (SQLITE_FILE.test(path)) for (const suffix of ['-wal', '-shm', '-journal']) all.add(`${path}${suffix}`);
+  }
+  return [...all];
+}
+
+/** Env variables that relocate a file or store: matched by name so none can be forgotten. */
+const SHARED_PATH_ENV_NAME = /^OLYMPUS_[A-Z0-9_]*(_PATH|_DB|_CONFIG|_FILE)$/;
 
 function isInsideKnownOlympusRoot(path: string, context: LifecyclePathContext): boolean {
   return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));

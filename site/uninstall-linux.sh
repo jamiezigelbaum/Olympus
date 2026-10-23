@@ -544,6 +544,13 @@ if purge:
         absolute(root, "purge root")
         if not beneath(root, purge_boundaries[root]) or os.path.basename(root) not in {"olympus","engine","olympus-engine"}: fail(f"purge root is outside the Olympus boundary: {root}")
         purge_root(root)
+    # The store lock folder sits in the home folder, outside every data root, so
+    # that deleting data can never remove the lock the delete itself holds.
+    # The engine is stopped by now. A link or a foreign-owned folder is refused
+    # by the same ancestry and identity checks as the roots above.
+    lock_root = os.path.join(layout["home"], ".olympus-locks")
+    absolute(lock_root, "purge root")
+    purge_root(lock_root)
     # Never infer creation from the name, permissions or user ownership alone.
     for entry in owned_empty_parents:
         parent = entry["path"]

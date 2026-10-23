@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../src/core/store-open.ts';
 // Corrects contaminated embedding-epoch labels on a store's
 // `embedding_models` rows. Dry run by default.
 //
@@ -117,8 +118,8 @@ function runEmbeddingIdentityRepair(argv: readonly string[]): {
   // A dry run cannot write even by accident, and neither run creates a
   // database: a typo'd path fails instead of producing an empty store.
   const db = args.execute
-    ? new Database(args.db, { readwrite: true, create: false })
-    : new Database(args.db, { readonly: true });
+    ? openStoreDatabase(args.db, { readwrite: true, create: false })
+    : openStoreDatabase(args.db, { readonly: true });
   // First pragma, before any query: live stores have active writers, and a
   // lock mid-repair should wait, not error a half-reported run.
   db.exec('PRAGMA busy_timeout = 10000;');

@@ -1,3 +1,4 @@
+import { openStoreDatabase } from './store-open.ts';
 import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -450,7 +451,7 @@ export class LocalSourceWatchStore {
     this.dbPath = dbPath;
     this.clock = options.clock ?? SYSTEM_CLOCK;
     hardenPrivateDatabasePath(dbPath);
-    this.db = new Database(dbPath, { create: true });
+    this.db = openStoreDatabase(dbPath, { create: true });
     try {
       chmodSync(dbPath, 0o600);
       this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;');

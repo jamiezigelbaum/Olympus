@@ -1007,7 +1007,7 @@ async function completeOAuthSourceConnection(
               sourceAccountNotice: `${sourceAccountPurgeRequired.join(', ')} now ${sourceAccountPurgeRequired.length === 1 ? 'belongs' : 'belong'} to a different account than the items already stored, so nothing syncs. `
                 + 'To keep those items, reconnect the previous account. To replace them, Disconnect, run '
                 + sourceAccountPurgeRequired.map((sourceId) => `\`olympus data delete --source ${sourceId}\``).join(' and ')
-                + ' (preview with --dry-run), then connect again.',
+                + ' (preview with --dry-run; stop Olympus first, or use Delete indexed data on the source in the dashboard), then connect again.',
             }
           : {}),
       };

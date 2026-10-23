@@ -7,7 +7,7 @@
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
   buildEnvBridgeSovereigntyConfig,
@@ -59,6 +59,25 @@ describe('the dashboard renders over an unreadable handle registry', () => {
 
     const page = await worker.fetch(new Request('http://worker.test/dashboard'));
     expect(page.status).toBe(200);
+  });
+
+  test('an unreadable this-computer record is never shown as calmly disconnected', async () => {
+    const registryPath = fixtureRegistryPath();
+    writeFileSync(join(dirname(registryPath), 'this-computer.json'), '{"version": 1, "sources": [');
+    const worker = createEmailSourceWorker({
+      sourceIndexStatus: { async status() { return fixtureStatus(); } },
+      sourceDashboard: {
+        sovereigntyEngine: fixtureSovereigntyEngine(),
+        registryPath,
+        secretStore: memorySecretStore({}),
+      },
+    });
+    const response = await worker.fetch(new Request('http://worker.test/dashboard.json'));
+    const view = await response.json() as { sources: Array<{ source_id: string; connection: { label: string } }> };
+    expect(cardLabel(view, 'local.files')).toBe('connection state unreadable');
+    expect(cardLabel(view, 'local.files')).not.toContain('Disconnected');
+    // A source that does not live in that record is unaffected.
+    expect(cardLabel(view, 'dropbox.files')).not.toBe('connection state unreadable');
   });
 
   test('a readable registry still says plainly that a source is not connected', async () => {

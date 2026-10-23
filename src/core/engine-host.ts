@@ -1,6 +1,7 @@
 import { startLinuxOwnerBridgeHost } from './linux-owner-bridge-host.ts';
 import { linuxGraphicalSessionReadinessAsync } from './linux-desktop-opener.ts';
 import { readWorkerSetupEnv, workerAuthTokenFromConfig } from './worker-auth.ts';
+import { effectiveWorkerEnvironment } from './worker-effective-env.ts';
 import { resolveServerMode } from './remote-open.ts';
 import { processInstanceIdentity } from './file-lease.ts';
 import { rotateEngineLog } from './linux-engine-service.ts';
@@ -23,6 +24,9 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { removeFileDurablySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import { configFromPluginConfig } from './config.ts';
+import { holdStoreCustodyShared } from './store-custody.ts';
+import { applyPendingSourceDeletes } from '../pending-source-deletes.ts';
+import { handleRegistryPathFromEnv } from '../workers/credential-broker/connected-handles.ts';
 import {
   engineChildrenPath,
   engineChildrenRecorder,
@@ -83,6 +87,8 @@ export interface EngineHostOptions {
   installSignalHandlers?: boolean;
   /** Test seam for the stale child-group cleanup that runs before any service starts. */
   reap?: EngineChildReapDeps;
+  /** Test seam: where pending source deletes are read and applied (default: the handle registry's directory). */
+  pendingDeletes?: { registryPath: string };
   /** Desktop OS seams for isolated lifecycle qualification. */
   desktop?: { ready?: () => Promise<boolean>; openFile?: (path: string) => Promise<void> };
 }
@@ -162,6 +168,35 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     ||reaped.skipped.some(entry=>entry.pgid===child.pgid&&['gone','not_ours'].includes(entry.reason)));
   if(allRecordedReleased)removeFileDurablySync(childrenPath);
   setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
+
+  // Delete indexed data (owner, 2026-10-23) is applied here: after any child a
+  // previous host left behind is stopped, and before this host starts a single
+  // service, so no worker, scheduler, sniffer, watch or embedding-drain child
+  // can have a store open while its files are removed.
+  // The worker's effective environment, worker.env included: the registry and
+  // every store path resolve the way the worker resolves them, or the worker
+  // would record an intent this host never reads.
+  // A delete that began and did not finish does not stop the engine: it fences
+  // that source's stores (core/delete-fence.ts), the dashboard says so, and the
+  // next start retries. Everything else runs normally.
+  try {
+    const workerEnv = effectiveWorkerEnvironment({ env: dataEnv, homeDir, platform: options.platform ?? process.platform, pluginConfig });
+    const registryPath = options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(workerEnv, true)!;
+    const applied = await applyPendingSourceDeletes({ registryPath, context: { homeDir, env: workerEnv }, log });
+    if (applied.incomplete.length > 0) log(`engine: ${applied.incomplete.length} Delete indexed data did not finish; those stores stay fenced and the next start retries.`);
+  } catch (error) {
+    log(`engine: pending deletes could not be applied: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+  // Every service and child below (the worker, the Telegram reader, the
+  // WhatsApp bridge, the embedding drain) is this process's child. Holding
+  // store custody for the host's whole life means no delete can take the
+  // stores exclusively while any of them runs, even if the worker itself
+  // is down for a moment. The kernel drops the hold if the host dies.
+  try { holdStoreCustodyShared({ ...(homeDir ? { homeDir } : {}) }); } catch (error) {
+    log(`engine: store custody could not be taken: ${error instanceof Error ? error.message : 'unknown error'}`);
+    exit(EXIT_CONFIG);
+    return undefined;
+  }
 
   const now = () => new Date().toISOString();
   const status: EngineStatusFile = {
@@ -256,6 +291,13 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     const onSignal = () => { void stop().then(() => exit(0)); };
     process.once('SIGTERM', onSignal);
     process.once('SIGINT', onSignal);
+    // A worker that recorded a delete asks its host to restart: stop every
+    // child, then exit non-zero so the supervisor starts a fresh host, which
+    // applies the delete before it spawns anything.
+    process.once('SIGUSR2', () => {
+      log('engine: restarting to apply a requested delete.');
+      void stop().then(() => exit(75));
+    });
   }
   // No worker, no bridge: a worker-disabled engine reserves no port and never
   // touches the worker socket.

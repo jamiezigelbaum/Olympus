@@ -404,7 +404,7 @@ function dashboardIsUnconnectedState(source: DashboardSourceCard): boolean {
 export function dashboardUnsettledWithData(source: DashboardSourceCard): boolean {
   return source.coverage.indexed_items > 0
     && dashboardIsUnconnectedState(source)
-    && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
+    && (source.delete_state !== undefined || DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label));
 }
 
 /**
@@ -1726,7 +1726,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    */
   deleteDataConfirmMessages: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.',
   deleteDataConfirmMessagesMedia: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.',
-  deleteDataDone: 'Indexed data deleted',
+  deleteDataDone: 'Deleting indexed data. Olympus is restarting to remove it.',
   disconnectConfirm: 'Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
   /**

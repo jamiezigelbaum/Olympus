@@ -16,7 +16,8 @@ the previous app and the Bun runtime), the `~/.local/bin/olympus` command the
 installer wrote, and the PATH line it added to `~/.zprofile` or
 `~/.bash_profile`. It keeps settings and data (`~/.olympus`,
 `~/.config/olympus`, `~/.local/share/openclaw/olympus`,
-`~/Library/Logs/Olympus`) and lists them. To delete the data too, run
+`~/Library/Logs/Olympus`) and lists them. It does remove `~/.olympus-locks`,
+the store lock folder (a lock file only, plus the note of an unfinished delete). To delete the data too, run
 `olympus engine stop` and then `olympus data delete --all` (preview with
 `--dry-run`) before uninstalling. The rest of this page covers the OpenClaw
 worker.

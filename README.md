@@ -588,9 +588,14 @@ repairs do not normally require a worker restart. Follow the source card or
 Dashboard **Disconnect** stops new scheduled and manual reads, removes the
 selected local account grant, and keeps indexed data and reusable developer-app
 registration. It does not revoke provider-side access; the card links the
-provider revocation page. Local data deletion remains the deliberate CLI-only
-flow: preview `olympus data delete --source <id> --dry-run`, Disconnect the
-source, then run the command without `--dry-run`.
+provider revocation page. Local data deletion is the separate **Delete indexed
+data** action on a disconnected source's card (or the `olympus_delete_source_data`
+tool): it records the request durably and restarts Olympus, and the restarted
+engine removes the data before it opens any store, so nothing running ever holds
+a file that is being deleted. The card reads "Deleting indexed data…" until it
+is done, and says so plainly if the restart's re-check refused. The CLI,
+`olympus data delete --source <id> --dry-run` then without `--dry-run`, applies
+the same deletion and requires Olympus to be stopped.
 
 Telegram and WhatsApp are paired sessions rather than broker grants, so their
 cards carry **Unpair** instead: it stops new reads and deletes this computer's

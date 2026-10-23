@@ -470,7 +470,7 @@ export async function callSetupTool(
       case DELETE_SOURCE_DATA_TOOL_NAME: {
         const sourceId = oneOf(args.source_id, DELETE_DATA_SOURCE_IDS);
         const { restarting } = await backend.deleteSourceData(sourceId);
-        return deleteSourceDataToolResult({ status: 'deleted', source_id: sourceId, restarting });
+        return deleteSourceDataToolResult({ status: 'deleting', source_id: sourceId, restarting });
       }
       case MODEL_SET_TOOL_NAME: {
         const choice: ChatGptModelChoice = {};
@@ -913,6 +913,7 @@ const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   delete_reopen_unavailable: 'delete_unavailable',
   delete_unavailable: 'delete_unavailable',
   delete_failed: 'delete_incomplete',
+  delete_refused: 'delete_unavailable',
 };
 
 function surfaceError(error: unknown): ChatGptSurfaceError {

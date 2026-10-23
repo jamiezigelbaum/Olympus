@@ -43,3 +43,20 @@ export function createModelKeyReload(options: {
     return true;
   };
 }
+
+/**
+ * Whether one restart request also restarts the embedding drain, which keeps
+ * the connector stores open in a process of its own. Only the standalone
+ * engine host does: it supervises the worker and the drain together and
+ * applies a pending delete before it starts either. Under the OpenClaw Gateway
+ * the drain is a separate registered service, and on a generated
+ * LaunchAgent/systemd worker unit it is a separate unit, so restarting the
+ * worker would leave the deleted stores open in a live drain.
+ */
+export function restartCoversEmbeddingDrain(launch: WorkerLaunch, env: Record<string, string | undefined>): boolean {
+  // The supervisor identity the native worker service itself assigns at launch
+  // (WORKER_SUPERVISOR_ENV), together with the validated launch. An inherited
+  // OLYMPUS_ENGINE_HOST is ambient and proves nothing: a Gateway-launched
+  // worker can carry it.
+  return env.OLYMPUS_WORKER_SUPERVISOR === 'engine' && launch.nativeServiceSupervised === true;
+}

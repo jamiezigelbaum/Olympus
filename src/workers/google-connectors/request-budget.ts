@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 // Durable per-provider day counter for the Google connector lanes.
 //
 // The ledger is deliberately NOT stored in the connector-store sqlite: that
@@ -450,7 +451,7 @@ function withLedger<T>(
   run: (db: Database) => T,
   options: { journalModeWal?: boolean } = {},
 ): T {
-  const db = new Database(ledgerPath, { create: true });
+  const db = openStoreDatabase(ledgerPath, { create: true });
   hardenLedgerFiles(ledgerPath);
   try {
     db.exec(options.journalModeWal

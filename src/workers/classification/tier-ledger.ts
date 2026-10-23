@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 // The tier ledger (design docs/design/per-item-four-tier-classification.md,
 // section 3.3): one local SQLite record per item identity of its two current
 // tiers, why they were chosen, and which generation is live.
@@ -292,7 +293,7 @@ export class TierLedger {
     }
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, { create: true });
+      db = openStoreDatabase(this.dbPath, { create: true });
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       settleStaleEmbedHolds(db, this.now().toISOString());

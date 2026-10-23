@@ -182,6 +182,8 @@ export interface DashboardSource {
    * shows. Secrets items are never counted or named here.
    */
   unreadable?: DashboardUnreadable;
+  /** Delete indexed data was asked for and waits for the engine's restart to apply it. */
+  deleting?: true;
   /**
    * The owner's last Sync now press, while it is still news (about ten
    * minutes, and only until a later sync). `newItems` is absent when the lane
@@ -933,11 +935,11 @@ export interface DisconnectSourceResult {
 
 /**
  * `olympus_delete_source_data {source_id}` (destructive: the UI confirms). The
- * source must already be disconnected. `restarting`: the engine's worker is
- * restarting so it stops serving the deleted data from files it still held open.
+ * source must already be disconnected. The engine records the delete and
+ * restarts; the restarted engine removes the data before it opens anything.
  */
 export interface DeleteSourceDataResult {
-  status: 'deleted';
+  status: 'deleting';
   source_id: ChatGptDeleteSourceId;
   restarting: boolean;
 }

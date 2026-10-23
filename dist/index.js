@@ -2334,6 +2334,21 @@ function acquireFileLeaseSync(targetPath, options) {
     sleepSync(options.pollIntervalMs);
   }
 }
+function pragmaText(connection, sql) {
+  const statement = connection.query ? connection.query(sql) : connection.prepare(sql);
+  const row = statement.get();
+  return String(row ? Object.values(row)[0] : "").toLowerCase();
+}
+function requireRollbackJournal(connection, lockPath) {
+  if (pragmaText(connection, "PRAGMA journal_mode") === "delete")
+    return;
+  try {
+    connection.exec("PRAGMA busy_timeout = 0; PRAGMA journal_mode = DELETE");
+  } catch {}
+  if (pragmaText(connection, "PRAGMA journal_mode") !== "delete") {
+    throw new Error(`Lock database ${lockPath} is not in rollback-journal mode and could not be switched.`);
+  }
+}
 function openSqlite(path) {
   if (typeof globalThis.Bun !== "undefined") {
     const { Database } = runtimeRequire("bun:sqlite");
@@ -2347,6 +2362,9 @@ function openSqlite(path) {
   return connection;
 }
 function tryKernelLock(lockPath) {
+  return tryKernelLockAt(lockPath, "exclusive");
+}
+function tryKernelLockAt(lockPath, mode) {
   if (!existsSync4(lockPath)) {
     try {
       closeSync3(openSync3(lockPath, "wx", 384));
@@ -2357,7 +2375,20 @@ function tryKernelLock(lockPath) {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec("BEGIN EXCLUSIVE");
+    requireRollbackJournal(connection, lockPath);
+  } catch (error) {
+    closeQuietly(connection);
+    if (isSqliteBusy(error))
+      return;
+    throw error;
+  }
+  try {
+    if (mode === "exclusive") {
+      connection.exec("BEGIN EXCLUSIVE");
+    } else {
+      connection.exec("BEGIN");
+      connection.exec("SELECT 1 FROM sqlite_master LIMIT 1");
+    }
   } catch (error) {
     closeQuietly(connection);
     if (isSqliteBusy(error))
@@ -5025,6 +5056,28 @@ var storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because i
 var init_release_manifest = __esm(() => {
   storage = new AsyncLocalStorage;
   withheldAnswers = new WeakSet;
+});
+
+// src/core/store-custody.ts
+var heldShared, heldExclusiveHere;
+var init_store_custody = __esm(() => {
+  init_file_lease();
+  heldShared = new Map;
+  heldExclusiveHere = new Set;
+});
+
+// src/core/delete-fence.ts
+var init_delete_fence = __esm(() => {
+  init_atomic_file();
+  init_store_custody();
+});
+
+// src/core/store-open.ts
+var warned;
+var init_store_open = __esm(() => {
+  init_delete_fence();
+  init_store_custody();
+  warned = new Set;
 });
 
 // src/core/sqlite-migrations.ts
@@ -13286,7 +13339,7 @@ var init_vocabulary = __esm(() => {
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
     deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
-    deleteDataDone: "Indexed data deleted",
+    deleteDataDone: "Deleting indexed data. Olympus is restarting to remove it.",
     disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
@@ -14121,6 +14174,7 @@ function metadataStringArray(metadata, key) {
 // src/workers/google-connectors/request-budget.ts
 var GoogleRequestBudgetError;
 var init_request_budget = __esm(() => {
+  init_store_open();
   GoogleRequestBudgetError = class GoogleRequestBudgetError extends Error {
     retryAt;
     provider;
@@ -15850,6 +15904,7 @@ var init_tier_classifier = __esm(() => {
 });
 // src/workers/classification/tier-ledger.ts
 var init_tier_ledger = __esm(() => {
+  init_store_open();
   init_sqlite_migrations();
   init_tier_classifier();
 });
@@ -15857,6 +15912,7 @@ var init_tier_ledger = __esm(() => {
 // src/workers/classification/secret-locations.ts
 var STOP_WORDS;
 var init_secret_locations = __esm(() => {
+  init_store_open();
   init_sqlite_migrations();
   init_engine();
   init_tier_classifier();
@@ -15932,6 +15988,7 @@ var init_delphi_scorer = __esm(() => {
 
 // src/workers/classification/sniffer-store.ts
 var init_sniffer_store = __esm(() => {
+  init_store_open();
   init_sqlite_migrations();
   init_tier_classifier();
 });
@@ -16011,6 +16068,7 @@ var init_sniffer = __esm(() => {
 // src/workers/file-extraction/job-names.ts
 var openLedgerPaths;
 var init_job_names = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   openLedgerPaths = new Map;
 });
@@ -16185,6 +16243,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_store_open();
   init_keyword_context();
   init_keyword_languages();
   init_keyword_expansion();
@@ -17380,6 +17439,7 @@ var init_grant_fence = __esm(() => {
 // src/workers/x-bookmarks/live-control.ts
 var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
 var init_live_control2 = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   init_sqlite_migrations();
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60000;
@@ -17394,6 +17454,7 @@ var init_live_control2 = __esm(() => {
 // src/workers/x-bookmarks/reconcile-state.ts
 var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2, FOLDER_FACET_REFRESH_LEASE_MS;
 var init_reconcile_state = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   init_sqlite_migrations();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
@@ -18170,8 +18231,9 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir16(), ".local", "share");
   return join35(standaloneLinuxDataDir(env) ?? join35(dataHome, "openclaw", "olympus"), "source-dashboard.sqlite");
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETE_REFUSAL_CODES, DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_DELETE_UNFINISHED_LABEL = "Delete didn't finish", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   init_google_handle_compatibility();
   init_publisher_oauth_client();
@@ -18189,10 +18251,22 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_DELETE_REFUSAL_CODES = new Set([
+    "settings_changed",
+    "protected_path",
+    "not_disconnected",
+    "failed",
+    "holders_running",
+    "connection_changed",
+    "record_unreadable"
+  ]);
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
     DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
-    DASHBOARD_UNPAIR_INCOMPLETE_LABEL
+    DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
+    DASHBOARD_DELETING_LABEL,
+    DASHBOARD_DELETE_NOT_DONE_LABEL,
+    DASHBOARD_DELETE_UNFINISHED_LABEL
   ]);
   DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
     "credential_refresh_busy",
@@ -18886,6 +18960,7 @@ function formatNumber(value) {
 }
 var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
+  init_store_open();
   init_config();
   init_source_corpus_registry();
   init_source_ingestion_exclusions();
@@ -21475,6 +21550,7 @@ var inProcessRemoteRequests = new WeakSet;
 init_source_corpus_registry();
 
 // src/core/source-watch.ts
+init_store_open();
 init_linux_engine_layout();
 init_sqlite_migrations();
 var SOURCE_WATCH_MIN_LEASE_MS = 1000;
@@ -23256,16 +23332,20 @@ function assertNativeWorkerScopeConfigSupported(pluginConfig) {
     throw new NativeProcessConfigurationError(`Gateway-managed Olympus workers do not support explicit sourceIndex.${unsupported[0]} plugin config; configure source scope through the worker environment.`);
   }
 }
-function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
-  const service = config.worker.service;
-  const env = { ...process.env };
-  applyWorkerSetupEnv({ env, ...workerEnvPath ? { workerEnvPath } : {} });
+function finalizedWorkerEnvironment(config, options = {}) {
+  const env = { ...options.baseEnv ?? process.env };
+  applyWorkerSetupEnv({ env, ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {} });
   stripGatewayBootstrapSecrets(env);
-  for (const [name, value] of Object.entries(service.credentials))
+  for (const [name, value] of Object.entries(config.worker.service.credentials))
     env[name] = value;
   if (config.worker.authToken)
     env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
   applyNativeWorkerConfigEnv(config, env);
+  return env;
+}
+function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
+  const service = config.worker.service;
+  const env = finalizedWorkerEnvironment(config, { ...workerEnvPath ? { workerEnvPath } : {} });
   const authToken = workerAuthTokenFromConfig(config, {
     env,
     ...workerEnvPath ? { workerEnvPath } : {}

@@ -15,7 +15,9 @@ const SETS_BUSY_TIMEOUT = /^PRAGMA\s+busy_timeout\s*=/i;
 const SETS_JOURNAL_MODE = /^PRAGMA\s+journal_mode\s*=/i;
 const ASSIGNMENT_PRAGMA = /^PRAGMA\s+\w+\s*=/i;
 const COMMENT_LINE = /^\s*(\/\/|\/\*|\*)/;
-const OPENS_CONNECTION = /new Database\(/;
+// openStoreDatabase is the custody boundary around `new Database(`: a site that
+// opens through it is judged exactly like a raw open.
+const OPENS_CONNECTION = /(?:new Database\(|\bopenStoreDatabase\()/;
 const OPEN_SITE_SETUP_LINES = 12;
 
 /**

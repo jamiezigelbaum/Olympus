@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
@@ -316,7 +317,7 @@ export function readXBookmarksReconcileWatermark(
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error('X API usage store must be a regular non-symlink file.');
   }
-  const db = new Database(dbPath, { readonly: true, create: false, strict: true });
+  const db = openStoreDatabase(dbPath, { readonly: true, create: false, strict: true });
   try {
     db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;');
     assertSqliteSchemaCanOpen(
@@ -428,7 +429,7 @@ export class LocalXBookmarksApiUsageStore {
   constructor(dbPath = defaultXBookmarksApiUsageDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
-    this.db = new Database(dbPath, { create: true });
+    this.db = openStoreDatabase(dbPath, { create: true });
     if (dbPath !== ':memory:') chmodSync(dbPath, 0o600);
     this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, X_BOOKMARKS_API_USAGE_SCHEMA_VERSION);

@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
@@ -1340,7 +1341,7 @@ export interface ConnectorStoreQualificationFingerprint {
 export function connectorStoreQualificationFingerprint(
   dbPath: string,
 ): ConnectorStoreQualificationFingerprint {
-  const db = new Database(dbPath, { readonly: true, strict: true });
+  const db = openStoreDatabase(dbPath, { readonly: true, strict: true });
   try {
     // busy_timeout leads, matching the store's own read-only open below. This
     // digest reads a live store the sync loop may be checkpointing, so without
@@ -2575,7 +2576,7 @@ export class LocalConnectorStore {
     } else if (this.dbPath !== ':memory:') {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
-    this.db = new Database(this.dbPath, options.readOnly === true
+    this.db = openStoreDatabase(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
     this.openedFile = fileIdentity(this.dbPath);
@@ -9992,7 +9993,7 @@ export class LocalConnectorStore {
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const scanDb = this.dbPath === ':memory:'
       ? this.db
-      : new Database(this.dbPath, { readonly: true, create: false, strict: true });
+      : openStoreDatabase(this.dbPath, { readonly: true, create: false, strict: true });
     const ownsScanDb = scanDb !== this.db;
     const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
     let dimensionMismatches = 0;

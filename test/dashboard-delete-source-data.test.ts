@@ -5,12 +5,15 @@ import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { DASHBOARD_SUPPORTED_SOURCES } from '../src/workers/source-dashboard.ts';
+import { buildChatGptDashboardViewModel, scrubCard } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { applyPendingSourceDeletes, readSourceDeleteIntents } from '../src/pending-source-deletes.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 
 /** Delete indexed data: the engine route behind olympus_delete_source_data. */
 describe('dashboard Delete indexed data route', () => {
-  function fixture(options: { connected?: boolean; canRestart?: boolean; busy?: boolean } = {}) {
+  function fixture(options: { connected?: boolean; canRestart?: boolean; busy?: boolean; onRestart?: (registryPath: string) => unknown; envOverride?: (home: string) => Record<string, string> } = {}) {
     const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-delete-data-'));
     const homeDir = join(root, 'home');
     const registryPath = join(root, 'handles.json');
@@ -29,12 +32,21 @@ describe('dashboard Delete indexed data route', () => {
         }
       : { version: 1, handles: [] };
     writeConnectedHandleRegistry(registry, registryPath);
-    const context = { homeDir, env: {} };
+    const context = { homeDir, env: options.envOverride?.(homeDir) ?? {} };
     const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!.connectorStorePaths!(context)[0]!;
     mkdirSync(dirname(store), { recursive: true });
     writeFileSync(store, 'indexed');
     const restarts = { asked: 0, requested: 0 };
+    const restartSaw: unknown[] = [];
     const worker = createEmailSourceWorker({
+      sourceIndexStatus: {
+        async status() {
+          return {
+            kind: 'source_index_status', generated_at: '2026-10-23T00:00:00.000Z', corpora: [],
+            policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true },
+          } as never;
+        },
+      },
       ...(options.busy === true
         ? {
             sourceScheduler: {
@@ -54,12 +66,12 @@ describe('dashboard Delete indexed data route', () => {
           : {
               workerRestart: {
                 canRestart: () => { restarts.asked += 1; return true; },
-                request: () => { restarts.requested += 1; return true; },
+                request: () => { restarts.requested += 1; if (options.onRestart) restartSaw.push(options.onRestart(registryPath)); return true; },
               },
             }),
       },
     });
-    return { root, registryPath, store, restarts, worker };
+    return { root, homeDir, context, registryPath, store, restarts, restartSaw, worker };
   }
   const post = (worker: { fetch(request: Request): Promise<Response> }, body: Record<string, unknown>) =>
     worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', {
@@ -68,24 +80,6 @@ describe('dashboard Delete indexed data route', () => {
       body: JSON.stringify(body),
     }));
 
-  test('deletes a disconnected source\'s indexed data, then asks the worker to reopen its stores', async () => {
-    const f = fixture();
-    try {
-      const response = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({
-        ok: true,
-        source_id: 'dropbox.files',
-        worker_restarting: true,
-        policy: { indexed_data_deleted: true, source_files_untouched: true },
-      });
-      expect(existsSync(f.store)).toBe(false);
-      expect(f.restarts.requested).toBe(1);
-    } finally {
-      rmSync(f.root, { recursive: true, force: true });
-    }
-  });
-
   test('refuses while the source is still connected: custody is Disconnect first', async () => {
     const f = fixture({ connected: true });
     try {
@@ -93,6 +87,169 @@ describe('dashboard Delete indexed data route', () => {
       expect(response.status).toBe(409);
       await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_source_connected' } });
       expect(existsSync(f.store)).toBe(true);
+      expect(f.restarts.requested).toBe(0);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('records the delete durably, then asks for the restart, and deletes nothing itself', async () => {
+    const f = fixture();
+    try {
+      const order: string[] = [];
+      const response = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      void order;
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: true, source_id: 'dropbox.files', state: 'deleting', worker_restarting: true,
+        policy: { indexed_data_deleted: false, deletion_applies_on_restart: true, source_files_untouched: true },
+      });
+      // Nothing is unlinked under the running engine; the intent is on disk.
+      expect(existsSync(f.store)).toBe(true);
+      const { intents } = readSourceDeleteIntents(f.registryPath);
+      expect(intents).toHaveLength(1);
+      expect(intents[0]).toMatchObject({ source_id: 'dropbox.files', state: 'pending' });
+      expect(intents[0]!.targets).toContain(f.store);
+      expect(f.restarts.requested).toBe(1);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('the intent is already durable when the restart is requested', async () => {
+    const f = fixture({ onRestart: (registryPath) => readSourceDeleteIntents(registryPath).intents.length });
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      expect(f.restartSaw).toEqual([1]);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('the restart applies the intent: stores gone, intent removed, nothing else touched', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      const applied = await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      expect(applied).toEqual({ applied: ['dropbox.files'], incomplete: [], refused: [] });
+      expect(existsSync(f.store)).toBe(false);
+      expect(readSourceDeleteIntents(f.registryPath).intents).toEqual([]);
+      // Idempotent: a second start has nothing to do.
+      expect(await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context })).toEqual({ applied: [], incomplete: [], refused: [] });
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('the dashboard shows Deleting until the restarted engine has applied it', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      const label = async () => {
+        const view = await (await f.worker.fetch(new Request('http://worker.test/dashboard.json'))).json() as { sources: Array<{ source_id: string; connection: { label: string } }> };
+        return view.sources.find((source) => source.source_id === 'dropbox.files')?.connection.label;
+      };
+      expect(await label()).toBe('Deleting indexed data…');
+      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      expect(await label()).not.toBe('Deleting indexed data…');
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a delete refused because the source was reconnected keeps the real connection state, with the refusal shown separately', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      // The owner reconnects before the restart applies the delete.
+      writeConnectedHandleRegistry({
+        version: 1,
+        handles: [{
+          handle: 'dropbox.personal', provider: 'dropbox', accountRole: 'personal', trustDomain: 'secure_local',
+          allowedCapabilities: ['dropbox.files.sync'], scopes: ['files.content.read'], connectedAt: '2026-10-23T00:00:00.000Z',
+        }],
+      }, f.registryPath);
+      const applied = await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      expect(applied.applied).toEqual([]);
+      const view = await (await f.worker.fetch(new Request('http://worker.test/dashboard.json'))).json() as {
+        sources: Array<{ source_id: string; connection: { state: string; label: string }; delete_state?: { state: string; reason?: string } }>;
+      };
+      const card = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+      expect(card.connection.state).not.toBe('not_connected');
+      expect(card.connection.label).not.toBe('Deleting indexed data…');
+      expect(card.delete_state?.state).toBe('refused');
+      expect(existsSync(f.store)).toBe(true);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a delete that began and did not finish reads Needs you with a plain reason, and still offers Delete again', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      const view = await (await f.worker.fetch(new Request('http://worker.test/dashboard.json'))).json() as {
+        sources: Array<{ source_id: string; coverage: { indexed_items: number }; delete_state?: unknown }>;
+      };
+      const card = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+      card.delete_state = { state: 'unfinished', reason: 'failed' };
+      // Everything may already be gone: the retry must not depend on items left.
+      card.coverage.indexed_items = 0;
+      const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === 'dropbox.files')!;
+      expect(scrubCard(definition, card as never).delete_state).toEqual({ state: 'unfinished', reason: 'failed' });
+      expect(scrubCard(definition, { ...card, delete_state: { state: 'unfinished', reason: '/home/me/secret' } } as never).delete_state).toEqual({ state: 'unfinished' });
+      const model = buildChatGptDashboardViewModel(view as never);
+      const row = model.sources.find((source) => source.id === 'dropbox.files')!;
+      expect(row.status).toBe('Needs you');
+      expect(row.detail).toContain("Delete didn't finish");
+      expect(row.menu?.some((item) => item.tool === 'olympus_delete_source_data')).toBe(true);
+      expect(JSON.stringify(row)).not.toContain(f.root);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  test('both delete states survive the ChatGPT sanitization as explicit fields with a closed reason', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      const card = async () => {
+        const view = await (await f.worker.fetch(new Request('http://worker.test/dashboard.json'))).json() as { sources: Array<{ source_id: string }> };
+        return view.sources.find((source) => source.source_id === 'dropbox.files')!;
+      };
+      const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === 'dropbox.files')!;
+      const pending = scrubCard(definition, await card() as never);
+      expect(pending.delete_state).toEqual({ state: 'pending' });
+      expect(pending.connection.label).toBe('Deleting indexed data…');
+      // The re-check refuses (holders still running): the explanation and the retry survive.
+      const holder = Bun.spawn([process.execPath, join(import.meta.dir, 'support', 'custody-holder.ts'), 'lib', f.store], { stdout: 'pipe', env: { PATH: process.env.PATH!, HOME: f.context.homeDir } });
+      await holder.stdout.getReader().read();
+      try {
+        await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      } finally {
+        holder.kill('SIGKILL');
+        await holder.exited;
+      }
+      const refused = scrubCard(definition, await card() as never);
+      expect(refused.delete_state).toEqual({ state: 'refused', reason: 'holders_running' });
+      expect(refused.connection.label).toContain("Delete didn't run");
+      // A reason outside the closed set is dropped, never passed through.
+      expect(scrubCard(definition, { ...(await card()), delete_state: { state: 'refused', reason: '/home/me/secret' } } as never).delete_state).toEqual({ state: 'refused' });
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  test('a config.json relocated onto a store path is refused when asking, with nothing recorded', async () => {
+    const f = fixture({ envOverride: (home) => ({ OLYMPUS_EMAIL_INDEX_DB_PATH: join(home, '.olympus', 'config.json') })});
+    try {
+      mkdirSync(join(f.homeDir, '.olympus'), { recursive: true });
+      writeFileSync(join(f.homeDir, '.olympus', 'config.json'), '{"keep":true}');
+      const response = await post(f.worker, { source_id: 'gmail.email', acknowledge: true });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_refused' } });
+      expect(existsSync(join(f.homeDir, '.olympus', 'config.json'))).toBe(true);
+      expect(readSourceDeleteIntents(f.registryPath).intents).toEqual([]);
       expect(f.restarts.requested).toBe(0);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
@@ -142,8 +299,8 @@ describe('dashboard Delete indexed data route', () => {
     const f = fixture({ canRestart: false });
     try {
       const response = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
-      expect(response.status).toBe(501);
-      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_reopen_unavailable' } });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_reopen_unavailable', message: expect.stringContaining('olympus data delete') } });
       expect(existsSync(f.store)).toBe(true);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
@@ -225,7 +382,7 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
         },
       },
     });
-    return { root, files, restarts, stops, worker };
+    return { root, files, restarts, stops, worker, registryPath, context };
   }
   const post = (worker: { fetch(request: Request): Promise<Response> }, body: Record<string, unknown>) =>
     worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', {
@@ -238,13 +395,14 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     const f = fixture();
     try {
       const response = await post(f.worker, { source_id: 'telegram.messages', acknowledge: true });
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(202);
+      expect(existsSync(f.files.tgStore)).toBe(true);
+      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
       expect(existsSync(f.files.tgStore)).toBe(false);
       // Olympus's raw copy of the messages goes with the index.
       expect(existsSync(f.files.tgSpool)).toBe(false);
       // WhatsApp is a different source: untouched.
       expect(existsSync(f.files.waStore)).toBe(true);
-      expect(f.stops).toEqual(['telegram']);
       expect(f.restarts.requested).toBe(1);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
@@ -255,13 +413,13 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     const f = fixture();
     try {
       const response = await post(f.worker, { source_id: 'whatsapp.personal.messages', acknowledge: true });
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(202);
+      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
       expect(existsSync(f.files.waStore)).toBe(false);
       expect(existsSync(f.files.waSpool)).toBe(false);
       expect(existsSync(f.files.waMedia)).toBe(false);
       expect(existsSync(f.files.tgStore)).toBe(true);
       expect(existsSync(f.files.tgSpool)).toBe(true);
-      expect(f.stops).toEqual(['whatsapp']);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
@@ -272,7 +430,6 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     ['the unpair is incomplete', { unpaired: 'incomplete' as const }, 'delete_unavailable'],
     ['the unpair record is unreadable', { unpaired: 'unreadable' as const }, 'delete_unavailable'],
     ['the session file is still on disk', { sessionOnDisk: true }, 'delete_source_paired'],
-    ['capture has not confirmed it stopped', { stopThrows: true }, 'delete_unavailable'],
   ] as const)('refuses and deletes nothing when %s', async (_name, options, code) => {
     const f = fixture(options as never);
     try {

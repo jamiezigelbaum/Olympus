@@ -11,9 +11,9 @@ import { isSecureSensitivity, type SourceTrustDomain } from '../../core/source-i
 import type { SecretLocationNote } from '../../core/evidence-pack.ts';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { FileLeaseBusyError } from '../../core/file-lease.ts';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
 import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
@@ -270,8 +270,9 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
-import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../../core/this-computer.ts';
-import { dataDeleteCustody, deleteOlympusDataWithCustody, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles, thisComputerStateUnreadable } from '../../core/this-computer.ts';
+import { dataDeleteCustody, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { discardSourceDeleteIntent, recordSourceDeleteIntent, sourceDeleteCustodyInput, sourceDeleteStates } from '../../pending-source-deletes.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -1479,6 +1480,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
               connectedHandleRegistry: registry,
               ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
+              ...(thisComputerStateUnreadableSafe(sourceDashboard.registryPath) ? { thisComputerStateUnreadable: true } : {}),
+              sourceDeleteStates: sourceDeleteStates(sourceDashboard.registryPath ?? defaultHandleRegistryPath(), sourceDashboard.dataLifecyclePathContext?.homeDir),
               ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
               unpairedSources: dashboardUnpairedSourceStates(
                 dashboardUnpairedSources,
@@ -2410,16 +2413,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
-        // Delete indexed data: removes what Olympus indexed from a source that
-        // is already disconnected (owner request, 2026-10-23). The custody rule is
-        // the CLI's (`olympus data delete --source`): Disconnect first, which
-        // takes the source out of the scheduler before any store byte goes.
-        // Like Disconnect it refuses while a read for the source runs and runs
-        // under the grant lock, so a concurrent Connect cannot interleave. The
-        // worker holds the source's SQLite files open, so after the delete it
-        // is restarted to reopen them; with no supervisor to do that the route
-        // refuses BEFORE deleting rather than leave stale handles serving
-        // deleted rows.
+        // Delete indexed data (owner request, 2026-10-23), applied on restart.
+        // The running engine holds a source's stores open in many places (this
+        // worker, its scheduler, sniffer and watches, the embedding drain
+        // child), so nothing running unlinks them. This route checks the
+        // custody rule the CLI uses (Disconnect first; a paired-session source
+        // needs a clean Unpair; no read running), validates and durably records
+        // the exact delete as an intent, and asks for the supervised restart.
+        // The restarted engine applies the intent before it opens anything
+        // (pending-source-deletes.ts). With no supervisor to restart it the
+        // route refuses BEFORE recording anything.
         if (request.method === 'POST' && url.pathname === '/dashboard/delete-source-data') {
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
@@ -2443,9 +2446,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const restart = sourceDashboard.workerRestart;
           if (!restart || !restart.canRestart()) {
             throw new EmailSourceWorkerError(
-              501,
+              409,
               'delete_reopen_unavailable',
-              'Olympus cannot restart its worker to reopen its stores here, so it will not delete indexed data while it is running. Nothing was deleted.',
+              'Olympus can only delete indexed data while it restarts the whole app, and this install cannot do that from here, because its embedding step runs separately and would keep the data open. Nothing was deleted. Quit Olympus (the OpenClaw gateway or the worker and its embedding step), then run "olympus data delete --source <source>" in a terminal.',
             );
           }
           const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
@@ -2461,14 +2464,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 'This source is finishing a read. Retry deleting its indexed data after the current read completes.',
               );
             }
-            const custodyInput = {
-              sourceId,
-              connectedRegistry: readConnectedHandleRegistry(registryPath),
-              thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
-              // A paired-session source (Telegram, WhatsApp) is disconnected
-              // only after a clean Unpair, which the durable record carries.
-              unpairedSources: readReconciledUnpairedSources(registryPath),
-            };
+            const custodyInput = sourceDeleteCustodyInput(sourceId, registryPath);
             const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
             if (!custody.ready) {
               throw custody.observed === 'paired'
@@ -2479,48 +2475,43 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   ? new EmailSourceWorkerError(409, 'delete_unavailable', 'Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.')
                   : new EmailSourceWorkerError(409, 'delete_unavailable', 'Olympus cannot confirm this source is disconnected, so it did not delete anything.');
             }
-            // A paired-session source's capture runs as a child of this worker.
-            // Unpair stopped it; confirm that again now rather than assume it,
-            // because a spool still being written while its store is deleted
-            // would bring the deleted messages straight back.
-            const captureKind = sourceId === 'telegram.messages' ? 'telegram' as const
-              : sourceId === 'whatsapp.personal.messages' ? 'whatsapp' as const
-              : undefined;
-            if (captureKind && sourceDashboard.stopMessagingCapture) {
-              try { await sourceDashboard.stopMessagingCapture(captureKind); }
-              catch {
-                throw new EmailSourceWorkerError(409, 'delete_unavailable', 'Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.');
-              }
-            }
-            let removedCount = 0;
-            let failed = false;
+            // Validate now (protection, containment, every target) and record
+            // the exact delete durably before asking for the restart. A
+            // refusal records nothing.
+            let intent;
             try {
-              removedCount = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext }).removed.length;
-            } catch {
-              failed = true;
-            }
-            // Whatever the delete did, some stores may already be gone: the
-            // worker reopens them either way.
-            const restarting = restart.request();
-            if (failed) {
+              intent = recordSourceDeleteIntent({ sourceId, registryPath, context: pathContext });
+            } catch (error) {
               throw new EmailSourceWorkerError(
-                500,
-                'delete_failed',
-                'Olympus could not finish deleting this source\'s indexed data. Retry; the worker is restarting to reopen its stores.',
+                409,
+                'delete_refused',
+                error instanceof OperationError
+                  ? 'Olympus will not delete this source\'s indexed data: one of the places it would remove is protected. Nothing was deleted. Check the data-location settings.'
+                  : 'Olympus could not record this delete, so it did not delete anything.',
+              );
+            }
+            const restarting = restart.request();
+            if (!restarting) {
+              discardSourceDeleteIntent(registryPath, intent.id);
+              throw new EmailSourceWorkerError(
+                409,
+                'delete_reopen_unavailable',
+                'Olympus cannot restart to apply the delete right now. Nothing was deleted.',
               );
             }
             return json({
               ok: true,
               source_id: sourceId,
-              removed_count: removedCount,
-              worker_restarting: restarting,
+              state: 'deleting',
+              worker_restarting: true,
               policy: {
-                indexed_data_deleted: true,
+                indexed_data_deleted: false,
+                deletion_applies_on_restart: true,
                 source_files_untouched: true,
                 provider_grant_revoked: false,
                 raw_runtime_secrets_exposed: false,
               },
-            });
+            }, 202);
           });
           });
         }
@@ -6454,6 +6445,10 @@ function withThisComputerHandles(
     return registry;
   }
   return synthetic.length === 0 ? registry : { ...registry, handles: [...registry.handles, ...synthetic] };
+}
+
+function thisComputerStateUnreadableSafe(registryPath: string | undefined): boolean {
+  try { return thisComputerStateUnreadable(registryPath ?? defaultHandleRegistryPath()); } catch { return true; }
 }
 
 function readDashboardRegistry(registryPath: string | undefined): ConnectedHandleRegistry {

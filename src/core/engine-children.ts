@@ -318,7 +318,7 @@ function normalizeStart(value: string): string {
  */
 const PS_ENV = { ...process.env, LC_ALL: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8', TZ: 'UTC' };
 
-function listProcessTable(): ProcessTableEntry[] | undefined {
+export function listProcessTable(): ProcessTableEntry[] | undefined {
   const result = spawnSync('ps', ['-axww', '-o', 'pid=,pgid=,lstart=,command='], {
     encoding: 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024, env: PS_ENV,
   });

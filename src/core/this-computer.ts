@@ -87,6 +87,24 @@ function readStateForHost(path: string, hostIdentity: HostIdentity): PersistedTh
   return state;
 }
 
+/**
+ * True when the record exists but cannot be used on this host: malformed, an
+ * unsupported shape, or bound to another host. `readThisComputerHandles`
+ * answers "nothing connected" for those, which is also its answer for a
+ * source the owner disconnected; a caller that must tell the two apart (the
+ * dashboard, which would otherwise call a broken file an intentional
+ * disconnect) asks here. An absent file is not unreadable: nothing was ever
+ * connected.
+ */
+export function thisComputerStateUnreadable(
+  handleRegistryPath: string,
+  hostIdentity: HostIdentity = systemHostIdentity,
+): boolean {
+  const path = defaultThisComputerStatePath(handleRegistryPath);
+  if (!existsSync(path)) return false;
+  return readStateForHost(path, hostIdentity) === undefined;
+}
+
 export function defaultThisComputerStatePath(handleRegistryPath: string): string {
   return join(dirname(handleRegistryPath), 'this-computer.json');
 }

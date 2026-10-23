@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 /**
  * The generic extraction job side database.
  *
@@ -616,8 +617,8 @@ export class LocalFileExtractionJobStore {
       mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     }
     this.db = this.readonly
-      ? new Database(dbPath, { readonly: true })
-      : new Database(dbPath, { create: true });
+      ? openStoreDatabase(dbPath, { readonly: true })
+      : openStoreDatabase(dbPath, { create: true });
     if (!inMemory && !this.readonly) chmodSync(dbPath, 0o600);
 
     const busyTimeoutMs = options.busyTimeoutMs
@@ -655,6 +656,25 @@ export class LocalFileExtractionJobStore {
       DELETE FROM extraction_jobs
       WHERE corpus_id = ? AND status IN ('queued', 'leased')
     `).run(id).changes;
+  }
+
+  /**
+   * Remove every job and derived artifact row of the given corpora, settled
+   * or not. A deleted source's rows name its files and keep derivation
+   * metadata, so they go with the source rather than lingering in the shared
+   * queue. Returns the job rows removed.
+   */
+  deleteForCorpora(corpusIds: readonly string[]): number {
+    this.assertWritable('source deletion');
+    let removed = 0;
+    this.db.transaction(() => {
+      for (const corpusId of new Set(corpusIds)) {
+        const id = requireBoundedString(corpusId, 'corpusId');
+        this.db.query('DELETE FROM extraction_artifacts WHERE corpus_id = ?').run(id);
+        removed += this.db.query('DELETE FROM extraction_jobs WHERE corpus_id = ?').run(id).changes;
+      }
+    })();
+    return removed;
   }
 
   /**

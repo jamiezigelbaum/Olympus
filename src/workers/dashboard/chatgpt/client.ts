@@ -2434,7 +2434,8 @@ export function chatgptDashboardClient(
       const row = sources.filter((source: Any) => source && source.id === id)[0];
       const offered = !!row && Array.isArray(row.menu)
         && row.menu.some((fix: Any) => fix && fix.tool === config.deleteDataTool);
-      if (!offered || Date.now() >= (state.deleting[id] ?? 0)) delete state.deleting[id];
+      const deleting = !!row && row.deleting === true;
+      if ((!offered && !deleting) || Date.now() >= (state.deleting[id] ?? 0)) delete state.deleting[id];
     }
   }
 

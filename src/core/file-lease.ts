@@ -187,7 +187,7 @@ class AsyncFileLeaseOwner implements FileLease {
   }
 }
 
-interface KernelLock {
+export interface KernelLock {
   release(): void;
 }
 
@@ -224,6 +224,29 @@ function acquireFileLeaseSync(
 interface SqliteConnection {
   exec(sql: string): unknown;
   close(): void;
+  /** bun:sqlite */
+  query?(sql: string): { get(): unknown };
+  /** node:sqlite */
+  prepare?(sql: string): { get(): unknown };
+}
+
+function pragmaText(connection: SqliteConnection, sql: string): string {
+  const statement = connection.query ? connection.query(sql) : connection.prepare!(sql);
+  const row = statement.get() as Record<string, unknown> | undefined;
+  return String(row ? Object.values(row)[0] : '').toLowerCase();
+}
+
+/**
+ * Exclusive and shared locks only exclude each other in rollback-journal mode:
+ * in WAL an exclusive transaction coexists with readers. Establish it before
+ * either lock is granted; if it cannot be established, fail closed.
+ */
+function requireRollbackJournal(connection: SqliteConnection, lockPath: string): void {
+  if (pragmaText(connection, 'PRAGMA journal_mode') === 'delete') return;
+  try { connection.exec('PRAGMA busy_timeout = 0; PRAGMA journal_mode = DELETE'); } catch { /* verified below */ }
+  if (pragmaText(connection, 'PRAGMA journal_mode') !== 'delete') {
+    throw new Error(`Lock database ${lockPath} is not in rollback-journal mode and could not be switched.`);
+  }
 }
 
 function openSqlite(path: string): SqliteConnection {
@@ -248,6 +271,16 @@ function openSqlite(path: string): SqliteConnection {
  * is created only if absent and is otherwise opened solely by SQLite.
  */
 function tryKernelLock(lockPath: string): KernelLock | undefined {
+  return tryKernelLockAt(lockPath, 'exclusive');
+}
+
+/**
+ * The same kernel lock in two strengths. `exclusive` is the lease above.
+ * `shared` is an open read transaction on the same kind of file: any number of
+ * holders coexist, none can coexist with an exclusive one, and the kernel drops
+ * it when the holder dies. Used for store custody (core/store-custody.ts).
+ */
+export function tryKernelLockAt(lockPath: string, mode: 'exclusive' | 'shared'): KernelLock | undefined {
   if (!existsSync(lockPath)) {
     try {
       closeSync(openSync(lockPath, 'wx', 0o600));
@@ -257,7 +290,20 @@ function tryKernelLock(lockPath: string): KernelLock | undefined {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec('BEGIN EXCLUSIVE');
+    requireRollbackJournal(connection, lockPath);
+  } catch (error) {
+    closeQuietly(connection);
+    if (isSqliteBusy(error)) return undefined;
+    throw error;
+  }
+  try {
+    if (mode === 'exclusive') {
+      connection.exec('BEGIN EXCLUSIVE');
+    } else {
+      connection.exec('BEGIN');
+      // The first read takes the SHARED lock and the open transaction keeps it.
+      connection.exec('SELECT 1 FROM sqlite_master LIMIT 1');
+    }
   } catch (error) {
     closeQuietly(connection);
     if (isSqliteBusy(error)) return undefined;
@@ -624,7 +670,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function sleepSync(ms: number): void {
+export function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 

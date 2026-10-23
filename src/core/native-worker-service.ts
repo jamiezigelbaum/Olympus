@@ -235,18 +235,34 @@ function assertNativeWorkerScopeConfigSupported(pluginConfig: unknown): void {
   }
 }
 
+/**
+ * The worker's complete environment, finalized the way its launcher does it:
+ * the process environment, worker.env, the service credentials from the
+ * configuration, the configured auth token, and the configuration's own
+ * environment. Delete indexed data resolves every path (registry, stores)
+ * through this, so a setting that lives in any layer is seen by the host that
+ * applies the delete exactly as the worker that recorded it saw it.
+ */
+export function finalizedWorkerEnvironment(
+  config: OlympusConfig,
+  options: { baseEnv?: NodeJS.ProcessEnv; workerEnvPath?: string } = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...(options.baseEnv ?? process.env) };
+  applyWorkerSetupEnv({ env, ...(options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}) });
+  stripGatewayBootstrapSecrets(env);
+  for (const [name, value] of Object.entries(config.worker.service.credentials)) env[name] = value;
+  if (config.worker.authToken) env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
+  applyNativeWorkerConfigEnv(config, env);
+  return env;
+}
+
 function workerLaunchSettings(
   config: OlympusConfig,
   moduleUrl: string,
   workerEnvPath?: string,
 ): Omit<WorkerLaunchSettings, 'command' | 'args' | 'endpointOccupied' | 'readinessProbe' | 'startupTimeoutMs'> {
   const service = config.worker.service;
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  applyWorkerSetupEnv({ env, ...(workerEnvPath ? { workerEnvPath } : {}) });
-  stripGatewayBootstrapSecrets(env);
-  for (const [name, value] of Object.entries(service.credentials)) env[name] = value;
-  if (config.worker.authToken) env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
-  applyNativeWorkerConfigEnv(config, env);
+  const env = finalizedWorkerEnvironment(config, { ...(workerEnvPath ? { workerEnvPath } : {}) });
   const authToken = workerAuthTokenFromConfig(config, {
     env,
     ...(workerEnvPath ? { workerEnvPath } : {}),

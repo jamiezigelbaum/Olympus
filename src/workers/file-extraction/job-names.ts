@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 /**
  * Where the extraction job ledger lives, and the one thing done to it for an
  * item that becomes Secrets: the name captured at enqueue is cleared from
@@ -132,7 +133,7 @@ export function clearExtractionJobNames(
   } = {},
 ): { cleared: number; durable: boolean } {
   if (dbPath === ':memory:' || !existsSync(dbPath)) return { cleared: 0, durable: true };
-  const db = new Database(dbPath, { readwrite: true, create: false });
+  const db = openStoreDatabase(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
@@ -204,7 +205,7 @@ export function retireExtractionJobRedaction(
   stillSecret: () => boolean,
 ): { retired: number; stillSecret: boolean } {
   if (dbPath === ':memory:' || !existsSync(dbPath)) return { retired: 0, stillSecret: false };
-  const db = new Database(dbPath, { readwrite: true, create: false });
+  const db = openStoreDatabase(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!redactionsTableExists(db)) return { retired: 0, stillSecret: false };

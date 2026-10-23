@@ -1128,7 +1128,7 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
     expect(host.toolCalls()).toEqual([{ name: 'olympus_delete_source_data', arguments: { source_id: 'dropbox.files' } }]);
 
     // Done: the row is read again and a brief line says so.
-    host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+    host.respond('tools/call', { structuredContent: { status: 'deleting', source_id: 'dropbox.files', restarting: true } });
     await sleep(0);
     expect(host.toolCalls().at(-1)).toEqual({ name: 'olympus_dashboard', arguments: {} });
     expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataDone);
@@ -1148,7 +1148,7 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
       host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
       host.button('Delete indexed data').click();
       host.button('Yes, delete indexed data').click();
-      host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+      host.respond('tools/call', { structuredContent: { status: 'deleting', source_id: 'dropbox.files', restarting: true } });
       await flush();
       expect(dashboardCalls(host)).toBe(1);
       host.respond('tools/call', undefined, { code: -32000, message: 'worker restarting' });
@@ -1170,7 +1170,7 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
       host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
       host.button('Delete indexed data').click();
       host.button('Yes, delete indexed data').click();
-      host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+      host.respond('tools/call', { structuredContent: { status: 'deleting', source_id: 'dropbox.files', restarting: true } });
       await flush();
       expect(dashboardCalls(host)).toBe(1);
       // The old process answers: still 4 items, still offering Delete.

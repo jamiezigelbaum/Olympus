@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
 // `runSnifferPass` over every connector store, continuously while work remains.
@@ -317,7 +318,7 @@ export class TierSnifferService {
     for (const ledgerPath of this.ledgerPaths()) {
       let db: Database | undefined;
       try {
-        db = new Database(ledgerPath, { readonly: true, create: false });
+        db = openStoreDatabase(ledgerPath, { readonly: true, create: false });
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
         const path = tierSnifferPathForLedger(ledgerPath);
         const hasQueue = existsSync(path);

@@ -1,3 +1,5 @@
+import { effectiveWorkerEnvironment } from './core/worker-effective-env.ts';
+import { holdStoreCustodyShared, tryHoldStoreCustodyExclusive } from './core/store-custody.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
@@ -24,6 +26,7 @@ import { allOpenTargets, openTargetFromPath, openTargetPath, parseOlympusOpenUrl
 import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
   deleteAllConfirmationPrompts,
+  assertNoRunningWorkerForSourceDelete,
   deleteOlympusDataWithCustody,
   exportOlympusData,
   validateDeleteAllConfirmations,
@@ -129,7 +132,7 @@ import {
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
-import { readThisComputerHandles } from './core/this-computer.ts';
+import { readThisComputerHandles, thisComputerStateUnreadable } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
 import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
@@ -2616,9 +2619,16 @@ async function runDataCommand(args: string[]): Promise<unknown> {
   const command = args[0];
   if (command === 'export') {
     const options = parseDataOptions(args.slice(1));
+    // One context for custody, the files exported and (below) the files
+    // deleted: the worker's effective environment, so a store relocated through
+    // worker.env or the service credentials is the store that is exported.
+    const context = { env: effectiveWorkerEnvironment({ env: process.env }) };
+    // Reading the stores is an opener: shared custody until this command ends.
+    holdStoreCustodyShared();
     return exportOlympusData({
       destination: options.output,
       ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+      ...context,
     });
   }
   if (command === 'verify') {
@@ -2636,29 +2646,66 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     // requirement, which is unsatisfiable unless the observed state is passed
     // in — the delete was refused at every worker state without it.
     const { workerState, engineLoaded } = observedWorkerServiceState();
+    // The worker's effective environment, worker.env included: the registry
+    // and every store path resolve the way the worker resolves them.
+    const effectiveEnv = effectiveWorkerEnvironment({ env: process.env });
+    const context = { env: effectiveEnv };
+    // Nothing else may hold a store. Every opener (the worker in any mode, the
+    // embedding drain, connector-store:embed) keeps shared kernel custody of
+    // its store directories for its whole life, so exclusive custody here
+    // proves, without looking for processes, that none holds them, and it
+    // stays held through the delete: an opener that starts meanwhile waits.
+    const holdStores = (_target: { sourceId?: string; all?: boolean }) => {
+      if (options.dryRun === true) return undefined;
+      const hold = tryHoldStoreCustodyExclusive();
+      if (!hold) {
+        throw new OperationError(
+          'invalid_params',
+          'Olympus is still using these stores (a worker, the OpenClaw gateway, the embedding step or another command), so nothing was deleted.',
+          'Quit Olympus (the engine, the OpenClaw gateway, any worker and its embedding step), then retry.',
+        );
+      }
+      return hold;
+    };
     if (options.sourceId) {
       const sourceId = options.sourceId;
-      const registryPath = handleRegistryPathFromEnv(process.env, true)!;
-      return withConnectedHandleGrantCustody(registryPath, {}, async () =>
-        deleteOlympusDataWithCustody({
+      assertNoRunningWorkerForSourceDelete({ sourceId, dryRun: options.dryRun === true, engineLoaded, workerState });
+      const registryPath = handleRegistryPathFromEnv(effectiveEnv, true)!;
+      // Grant custody is held from the last check through the delete.
+      return withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        const hold = holdStores({ sourceId });
+        try {
+          return deleteOlympusDataWithCustody({
           sourceId,
           dryRun: options.dryRun,
           connectedRegistry: readConnectedHandleRegistry(registryPath),
           thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
+          thisComputerStateUnreadable: thisComputerStateUnreadable(registryPath),
           // A paired-session source is "disconnected" only after a clean Unpair.
           unpairedSources: readReconciledUnpairedSources(registryPath),
+          registryPath,
           workerState,
           engineLoaded,
-        })
-      );
+          ...context,
+          });
+        } finally {
+          hold?.release();
+        }
+      });
     }
-    return deleteOlympusDataWithCustody({
-      all: options.all,
-      dryRun: options.dryRun,
-      workerState,
-      engineLoaded,
-      relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
-    });
+    const hold = holdStores({ all: true });
+    try {
+      return deleteOlympusDataWithCustody({
+        all: options.all,
+        dryRun: options.dryRun,
+        workerState,
+        engineLoaded,
+        relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
+        ...context,
+      });
+    } finally {
+      hold?.release();
+    }
   }
   if (command === '--help' || command === '-h') {
     console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');

@@ -7,7 +7,11 @@ const ROOT = join(import.meta.dir, '..');
 describe('verification contract', () => {
   test('focused, explicit local checks remain available without running in pre-push', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-    expect(pkg.scripts['test:focus']).toBe('bun test');
+    // HOME is a throwaway directory BEFORE Bun starts: Bun reads it once at process
+    // start and every descendant inherits it, so no test, however deep its process
+    // tree, resolves the account's real home (test/support/isolated-home.ts refuses
+    // to run otherwise). Still one explicit, ungated `bun test`.
+    expect(pkg.scripts['test:focus']).toBe('HOME="$(mktemp -d)" bun test');
     expect(pkg.scripts['contracts:check']).toBe('bun scripts/contract-version.ts');
     expect(pkg.scripts['credentials:check']).toBe('bun scripts/credential-pattern-check.ts');
     expect(pkg.scripts['risk:check']).toBe('bun scripts/change-risk.ts');
@@ -84,10 +88,10 @@ describe('verification contract', () => {
     );
     expect(exchangeSection).toContain('name: exchange tests');
     expect(exchangeSection).toContain('run: bun run test:exchange');
-    expect(pkg.scripts['test:connect-relay']).toBe('bun test --parallel --timeout=15000 ./connect-relay/test');
+    expect(pkg.scripts['test:connect-relay']).toBe('HOME="$(mktemp -d)" bun test --parallel --timeout=15000 ./connect-relay/test');
     expect(existsSync(join(ROOT, 'connect-relay/test/relay-e2e.test.ts'))).toBe(true);
     // Directory discovery includes new exchange tests, including nested tests.
-    expect(pkg.scripts['test:exchange']).toBe('bun test ./exchange/test');
+    expect(pkg.scripts['test:exchange']).toBe('HOME="$(mktemp -d)" bun test ./exchange/test');
     expect(existsSync(join(ROOT, 'exchange/test/google-exchange.test.ts'))).toBe(true);
   });
 });

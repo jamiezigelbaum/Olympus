@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
+import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { deleteOlympusData, exportOlympusData, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
 
 const SPOOL_LINE = JSON.stringify({
@@ -340,5 +341,224 @@ describe('recursive raw-state deletes stay inside Olympus\'s own, unshared direc
       expect(() => l.del({}, 'whatsapp.personal.messages')).toThrow('symbolic link');
       expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
     } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test('a gateway-state override that holds the handle registry is refused, files intact', () => {
+    const l = lab();
+    try {
+      const gw = join(l.olympusRoot, 'gw-override');
+      mkdirSync(gw, { recursive: true });
+      writeFileSync(join(gw, 'cursor.json'), '{}');
+      const registry = join(gw, 'handles.json');
+      writeFileSync(registry, '{"handles":[]}');
+      writeFileSync(`${registry}.grant-epoch.json`, '{}');
+      writeFileSync(join(gw, 'this-computer.json'), '{}');
+      // Through the engine's context value and through the env override.
+      expect(() => deleteOlympusData({
+        sourceId: 'telegram.messages', homeDir: l.homeDir, registryPath: registry,
+        env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw },
+      } as never)).toThrow('overlaps another source');
+      expect(() => l.del({ OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registry }))
+        .toThrow('overlaps another source');
+      for (const path of [registry, `${registry}.grant-epoch.json`, join(gw, 'this-computer.json'), join(gw, 'cursor.json')]) {
+        expect(`${path}:${existsSync(path)}`).toBe(`${path}:true`);
+      }
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('shared files and stores stay out of a recursive delete, whichever variable relocates them', () => {
+  // Every shared-store or config location a deployment can relocate. The
+  // protection is by variable NAME pattern, so a new one is covered; this
+  // table pins the known ones and the sweep test below catches a new name.
+  const SHARED_ENV = [
+    'OLYMPUS_CONFIG',
+    'OLYMPUS_SOVEREIGNTY_CONFIG',
+    'OLYMPUS_SOVEREIGNTY_CONFIG_PATH',
+    'OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH',
+    'OLYMPUS_REMOTE_CONNECTIONS_DB_PATH',
+    'OLYMPUS_CREDENTIAL_BROKER_STATE_PATH',
+    'OLYMPUS_CREDENTIAL_SESSION_BACKEND_STATE_PATH',
+    'OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH',
+    'OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH',
+    'OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH',
+  ];
+  for (const name of SHARED_ENV) {
+    test(`${name} inside a state-directory override is refused, file and sidecars intact`, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-shared-'));
+      const homeDir = join(dir, 'home');
+      const gw = join(homeDir, '.local', 'share', 'olympus', 'gw');
+      mkdirSync(gw, { recursive: true });
+      const shared = join(gw, name.endsWith('_DB_PATH') ? 'shared.sqlite' : 'shared.json');
+      writeFileSync(shared, 'x');
+      writeFileSync(`${shared}-wal`, 'x');
+      try {
+        expect(() => deleteOlympusData({
+          sourceId: 'telegram.messages', homeDir,
+          env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, [name]: shared },
+        } as never)).toThrow('overlaps another source');
+        expect(existsSync(shared)).toBe(true);
+        expect(existsSync(`${shared}-wal`)).toBe(true);
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+
+  test('a state-directory override that IS an authoritative file is refused, never selected for removal', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-shared-file-'));
+    const homeDir = join(dir, 'home');
+    const config = join(homeDir, '.olympus', 'config.json');
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, '{"keep":true}');
+    try {
+      expect(() => deleteOlympusData({ sourceId: 'telegram.messages', homeDir, env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: config } } as never))
+        .toThrow('overlaps another source');
+      expect(readFileSync(config, 'utf8')).toBe('{"keep":true}');
+      // Also through the variable that relocates the config itself.
+      const moved = join(homeDir, 'elsewhere', 'owner.json');
+      mkdirSync(dirname(moved), { recursive: true });
+      writeFileSync(moved, 'x');
+      expect(() => deleteOlympusData({ sourceId: 'telegram.messages', homeDir, env: { OLYMPUS_CONFIG: moved, OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: moved } } as never))
+        .toThrow('overlaps another source');
+      expect(existsSync(moved)).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('a NON-recursive target (a relocated legacy index) pointing at the owner config is refused too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-nonrecursive-'));
+    const homeDir = join(dir, 'home');
+    const config = join(homeDir, '.olympus', 'config.json');
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, '{"keep":true}');
+    try {
+      const legacyIndexVariable: Record<string, string> = {
+        'gmail.email': 'OLYMPUS_EMAIL_INDEX_DB_PATH',
+        'dropbox.files': 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH',
+        'telegram.messages': 'OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH',
+      };
+      for (const [sourceId, variable] of Object.entries(legacyIndexVariable)) {
+        const env = { [variable]: config };
+        expect(() => deleteOlympusData({ sourceId, homeDir, env } as never)).toThrow('overlaps another source');
+        expect(readFileSync(config, 'utf8')).toBe('{"keep":true}');
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('the worker environment file and the default embedding ledger are protected whatever variable points at them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-authoritative-defaults-'));
+    const homeDir = join(dir, 'home');
+    const dataHome = join(homeDir, '.local', 'share');
+    const workerEnv = join(homeDir, '.config', 'olympus', 'worker.env');
+    const ledger = join(dataHome, 'openclaw', 'olympus', 'embedding-ledger.jsonl');
+    for (const path of [workerEnv, ledger]) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, 'KEEP=1\n');
+    }
+    try {
+      for (const protectedFile of [workerEnv, ledger]) {
+        for (const [sourceId, variable] of [
+          ['gmail.email', 'OLYMPUS_EMAIL_INDEX_DB_PATH'],
+          ['dropbox.files', 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH'],
+        ] as const) {
+          expect(() => deleteOlympusData({ sourceId, homeDir, env: { XDG_DATA_HOME: dataHome, [variable]: protectedFile } } as never))
+            .toThrow('overlaps another source');
+          expect(readFileSync(protectedFile, 'utf8')).toBe('KEEP=1\n');
+        }
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('a RELATIVE override is resolved the way its consumer resolves it before the overlap check', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-relative-'));
+    const homeDir = join(dir, 'home');
+    const gw = join(homeDir, '.local', 'share', 'olympus', 'gw');
+    mkdirSync(gw, { recursive: true });
+    writeFileSync(join(gw, 'broker.json'), 'x');
+    const cwd = process.cwd();
+    try {
+      process.chdir(gw);
+      expect(() => deleteOlympusData({
+        sourceId: 'telegram.messages', homeDir,
+        env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, OLYMPUS_CREDENTIAL_BROKER_STATE_PATH: 'broker.json' },
+      } as never)).toThrow('overlaps another source');
+      expect(existsSync(join(gw, 'broker.json'))).toBe(true);
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a source\'s own relocated legacy index and its journal do not read as shared', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-own-journal-'));
+    const homeDir = join(dir, 'home');
+    const gw = join(homeDir, '.local', 'share', 'olympus', 'gw');
+    mkdirSync(gw, { recursive: true });
+    const legacy = join(gw, 'legacy.sqlite');
+    // A relocated index is the source's own only if its contents say so.
+    const marked = new Database(legacy, { create: true });
+    try { marked.exec("CREATE TABLE schema_version (store_id TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL); INSERT INTO schema_version VALUES ('telegram-messages-index', 1, 'now');"); } finally { marked.close(); }
+    writeFileSync(`${legacy}-journal`, '');
+    try {
+      const result = deleteOlympusData({
+        sourceId: 'telegram.messages', homeDir,
+        env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH: legacy },
+      } as never);
+      expect(result.removed).toContain(gw);
+      expect(existsSync(gw)).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('every OLYMPUS_*_PATH / _DB_PATH variable the source reads is covered by the name sweep', () => {
+    const { readdirSync, readFileSync, statSync } = require('node:fs');
+    const names = new Set<string>();
+    const walk = (d: string) => {
+      for (const entry of readdirSync(d)) {
+        const path = join(d, entry);
+        if (statSync(path).isDirectory()) walk(path);
+        else if (path.endsWith('.ts')) {
+          for (const m of readFileSync(path, 'utf8').matchAll(/\b(OLYMPUS_[A-Z0-9_]*_DB_PATH)\b/g)) names.add(m[1]!);
+        }
+      }
+    };
+    walk(join(import.meta.dir, '..', 'src'));
+    expect(names.size).toBeGreaterThan(10);
+    const pattern = /^OLYMPUS_[A-Z0-9_]*(_PATH|_DB|_CONFIG|_FILE)$/;
+    expect([...names].filter((name) => !pattern.test(name))).toEqual([]);
+  });
+});
+
+describe('a per-source delete clears that source\'s shared file-extraction job rows', () => {
+  test('rows of the deleted source go (jobs and artifacts); another source\'s rows stay', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-extraction-jobs-'));
+    const homeDir = join(dir, 'home');
+    const jobsPath = join(dir, 'jobs.sqlite');
+    const env = { OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH: jobsPath };
+    try {
+      const store = new LocalFileExtractionJobStore(jobsPath);
+      const extractor = { extractorKind: 'local_text', extractorVersion: 'text-v1' } as const;
+      const ref = (corpusId: string, provider: string, id: string) => ({
+        corpusId, provider, accountScope: 'a', approvedScopeKey: 'k',
+        providerItemId: id, localItemId: `l:${id}`, sourceVersion: 'v1', contentHash: `h${id}`,
+        name: `${id}.txt`, mimeType: 'text/plain', sizeBytes: 4,
+      });
+      store.enqueue({ refs: [ref('secure_local.dropbox.files', 'dropbox', 'd1')], ...extractor, policyDecision: 'index_allowed' });
+      store.enqueue({ refs: [ref('secure_local.local.files', 'local_files', 'f1')], ...extractor, policyDecision: 'index_allowed' });
+      store.close();
+      const count = (sql: string) => {
+        const db = new Database(jobsPath, { readonly: true });
+        try { return (db.query(sql).get() as { n: number }).n; } finally { db.close(); }
+      };
+      expect(count('SELECT COUNT(*) n FROM extraction_jobs')).toBe(2);
+
+      const dry = deleteOlympusData({ sourceId: 'dropbox.files', homeDir, env, dryRun: true });
+      expect(dry.removed.some((entry) => entry.includes('extraction jobs'))).toBe(false);
+      expect(count('SELECT COUNT(*) n FROM extraction_jobs')).toBe(2);
+
+      const result = deleteOlympusData({ sourceId: 'dropbox.files', homeDir, env });
+      expect(result.removed).toContain(`${jobsPath} (extraction jobs: 1)`);
+      expect(count("SELECT COUNT(*) n FROM extraction_jobs WHERE corpus_id = 'secure_local.dropbox.files'")).toBe(0);
+      expect(count("SELECT COUNT(*) n FROM extraction_jobs WHERE corpus_id = 'secure_local.local.files'")).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

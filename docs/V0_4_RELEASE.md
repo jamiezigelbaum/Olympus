@@ -213,6 +213,20 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-23 — A Delete indexed data that began and did not finish fences
+  its source; the engine keeps running.** Owner direction (Astra round 7 on
+  PR #467). Non-mutating preparation happens before the delete is recorded as
+  started; a failure there is a plain refusal with nothing deleted or fenced.
+  Once started, any failure (an unlink that keeps failing, a refusal after
+  the start, changed settings, an unreadable intent file) leaves the engine
+  running and the other sources working. Only that source's stores are closed,
+  at the single store-open boundary, through `delete-fence.json` beside the
+  store lock; every start and **Delete indexed data** (Try again) re-runs the
+  delete, and finishing it lifts the fence. New visible states, awaiting owner
+  acceptance of the renders: the card label "Delete didn't finish" with a
+  plain reason, Needs you, and Delete indexed data still offered when no items
+  remain. Supersedes "exit 1 until done" from round 6.
+
 - **2026-10-15 — Grok Bot and Cursor marketplace listing.** Owner decision:
   list Olympus in the Grok Bot and Cursor marketplace (Anysphere's form,
   https://x.ai/bot/marketplace/submit-a-plugin), which signs in with Cursor's

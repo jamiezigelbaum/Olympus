@@ -319,7 +319,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
         'source_account_changed',
         `${options.sourceId} is now connected to ${decision.reason === 'account_changed' ? 'a different account' : 'an account that could not be matched to the one its items came from'}, `
           + 'so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. '
-          + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`,
+          + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run; stop Olympus first, or use Delete indexed data on the source in the dashboard), then connect again.`,
       );
     },
   };
