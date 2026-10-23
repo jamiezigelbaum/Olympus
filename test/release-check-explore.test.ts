@@ -242,7 +242,7 @@ describe('exploring the Sources section', () => {
     expect(clean.injected).toEqual(['panel', 'panel']);
     const cleanCheck = exploreChecks(cleanResult).find((check) => check.id === 'explore.accessibility')!;
     expect(cleanCheck.status).toBe('pass');
-    expect(cleanCheck.detail).toContain('2 lesser violation(s)');
+    expect(cleanCheck.detail).toContain('4 lesser violation(s)');
 
     const bad = new PanelDriver();
     bad.axe = { host: [], panel: [violation('serious', 'color-contrast')] };
