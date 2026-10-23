@@ -43449,6 +43449,8 @@ function safeSchedulerErrorKind(error) {
   if (error instanceof CredentialBrokerError && (error.code === "credential_reauth_required" || error.code === "credential_missing")) {
     return error.code;
   }
+  if (isProviderCredentialRejection(error))
+    return "credential_reauth_required";
   if (error instanceof OperationError && error.code === "source_index_error" && error.message.startsWith("Local source embedding endpoint ")) {
     return "embedding_backend_unavailable";
   }
@@ -43466,6 +43468,13 @@ function safeSchedulerErrorKind(error) {
   if (/temporar|try again/i.test(message2))
     return "temporary";
   return "task_failed";
+}
+function isProviderCredentialRejection(error) {
+  if (!(error instanceof Error))
+    return false;
+  if (error.status === 401)
+    return true;
+  return /\bHTTP 401\b/.test(error.message);
 }
 function mapExplicitSchedulerErrorKind(value) {
   if (HONEST_SCHEDULER_ERROR_KINDS.has(value))
