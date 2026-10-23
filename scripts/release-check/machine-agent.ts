@@ -1338,6 +1338,7 @@ function exploreSeeds(config: AgentConfig): Seed[] {
 }
 
 async function exploreCommand(outDir: string, inventoryPath: string, pagesInventoryPath?: string): Promise<never> {
+  const startedAt = Date.now();
   const browser = findBrowser();
   if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
   rmSync(outDir, { recursive: true, force: true });
@@ -1372,7 +1373,7 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     // The computer's other pages, in the same signed-in browser, after the Sources section (Lock ends the session, so it comes last).
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
-      result = { ...result, pages: await explorePages({ driver, inventory: pagesInventory }) };
+      result = { ...result, pages: await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 33 * 60_000 }) };
     }
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);

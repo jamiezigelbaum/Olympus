@@ -79,6 +79,8 @@ export interface PagesOptions {
   audit?: (driver: JourneyDriver, page: PageDef) => Promise<string[]>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** The time (epoch ms) after which no new page or press is started. */
+  deadlineAt?: number;
   /** The most presses one page may take. */
   maxPresses?: number;
   settleMs?: number;
@@ -106,6 +108,15 @@ const NOT_PRESSED: Array<{ test: (control: PageControl) => boolean; reason: stri
   { test: (c) => /data-connect-kind=oauth/.test(c.formKind), reason: 'it starts a sign-in at a real provider' },
   { test: (c) => /data-pa-destination/.test(c.attrs.join(' ')), reason: 'it sends a question to a model' },
 ];
+
+/** The longest one press (load, press, settle, judge) may take: a page that hangs fails that press, it does not take the run with it. */
+const ITEM_BOUND_MS = 120_000;
+async function withBound<T>(work: () => Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000} s`)), ms); })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
 
 const squash = (text: string): string => text.replace(/\s+/g, ' ').trim();
 const sleepFor = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
@@ -359,7 +370,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
       consider(base, []);
 
       let wave = 0;
-      while (summary.presses < maxPresses) {
+      while (summary.presses < maxPresses && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
         if ((queue.length === 0 || queue.every((entry) => entry.rank === 2)) && wave < 2) {
           // What the earlier presses made (a pairing code leaves a connection to revoke) shows on a fresh page; looked for before Lock ends the session.
           wave += 1;
@@ -374,6 +385,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
         const item = queue.shift()!;
         const started = now();
         try {
+          await withBound(async () => {
           await loadPage(page, item.answer ?? true);
           driver.drainEvents();
           let controls = await enumerate();
@@ -390,13 +402,13 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           if (!reachable || !control) {
             steps.push(failureStep(steps.length + 1, finalSig, !reachable ? 'a control on its way could not be pressed' : 'it was on the page as loaded but is not there on a fresh page'));
             summary.failed += 1;
-            continue;
+            return;
           }
           if (control.disabled) {
             const ok = control.reason.trim() !== '';
             steps.push({ n: steps.length + 1, name: `${control.name || control.tag} (disabled)`, action: `look at "${control.name}"`, expected: 'a disabled control says why', actual: ok ? control.reason : 'it says nothing', ok, ms: now() - started, at: page.path, consoleErrors: [], failedRequests: [], findings: ok ? [] : [`"${control.name}" is disabled and says nothing about why`] });
             if (!ok) summary.failed += 1;
-            continue;
+            return;
           }
           const before = (await observe())!;
           const pagesBefore = await driver.pages();
@@ -438,12 +450,13 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
             const revealed = afterControls.filter((candidate) => candidate.visible && !controls.some((was) => was.sig === candidate.sig && was.visible));
             if (revealed.length > 0 && (control.tag === 'summary' || control.expanded !== null || control.attrs.includes('data-sheet-toggle'))) consider(revealed, item.path);
           }
+          }, ITEM_BOUND_MS, `pressing ${item.path[item.path.length - 1] ?? 'a control'}`);
         } catch (error) {
           steps.push(failureStep(steps.length + 1, item.path[item.path.length - 1] ?? '', `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`));
           summary.failed += 1;
         }
       }
-      if (queue.length > 0) steps.push({ n: steps.length + 1, name: 'Stopped at the bound', action: 'bounded exploration', expected: 'every control pressed', actual: `${queue.length} control(s) left when the ${maxPresses}-press bound was reached`, ok: true, ms: 0, at: '', consoleErrors: [], failedRequests: [], findings: [] });
+      if (queue.length > 0) steps.push({ n: steps.length + 1, name: 'Stopped at the bound', action: 'bounded exploration', expected: 'every control pressed', actual: `${queue.length} control(s) left when the press or time bound was reached`, ok: true, ms: 0, at: '', consoleErrors: [], failedRequests: [], findings: [] });
     } catch (error) {
       summary.error = error instanceof Error ? error.message.slice(0, 200) : String(error);
       steps.push(failureStep(steps.length + 1, page.path, `the page could not be explored: ${summary.error}`));
