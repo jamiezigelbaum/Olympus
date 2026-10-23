@@ -100,6 +100,8 @@ const REFUSAL_REQUESTS: RegExp[] = [/\/dashboard\/tools\/call/];
 /** The kinds of control that open a page of their own: leaving the dashboard is their outcome. Every other kind must stay and show what it did. */
 const LEAVES = new Set<ControlKind>(['connect', 'reconnect', 'scope', 'check-again', 'privacy-settings', 'other']);
 const CONFIRM_WAIT_MS = 60_000;
+/** How long a page with a busy control (a sync running) is waited on before it is judged. */
+const BUSY_WAIT_MS = 90_000;
 const OWN_HOSTS = /^https:\/\/(www\.)?olympusplugin\.ai\//;
 
 const keyed = (key: string): { css: string } => ({ css: `[data-key="${key.replace(/"/g, '\\"')}"]` });
@@ -249,7 +251,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   };
 
   const settle = async (): Promise<void> => {
-    const until = now() + settleMs;
+    const started = now();
+    let until = started + settleMs;
     let last = '';
     let stable = 0;
     await sleep(500);
@@ -257,6 +260,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       let text = '';
       try { text = await panelText(driver); } catch { /* the page is changing */ }
       const busy = await driver.probe('panel', `!!document.querySelector('[aria-busy="true"]')`).catch(() => false);
+      // A control that is busy ("Checking…" while a sync runs) says so itself; the page is given up to a minute and a half to finish.
+      if (busy === true) until = Math.max(until, started + BUSY_WAIT_MS);
       stable = text === last && busy !== true ? stable + 1 : 0;
       last = text;
       if (stable >= 2 || now() >= until) return;
@@ -393,7 +398,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       presses += 1;
       totalPresses += 1;
       pressedHere += 1;
-      if (listed) foundIds.get(listed)!.pressed = true;
+      if (listed) { const entry = foundIds.get(listed); if (entry) entry.pressed = true; }
       else for (const entry of unlisted.values()) if (entry.key === control.key && entry.rowName === control.rowName) entry.pressed = true;
       let pagesMax = pagesBefore;
       // Watched while the page settles: a window that opens and goes is still seen.
