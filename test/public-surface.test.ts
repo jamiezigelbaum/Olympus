@@ -182,9 +182,9 @@ describe('v0.4 positive public surface', () => {
     expect(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((source) => source.source_id))
       .toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
     const doctorLanes = publicSourceDoctorLanes();
-    // A source with no credential (files on this computer) has no doctor lane.
+    // A source with no credential (files on this computer, imported archives) has no doctor lane.
     expect([...new Set(doctorLanes.map((lane) => lane.sourceId))])
-      .toEqual(V0_4_PUBLIC_SOURCE_IDS.filter((id) => id !== 'local.files'));
+      .toEqual(V0_4_PUBLIC_SOURCE_IDS.filter((id) => id !== 'local.files' && id !== 'archive.imports'));
     expect(doctorLanes.filter((lane) => lane.sourceId === 'gmail.email').map((lane) => lane.corpusId).sort())
       .toEqual(['internal.email', 'secure_local.email.private']);
     expect(doctorLanes.filter((lane) => lane.sourceId === 'google_drive.docs').map((lane) => lane.corpusId).sort())

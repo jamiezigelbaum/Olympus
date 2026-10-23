@@ -360,7 +360,7 @@ describe('multi-source source dashboard', () => {
     });
 
     expect(view.summary).toMatchObject({
-      configured_sources: 8,
+      configured_sources: 9,
       connected_sources: 3,
       answer_ready_sources: 1,
       needs_attention_sources: 1,
@@ -372,6 +372,7 @@ describe('multi-source source dashboard', () => {
       'Google Drive',
       'Dropbox',
       'Files on this computer',
+      'Archives',
       'X bookmarks',
       'Telegram',
       'WhatsApp',
@@ -1168,7 +1169,7 @@ describe('multi-source source dashboard', () => {
         now: new Date('2026-07-02T11:00:00.000Z'),
       });
 
-      expect(view.history).toMatchObject({ sample_count: 16, eta_available: true });
+      expect(view.history).toMatchObject({ sample_count: 18, eta_available: true });
       expect(view.sources[0]?.progress).toEqual({
         indexed_items_per_hour: 30,
         eta_minutes: 60,
@@ -1226,7 +1227,7 @@ describe('multi-source source dashboard', () => {
 
     expect(response.status).toBe(200);
     expect(body.kind).toBe('source_dashboard');
-    expect(body.sources).toHaveLength(8);
+    expect(body.sources).toHaveLength(9);
     expect(body.sources.some((source: { source_id: string }) => source.source_id === 'venice.api')).toBe(false);
     expect(body.answer_lanes).toEqual([
       expect.objectContaining({

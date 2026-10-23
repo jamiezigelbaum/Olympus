@@ -151,7 +151,8 @@ describe('the default install finds Private items by meaning locally', () => {
       expect(engine.resolveEmbeddingProfile('secure_local')).toBeUndefined();
       expect(readFileSync(path, 'utf8')).toBe(oldBytes);
     });
-    expect(readdirSync(home)).toEqual(['sovereignty.json']);
+    // The test's own lease left its (empty, persistent) lock database; the upgrade took none.
+    expect(readdirSync(home).sort()).toEqual(['sovereignty.json', 'sovereignty.json.lock.db']);
     expect(migratePrivateMeaningSearch(path)).toBeDefined();
   }, 10_000);
 

@@ -5,6 +5,7 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'n
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { isFileLeaseSidecarName } from './file-lease.ts';
 
 type Env = Record<string, string | undefined>;
 export interface LinuxEngineLayout {
@@ -167,7 +168,8 @@ export function isLegacyLinuxSetting(name: string): boolean {
   if (legacyLinuxManifestTemporaryPid(name) !== undefined) return true;
   const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
   if (temporary) return isLegacyLinuxSetting(temporary[1]!);
-  return ['privacy.json', 'tier-rules.json', 'consult.json', 'consult.json.lock', 'consult.json.lock.commit', 'sovereignty.json',
+  if (isFileLeaseSidecarName('consult.json', name)) return true;
+  return ['privacy.json', 'tier-rules.json', 'consult.json', 'sovereignty.json',
     'sources/dropbox.personal.ingestion.json', 'sources/ingestion-exclusions.json',
     'consult/vocabulary/manifest.json', 'consult/vocabulary/de-hunspell.txt.gz', 'consult/vocabulary/it-hunspell.txt.gz'].includes(name)
     || /^consult\/vocabulary\/[a-z]{2}(?:[.]txt[.]gz|[.]LICENSE[.]txt)$/.test(name)

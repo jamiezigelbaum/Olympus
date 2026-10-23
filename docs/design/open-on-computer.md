@@ -39,7 +39,7 @@ pass-through and is not involved.
 3. `olympus open` reads the link against a closed list
    (`src/core/open-targets.ts`): `dashboard`, `connect/{x,readwise,telegram,whatsapp}`,
    `fix/{connect,reconnect,answers,search,models}`, `unreadable/{dropbox,drive,whatsapp}`
-   (added 2026-10-10). Any other `olympus:` link
+   (added 2026-10-10), `archives` (added 2026-10-23). Any other `olympus:` link
    opens the plain dashboard; anything else opens nothing. It then does
    exactly what `olympus dashboard` does: asks this install's own worker for a
    single-use 15-minute ticket and opens `/dashboard/launch#…` in the default
@@ -56,7 +56,11 @@ pass-through and is not involved.
    briefly (`.landed`). There the computer lists every unreadable file (200
    at a time; "and N more" reads the next page through the computer-only
    `olympus_unreadable_files`), each opening through the computer-only tool
-   `olympus_open_unreadable_file`, which takes a token and never a path. A
+   `olympus_open_unreadable_file`, which takes a token and never a path. The
+   Archives target (`archives`, the button of a Needs you line about an
+   imported archive or an import an agent asked for) lands the same way on
+   the Archives row, outlining each archive and request that needs the
+   person; it names no archive, so the link carries nothing. A
    token is minted only for an unlocked control session (or the worker
    bearer) and opens only for it, is spent before the open starts, and lasts
    30 minutes from issue; a locked `dash_` reader sees the names alone. The

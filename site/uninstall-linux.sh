@@ -35,7 +35,7 @@ check_path() {
       owner=$(stat -c %u "$path")
       [ "$owner" = "$USER_ID" ] || [ "$owner" = 0 ] || die "Foreign-owned path: $path"
       if [ -n "$(find "$path" -maxdepth 0 -perm /022 -print)" ]; then
-        [ "$owner" = 0 ] && [ -d "$path" ] && [ -k "$path" ] || die "Writable by other users: $path"
+        [ "$owner" = 0 ] && [ -d "$path" ] && [ -n "$(find "$path" -maxdepth 0 -perm -1000 -print)" ] || die "Writable by other users: $path"
       fi
     fi
     path=$(dirname "$path")

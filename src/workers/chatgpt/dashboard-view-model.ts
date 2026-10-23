@@ -36,16 +36,23 @@ import { isSourceFailureKind, sourceFailureKind, sourceFailureRef } from '../das
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
 import {
+  DASHBOARD_ARCHIVES_IMPORTING_LABEL,
+  DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL,
+  DASHBOARD_ARCHIVES_UNREADABLE_LABEL,
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
+  DASHBOARD_NO_ARCHIVES_LABEL,
   DASHBOARD_SUPPORTED_SOURCES,
   DASHBOARD_UNPAIRED_LABEL,
+  type DashboardImportAttention,
   type DashboardSourceAction,
   type DashboardSourceCard,
   type DashboardSupportedSourceDefinition,
   type SourceDashboardViewModel,
 } from '../source-dashboard.ts';
 import {
+  DASHBOARD_ARCHIVE_COPY,
   dashboardAttentionLine,
+  dashboardImportAttentionSentence,
   dashboardIsConnectedSource,
   dashboardManualSyncLine,
   dashboardOperatorPaused,
@@ -143,8 +150,14 @@ const KNOWN_CONNECTION_LABELS = new Set([
   'unpair state unreadable',
   'Unpair incomplete — manual cleanup required',
   'synced',
+  DASHBOARD_NO_ARCHIVES_LABEL,
+  DASHBOARD_ARCHIVES_IMPORTING_LABEL,
+  DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL,
+  DASHBOARD_ARCHIVES_UNREADABLE_LABEL,
 ]);
 const SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour|day|week|month|year)s? ago)$/;
+/** dashboardArchivesImportedLabel's words, with the count. */
+const ARCHIVES_IMPORTED = /^(1 archive|\d+ archives) imported$/;
 
 const KNOWN_READINESS_LABELS = new Set([
   'Connect this source',
@@ -207,9 +220,14 @@ export function buildChatGptDashboardViewModel(
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...(degraded ? { degradedCredentials: degraded } : {}) });
     const credentials = credentialProblem(scrubbed, degraded);
+    // What an import source's imports need from the person (an import that
+    // stopped, a request, held items no model can judge, an unreadable
+    // record) is Needs you whatever the progress says, each with its own
+    // item; the row's own bar would only restate it as a stall.
+    const imports = scrubbed.connection.imports_attention ?? [];
     // A first connect the provider refused has nothing behind it: no progress,
     // exactly as an Off source has none, but it stays in Needs you.
-    const measured = connecting || vocabularyStatus === 'Off' || refusedFirstConnect(scrubbed)
+    const measured = connecting || vocabularyStatus === 'Off' || refusedFirstConnect(scrubbed) || imports.length > 0
       ? undefined
       : measuredSourceProgress(card, scrubbed, embedding,
         // A sign-in already under way is not a signed-out source: its row keeps
@@ -227,7 +245,8 @@ export function buildChatGptDashboardViewModel(
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
     // 2026-10-01). A real fix (reconnect, choose folders) still stands.
-    if (!connecting && !credentials && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
+    if (imports.length > 0) status = 'Needs you';
+    else if (!connecting && !credentials && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
       && !progress.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress).fix)) {
       status = 'Working';
     }
@@ -251,7 +270,9 @@ export function buildChatGptDashboardViewModel(
 
   const needsYou: DashboardItem[] = rows
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
-    .map(({ definition, card, actionKind, connecting, progress, sync }) => attentionItem(definition, card, actionKind, degraded, connecting, progress, sync));
+    .flatMap(({ definition, card, actionKind, connecting, progress, sync }) => (card.connection.imports_attention?.length
+      ? card.connection.imports_attention.map(importAttentionItem)
+      : [attentionItem(definition, card, actionKind, degraded, connecting, progress, sync)]));
 
   // Models are status only in ChatGPT (owner decision 2026-10-01): a
   // configured model's fix is to check again; a built-in install that failed
@@ -428,6 +449,11 @@ function sourceEntry(
   // sync; on a late or unresponsive source it is the row's button instead
   // (owner, 2026-10-09), and the panel keeps the menu free of the row's fix.
   if (sync) menu.push(sync);
+  // Another archive is imported the way the first was: from the dashboard on
+  // the computer it is on. Never over a record that cannot be read, which an
+  // import would write over.
+  if (status !== 'Off' && definition.connect_action.kind === 'archive_import'
+    && !card.connection.imports_attention?.some((entry) => entry.kind === 'unreadable')) menu.push(connectFix(definition));
   if (status !== 'Off' && card.scope_selection && !scopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);
@@ -549,6 +575,39 @@ function attentionItem(
       ? reconnectFix(definition, card)
       : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
+}
+
+/**
+ * One Needs you item about imports, with the way to exactly that: an
+ * archive or a request opens the computer's dashboard on the Archives row
+ * (on the computer the button goes to that archive or request in place),
+ * and held items open the private model's setup.
+ */
+function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
+  const words = DASHBOARD_ARCHIVE_COPY.needsYou;
+  const sentence = dashboardImportAttentionSentence(entry);
+  const archives = openPageUrl({ kind: 'archives' });
+  switch (entry.kind) {
+    case 'stopped':
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'request':
+    case 'removal':
+      return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words.review, archives) };
+    case 'failed':
+      return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'counts':
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'scheduler':
+      return { id: 'archives:scheduler', sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'held':
+      return {
+        id: 'archives:held',
+        sentence,
+        fix: helpLinkFix(entry.model === 'off' ? words.setUp : words.check, openOnComputer(undefined, 'answers')),
+      };
+    case 'unreadable':
+      return { id: 'archives:unreadable', sentence, fix: helpLinkFix(words.seeWhy, archives) };
+  }
 }
 
 /**
@@ -941,6 +1000,10 @@ function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAu
  * the computer for now: their Connect opens the help page's steps for that.
  */
 function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+  // An archive is chosen on the computer it is on: the dashboard there.
+  if (definition.connect_action.kind === 'archive_import') {
+    return helpLinkFix(CHATGPT_SETUP_LABELS.importArchive, openPageUrl({ kind: 'dashboard' }));
+  }
   const source = oauthSource(definition);
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
@@ -1125,8 +1188,31 @@ function overallProgress(
  * set, so vocabulary.ts can only ever compose sentences from known words.
  * Explicit field-by-field copy: nothing is spread from the input card.
  */
+const IMPORT_UNREADABLE_REASONS: ReadonlySet<string> = new Set(['damaged', 'unknown_form', 'permission', 'other']);
+
+/** Only well-formed entries, each rebuilt from its own fields. */
+function importsAttention(input: readonly DashboardImportAttention[] | undefined): { imports_attention?: DashboardImportAttention[] } {
+  if (!Array.isArray(input)) return {};
+  const name = (value: unknown): string => (typeof value === 'string' ? value.slice(0, 255) : '');
+  const out: DashboardImportAttention[] = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== 'object') continue;
+    if ((entry.kind === 'stopped' || entry.kind === 'request' || entry.kind === 'removal' || entry.kind === 'failed' || entry.kind === 'counts') && typeof entry.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
+      out.push({ kind: entry.kind, id: entry.id, name: name(entry.name) });
+    } else if (entry.kind === 'held' && finite(entry.count) && entry.count > 0 && (entry.model === 'off' || entry.model === 'waiting')) {
+      out.push({ kind: 'held', count: count(entry.count), model: entry.model });
+    } else if (entry.kind === 'scheduler' && (entry.setting === 'disabled' || entry.setting === 'not_selected')) {
+      out.push({ kind: 'scheduler', setting: entry.setting });
+    } else if (entry.kind === 'unreadable') {
+      out.push({ kind: 'unreadable', reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : 'other' });
+    }
+  }
+  return out.length > 0 ? { imports_attention: out } : {};
+}
+
 export function scrubCard(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardSourceCard {
   const connectionLabel = KNOWN_CONNECTION_LABELS.has(card.connection.label) || SYNCED_RELATIVE.test(card.connection.label)
+    || ARCHIVES_IMPORTED.test(card.connection.label)
     ? card.connection.label
     : '';
   const freshnessLabel = card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL
@@ -1205,8 +1291,11 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
     connection: {
       state: card.connection.state,
       label: connectionLabel,
-      // Instructions, redirect URIs and client ids stay on the Mac.
-      action: { kind: 'none' },
+      // Instructions, redirect URIs and client ids stay on the Mac. Import an
+      // archive carries none of them, and its kind words the row's line.
+      action: card.connection.action.kind === 'archive_import'
+        ? { kind: 'archive_import', label: 'Import an archive' }
+        : { kind: 'none' },
       handles: [],
       ...(pending && finite(pending.expires_in_minutes)
         ? { pending: { started_at: '', expires_at: '', expires_in_minutes: count(pending.expires_in_minutes) } }
@@ -1219,6 +1308,9 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
         : {}),
       // A flag only: Reconnect Google is offered (sourceEntry).
       ...(card.connection.google_signin_moved === true ? { google_signin_moved: true as const } : {}),
+      // What an import source needs from the person: closed kinds, ids,
+      // counts and the person's own file names only.
+      ...(importsAttention(card.connection.imports_attention)),
     },
     ...(card.progress && finite(card.progress.indexed_items_per_hour)
       ? {

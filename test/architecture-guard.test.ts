@@ -235,9 +235,11 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   // every archive format shares. A format's own reader lives beside it
   // (src/workers/archive-import/<format>/), where this guard does not reach;
   // nothing here may learn one format's or one source's shapes.
+  'src/workers/archive-import/dashboard.ts',
   'src/workers/archive-import/lane.ts',
   'src/workers/archive-import/manifest.ts',
   'src/workers/archive-import/removal.ts',
+  'src/workers/archive-import/requests.ts',
   'src/workers/archive-import/runtime.ts',
   'src/workers/archive-import/scheduler-source.ts',
   'src/workers/archive-import/start.ts',

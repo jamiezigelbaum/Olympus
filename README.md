@@ -565,6 +565,7 @@ flowchart LR
 | `olympus dashboard token` | advanced compatibility access to the worker bearer; never share it in chat |
 | `olympus source answer "…"` | ask across your sources from the terminal |
 | `olympus ask "…" [--level strict\|standard]` | one question to a frontier model anonymously through zkAPI (paid from your zkAPI balance; the question only) |
+| `olympus archive start --path <path>\|status\|remove --archive-id <id>` | asks to import an old export (such as a mail `.mbox`) or to remove an imported one; you approve on the dashboard, and `status` shows progress without any message text |
 | `olympus tier explain\|set\|rules\|classifier …` | why an item has its tier, owner overrides and rules, and the private classifier's approval |
 | `olympus tier migrate plan\|approve\|run\|rollback\|purge\|status` | moves an existing install's items into per-item tiers, each step owner-approved after a dry-run plan |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
@@ -656,10 +657,19 @@ load the packaged Agent Skills folder
 
 `olympus serve` exposes the same sanitized read operations — `source_answer`,
 `source_answer_result`, `source_index_status`, capability-gated
-`source_index_search`, and `ask_anonymously` — to any MCP-capable agent. The
+`source_index_search`, `ask_anonymously`, and `archive_import` — to any MCP-capable agent. The
 supported Hermes configuration narrows that server to exactly `source_answer`,
 `source_answer_result`, `source_index_status` and `ask_anonymously` through its
 per-server tool allowlist.
+
+`archive_import` (start, status, remove) lets an agent ask to import an old
+export the user wants searched, such as a mail `.mbox` from Google Takeout or
+Apple Mail. It only asks: `start` stores the path as text without opening it
+and returns `needs_approval`; the user approves on the Olympus dashboard on
+their computer (Sources, Archives), and `remove` works the same way. `status`
+reports each archive's progress, counts, date range and gaps, never message
+text. It is on the native, MCP and CLI surfaces only, not on Hermes, remote MCP
+or the ChatGPT relay.
 
 `ask_anonymously` sends one typed question to a frontier model through zkAPI
 (paid per question, anonymously, from the user's own balance; what the
@@ -750,10 +760,10 @@ separately reviewed external action.
 
 There are no operator agent tools. Index maintenance — sync, extraction,
 embedding, retries — is the worker's own scheduler, and what a person drives by
-hand goes through the `olympus` CLI. The whole agent tool surface is twelve tools —
+hand goes through the `olympus` CLI. The whole agent tool surface is thirteen tools —
 `argus_ping`, `argus_list_models`, `argus_complete`, `source_answer`,
 `source_answer_result` (MCP and remote only), `source_index_status`, `source_index_search`, `source_watch_create`,
-`source_watches`, `source_watch_cancel`, `olympus_doctor`, `ask_anonymously` — declared in
+`source_watches`, `source_watch_cancel`, `olympus_doctor`, `ask_anonymously`, `archive_import` — declared in
 [`src/core/public-surface.ts`](src/core/public-surface.ts); Hermes over MCP sees
 the subset above, and worker bearer auth is enforced throughout.
 

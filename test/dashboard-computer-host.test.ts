@@ -18,6 +18,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Window } from 'happy-dom';
 import {
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_DECLINE_TOOL_NAME,
+  ARCHIVE_REMOVE_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
@@ -61,10 +65,23 @@ describe('the panel\'s tool lists', () => {
     expect(PANEL_TOOL_NAMES).toContain(PRIVACY_SET_TOOL_NAME);
   });
 
-  test('the computer adds exactly Index faster, Unpair, and opening and paging unreadable files; ChatGPT\'s conversation tools are on neither list', () => {
-    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME, UNREADABLE_FILES_PAGE_TOOL_NAME]);
+  test('the computer adds exactly Index faster, Unpair, opening and paging unreadable files, and importing archives; ChatGPT\'s conversation tools are on neither list', () => {
+    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([
+      ...PANEL_TOOL_NAMES,
+      INDEX_FASTER_TOOL_NAME,
+      UNPAIR_SOURCE_TOOL_NAME,
+      OPEN_UNREADABLE_FILE_TOOL_NAME,
+      UNREADABLE_FILES_PAGE_TOOL_NAME,
+      ARCHIVE_BROWSE_TOOL_NAME,
+      ARCHIVE_APPROVE_TOOL_NAME,
+      ARCHIVE_DECLINE_TOOL_NAME,
+      ARCHIVE_REMOVE_TOOL_NAME,
+    ]);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(UNPAIR_SOURCE_TOOL_NAME);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(OPEN_UNREADABLE_FILE_TOOL_NAME);
+    for (const name of [ARCHIVE_BROWSE_TOOL_NAME, ARCHIVE_APPROVE_TOOL_NAME, ARCHIVE_DECLINE_TOOL_NAME, ARCHIVE_REMOVE_TOOL_NAME]) {
+      expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(name);
+    }
     for (const name of ['olympus_search', 'olympus_answer', 'olympus_source_status']) {
       expect(COMPUTER_HOST_TOOL_NAMES).not.toContain(name);
     }
@@ -760,6 +777,9 @@ describe('the host page renderer', () => {
     const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN });
     expect(html).toContain('"unreadable.dropbox":"dropbox.files"');
     expect(html).toContain('"unreadable.whatsapp":"whatsapp.personal.messages"');
+    // The Archives row the same way.
+    expect(targets.archives).toBe(`${ORIGIN}/dashboard#olympus-open=archives`);
+    expect(html).toContain('"archives":"archive.imports"');
   });
 
   test('its policy frames nothing else and is framed by nothing', () => {
