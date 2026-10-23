@@ -66,6 +66,8 @@ export interface ExploreOptions {
   signedIn?: boolean;
   /** The most presses one seed may make (bounded exploration). */
   maxPresses?: number;
+  /** The time (epoch ms) after which no new seed or press is started, so a slow machine still returns what it covered. */
+  deadlineAt?: number;
   /** Milliseconds the page may take to settle after a press. */
   settleMs?: number;
 }
@@ -307,6 +309,11 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   };
 
   for (const seed of options.seeds) {
+    if (options.deadlineAt !== undefined && now() >= options.deadlineAt) {
+      seeds.push({ id: seed.id, title: seed.title, produced: false, detail: 'the time bound for the exploration was reached before this state', pressed: 0, failed: 0 });
+      seedFailures.set(seed.id, 'the time bound was reached');
+      continue;
+    }
     const applied: Awaited<ReturnType<Seed['apply']>> = await seed.apply().catch((error: unknown) => ({ ok: false, detail: error instanceof Error ? error.message : String(error) }));
     if (!applied.ok) {
       seeds.push({ id: seed.id, title: seed.title, produced: false, detail: applied.detail, pressed: 0, failed: 0 });
@@ -370,7 +377,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     let dirty = false;
     let pressedHere = 0;
     let failedHere = 0;
-    while (queue.length > 0 && presses < maxPresses) {
+    while (queue.length > 0 && presses < maxPresses && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
       queue.sort((a, b) => orderKey(a) - orderKey(b));
       const item = queue.shift()!;
       const started = now();
@@ -525,7 +532,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     }
     traces.push({ id: `explore-${seed.id}`, title: `Pressing every control in the Sources section, from the ${seed.title} state`, source: 'bounded exploration (layer 3 of the release-testing design)', ok: steps.every((step) => step.ok), steps, ms: steps.reduce((sum, step) => sum + step.ms, 0) });
     seeds.push({ id: seed.id, title: seed.title, produced: true, detail: applied.detail, pressed: pressedHere, failed: failedHere });
-    if (queue.length > 0 && presses >= maxPresses) steps.push({ n: steps.length + 1, name: 'Stopped at the bound', action: 'bounded exploration', expected: 'every control pressed', actual: `${queue.length} control(s) left when the ${maxPresses}-press bound was reached`, ok: true, ms: 0, at: '', consoleErrors: [], failedRequests: [], findings: [] });
+    if (queue.length > 0) steps.push({ n: steps.length + 1, name: 'Stopped at the bound', action: 'bounded exploration', expected: 'every control pressed', actual: `${queue.length} control(s) left when the press or time bound was reached`, ok: true, ms: 0, at: '', consoleErrors: [], failedRequests: [], findings: [] });
   }
 
   // Coverage, against the list taken from the source.

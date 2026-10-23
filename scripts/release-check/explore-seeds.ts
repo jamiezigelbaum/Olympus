@@ -223,6 +223,9 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
  * The primary seeds (Readwise's: the stand-in API) with every other driven source brought to the same state. The primary's own result
  * stays the seed's result; another source that cannot reach the state is listed in `failedSources` and the seed is still pressed.
  */
+/** The longest one source may take to reach one state. */
+const STATE_BOUND_MS = 240_000;
+
 export function composeSeeds(primary: readonly Seed[], drivers: readonly SourceDriver[]): Seed[] {
   return primary.map((seed) => ({
     ...seed,
@@ -234,8 +237,11 @@ export function composeSeeds(primary: readonly Seed[], drivers: readonly SourceD
       for (const driver of drivers) {
         const state = driver.states[seed.id];
         if (!state) continue;
-        const result = await state().catch((error: unknown): StateResult => ({ ok: false, detail: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200) }));
-        details.push(result.ok ? result.detail : `${driver.label} NOT PRODUCED`);
+        const started = Date.now();
+        // A source that does not come to its state in this time is reported as not produced, so one slow source cannot take the whole exploration.
+        const bound = new Promise<StateResult>((done) => setTimeout(() => done({ ok: false, detail: `${driver.label} did not reach its state within ${STATE_BOUND_MS / 1000} s` }), STATE_BOUND_MS));
+        const result = await Promise.race([state(), bound]).catch((error: unknown): StateResult => ({ ok: false, detail: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200) }));
+        details.push(`${result.ok ? result.detail : `${driver.label} NOT PRODUCED`} (${Math.round((Date.now() - started) / 1000)} s)`);
         if (!result.ok) failedSources.push({ source: driver.label, detail: result.detail });
       }
       return { ok: true, detail: details.join('; '), ...(failedSources.length > 0 ? { failedSources } : {}) };
