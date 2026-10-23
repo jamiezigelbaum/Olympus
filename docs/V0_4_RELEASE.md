@@ -38,13 +38,13 @@ delivery sequence:
 
 Planned, not built. One "Import an archive" entry point in the dashboard and
 one `archive_import` operation for agents: Olympus detects the format and a
-thin per-format connector reads it. Order: shared spine with Reflect, then
-mail (mbox), Roam, WhatsApp chat export, Telegram Desktop export. This adds
+thin per-format connector reads it. Order: mail (mbox) with the shared spine,
+then Reflect and Roam, WhatsApp chat export, Telegram Desktop export. This adds
 Reflect, Roam and archive import to the public surface after 1.0; the 0.4
 source roster in Slice 3A below is the 0.4 record and does not limit it.
-Imported items stay Private until the local model judges them (owner,
-2026-10-23), a shared classifier change that goes through the contract
-change gate. Design and delivery sequence:
+Imported content stays Private until the local model judges it (owner,
+2026-10-23); cleared names follow the existing names rule. This is a
+shared classifier change that goes through the contract change gate. Design and delivery sequence:
 [archive import](design/archive-import.md).
 
 ## Olympus 1.0 (ChatGPT)

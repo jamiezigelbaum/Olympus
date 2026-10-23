@@ -184,15 +184,15 @@ Both are in scope. They come after mail because they reuse the same spine
 
 ## Order
 
-1. Format registry, detection, archive identity and checkpoints, per-archive
+1. Mail (mbox) as the first format, with the spine it needs: format
+   registry, detection, archive identity and checkpoints, per-archive
    removal, `archive_import` operation, Archives source in the dashboard,
-   with Reflect as the first format (its connector exists, so this proves the
-   spine), with streaming reads and the `internal` default. The
+   the streaming reader and the file-selecting picker. The
    hold-until-judged rule lands here too, through its classifier gate.
-2. Mail (mbox), with the streaming reader and file-selecting picker.
-3. Roam onto the registry; all Reflect and Roam allowlist entries removed.
-4. WhatsApp chat export, with the selected-file, scope-safe reads.
-5. Telegram Desktop export.
+2. Reflect and Roam onto the registry, with streaming reads and the
+   `internal` default; all their allowlist entries removed.
+3. WhatsApp chat export, with the selected-file, scope-safe reads.
+4. Telegram Desktop export.
 
 Each step is one PR with focused tests on synthetic fixtures (never real
 exports), plus the held-out eval where the step changes the source pipeline.
