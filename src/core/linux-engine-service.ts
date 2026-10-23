@@ -1,4 +1,4 @@
-import { FileLeaseBusyError, withFileLeaseSync } from './file-lease.ts';
+import { FileLeaseBusyError, isFileLeaseSidecarName, parseProcessInstanceIdentity, recordedProcessOwnerIsAlive, withFileLeaseSync } from './file-lease.ts';
 import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
@@ -545,14 +545,34 @@ function priorEngineUsesLegacySettings(layout: LinuxEngineLayout, receiptState =
  // An installed receipt with no generation marker cannot prove modern readers.
  return receiptState==='installed';
 }
-function isLegacyConsultSidecar(name: string): boolean { return name==='consult.json.lock'||name==='consult.json.lock.commit'; }
+function isLegacyConsultSidecar(name: string): boolean { return isFileLeaseSidecarName('consult.json',name); }
+const LEGACY_CONSULT_LEASE_FILES=['consult.json.lock','consult.json.lock.commit'];
+/** An engine from before the kernel lock records its owner in these files; a live owner still means a writer is saving. */
+function legacyConsultWriterIsLive(directory: string): boolean {
+ for(const name of LEGACY_CONSULT_LEASE_FILES){
+  try {
+   const record=JSON.parse(readFileSync(join(directory,name),'utf8')) as {pid?:unknown;processInstance?:unknown};
+   if(typeof record.pid==='number'&&recordedProcessOwnerIsAlive(record.pid,parseProcessInstanceIdentity(record.processInstance)))return true;
+  } catch { /* absent, empty or unreadable: nothing names a live owner */ }
+ }
+ return false;
+}
 function withLegacyConsultLease<T>(layout: LinuxEngineLayout, run:()=>T): T {
  const files=legacyLinuxSettings(layout);
  if(!files.some(name=>name==='consult.json'||isLegacyConsultSidecar(name)))return run();
+ const directory=join(layout.home,'.olympus');
  try {
-  // Share the writer's stale-owner reclamation and compare-and-commit guard.
-  // Holding the guard prevents takeover while the synchronous upgrade runs.
-  return withFileLeaseSync(join(layout.home,'.olympus/consult.json'),lease=>lease.commit(run),{acquireTimeoutMs:100,pollIntervalMs:10});
+  // Share the writer's kernel lock: held for the whole synchronous upgrade, and
+  // released by the kernel if this process dies.
+  return withFileLeaseSync(join(directory,'consult.json'),lease=>lease.commit(()=>{
+   if(legacyConsultWriterIsLive(directory))throw new FileLeaseBusyError(join(directory,'consult.json'));
+   const result=run();
+   // The old engine has released custody, so its record-based lease files go.
+   // The kernel lock file stays: unlinking it while held would let a late
+   // writer lock a fresh inode and write the obsolete legacy settings.
+   for(const name of LEGACY_CONSULT_LEASE_FILES)rmSync(join(directory,name),{force:true});
+   return result;
+  }),{acquireTimeoutMs:100,pollIntervalMs:10});
  } catch(error){
   if(error instanceof FileLeaseBusyError)throw new Error('Finish saving Olympus settings, then retry the upgrade. A settings writer is still running; nothing was migrated.');
   throw error;
