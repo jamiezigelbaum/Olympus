@@ -57,4 +57,18 @@ describe('file lease stale takeover vs acquire deadline', () => {
       await expect(withFileLease(target, async () => 'second', fast)).rejects.toBeInstanceOf(FileLeaseBusyError);
     }, fast);
   });
+  test('owners that keep dying do not make the acquirer retry forever', async () => {
+    const { target } = setup();
+    rmSync(`${target}.lock.commit`, { force: true });
+    // Another process keeps planting abandoned leases as fast as it can.
+    const dead = record('dead-again', 2_147_483_000).replace(/'/g, '');
+    const planter = Bun.spawn(['/bin/sh', '-c', `end=$(( $(date +%s) + 3 )); while [ $(date +%s) -lt $end ]; do printf '%s' '${dead}' > '${target}.lock'; done`]);
+    const started = Date.now();
+    const outcome = await withFileLease(target, async () => 'held', { acquireTimeoutMs: 50, pollIntervalMs: 5, staleAfterMs: Number.MAX_SAFE_INTEGER })
+      .catch((error: unknown) => (error instanceof FileLeaseBusyError ? 'busy' : 'other'));
+    planter.kill();
+    // Either it won the race or it gave up; it never spins past the deadline.
+    expect(['held', 'busy']).toContain(outcome);
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
 });

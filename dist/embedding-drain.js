@@ -147,6 +147,7 @@ class SyncFileLeaseOwner {
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   await mkdir(dirname(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID();
@@ -164,8 +165,10 @@ async function acquireFileLease(targetPath, options) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
     }
-    if (await removeStaleLease(targetPath, lockPath, options))
+    if (await removeStaleLease(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
+      lateTakeoverRetry ||= Date.now() >= deadline;
       continue;
+    }
     if (Date.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
     await sleep(options.pollIntervalMs);
@@ -174,6 +177,7 @@ async function acquireFileLease(targetPath, options) {
 function acquireFileLeaseSync(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   mkdirSync(dirname(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID();
@@ -191,8 +195,10 @@ function acquireFileLeaseSync(targetPath, options) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
     }
-    if (removeStaleLeaseSync(targetPath, lockPath, options))
+    if (removeStaleLeaseSync(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
+      lateTakeoverRetry ||= Date.now() >= deadline;
       continue;
+    }
     if (Date.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
@@ -233,6 +239,7 @@ function removeStaleLeaseSync(targetPath, lockPath, options) {
 async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
   const guardPath = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   const token = randomUUID();
   let descriptor;
   while (!descriptor) {
@@ -253,8 +260,10 @@ async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
           });
         throw error;
       }
-      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs))
+      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
+        lateTakeoverRetry ||= Date.now() >= deadline;
         continue;
+      }
       if (Date.now() >= deadline)
         throw new FileLeaseBusyError(targetPath);
       await sleep(options.pollIntervalMs);
@@ -278,6 +287,7 @@ async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
 function withSyncCommitGuard(targetPath, lockPath, options, callback) {
   const guardPath = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  let lateTakeoverRetry = false;
   const token = randomUUID();
   let descriptor;
   while (descriptor === undefined) {
@@ -295,8 +305,10 @@ function withSyncCommitGuard(targetPath, lockPath, options, callback) {
       }
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
-      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs))
+      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
+        lateTakeoverRetry ||= Date.now() >= deadline;
         continue;
+      }
       if (Date.now() >= deadline)
         throw new FileLeaseBusyError(targetPath);
       sleepSync(options.pollIntervalMs);

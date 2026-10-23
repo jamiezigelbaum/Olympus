@@ -270,6 +270,9 @@ async function acquireFileLease(
 ): Promise<AsyncFileLeaseOwner> {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  // One claim attempt after a takeover past the deadline, never more: a
+  // stream of owners that keep dying must not retry forever (PR #466 review).
+  let lateTakeoverRetry = false;
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
     const token = randomUUID();
@@ -291,7 +294,10 @@ async function acquireFileLease(
     // deadline: the takeover itself may have spent the whole timeout (slow
     // runner, busy commit guard), and reporting "busy" for a lease nobody holds
     // is wrong. O_EXCL still admits exactly one claimant.
-    if (await removeStaleLease(targetPath, lockPath, options)) continue;
+    if ((await removeStaleLease(targetPath, lockPath, options)) && (Date.now() < deadline || !lateTakeoverRetry)) {
+      lateTakeoverRetry ||= Date.now() >= deadline;
+      continue;
+    }
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     await sleep(options.pollIntervalMs);
   }
@@ -303,6 +309,9 @@ function acquireFileLeaseSync(
 ): SyncFileLeaseOwner {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  // One claim attempt after a takeover past the deadline, never more: a
+  // stream of owners that keep dying must not retry forever (PR #466 review).
+  let lateTakeoverRetry = false;
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
     const token = randomUUID();
@@ -319,7 +328,10 @@ function acquireFileLeaseSync(
     } catch (error) {
       if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
     }
-    if (removeStaleLeaseSync(targetPath, lockPath, options)) continue;
+    if ((removeStaleLeaseSync(targetPath, lockPath, options)) && (Date.now() < deadline || !lateTakeoverRetry)) {
+      lateTakeoverRetry ||= Date.now() >= deadline;
+      continue;
+    }
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
   }
@@ -369,6 +381,9 @@ async function withAsyncCommitGuard<T>(
 ): Promise<T> {
   const guardPath = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  // One claim attempt after a takeover past the deadline, never more: a
+  // stream of owners that keep dying must not retry forever (PR #466 review).
+  let lateTakeoverRetry = false;
   const token = randomUUID();
   let descriptor: Awaited<ReturnType<typeof open>> | undefined;
   while (!descriptor) {
@@ -390,7 +405,10 @@ async function withAsyncCommitGuard<T>(
         if (created) await unlink(guardPath).catch(() => undefined);
         throw error;
       }
-      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs)) continue;
+      if ((await removeAbandonedCommitGuard(guardPath, options.staleAfterMs)) && (Date.now() < deadline || !lateTakeoverRetry)) {
+        lateTakeoverRetry ||= Date.now() >= deadline;
+        continue;
+      }
       if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
       await sleep(options.pollIntervalMs);
     }
@@ -418,6 +436,9 @@ function withSyncCommitGuard<T>(
 ): T {
   const guardPath = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
+  // One claim attempt after a takeover past the deadline, never more: a
+  // stream of owners that keep dying must not retry forever (PR #466 review).
+  let lateTakeoverRetry = false;
   const token = randomUUID();
   let descriptor: number | undefined;
   while (descriptor === undefined) {
@@ -436,7 +457,10 @@ function withSyncCommitGuard<T>(
         }
       }
       if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
-      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs)) continue;
+      if ((removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs)) && (Date.now() < deadline || !lateTakeoverRetry)) {
+        lateTakeoverRetry ||= Date.now() >= deadline;
+        continue;
+      }
       if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
       sleepSync(options.pollIntervalMs);
     }
