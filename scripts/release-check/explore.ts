@@ -146,11 +146,6 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
     const no = c.after.controls.some((control) => control.key === `${c.control.key}:no` && control.visible);
     return { ok: yes && no, expected: 'Delete indexed data asks first, with Confirm and Cancel', actual: yes && no ? 'it asks' : 'it did not ask' };
   },
-  unpair: (c) => {
-    const yes = c.after.controls.some((control) => control.key === `${c.control.key}:yes` && control.visible);
-    const no = c.after.controls.some((control) => control.key === `${c.control.key}:no` && control.visible);
-    return { ok: yes && no, expected: 'Unpair asks first, with Confirm and Cancel', actual: yes && no ? 'it asks' : 'it did not ask' };
-  },
   cancel: (c) => {
     const base = c.control.key.replace(/:no$/, '');
     const gone = !c.after.controls.some((control) => control.key === `${base}:yes`);
@@ -170,10 +165,6 @@ export const AFTER_CONFIRM: Partial<Record<ControlKind, (context: PressContext &
   'delete-data': (c) => {
     const gone = !c.after.controls.some((control) => control.rowName === c.control.rowName && kindOf(control.key, control.name) === 'delete-data');
     return { ok: gone, expected: 'after Delete indexed data the row no longer offers it', actual: gone ? 'it is gone' : 'the row still offers it' };
-  },
-  unpair: (c) => {
-    const gone = !c.after.controls.some((control) => control.rowName === c.control.rowName && kindOf(control.key, control.name) === 'unpair');
-    return { ok: gone, expected: 'after Unpair the row no longer offers it', actual: gone ? 'it is gone' : 'the row still offers Unpair' };
   },
 };
 
@@ -377,7 +368,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     let dirty = false;
     let pressedHere = 0;
     let failedHere = 0;
-    while (queue.length > 0 && presses < maxPresses && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
+    let destroyed = false;
+    while (queue.length > 0 && presses < maxPresses && !destroyed && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
       queue.sort((a, b) => orderKey(a) - orderKey(b));
       const item = queue.shift()!;
       const started = now();
@@ -519,10 +511,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         record(child, idOf(child));
         enqueue([...item.path, child.key], kind);
       }
-      // A confirmed press that cannot be undone (the data is gone, the phone unpaired) is not replayed; the presses after it start from a fresh page of
-      // what is left, which is why those run last and each source's own come one after another.
-      const spent = kind === 'confirm' && parent !== undefined && lastKinds.has(parent);
-      if (!spent && ((seed.resetAfter ?? []).includes(kind) || kind === 'confirm')) dirty = true;
+      if ((seed.resetAfter ?? []).includes(kind) || kind === 'confirm') dirty = true;
+      if (kind === 'confirm' && parent && lastKinds.has(parent)) destroyed = true;
       } catch (error) {
         // The page or the browser failed under a press: that press fails, with the reason, and the exploration goes on.
         steps.push(failureStep(steps.length + 1, item.path, `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`));

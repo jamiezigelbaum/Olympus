@@ -1,14 +1,12 @@
 // The seeded states of the sources besides Readwise (scripts/release-check/explore-seeds.ts), against a small stand-in for the engine's
-// routes: the chat sources are populated by writing the daemons' spool and ended by the dashboard's own Unpair and Delete; Files on this
-// computer is populated with a real folder chosen through the picker's tools. A source that cannot reach a state is named, and the others go on.
+// routes: Files on this computer is populated with a real folder chosen through the picker's tools. A source that cannot reach a state is named, and the others go on.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exploreChecks, type ExploreResult, type Seed } from '../scripts/release-check/explore.ts';
-import { chatDriver, chatSources, composeSeeds, localFilesDriver, LOCAL_FILES_FOLDER, type SeedContext, type SourceDriver } from '../scripts/release-check/explore-seeds.ts';
-import { telegramSpoolDir, whatsappSpoolDir } from '../scripts/release-check/capture-standin.ts';
+import { composeSeeds, localFilesDriver, LOCAL_FILES_FOLDER, type SeedContext, type SourceDriver } from '../scripts/release-check/explore-seeds.ts';
 
 const dirs: string[] = [];
 const temp = (): string => { const dir = mkdtempSync(join(tmpdir(), 'rc-seeds-')); dirs.push(dir); return dir; };
@@ -19,10 +17,7 @@ class FakeEngine {
   readonly home = temp();
   readonly env: Record<string, string | undefined> = { HOME: this.home };
   readonly calls: string[] = [];
-  chat: Record<string, { paired: boolean; items: number; dropped?: boolean }> = { telegram: { paired: true, items: 0 }, whatsapp_personal: { paired: true, items: 0 } };
   local = { connected: false, approved: false, items: 0, missing: false, refuseList: false };
-  /** A source whose messages never get indexed. */
-  stuck = new Set<string>();
   ctx: SeedContext = {
     call: async (method, path, body) => this.route(method, path, body),
     cardOf: async (provider) => this.card(provider),
@@ -31,14 +26,8 @@ class FakeEngine {
     home: this.home,
     env: this.env,
   };
-  /** Time passing: the engine reads what is in the spool and the folder. */
+  /** Time passing: the engine reads what is in the folder. */
   private tick(): void {
-    for (const [provider, dir] of [['telegram', telegramSpoolDir(this.env)], ['whatsapp_personal', whatsappSpoolDir(this.env)]] as const) {
-      const state = this.chat[provider]!;
-      if (this.stuck.has(provider) || !state.paired || state.dropped || !existsSync(dir)) continue;
-      const lines = readdirSync(dir).flatMap((name) => readFileSync(join(dir, name), 'utf8').trim().split('\n'));
-      state.items = lines.length;
-    }
     if (this.local.connected && this.local.approved) {
       const folder = join(this.home, LOCAL_FILES_FOLDER);
       this.local.missing = !existsSync(folder);
@@ -51,16 +40,13 @@ class FakeEngine {
       const l = this.local;
       return { provider, connection: { state: l.connected ? 'synced' : 'not_connected', label: 'x' }, coverage: { indexed_items: l.items }, scope_selection: { connected: l.connected, status: l.approved ? 'approved' : 'scope_pending' }, schedule: { missing_folders: l.missing ? ['f'] : [], ...(l.missing ? { degraded_reason: 'scope_root_missing' } : {}) } };
     }
-    const c = this.chat[provider]!;
-    return { provider, connection: { state: c.items > 0 ? 'synced' : 'not_connected', label: c.paired ? 'paired' : 'unpaired', ...(c.paired && c.items > 0 ? { unpair: { source_id: provider } } : {}) }, coverage: { indexed_items: c.items } };
+    return { provider, connection: { state: 'not_connected' }, coverage: { indexed_items: 0 } };
   }
   private route(method: string, path: string, body: any): { status: number; json: any; text: string } {
     this.calls.push(`${method} ${path}${body?.source_id ? ` ${body.source_id}` : body?.source ? ` ${body.source}` : body?.name ? ` ${body.name}` : ''}`);
     const ok = (json: any = { ok: true }) => ({ status: 200, json, text: JSON.stringify(json) });
-    const provider = body?.source_id === 'telegram.messages' ? 'telegram' : body?.source_id === 'whatsapp.personal.messages' ? 'whatsapp_personal' : undefined;
-    if (path === '/dashboard/unpair' && provider) { this.chat[provider]!.paired = false; return ok(); }
     if (path === '/dashboard/delete-source-data') {
-      if (provider) { this.chat[provider]!.items = 0; this.chat[provider]!.dropped = true; } else this.local.items = 0;
+      this.local.items = 0;
       return ok();
     }
     if (path === '/dashboard/connect/this-computer') { this.local.connected = true; return ok(); }
@@ -78,40 +64,6 @@ class FakeEngine {
     return { status: 404, json: undefined, text: 'no route' };
   }
 }
-
-describe('chat sources', () => {
-  test('populated writes the stand-in daemon\'s spool and waits for the messages to be indexed with Unpair offered', async () => {
-    const engine = new FakeEngine();
-    const [telegram, whatsapp] = chatSources(engine.ctx);
-    const first = await chatDriver(engine.ctx, telegram!).states.populated!();
-    const second = await chatDriver(engine.ctx, whatsapp!).states.populated!();
-    expect(first).toMatchObject({ ok: true }); expect(second).toMatchObject({ ok: true });
-    expect(readdirSync(telegramSpoolDir(engine.env))).toHaveLength(1);
-    expect(readdirSync(whatsappSpoolDir(engine.env))).toHaveLength(1);
-    expect(engine.chat.telegram!.items).toBe(6);
-  });
-
-  test('disconnected unpairs through the dashboard\'s route and empty deletes the indexed data; a pairing that has ended is not made again', async () => {
-    const engine = new FakeEngine();
-    const driver = chatDriver(engine.ctx, chatSources(engine.ctx)[0]!);
-    expect((await driver.states.disconnected!()).ok).toBe(true);
-    expect(engine.calls).toContain('POST /dashboard/unpair telegram.messages');
-    expect(engine.chat.telegram).toMatchObject({ paired: false, items: 6 });
-    // The populated state, asked again after the pairing ended, is the state the install is in.
-    expect((await driver.states.populated!()).detail).toContain('already unpaired');
-    expect((await driver.states.empty!()).ok).toBe(true);
-    expect(engine.calls).toContain('POST /dashboard/delete-source-data telegram.messages');
-    expect(engine.chat.telegram!.items).toBe(0);
-  });
-
-  test('messages that never get indexed fail the state, with what the card said', async () => {
-    const engine = new FakeEngine();
-    engine.stuck.add('telegram');
-    const result = await chatDriver(engine.ctx, chatSources(engine.ctx)[0]!).states.populated!();
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain('did not show as indexed');
-  });
-});
 
 describe('Files on this computer', () => {
   test('populated makes a real folder, connects, chooses it with the picker\'s tools and waits for it to be indexed', async () => {
@@ -177,8 +129,8 @@ describe('putting the sources together', () => {
   test('a source that could not be driven fails the sources check; none failing adds no check', () => {
     const base = { seeds: [], traces: [], coverage: [], unlisted: [], summary: { listed: 0, found: 0, pressed: 0, missed: 0, unlisted: 0, presses: 0 }, accessibility: { status: 'skipped' as const, reason: 'x' } };
     expect(exploreChecks({ ...base } as ExploreResult).some((check) => check.id === 'explore.sources')).toBe(false);
-    const failing = exploreChecks({ ...base, sourceFailures: [{ seed: 'populated', source: 'Telegram', detail: 'never indexed' }] } as ExploreResult).find((check) => check.id === 'explore.sources')!;
+    const failing = exploreChecks({ ...base, sourceFailures: [{ seed: 'populated', source: 'Files on this computer', detail: 'never indexed' }] } as ExploreResult).find((check) => check.id === 'explore.sources')!;
     expect(failing.status).toBe('fail');
-    expect(failing.detail).toContain('Telegram (populated): never indexed');
+    expect(failing.detail).toContain('Files on this computer (populated): never indexed');
   });
 });

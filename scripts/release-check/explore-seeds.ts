@@ -4,17 +4,15 @@
  * Each source the machine can drive has a driver that brings it to one of the install's seeded states (populated, failed,
  * disconnected with its data kept, empty) through the dashboard's own routes, the way the owner's page does, and reads the card back to
  * check it got there:
- * - Telegram and WhatsApp: a stand-in for the capture daemon writes the spool the connector reads (capture-standin.ts); Unpair and Delete
- *   indexed data are the dashboard's routes. There is no phone, account or session.
  * - Files on this computer (Linux): a real folder of text files made on the machine, chosen with the picker's own tools.
  *
- * A source that cannot reach a state it has is reported (`failedSources`), the other sources are still pressed, and the run's
+ * Telegram and WhatsApp are not driven: a paired session is a credential-broker handle for a local Telethon or whatsmeow reader, so a stand-in
+ * would need a test-only hook in the product (see explore-inventory.ts). A source that cannot reach a state it has is reported (`failedSources`), the other sources are still pressed, and the run's
  * `explore.sources` check fails: a source the machine claims to drive has to be driven. A state a source cannot be in (a chat app
  * cannot be "failed" here) is simply the state it is in.
  */
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { syntheticMessages, telegramSpoolDir, telegramSpoolLines, whatsappSpoolDir, whatsappSpoolLines, writeSpool } from './capture-standin.ts';
 import type { Seed } from './explore.ts';
 import type { SeedId } from './explore-kinds.ts';
 
@@ -66,71 +64,6 @@ export function helpers(ctx: SeedContext) {
 }
 
 // ---------------------------------------------------------------------------
-// Telegram and WhatsApp
-
-export interface ChatSource {
-  sourceId: string;
-  provider: string;
-  label: string;
-  /** Writes the stand-in daemon's messages to the spool the connector reads. */
-  write(): void;
-}
-
-export function chatSources(ctx: SeedContext): ChatSource[] {
-  return [
-    { sourceId: 'telegram.messages', provider: 'telegram', label: 'Telegram', write: () => { const dir = telegramSpoolDir(ctx.env); mkdirSync(dir, { recursive: true, mode: 0o700 }); writeSpool(dir, telegramSpoolLines('release-check-chat', syntheticMessages(6, 'tg'))); } },
-    { sourceId: 'whatsapp.personal.messages', provider: 'whatsapp_personal', label: 'WhatsApp', write: () => { const dir = whatsappSpoolDir(ctx.env); mkdirSync(dir, { recursive: true, mode: 0o700 }); writeSpool(dir, whatsappSpoolLines('15550100099@s.whatsapp.net', syntheticMessages(6, 'wa'))); } },
-  ];
-}
-
-export function chatDriver(ctx: SeedContext, source: ChatSource): SourceDriver {
-  const { until, ask } = helpers(ctx);
-  const unpaired = (card: any): boolean => card?.connection?.unpair === undefined || card?.connection?.unpair === null;
-  const populated = async (): Promise<StateResult> => {
-    let card = await ctx.cardOf(source.provider);
-    // A pairing that was ended stays ended (there is no phone here to pair again): the state is then the one the card is in.
-    if (items(card) > 0 && unpaired(card)) return { ok: true, detail: `${source.label} was already unpaired: ${summary(card)}` };
-    source.write();
-    card = await until(async () => { const now = await ctx.cardOf(source.provider); return items(now) > 0 && now?.connection?.unpair ? now : undefined; }, 300_000, 5_000);
-    return card ? { ok: true, detail: `${source.label}: ${summary(card)}` } : { ok: false, detail: `${source.label}: the messages the stand-in wrote did not show as indexed with Unpair offered (${summary(await ctx.cardOf(source.provider))})` };
-  };
-  const unpair = async (): Promise<StateResult> => {
-    let card = await ctx.cardOf(source.provider);
-    if (!unpaired(card)) {
-      const reply = await ask('/dashboard/unpair', { source_id: source.sourceId, acknowledge: true });
-      if (reply.status !== 200) return { ok: false, detail: `${source.label}: unpair answered ${reply.status}: ${flat(reply.text)}` };
-      card = await until(async () => { const now = await ctx.cardOf(source.provider); return unpaired(now) ? now : undefined; }, 90_000);
-    }
-    return card && unpaired(card) ? { ok: true, detail: `${source.label}: ${summary(card)}` } : { ok: false, detail: `${source.label}: it did not read as unpaired: ${summary(await ctx.cardOf(source.provider))}` };
-  };
-  return {
-    label: source.label,
-    states: {
-      populated,
-      disconnected: async () => {
-        const first = await populated();
-        return first.ok ? await unpair() : first;
-      },
-      empty: async () => {
-        let card = await ctx.cardOf(source.provider);
-        if (items(card) > 0 || !unpaired(card)) {
-          const ended = await unpair();
-          if (!ended.ok) return ended;
-        }
-        card = await ctx.cardOf(source.provider);
-        if (items(card) > 0) {
-          const reply = await ask('/dashboard/delete-source-data', { source_id: source.sourceId, acknowledge: true });
-          if (reply.status !== 200) return { ok: false, detail: `${source.label}: delete-source-data answered ${reply.status}: ${flat(reply.text)}` };
-          card = await until(async () => { const now = await ctx.cardOf(source.provider); return items(now) === 0 ? now : undefined; }, 120_000, 3_000);
-        }
-        // The spool still holds the stand-in's messages; the lane reads them again only when a pairing is made again, which cannot happen here.
-        return card && items(card) === 0 ? { ok: true, detail: `${source.label}: ${summary(card)}` } : { ok: false, detail: `${source.label}: it did not read as empty: ${summary(await ctx.cardOf(source.provider))}` };
-      },
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Files on this computer (Linux)
 
 export const LOCAL_FILES_FOLDER = 'rc-files';
@@ -169,7 +102,8 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
       if (problem) return { ok: false, detail: problem };
     }
     await ctx.call('POST', '/dashboard/sync-now', { source: 'local.files' });
-    card = await until(async () => { const now = await ctx.cardOf('local_files'); return connected(now) && items(now) > 0 && (now?.schedule?.missing_folders?.length ?? 0) === 0 ? now : undefined; }, 180_000, 3_000);
+    card = await until(async () => { const now = await ctx.cardOf('local_files'); // `synced`, not `syncing`: while the read is under way the row offers fewer actions, and the page would change under the first presses.
+      return connected(now) && now?.connection?.state === 'synced' && items(now) > 0 && (now?.schedule?.missing_folders?.length ?? 0) === 0 ? now : undefined; }, 180_000, 3_000);
     return card ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))})` };
   };
   const disconnect = async (): Promise<StateResult> => {

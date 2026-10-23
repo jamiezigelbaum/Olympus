@@ -36,7 +36,7 @@ import { captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey
 import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
 import { explore, type Seed } from './explore.ts';
-import { chatDriver, chatSources, composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
+import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 
 export { ISOLATED_BROWSER_FLAGS } from './browser.ts';
@@ -1255,7 +1255,6 @@ function exploreSeeds(config: AgentConfig): Seed[] {
     cardOf, sleep, now: () => Date.now(), home: homedir(), env: process.env,
   };
   return composeSeeds(readwiseSeeds(config), [
-    ...chatSources(ctx).map((source) => chatDriver(ctx, source)),
     ...(platform().os === 'linux' ? [localFilesDriver(ctx)] : []),
   ]);
 }
@@ -1281,7 +1280,7 @@ function readwiseSeeds(config: AgentConfig): Seed[] {
   };
   return [
     // Unpair ends a pairing the machine cannot make again (there is no phone), so its Confirm runs last, like Delete indexed data.
-    { id: 'populated', title: 'populated', apply: populated, resetAfter: ['confirm'], last: ['unpair'] },
+    { id: 'populated', title: 'populated', apply: populated, resetAfter: ['confirm'] },
     {
       id: 'failed', title: 'failed',
       apply: async () => {

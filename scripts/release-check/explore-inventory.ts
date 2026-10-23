@@ -42,17 +42,16 @@ export function setLiteral(source: string, name: string): string[] {
 /**
  * The sources the throwaway machine can drive, and how:
  * - Readwise, through the stand-in for its API, reached by the connector's own base-URL settings (readwise-fake.ts);
- * - Telegram and WhatsApp, through stand-ins for their capture daemons, which write the spool the connectors read (capture-standin.ts);
  * - Files on this computer on a Linux machine, with a real folder of files made on it (a Mac asks for a privacy permission the
  *   machine cannot grant).
  */
 export type MachineOs = 'linux' | 'macos';
-const DRIVABLE = new Set(['readwise.library', 'telegram.messages', 'whatsapp.personal.messages']);
+const DRIVABLE = new Set(['readwise.library']);
 
 const UNREACHABLE: Record<string, string> = {
   oauth: 'needs a real sign-in at the provider, and the sign-in and API addresses are a closed table in the product with no setting to point them at a stand-in; a stand-in would need a hook that exists only for tests',
   local: 'needs this computer\'s own folders and, on a Mac, its privacy permission, which a throwaway machine cannot grant',
-  pairing: 'needs a paired phone',
+  pairing: 'needs a paired session: a credential-broker handle for a local Telethon or whatsmeow reader, which only the pairing daemon makes (a stand-in would need a test-only product hook)',
   api_token: 'this source has no stand-in',
 };
 
