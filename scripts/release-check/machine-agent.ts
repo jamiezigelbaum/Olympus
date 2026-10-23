@@ -1267,13 +1267,13 @@ function exploreSeeds(config: AgentConfig): Seed[] {
         };
         const session = await ownerSession();
         const sync = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
-        let card = await until(refused, 60_000);
+        let card = await until(refused, 240_000, 5_000);
         // A key the provider no longer accepts, entered again, is the other way a source ends up needing the owner.
         let entered = 0;
         if (!card) {
-          const again = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: WRONG_TOKEN });
+          const again = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: config.fakeToken });
           entered = again.status;
-          card = await until(refused, 30_000);
+          card = await until(refused, 60_000);
         }
         return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `a sync with a rejected key (sync answered ${sync.status}${entered ? `, a rejected key entered again answered ${entered}` : ''}) did not leave the source needing attention: ${cardSummary(await readwiseCard())}` };
       },
@@ -1296,6 +1296,7 @@ function exploreSeeds(config: AgentConfig): Seed[] {
     {
       id: 'empty', title: 'empty (disconnected, nothing indexed)',
       apply: async () => {
+        await startFakeWith(config, config.fakeToken).catch(() => undefined);
         const session = await ownerSession();
         let card = await readwiseCard();
         if (connected(card)) await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });

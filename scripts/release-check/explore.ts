@@ -460,7 +460,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   // Coverage, against the list taken from the source.
   const coverage: CoverageEntry[] = options.inventory.map((entry) => {
     const found = foundIds.get(entry.id);
-    const base = { id: entry.id, sourceLabel: entry.sourceLabel, kind: entry.kind, label: entry.label.replace(/^\^\(|\)\$$/g, '').replace(/\\/g, ''), destructive: entry.destructive, seeds: entry.seeds };
+    const base = { id: entry.id, sourceLabel: entry.sourceLabel, kind: entry.kind, label: entry.label.replace(/^\^\(|\)\$$/g, '').replace(/\\/g, '').replace(/\|/g, ' or '), destructive: entry.destructive, seeds: entry.seeds };
     if (found?.pressed) return { ...base, status: 'pressed' as const, detail: `pressed from: ${[...found.seeds].join(', ')}` };
     if (entry.unreachable) return { ...base, status: 'missed' as const, detail: `${found ? 'found on the page, not pressed' : 'unreachable'} on a throwaway machine: ${entry.unreachable}` };
     if (found?.disabled) return { ...base, status: 'missed' as const, detail: 'found, but disabled in every state it showed (it says why; a disabled control is not pressed)' };
