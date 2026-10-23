@@ -29,6 +29,7 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type {
   TranscriptionModelView,
+  ChatGptDeleteSourceId,
   ChatGptDisconnectSourceId,
   ChatGptSyncSourceId,
   ChatGptOAuthSource,
@@ -128,13 +129,14 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
 const OAUTH_SOURCES = new Set<ChatGptOAuthSource>(['gmail', 'google-drive', 'dropbox']);
 const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files']);
+const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
 const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [DASHBOARD_TOOL_NAME]: {},
   [CONNECT_SOURCE_TOOL_NAME]: { source: OAUTH_SOURCES },
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
-  [DELETE_SOURCE_DATA_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
+  [DELETE_SOURCE_DATA_TOOL_NAME]: { source_id: DELETE_DATA_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
   [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers', 'transcription']) },
   [SYNC_SOURCE_TOOL_NAME]: { source_id: SYNC_SOURCE_IDS },
@@ -405,6 +407,7 @@ function copyFix(fix: DashboardFix): DashboardFix {
   if (href) out.href = href;
   if (fix?.disabledReason) out.disabledReason = text(fix.disabledReason);
   if (fix?.destructive === true) out.destructive = true;
+  if (tool === DELETE_SOURCE_DATA_TOOL_NAME && (fix?.deletesCopies === 'messages' || fix?.deletesCopies === 'messages_and_media')) out.deletesCopies = fix.deletesCopies;
   if (fix?.openHref === true && href) out.openHref = true;
   return out;
 }
@@ -961,6 +964,8 @@ const SOURCE_LABELS: Record<string, string> = {
   'local.files': 'Files on this computer',
   'x.bookmarks': 'X bookmarks',
   'readwise.library': 'Readwise',
+  'telegram.messages': 'Telegram',
+  'whatsapp.personal.messages': 'WhatsApp',
 };
 
 export function connectSourceToolResult(result: ConnectSourceResult, options: { direct?: boolean; onComputer?: boolean } = {}): ChatGptToolResult {
@@ -1029,7 +1034,7 @@ export function disconnectToolResult(result: DisconnectSourceResult): ChatGptToo
 }
 
 export function deleteSourceDataToolResult(result: DeleteSourceDataResult): ChatGptToolResult {
-  const sourceId = DISCONNECT_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
+  const sourceId = DELETE_DATA_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
   if (!sourceId) return errorToolResult(new ChatGptSurfaceError('internal'));
   return {
     content: [{ type: 'text', text: `Indexed data deleted for ${SOURCE_LABELS[sourceId]}. Your files and accounts were not touched.` }],
@@ -1312,6 +1317,7 @@ type SurfaceOnlyErrorCode =
   | 'sync_unavailable'
   | 'disconnect_incomplete'
   | 'delete_needs_disconnect'
+  | 'delete_needs_unpair'
   | 'delete_unavailable'
   | 'delete_incomplete';
 
@@ -1345,6 +1351,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   sync_unavailable: 'Olympus can\'t check this source from here right now. It keeps checking on its own.',
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   delete_needs_disconnect: 'Disconnect this source first, then delete its indexed data.',
+  delete_needs_unpair: 'Unpair this source first, then delete its indexed data.',
   delete_incomplete: 'Olympus couldn\'t finish deleting this source\'s indexed data. Try again; the engine is reopening its stores.',
   delete_unavailable: 'Olympus can\'t delete this source\'s indexed data from here right now. Nothing was deleted. Try again in a moment.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',

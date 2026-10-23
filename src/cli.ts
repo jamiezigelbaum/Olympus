@@ -62,6 +62,7 @@ import {
   runCalendarAgenda,
 } from './core/calendar-agenda.ts';
 import { createEnvCredentialBroker } from './workers/credential-broker/index.ts';
+import { readReconciledUnpairedSources } from './workers/credential-broker/unpaired-sources.ts';
 import {
   handleRegistryPathFromEnv,
   readConnectedHandleRegistry,
@@ -2643,6 +2644,8 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           dryRun: options.dryRun,
           connectedRegistry: readConnectedHandleRegistry(registryPath),
           thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
+          // A paired-session source is "disconnected" only after a clean Unpair.
+          unpairedSources: readReconciledUnpairedSources(registryPath),
           workerState,
           engineLoaded,
         })

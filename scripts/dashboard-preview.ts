@@ -671,8 +671,11 @@ function deleteDataPreview(done: boolean): SourceDashboardViewModel {
   status.corpora = [
     corpus('internal.readwise.library', 'readwise', 'internal', 'readwise', 250, 250, { withText: 250, embedded: 250 }),
     ...(done ? [] : [corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 30_012, 600_000, { withText: 30_012, embedded: 30_012 })]),
+    // A chat source after a clean Unpair: no pairing left, its data kept.
+    corpus('internal.telegram.messages', 'chat', 'internal', 'telegram', 4200, 4200, { withText: 4200, embedded: 4200 }),
   ];
   const view = buildSourceDashboardViewModel({
+    unpairedSources: [{ source_id: 'telegram.messages', state: 'unpaired' }],
     sourceIndexStatus: status,
     schedulerStatus: scheduler([schedulerSource('readwise.library', 'internal.readwise.library', 0.4)]),
     sovereigntyEngine: engine,

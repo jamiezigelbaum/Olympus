@@ -56,6 +56,12 @@ export interface DashboardFix {
   disabledReason?: string;
   /** The UI confirms first; matches the tool's destructive annotation. */
   destructive?: boolean;
+  /**
+   * Delete indexed data only: this source also keeps Olympus's own copies of
+   * the raw messages (and media), which the delete removes, so the
+   * confirmation says so. A fixed enum; the UI owns the words.
+   */
+  deletesCopies?: 'messages' | 'messages_and_media';
 }
 
 export interface DashboardItem {
@@ -596,6 +602,13 @@ export type ChatGptDisconnectSourceId =
   | 'x.bookmarks'
   | 'readwise.library'
   | 'local.files';
+/**
+ * Sources whose indexed data the panel may delete: the Disconnect set, plus the
+ * paired-session chat sources once a CLEAN Unpair has ended their pairing
+ * (they have no Disconnect; Unpair is their disconnect). Widening this never
+ * widens Disconnect.
+ */
+export type ChatGptDeleteSourceId = ChatGptDisconnectSourceId | 'telegram.messages' | 'whatsapp.personal.messages';
 
 /**
  * `olympus_connect_source {source}` → structuredContent. The provider's sign-in
@@ -768,7 +781,7 @@ export interface DisconnectSourceResult {
  */
 export interface DeleteSourceDataResult {
   status: 'deleted';
-  source_id: ChatGptDisconnectSourceId;
+  source_id: ChatGptDeleteSourceId;
   restarting: boolean;
 }
 
