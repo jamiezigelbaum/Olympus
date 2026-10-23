@@ -1,4 +1,5 @@
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
+import { createStoreCustody, type StoreCustody } from './store-custody.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import type { UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
@@ -412,6 +413,8 @@ export interface EmailSourceConnector {
 }
 
 export interface EmailSourceWorkerOptions {
+  /** Shared admission to the stores, so in-process readers join the same fence. */
+  storeCustody?: StoreCustody;
   /** Content-free, in-memory installer version; local surfaces only. */
   updateAvailable?: () => UpdateAvailable | undefined;
   platform?: string;
@@ -894,7 +897,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // exempt: the dashboard is how the owner sees the result, and its own
   // mutations queue behind the delete's grant lock, so counting them would
   // deadlock.
-  const requestCustody = { reopening: false, inflight: 0 };
+  const requestCustody = options.storeCustody ?? createStoreCustody();
   const dashboardManualSyncStarts = new Map<string, number>();
   // Paired-session sources this worker has unpaired. Separate from the
   // Disconnect latch because it answers a different question: Disconnect's
@@ -2475,11 +2478,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // provider, an extraction) finish, so nothing reads rows or writes
             // to a file that is about to be unlinked. One that will not finish
             // in time means the source is in use: lift the fence and refuse.
-            requestCustody.reopening = true;
-            const drainUntil = Date.now() + (restart.drainTimeoutMs ?? 5_000);
-            while (requestCustody.inflight > 0 && Date.now() < drainUntil) await new Promise((resolve) => setTimeout(resolve, 25));
-            if (requestCustody.inflight > 0) {
-              requestCustody.reopening = false;
+            requestCustody.fence();
+            if (!(await requestCustody.drain(restart.drainTimeoutMs ?? 5_000))) {
+              requestCustody.lift();
               throw new EmailSourceWorkerError(
                 409,
                 'delete_source_busy',
@@ -2499,7 +2500,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // there is nothing to wait for, so it is lifted rather than leave
             // the worker refusing everything forever.
             const restarting = restart.request();
-            if (!restarting) requestCustody.reopening = false;
+            if (!restarting) requestCustody.lift();
             if (failed) {
               throw new EmailSourceWorkerError(
                 500,
@@ -3643,12 +3644,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '5' } },
         );
       }
-      requestCustody.inflight += 1;
-      try {
-        return await innerWorker.fetch(request);
-      } finally {
-        requestCustody.inflight -= 1;
-      }
+      return requestCustody.admit(() => innerWorker.fetch(request));
     },
   };
 

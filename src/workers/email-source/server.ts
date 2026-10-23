@@ -1,4 +1,5 @@
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
+import { createStoreCustody, guardLanes } from './store-custody.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
@@ -3500,6 +3501,10 @@ export async function main(): Promise<void> {
   );
   // `embedding: 'built_in_only'` builds the same lanes for answers on this
   // computer alone (source-index/local-answer.ts, source-answer-lanes.ts).
+  // One admission point for every path that serves indexed data: the worker's
+  // HTTP API (given to createEmailSourceWorker below) and the in-process
+  // readers wired after it. Delete indexed data fences all of them together.
+  const storeCustody = createStoreCustody();
   let sourceAnswerLanes: ReturnType<typeof createSourceAnswerLanes> | undefined;
   const analystSourceAnswer = sourceIndexAnswerEnabled
     ? await (async () => {
@@ -3656,7 +3661,7 @@ export async function main(): Promise<void> {
         // real bounded content. A registered corpus without a mounted adapter
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
-        lanes: sourceAnswerLanes = createSourceAnswerLanes({
+        lanes: sourceAnswerLanes = guardLanes(storeCustody, createSourceAnswerLanes({
           stores: () => readConnectorStores,
           registry: () => buildSourceIndexCorpusRegistry(
             sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
@@ -3674,7 +3679,7 @@ export async function main(): Promise<void> {
           visibilityGate: tierVisibilityGate,
           secretLocations: tierSecretLocations,
           heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
-        }),
+        })),
       });
     })()
     : undefined;
@@ -3685,7 +3690,7 @@ export async function main(): Promise<void> {
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
+          return storeCustody.admit(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind));
         },
       }
     : undefined;
@@ -4731,6 +4736,7 @@ export async function main(): Promise<void> {
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
   const worker = createEmailSourceWorker({
+    storeCustody,
     updateAvailable: () => updateChecker.available(),
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: agentApprovalHost,
@@ -5569,7 +5575,7 @@ export async function main(): Promise<void> {
     });
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
-    ? async (input: { question: string; limit?: number }) => {
+    ? storeCustody.guard(async (input: { question: string; limit?: number }) => {
         // Not an answer: no answerActivity lease, so it never preempts the
         // sniffer. It does ask the built-in model, once per new wording, to
         // translate the question's words (core/source-index/keyword-expansion.ts),
@@ -5580,17 +5586,17 @@ export async function main(): Promise<void> {
           ...(input.limit ? { maxResults: input.limit } : {}),
           releaseCheck: remoteReleaseCheck,
         });
-      }
+      })
     : undefined;
   // The same search for every other remote agent, with the tiers read once
   // more right before the result leaves (workers/remote-search.ts).
   const remoteEvidenceSearch = sourceAnswerLanes
-    ? async (input: { question: string; limit?: number }) => searchReleasedEvidence({
+    ? storeCustody.guard(async (input: { question: string; limit?: number }) => searchReleasedEvidence({
         lanes: sourceAnswerLanes!,
         question: input.question,
         ...(input.limit ? { maxResults: input.limit } : {}),
         releaseCheck: remoteReleaseCheck,
-      })
+      }))
     : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
@@ -5598,10 +5604,10 @@ export async function main(): Promise<void> {
   // private answer job (and the built-in model on this computer); only their
   // count leaves the engine. The claim-time refresh runs the same search.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
-    ? async (question: string) => {
+    ? storeCustody.guard(async (question: string) => {
         const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question });
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[] };
-      }
+      })
     : undefined;
   // The dashboard's install progress follows the built-in model's download.
   const chatgptPrivateModelState = () => {

@@ -63301,9 +63301,10 @@ function deleteOlympusDataWithCustody(options) {
   };
 }
 function assertNoRunningWorkerForSourceDelete(input) {
-  if (input.dryRun || !(input.engineLoaded || input.workerState === "active"))
+  const provenStopped = !input.engineLoaded && (input.workerState === "inactive" || input.workerState === "missing");
+  if (input.dryRun || provenStopped)
     return;
-  throw new OperationError("invalid_params", `Olympus is running, so it would keep serving ${input.sourceId} from the stores this delete removes. Nothing was deleted.`, "Use Delete indexed data on the source in the Olympus dashboard (it also reopens the worker's stores), or run olympus engine stop (olympus worker stop for a legacy worker), then retry.");
+  throw new OperationError("invalid_params", `Olympus is running or its state could not be confirmed stopped (${input.engineLoaded ? "engine loaded" : input.workerState}), so it could keep serving ${input.sourceId} from the stores this delete removes. Nothing was deleted.`, "Use Delete indexed data on the source in the Olympus dashboard (it also reopens the worker's stores), or run olympus engine stop (olympus worker stop for a legacy worker), then retry.");
 }
 function dataDeleteCustody(options) {
   if (options.all === true && options.sourceId) {
@@ -63899,7 +63900,8 @@ function assertRawStateTargetsContained(targets, context2, selectedSource) {
   if (!selectedSource)
     return;
   const own3 = new Set([selectedSource.sourceId, ...selectedSource.sourceAliases ?? []]);
-  const protectedPaths = new Set(authoritativeStatePaths(context2));
+  const ownTargetPaths = new Set(targets.map((target) => resolve11(target.path)));
+  const protectedPaths = new Set(authoritativeStatePaths(context2).filter((path) => !ownTargetPaths.has(resolve11(path))));
   for (const other of lifecycleSourceSpecs()) {
     if (own3.has(other.sourceId))
       continue;
@@ -63964,14 +63966,34 @@ function authoritativeStatePaths(context2) {
     for (const path of Object.values(resolveLinuxSecretPaths(env)))
       files.add(path);
   } catch {}
+  const configured = (name) => {
+    const value = env[name]?.trim();
+    return value ? [resolve11(value)] : [];
+  };
   for (const path of [
     join58(home2, ".olympus", "config.json"),
+    ...configured("OLYMPUS_CONFIG"),
+    ...configured("OLYMPUS_SOVEREIGNTY_CONFIG"),
+    ...configured("OLYMPUS_SOVEREIGNTY_CONFIG_PATH"),
+    defaultFileExtractionJobsDbPath(env),
     defaultSovereigntyConfigPathForHome(context2.homeDir),
     defaultSovereigntyConfigPath(env),
     ...remoteConnectionsDeleteTargets(context2).map((target) => target.path),
     ...mediaCacheDeleteTargets(context2).map((target) => target.path)
   ])
     files.add(path);
+  for (const [name, value] of Object.entries(env)) {
+    if (!SHARED_PATH_ENV_NAME.test(name) || typeof value !== "string")
+      continue;
+    const trimmed2 = value.trim();
+    if (trimmed2.startsWith("/"))
+      files.add(resolve11(trimmed2));
+  }
+  for (const path of [...files]) {
+    if (/\.(sqlite3?|db)$/.test(path))
+      for (const suffix of ["-wal", "-shm", "-journal"])
+        files.add(`${path}${suffix}`);
+  }
   return [...files];
 }
 function isInsideKnownOlympusRoot(path, context2) {
@@ -64029,7 +64051,7 @@ function uniqueTargets(values) {
   }
   return [...byPath.values()];
 }
-var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store", DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA", DELETE_CONFIRMATION_2 = "DELETE EVERYTHING";
+var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store", DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA", DELETE_CONFIRMATION_2 = "DELETE EVERYTHING", SHARED_PATH_ENV_NAME;
 var init_data_lifecycle = __esm(() => {
   init_atomic_file();
   init_operation_error();
@@ -64060,6 +64082,7 @@ var init_data_lifecycle = __esm(() => {
   init_public_source_capabilities();
   init_worker_service();
   init_media_cache();
+  SHARED_PATH_ENV_NAME = /^OLYMPUS_[A-Z0-9_]*(_PATH|_DB|_CONFIG|_FILE)$/;
 });
 
 // src/core/delphi.ts
@@ -111031,6 +111054,67 @@ var init_remote_relay_runtime = __esm(() => {
   init_remote_access();
 });
 
+// src/workers/email-source/store-custody.ts
+function createStoreCustody() {
+  let reopening = false;
+  let inflight = 0;
+  const custody = {
+    get reopening() {
+      return reopening;
+    },
+    get inflight() {
+      return inflight;
+    },
+    assertOpen() {
+      if (reopening)
+        throw new StoreReopeningError;
+    },
+    async admit(work) {
+      if (reopening)
+        throw new StoreReopeningError;
+      inflight += 1;
+      try {
+        return await work();
+      } finally {
+        inflight -= 1;
+      }
+    },
+    guard(work) {
+      return (...args) => custody.admit(() => work(...args));
+    },
+    fence() {
+      reopening = true;
+    },
+    lift() {
+      reopening = false;
+    },
+    async drain(timeoutMs) {
+      const until = Date.now() + timeoutMs;
+      while (inflight > 0 && Date.now() < until)
+        await new Promise((resolve14) => setTimeout(resolve14, 25));
+      return inflight === 0;
+    }
+  };
+  return custody;
+}
+function guardLanes(custody, lanes) {
+  const guarded = (...args) => {
+    custody.assertOpen();
+    return lanes(...args);
+  };
+  return Object.assign(guarded, lanes);
+}
+var StoreReopeningError;
+var init_store_custody = __esm(() => {
+  StoreReopeningError = class StoreReopeningError extends Error {
+    code = "source_stores_reopening";
+    constructor() {
+      super("Olympus is reopening its stores after indexed data was deleted. Try again in a moment.");
+      this.name = "StoreReopeningError";
+    }
+  };
+});
+
 // src/workers/source-index/built-in-reasoning/manifest.ts
 function unslothQwen(size, revision, bytes, sha2565) {
   const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
@@ -133924,7 +134008,7 @@ function createEmailSourceWorker(options = {}) {
   const dashboardDisconnectedSources = new Set;
   const dashboardManualSyncs = new Map;
   const dashboardManualSyncRuns = new Map;
-  const requestCustody = { reopening: false, inflight: 0 };
+  const requestCustody = options.storeCustody ?? createStoreCustody();
   const dashboardManualSyncStarts = new Map;
   const dashboardUnpairedSources = new Set;
   let dashboardSchedulerRegistryStamp;
@@ -134979,12 +135063,9 @@ function createEmailSourceWorker(options = {}) {
                   throw new EmailSourceWorkerError(409, "delete_unavailable", "Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.");
                 }
               }
-              requestCustody.reopening = true;
-              const drainUntil = Date.now() + (restart.drainTimeoutMs ?? 5000);
-              while (requestCustody.inflight > 0 && Date.now() < drainUntil)
-                await new Promise((resolve16) => setTimeout(resolve16, 25));
-              if (requestCustody.inflight > 0) {
-                requestCustody.reopening = false;
+              requestCustody.fence();
+              if (!await requestCustody.drain(restart.drainTimeoutMs ?? 5000)) {
+                requestCustody.lift();
                 throw new EmailSourceWorkerError(409, "delete_source_busy", "Olympus is still using its stores for another request. Retry deleting its indexed data in a moment.");
               }
               let removedCount = 0;
@@ -134996,7 +135077,7 @@ function createEmailSourceWorker(options = {}) {
               }
               const restarting2 = restart.request();
               if (!restarting2)
-                requestCustody.reopening = false;
+                requestCustody.lift();
               if (failed) {
                 throw new EmailSourceWorkerError(500, "delete_failed", "Olympus could not finish deleting this source's indexed data. Retry; the worker is restarting to reopen its stores.");
               }
@@ -135735,12 +135816,7 @@ function createEmailSourceWorker(options = {}) {
           policy: { raw_email_exposed: false }
         }), { status: 503, headers: { "content-type": "application/json", "retry-after": "5" } });
       }
-      requestCustody.inflight += 1;
-      try {
-        return await innerWorker.fetch(request);
-      } finally {
-        requestCustody.inflight -= 1;
-      }
+      return requestCustody.admit(() => innerWorker.fetch(request));
     }
   };
   function assertDashboardModelsReady() {
@@ -137989,6 +138065,7 @@ function mostPrivateTrustDomain(domains) {
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
   init_source_scope_approval();
+  init_store_custody();
   init_release_manifest();
   init_google_handle_compatibility();
   init_source_account_binding();
@@ -165640,6 +165717,7 @@ async function main() {
   });
   const sourceIndexAnalystPreflightTimeoutMs = parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PREFLIGHT_TIMEOUT_SECONDS, "OLYMPUS_SOURCE_INDEX_ANALYST_PREFLIGHT_TIMEOUT_SECONDS") ?? 0;
   const secureDerivativeDefault = parseSecureDerivativeDefault(process.env.OLYMPUS_SECURE_DERIVATIVE_DEFAULT);
+  const storeCustody = createStoreCustody();
   let sourceAnswerLanes;
   const analystSourceAnswer = sourceIndexAnswerEnabled ? await (async () => {
     const analystLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? parseLane(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE) : olympusConfig.argus.defaultLane;
@@ -165722,7 +165800,7 @@ async function main() {
       },
       secureAnalystPoolState,
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
-      lanes: sourceAnswerLanes = createSourceAnswerLanes({
+      lanes: sourceAnswerLanes = guardLanes(storeCustody, createSourceAnswerLanes({
         stores: () => readConnectorStores,
         registry: () => buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
         embeddingProvider: (store) => connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider,
@@ -165737,13 +165815,13 @@ async function main() {
         visibilityGate: tierVisibilityGate,
         secretLocations: tierSecretLocations,
         heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0
-      })
+      }))
     });
   })() : undefined;
   const sourceAnswer = analystSourceAnswer ? {
     async answer(request, local) {
       const kind = request.caller?.surface === "remote" && isBackgroundConnection(request.caller.connection_id) ? "background" : "owner";
-      return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
+      return storeCustody.admit(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind));
     }
   } : undefined;
   const sourceWatchStore = new LocalSourceWatchStore;
@@ -166479,6 +166557,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     fileEnv: () => readWorkerSetupEnv()
   });
   const worker = createEmailSourceWorker({
+    storeCustody,
     updateAvailable: () => updateChecker.available(),
     ...process.platform === "linux" ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {},
     agentConnectHost: agentApprovalHost,
@@ -167138,24 +167217,24 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
     });
   };
-  const chatgptEvidenceSearch = sourceAnswerLanes ? async (input) => {
+  const chatgptEvidenceSearch = sourceAnswerLanes ? storeCustody.guard(async (input) => {
     return searchReleasedEvidence({
       lanes: sourceAnswerLanes,
       question: input.question,
       ...input.limit ? { maxResults: input.limit } : {},
       releaseCheck: remoteReleaseCheck
     });
-  } : undefined;
-  const remoteEvidenceSearch = sourceAnswerLanes ? async (input) => searchReleasedEvidence({
+  }) : undefined;
+  const remoteEvidenceSearch = sourceAnswerLanes ? storeCustody.guard(async (input) => searchReleasedEvidence({
     lanes: sourceAnswerLanes,
     question: input.question,
     ...input.limit ? { maxResults: input.limit } : {},
     releaseCheck: remoteReleaseCheck
-  }) : undefined;
-  const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question) => {
+  })) : undefined;
+  const chatgptPrivateMatchProbe = sourceAnswerLanes ? storeCustody.guard(async (question) => {
     const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes, question });
     return { count: result.matched, evidence: result.candidates };
-  } : undefined;
+  }) : undefined;
   const chatgptPrivateModelState = () => {
     if (!workerBuiltInModel)
       return;
@@ -167970,6 +168049,7 @@ function googleFilePage(locator) {
 var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
   init_vocabulary();
+  init_store_custody();
   init_local_private_answers();
   init_worker_shutdown();
   init_linux_owner_bridge_host();

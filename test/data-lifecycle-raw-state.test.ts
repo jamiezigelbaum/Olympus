@@ -367,6 +367,61 @@ describe('recursive raw-state deletes stay inside Olympus\'s own, unshared direc
   });
 });
 
+describe('shared files and stores stay out of a recursive delete, whichever variable relocates them', () => {
+  // Every shared-store or config location a deployment can relocate. The
+  // protection is by variable NAME pattern, so a new one is covered; this
+  // table pins the known ones and the sweep test below catches a new name.
+  const SHARED_ENV = [
+    'OLYMPUS_CONFIG',
+    'OLYMPUS_SOVEREIGNTY_CONFIG',
+    'OLYMPUS_SOVEREIGNTY_CONFIG_PATH',
+    'OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH',
+    'OLYMPUS_REMOTE_CONNECTIONS_DB_PATH',
+    'OLYMPUS_CREDENTIAL_BROKER_STATE_PATH',
+    'OLYMPUS_CREDENTIAL_SESSION_BACKEND_STATE_PATH',
+    'OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH',
+    'OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH',
+    'OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH',
+  ];
+  for (const name of SHARED_ENV) {
+    test(`${name} inside a state-directory override is refused, file and sidecars intact`, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-shared-'));
+      const homeDir = join(dir, 'home');
+      const gw = join(homeDir, '.local', 'share', 'olympus', 'gw');
+      mkdirSync(gw, { recursive: true });
+      const shared = join(gw, name.endsWith('_DB_PATH') ? 'shared.sqlite' : 'shared.json');
+      writeFileSync(shared, 'x');
+      writeFileSync(`${shared}-wal`, 'x');
+      try {
+        expect(() => deleteOlympusData({
+          sourceId: 'telegram.messages', homeDir,
+          env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, [name]: shared },
+        } as never)).toThrow('overlaps another source');
+        expect(existsSync(shared)).toBe(true);
+        expect(existsSync(`${shared}-wal`)).toBe(true);
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+
+  test('every OLYMPUS_*_PATH / _DB_PATH variable the source reads is covered by the name sweep', () => {
+    const { readdirSync, readFileSync, statSync } = require('node:fs');
+    const names = new Set<string>();
+    const walk = (d: string) => {
+      for (const entry of readdirSync(d)) {
+        const path = join(d, entry);
+        if (statSync(path).isDirectory()) walk(path);
+        else if (path.endsWith('.ts')) {
+          for (const m of readFileSync(path, 'utf8').matchAll(/\b(OLYMPUS_[A-Z0-9_]*_DB_PATH)\b/g)) names.add(m[1]!);
+        }
+      }
+    };
+    walk(join(import.meta.dir, '..', 'src'));
+    expect(names.size).toBeGreaterThan(10);
+    const pattern = /^OLYMPUS_[A-Z0-9_]*(_PATH|_DB|_CONFIG|_FILE)$/;
+    expect([...names].filter((name) => !pattern.test(name))).toEqual([]);
+  });
+});
+
 describe('a per-source delete clears that source\'s shared file-extraction job rows', () => {
   test('rows of the deleted source go (jobs and artifacts); another source\'s rows stay', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-extraction-jobs-'));

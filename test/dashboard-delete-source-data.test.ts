@@ -5,12 +5,13 @@ import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { createStoreCustody, guardLanes, StoreReopeningError, type StoreCustody } from '../src/workers/email-source/store-custody.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 
 /** Delete indexed data: the engine route behind olympus_delete_source_data. */
 describe('dashboard Delete indexed data route', () => {
-  function fixture(options: { connected?: boolean; canRestart?: boolean; busy?: boolean; slowRequest?: Promise<void> } = {}) {
+  function fixture(options: { connected?: boolean; canRestart?: boolean; busy?: boolean; slowRequest?: Promise<void>; custody?: StoreCustody } = {}) {
     const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-delete-data-'));
     const homeDir = join(root, 'home');
     const registryPath = join(root, 'handles.json');
@@ -35,6 +36,7 @@ describe('dashboard Delete indexed data route', () => {
     writeFileSync(store, 'indexed');
     const restarts = { asked: 0, requested: 0 };
     const worker = createEmailSourceWorker({
+      ...(options.custody ? { storeCustody: options.custody } : {}),
       ...(options.busy === true
         ? {
             sourceScheduler: {
@@ -128,6 +130,32 @@ describe('dashboard Delete indexed data route', () => {
       expect((await statusCall(f.worker)).status).toBe(503);
       // The dashboard itself stays reachable to show the result.
       expect((await f.worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', { method: 'GET' }))).status).not.toBe(503);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('in-process readers (remote and ChatGPT search) share the fence: waited for, then refused until the restart', async () => {
+    const custody = createStoreCustody();
+    const f = fixture({ custody });
+    let release!: () => void;
+    try {
+      const search = custody.guard(async (_q: string) => { await new Promise<void>((resolve) => { release = resolve; }); return 'rows'; });
+      const lanes = guardLanes(custody, () => 'lanes');
+      const running = search('q');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const deleting = post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      // The delete waits for the in-process search; new ones and lane opens are refused.
+      expect(existsSync(f.store)).toBe(true);
+      await expect(search('late')).rejects.toBeInstanceOf(StoreReopeningError);
+      expect(() => lanes()).toThrow(StoreReopeningError);
+      release();
+      await expect(running).resolves.toBe('rows');
+      expect((await deleting).status).toBe(200);
+      expect(existsSync(f.store)).toBe(false);
+      await expect(search('after')).rejects.toBeInstanceOf(StoreReopeningError);
+      expect(() => lanes()).toThrow(StoreReopeningError);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

@@ -838,10 +838,14 @@ export function assertNoRunningWorkerForSourceDelete(input: {
   engineLoaded: boolean;
   workerState: WorkerServiceState;
 }): void {
-  if (input.dryRun || !(input.engineLoaded || input.workerState === 'active')) return;
+  // Destructive delete only after `inactive` or `missing` is positively
+  // established with no supervising engine; unknown, transitioning, failed
+  // (a deactivating unit, an inspection failure) all mean "cannot prove".
+  const provenStopped = !input.engineLoaded && (input.workerState === 'inactive' || input.workerState === 'missing');
+  if (input.dryRun || provenStopped) return;
   throw new OperationError(
     'invalid_params',
-    `Olympus is running, so it would keep serving ${input.sourceId} from the stores this delete removes. Nothing was deleted.`,
+    `Olympus is running or its state could not be confirmed stopped (${input.engineLoaded ? 'engine loaded' : input.workerState}), so it could keep serving ${input.sourceId} from the stores this delete removes. Nothing was deleted.`,
     'Use Delete indexed data on the source in the Olympus dashboard (it also reopens the worker\'s stores), or run olympus engine stop (olympus worker stop for a legacy worker), then retry.',
   );
 }
@@ -1798,7 +1802,8 @@ function assertRawStateTargetsContained(
   }
   if (!selectedSource) return;
   const own = new Set([selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
-  const protectedPaths = new Set<string>(authoritativeStatePaths(context));
+  const ownTargetPaths = new Set(targets.map((target) => resolve(target.path)));
+  const protectedPaths = new Set<string>(authoritativeStatePaths(context).filter((path) => !ownTargetPaths.has(resolve(path))));
   for (const other of lifecycleSourceSpecs()) {
     if (own.has(other.sourceId)) continue;
     for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
@@ -1864,15 +1869,38 @@ function authoritativeStatePaths(context: LifecyclePathContext): string[] {
   try {
     for (const path of Object.values(resolveLinuxSecretPaths(env))) files.add(path);
   } catch { /* not a Linux layout */ }
+  const configured = (name: string) => {
+    const value = env[name]?.trim();
+    return value ? [resolve(value)] : [];
+  };
   for (const path of [
     join(home, '.olympus', 'config.json'),
+    ...configured('OLYMPUS_CONFIG'),
+    ...configured('OLYMPUS_SOVEREIGNTY_CONFIG'),
+    ...configured('OLYMPUS_SOVEREIGNTY_CONFIG_PATH'),
+    defaultFileExtractionJobsDbPath(env),
     defaultSovereigntyConfigPathForHome(context.homeDir),
     defaultSovereigntyConfigPath(env),
     ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
     ...mediaCacheDeleteTargets(context).map((target) => target.path),
   ]) files.add(path);
+  // Every other file or store a deployment relocates by an OLYMPUS_* path
+  // variable (shared stores, ledgers, budget and broker state, drains). One
+  // sweep by name instead of a list somebody must remember to extend; a
+  // selected source's own targets are exempted by the caller.
+  for (const [name, value] of Object.entries(env)) {
+    if (!SHARED_PATH_ENV_NAME.test(name) || typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed.startsWith('/')) files.add(resolve(trimmed));
+  }
+  for (const path of [...files]) {
+    if (/\.(sqlite3?|db)$/.test(path)) for (const suffix of ['-wal', '-shm', '-journal']) files.add(`${path}${suffix}`);
+  }
   return [...files];
 }
+
+/** Env variables that relocate a file or store: matched by name so none can be forgotten. */
+const SHARED_PATH_ENV_NAME = /^OLYMPUS_[A-Z0-9_]*(_PATH|_DB|_CONFIG|_FILE)$/;
 
 function isInsideKnownOlympusRoot(path: string, context: LifecyclePathContext): boolean {
   return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));

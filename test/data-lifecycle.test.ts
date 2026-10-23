@@ -100,6 +100,14 @@ describe('Olympus data lifecycle', () => {
     } catch (error) {
       expect(JSON.stringify(error) + String((error as { nextAction?: string }).nextAction ?? '')).toContain('Delete indexed data');
     }
+    // Only a positively proven stop allows it: anything else cannot be told apart from running.
+    for (const workerState of ['unknown', 'transitioning', 'failed', 'active'] as const) {
+      expect(() => assertNoRunningWorkerForSourceDelete({ ...running, engineLoaded: false, workerState })).toThrow('Nothing was deleted');
+    }
+    expect(() => assertNoRunningWorkerForSourceDelete({ ...running, engineLoaded: true, workerState: 'inactive' })).toThrow('Nothing was deleted');
+    for (const workerState of ['inactive', 'missing'] as const) {
+      expect(() => assertNoRunningWorkerForSourceDelete({ ...running, engineLoaded: false, workerState })).not.toThrow();
+    }
     expect(() => assertNoRunningWorkerForSourceDelete({ ...running, dryRun: true })).not.toThrow();
     expect(() => assertNoRunningWorkerForSourceDelete({ ...running, engineLoaded: false })).not.toThrow();
   });
