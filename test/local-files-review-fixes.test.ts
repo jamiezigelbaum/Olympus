@@ -4,7 +4,8 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  chmodSync, existsSync, readdirSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+  accessSync, chmodSync, constants, existsSync, readdirSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync,
+  symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,8 +44,25 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!();
 });
 
-function fixture(select: (home: string) => string, platform: NodeJS.Platform = 'darwin') {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'local-files-fix-')));
+/**
+ * A temporary folder on a disk a walk of the whole computer reaches: the
+ * system temporary folder, or /var/tmp where /tmp is a RAM disk (tmpfs, as on
+ * Ubuntu 26.04), which is not a disk Olympus walks. Undefined when neither is
+ * (or neither can be written, as in a read-only build container).
+ */
+function onWalkedDisk(): string | undefined {
+  const volumes = new VolumeResolver();
+  for (const parent of [tmpdir(), '/var/tmp']) {
+    if (!existsSync(parent)) continue;
+    const real = realpathSync(parent);
+    try { accessSync(real, constants.W_OK); } catch { continue; }
+    if (statSync(real).dev === statSync(volumes.volumeOf(real).mountPoint).dev) return real;
+  }
+  return undefined;
+}
+
+function fixture(select: (home: string) => string, platform: NodeJS.Platform = 'darwin', parent: string = tmpdir()) {
+  const base = realpathSync(mkdtempSync(join(parent, 'local-files-fix-')));
   const home = join(base, 'home');
   const chosen = select(home);
   mkdirSync(chosen, { recursive: true });
@@ -76,7 +94,8 @@ function fixture(select: (home: string) => string, platform: NodeJS.Platform = '
       ...(options.ignore ? { ignore: options.ignore } : {}),
     });
   const keyFor = (root: string): string => `${LOCAL_FILES_POLICY_SOURCE}:${root}`;
-  return { base, home, chosen, store, scope, context, selections, hub, handler, keyFor, volumes };
+  const diskRoot = volumes.volumeOf(base).mountPoint;
+  return { base, home, chosen, store, scope, context, selections, hub, handler, keyFor, volumes, diskRoot };
 }
 
 const titles = (store: LocalConnectorStore, query: string): string[] =>
@@ -145,15 +164,15 @@ describe('one unreadable corner does not stop deletions elsewhere', () => {
     expect(titles(f.store, 'sealed')).toEqual(['sealed.txt']);
   });
 
-  test('a walk of the whole computer still removes what vanished', async () => {
-    const f = fixture((home) => join(home, 'proj'));
+  test.skipIf(onWalkedDisk() === undefined)('a walk of the whole computer still removes what vanished', async () => {
+    const f = fixture((home) => join(home, 'proj'), 'darwin', onWalkedDisk());
     writeFileSync(join(f.chosen, 'stays.txt'), 'a');
     writeFileSync(join(f.chosen, 'vanishes.txt'), 'b');
     const handler = f.handler({ useHub: false });
-    await handler.pull({ approved_scope_key: f.keyFor('/') });
+    await handler.pull({ approved_scope_key: f.keyFor(f.diskRoot) });
     expect(titles(f.store, 'txt')).toEqual(['stays.txt', 'vanishes.txt']);
     rmSync(join(f.chosen, 'vanishes.txt'));
-    await handler.pull({ approved_scope_key: f.keyFor('/') });
+    await handler.pull({ approved_scope_key: f.keyFor(f.diskRoot) });
     expect(titles(f.store, 'txt')).toEqual(['stays.txt']);
   });
 
@@ -295,12 +314,12 @@ describe('replay', () => {
     return items;
   }
 
-  test('a watcher event is not dropped when the whole computer is the root', async () => {
-    const f = fixture((home) => join(home, 'proj'));
+  test.skipIf(onWalkedDisk() === undefined)('a watcher event is not dropped when the whole computer is the root', async () => {
+    const f = fixture((home) => join(home, 'proj'), 'darwin', onWalkedDisk());
     writeFileSync(join(f.chosen, 'fresh.txt'), 'new');
     const hub = fakeHub(() => [{ type: 'create', path: join(f.chosen, 'fresh.txt') }]);
     cleanups.push(() => hub.close());
-    const items = await replay({ f, root: '/', hub });
+    const items = await replay({ f, root: f.diskRoot, hub });
     expect(items.map((item) => item.metadata['name'])).toEqual(['fresh.txt']);
   });
 
