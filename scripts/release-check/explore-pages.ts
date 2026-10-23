@@ -110,7 +110,7 @@ const NOT_PRESSED: Array<{ test: (control: PageControl) => boolean; reason: stri
 ];
 
 /** The longest one press (load, press, settle, judge) may take: a page that hangs fails that press, it does not take the run with it. */
-const ITEM_BOUND_MS = 120_000;
+const ITEM_BOUND_MS = 60_000;
 async function withBound<T>(work: () => Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -165,7 +165,7 @@ const ENUMERATE = String.raw`(() => {
     const solo = parent && parent.querySelectorAll('button, a, input, select, textarea, summary').length === 1;
     const describedBy = el.getAttribute('aria-describedby');
     const described = describedBy ? describedBy.split(/\s+/).map((id) => { const t = document.getElementById(id); return t ? t.textContent : ''; }).join(' ') : '';
-    const reason = disabled ? clean((solo ? (parent.textContent || '').replace(el.textContent || '', '') : '') + ' ' + described + ' ' + (el.getAttribute('title') || '')) : '';
+    const reason = disabled ? clean((solo ? (parent.textContent || '').replace(el.textContent || '', '') : '') + ' ' + described + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-description') || '')) : '';
     const field = tag === 'input' || tag === 'textarea' || tag === 'select';
     const submit = (tag === 'button' && (el.getAttribute('type') || 'submit') === 'submit') || (tag === 'input' && type === 'submit');
     out.push({
@@ -299,7 +299,10 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
 
   const pageList = options.pages ?? PAGES;
   const lastPageId = pageList[pageList.length - 1]?.id;
-  for (const page of pageList) {
+  for (const [pageIndex, page] of pageList.entries()) {
+    // Each page gets an equal share of the time left, so one large page cannot use up the others' turns.
+    const pageDeadline = options.deadlineAt === undefined ? undefined : now() + Math.max(0, options.deadlineAt - now()) / (pageList.length - pageIndex);
+    const reported = new Set<string>();
     const summary: PageSummary = { id: page.id, title: page.title, path: page.path, found: 0, pressed: 0, validated: 0, skipped: 0, failed: 0, presses: 0 };
     summaries.push(summary);
     const steps: StepTrace[] = [];
@@ -331,6 +334,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
         ok: baseFindings.length === 0, ms: 0, at: page.path,
         consoleErrors: loadConsole.map((message) => message.slice(0, 300)), failedRequests: loadRequests.map((request) => `${request.text} -> ${request.status || 'failed'}`), findings: baseFindings,
       });
+      for (const text of baseFindings) reported.add(text);
       if (baseFindings.length > 0) summary.failed += 1;
 
       const queue: Item[] = [];
@@ -370,7 +374,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
       consider(base, []);
 
       let wave = 0;
-      while (summary.presses < maxPresses && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
+      while (summary.presses < maxPresses && !(pageDeadline !== undefined && now() >= pageDeadline)) {
         if ((queue.length === 0 || queue.every((entry) => entry.rank === 2)) && wave < 2) {
           // What the earlier presses made (a pairing code leaves a connection to revoke) shows on a fresh page; looked for before Lock ends the session.
           wave += 1;
@@ -384,9 +388,11 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
         queue.sort((a, b) => a.rank - b.rank);
         const item = queue.shift()!;
         const started = now();
+        let phase = 'loading the page';
         try {
           await withBound(async () => {
           await loadPage(page, item.answer ?? true);
+          phase = 'reaching the control';
           driver.drainEvents();
           let controls = await enumerate();
           let reachable = true;
@@ -410,10 +416,13 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
             if (!ok) summary.failed += 1;
             return;
           }
+          phase = 'reading the page before the press';
           const before = (await observe())!;
           const pagesBefore = await driver.pages();
           driver.drainEvents();
+          phase = 'pressing it';
           const info = await driver.click('host', { css: `[data-rc-n="${control.n}"]` });
+          phase = 'waiting for the page to settle after the press';
           summary.presses += 1;
           summary.pressed += 1;
           totalPresses += 1;
@@ -427,8 +436,11 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           const events = driver.drainEvents();
           const opened = ((await read<string[]>('__rc.openedWindows()')) ?? []);
           const pagesAfter = await driver.pages();
+          phase = 'judging';
           const judged = judge({ page, control, info, before, after, afterControls, controlsBefore: controls, events, opened, pagesBefore, pagesAfter, pagesMax, answer: item.answer });
-          const extra = after ? await pageFindings(afterControls).catch(() => []) : [];
+          // A rule about the page as it stands is reported once for the page, not on every press after it.
+          const extra = (after ? await pageFindings(afterControls).catch(() => []) : []).filter((text) => !reported.has(text));
+          for (const text of extra) reported.add(text);
           judged.findings.push(...extra);
           const ok = judged.ok && extra.length === 0;
           if (!ok) summary.failed += 1;
@@ -452,7 +464,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           }
           }, ITEM_BOUND_MS, `pressing ${item.path[item.path.length - 1] ?? 'a control'}`);
         } catch (error) {
-          steps.push(failureStep(steps.length + 1, item.path[item.path.length - 1] ?? '', `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`));
+          steps.push(failureStep(steps.length + 1, item.path[item.path.length - 1] ?? '', `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)} (while ${phase})`));
           summary.failed += 1;
         }
       }
