@@ -65,7 +65,7 @@ import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation }
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
-import { SCREENS, compareScreens, visualChecks, type VisualResult } from './visual.ts';
+import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type VisualResult } from './visual.ts';
 
 export interface RunConfigFile {
   driver: string[];
@@ -899,7 +899,7 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   const screens = (Array.isArray(result.screens) ? result.screens : []) as Array<{ name: string; screen: string; width: number; theme: string }>;
   if (options.baselinesDir) {
     const names = screens.flatMap((item) => { const screen = SCREENS.find((candidate) => candidate.id === item.screen); return screen ? [{ name: item.name, screen, width: item.width, theme: item.theme }] : []; });
-    const compared = compareScreens({ actualDir: join(scratch, 'screens'), baselinesDir: options.baselinesDir, outDir, update: options.updateBaselines === true, names });
+    const compared = compareScreens({ actualDir: join(scratch, 'screens'), baselinesDir: options.baselinesDir, outDir, update: options.updateBaselines === true, approvalDigest: currentApprovalDigest(), names });
     run.stage.visual = compared.results;
     for (const check of visualChecks(compared)) run.add(check);
     const expected = SCREENS.length * 4;

@@ -12,7 +12,7 @@ import { journeyChecks, runJourney, type ElementInfo, type Journey, type Journey
 import { PROBE_SOURCE, describeTarget, type WireTarget } from '../scripts/release-check/probe.ts';
 import { JOURNEYS, selectJourneys } from '../scripts/release-check/journeys.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../src/workers/dashboard/vocabulary.ts';
-import { DEFAULT_TOLERANCE, SCREENS, compareImages, compareScreens, maskScript, normaliseDynamicText, screenName, visualChecks } from '../scripts/release-check/visual.ts';
+import { DEFAULT_TOLERANCE, SCREENS, compareImages, APPROVAL_FILE, approvalDigestOf, compareScreens, maskScript, normaliseDynamicText, screenName, visualChecks } from '../scripts/release-check/visual.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
 import { buildReport, renderHtml, type MachineReport } from '../scripts/release-check/report.ts';
 
@@ -289,6 +289,56 @@ describe('visual baselines', () => {
       writeFileSync(join(baselinesDir, `${name}.png`), base);
       const run = compareScreens({ actualDir, baselinesDir, outDir, update: true, names });
       expect(visualChecks(run)[0]).toMatchObject({ status: 'fail' });
+      expect(readFileSync(join(baselinesDir, `${name}.png`)).equals(base)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an approved design change refreshes the references; the same approval with a different look still fails; an unreadable picture still fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-visual-'));
+    try {
+      const actualDir = join(dir, 'actual');
+      const baselinesDir = join(dir, 'baselines');
+      const outDir = join(dir, 'out');
+      for (const folder of [actualDir, baselinesDir, outDir]) mkdirSync(folder, { recursive: true });
+      const screen = SCREENS[0]!;
+      const name = screenName(screen.id, 1280, 'light');
+      const names = [{ name, screen, width: 1280, theme: 'light' }];
+      const changed = png(100, 100, (x) => (x < 20 ? [0, 0, 0] : [250, 250, 250]));
+      const before = approvalDigestOf({ design_review: { id: 'a' }, reviewed_states: [{ id: 'panel', rendered_html_sha256: '1' }] });
+      const after = approvalDigestOf({ design_review: { id: 'a' }, reviewed_states: [{ id: 'panel', rendered_html_sha256: '2' }] });
+      expect(before).not.toBe(after);
+      const setUp = (actual: Buffer): void => {
+        writeFileSync(join(actualDir, `${name}.png`), actual);
+        writeFileSync(join(baselinesDir, `${name}.png`), base);
+        writeFileSync(join(baselinesDir, APPROVAL_FILE), JSON.stringify({ approvalDigest: before }));
+      };
+
+      // Same approval, different look: a defect, and the reference is untouched.
+      setUp(changed);
+      const same = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: before, names });
+      expect(visualChecks(same)[0]).toMatchObject({ status: 'fail' });
+      expect(readFileSync(join(baselinesDir, `${name}.png`)).equals(base)).toBe(true);
+
+      // A newer approval: the changed look is reported as approved, shown old and new, and written for commit with the new fingerprint.
+      const refreshed = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: after, names });
+      expect(visualChecks(refreshed)[0]).toMatchObject({ status: 'warn', detail: expect.stringContaining('approved change, references refreshed') });
+      expect(refreshed.results[0]!.baseline).toBeTruthy();
+      expect(refreshed.results[0]!.approvedRefresh).toBe(true);
+      expect(readFileSync(join(baselinesDir, `${name}.png`)).equals(changed)).toBe(true);
+      expect(JSON.parse(readFileSync(join(baselinesDir, APPROVAL_FILE), 'utf8')).approvalDigest).toBe(after);
+      expect(visualChecks(compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: after, names }))[0]!.status).toBe('pass');
+
+      // References with no recorded approval cannot be refreshed this way.
+      setUp(changed);
+      rmSync(join(baselinesDir, APPROVAL_FILE));
+      expect(visualChecks(compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: after, names }))[0]!.status).toBe('fail');
+
+      // A newer approval does not excuse an unreadable picture.
+      setUp(base.subarray(0, 40));
+      const broken = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: after, names });
+      expect(visualChecks(broken)[0]!.status).toBe('fail');
       expect(readFileSync(join(baselinesDir, `${name}.png`)).equals(base)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
