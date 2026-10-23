@@ -1802,8 +1802,21 @@ function assertRawStateTargetsContained(
   }
   if (!selectedSource) return;
   const own = new Set([selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
-  const ownTargetPaths = new Set(targets.map((target) => resolve(target.path)));
-  const protectedPaths = new Set<string>(authoritativeStatePaths(context).filter((path) => !ownTargetPaths.has(resolve(path))));
+  // Authoritative state (config, registry, secrets, shared stores) is protected
+  // unconditionally. A swept override is exempt only when the selected source
+  // itself reads that variable: removing it from the environment changes this
+  // source's own delete targets, so the path is provably its own.
+  const protectedPaths = new Set<string>(authoritativeStatePaths(context));
+  for (const override of sweptPathOverrides(context)) {
+    const withoutVar = { ...context, env: { ...envForContext(context), [override.name]: undefined } };
+    let ownsIt = false;
+    try {
+      const before = new Set(sourceDeleteTargets(selectedSource, withoutVar).map((target) => resolve(target.path)));
+      const after = new Set(sourceDeleteTargets(selectedSource, context).map((target) => resolve(target.path)));
+      ownsIt = after.has(override.path) && !before.has(override.path);
+    } catch { /* cannot prove it is the source's own: stays protected */ }
+    if (!ownsIt) protectedPaths.add(override.path);
+  }
   for (const other of lifecycleSourceSpecs()) {
     if (own.has(other.sourceId)) continue;
     for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
@@ -1811,7 +1824,7 @@ function assertRawStateTargetsContained(
     for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
-  const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve(path), canonicalPath(path)]);
+  const protectedCanonical = withSqliteSidecars(protectedPaths).flatMap((path) => [resolve(path), canonicalPath(path)]);
   for (const target of stateTargets) {
     const candidates = [resolve(target.path), canonicalPath(target.path)];
     for (const protectedPath of protectedCanonical) {
@@ -1884,19 +1897,35 @@ function authoritativeStatePaths(context: LifecyclePathContext): string[] {
     ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
     ...mediaCacheDeleteTargets(context).map((target) => target.path),
   ]) files.add(path);
-  // Every other file or store a deployment relocates by an OLYMPUS_* path
-  // variable (shared stores, ledgers, budget and broker state, drains). One
-  // sweep by name instead of a list somebody must remember to extend; a
-  // selected source's own targets are exempted by the caller.
-  for (const [name, value] of Object.entries(env)) {
+  return [...files];
+}
+
+/**
+ * Every other file or store a deployment relocates by an OLYMPUS_* path
+ * variable (shared stores, ledgers, budget and broker state, drains), found by
+ * variable NAME so none can be forgotten. A relative value is resolved the way
+ * its consumer resolves it (against the working directory), so a relative
+ * override cannot slip past the overlap check.
+ */
+function sweptPathOverrides(context: LifecyclePathContext): Array<{ name: string; path: string }> {
+  const out: Array<{ name: string; path: string }> = [];
+  for (const [name, value] of Object.entries(envForContext(context))) {
     if (!SHARED_PATH_ENV_NAME.test(name) || typeof value !== 'string') continue;
     const trimmed = value.trim();
-    if (trimmed.startsWith('/')) files.add(resolve(trimmed));
+    if (!trimmed || trimmed === ':memory:' || trimmed.startsWith('{')) continue;
+    out.push({ name, path: resolve(trimmed) });
   }
-  for (const path of [...files]) {
-    if (/\.(sqlite3?|db)$/.test(path)) for (const suffix of ['-wal', '-shm', '-journal']) files.add(`${path}${suffix}`);
+  return out;
+}
+
+const SQLITE_FILE = /\.(sqlite3?|db)$/;
+function withSqliteSidecars(paths: Iterable<string>): string[] {
+  const all = new Set<string>();
+  for (const path of paths) {
+    all.add(path);
+    if (SQLITE_FILE.test(path)) for (const suffix of ['-wal', '-shm', '-journal']) all.add(`${path}${suffix}`);
   }
-  return [...files];
+  return [...all];
 }
 
 /** Env variables that relocate a file or store: matched by name so none can be forgotten. */

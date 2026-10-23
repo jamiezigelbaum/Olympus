@@ -22,8 +22,16 @@ export interface StoreCustody {
   assertOpen(): void;
   /** Run `work` as admitted: counted while it runs, refused while fenced. */
   admit<T>(work: () => Promise<T>): Promise<T>;
-  /** Wrap a function so every call is admitted. */
+  /** Wrap an async function so every call is admitted and its result withheld if a delete began meanwhile. */
   guard<A extends unknown[], R>(work: (...args: A) => Promise<R>): (...args: A) => Promise<R>;
+  /**
+   * Wrap an object (or function) so every call is admitted for as long as its
+   * result is pending: a call made before the fence that is still reading when
+   * a delete begins is counted and waited for; one made after is refused.
+   */
+  retain<T extends object>(target: T): T;
+  /** Called each time the fence goes up (e.g. to drop cached answers built from the stores). */
+  onFence(listener: () => void): void;
   fence(): void;
   lift(): void;
   /** Resolves true once nothing admitted is running, false at the timeout. */
@@ -33,6 +41,7 @@ export interface StoreCustody {
 export function createStoreCustody(): StoreCustody {
   let reopening = false;
   let inflight = 0;
+  const fenceListeners: Array<() => void> = [];
   const custody: StoreCustody = {
     get reopening() { return reopening; },
     get inflight() { return inflight; },
@@ -47,9 +56,47 @@ export function createStoreCustody(): StoreCustody {
       }
     },
     guard(work) {
-      return (...args) => custody.admit(() => work(...args));
+      // Held from start to finish, and re-checked before the result leaves: a
+      // result read from stores a delete has since removed is not published.
+      return (...args) => custody.admit(async () => {
+        const result = await work(...args);
+        if (reopening) throw new StoreReopeningError();
+        return result;
+      });
     },
-    fence() { reopening = true; },
+    retain<T extends object>(target: T): T {
+      const call = (fn: (...args: unknown[]) => unknown, thisArg: unknown, args: unknown[]): unknown => {
+        if (reopening) throw new StoreReopeningError();
+        inflight += 1;
+        let pending = false;
+        try {
+          const result = fn.apply(thisArg, args);
+          if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+            pending = true;
+            return (result as Promise<unknown>).finally(() => { inflight -= 1; });
+          }
+          return result;
+        } finally {
+          if (!pending) inflight -= 1;
+        }
+      };
+      if (typeof target === 'function') {
+        return new Proxy(target, { apply: (fn, thisArg, args) => call(fn as never, thisArg, args) });
+      }
+      return new Proxy(target, {
+        get(obj, key) {
+          const value = Reflect.get(obj, key, obj);
+          return typeof value === 'function' ? (...args: unknown[]) => call(value as never, obj, args) : value;
+        },
+      });
+    },
+    onFence(listener) { fenceListeners.push(listener); },
+    fence() {
+      reopening = true;
+      for (const listener of fenceListeners) {
+        try { listener(); } catch { /* a listener must not keep the delete from fencing */ }
+      }
+    },
     lift() { reopening = false; },
     async drain(timeoutMs) {
       const until = Date.now() + timeoutMs;
@@ -68,7 +115,25 @@ export function createStoreCustody(): StoreCustody {
 export function guardLanes<F extends (...args: never[]) => unknown>(custody: StoreCustody, lanes: F): F {
   const guarded = ((...args: Parameters<F>) => {
     custody.assertOpen();
-    return lanes(...args);
+    const built = lanes(...args) as Record<string, unknown> | undefined;
+    if (!built || typeof built !== 'object') return built;
+    // Everything on the lanes that reads a store or ledger retains custody per
+    // call, so no reader can start before the fence and still be running when
+    // the delete unlinks files.
+    const retainEach = (value: unknown): unknown => {
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
+        [key, entry && typeof entry === 'object' ? custody.retain(entry as object) : entry]));
+    };
+    const out: Record<string, unknown> = { ...built };
+    if (built.adapters) out.adapters = retainEach(built.adapters);
+    if (built.contentProviders) out.contentProviders = retainEach(built.contentProviders);
+    for (const key of ['visibilityGate', 'secretLocations', 'classificationCoverage']) {
+      const entry = built[key];
+      if (entry && typeof entry === 'object') out[key] = custody.retain(entry as object);
+      else if (typeof entry === 'function') out[key] = custody.retain(entry as (...a: unknown[]) => unknown);
+    }
+    return out;
   }) as F;
   return Object.assign(guarded, lanes);
 }

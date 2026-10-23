@@ -403,6 +403,64 @@ describe('shared files and stores stay out of a recursive delete, whichever vari
     });
   }
 
+  test('a state-directory override that IS an authoritative file is refused, never selected for removal', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-shared-file-'));
+    const homeDir = join(dir, 'home');
+    const config = join(homeDir, '.olympus', 'config.json');
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, '{"keep":true}');
+    try {
+      expect(() => deleteOlympusData({ sourceId: 'telegram.messages', homeDir, env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: config } } as never))
+        .toThrow('overlaps another source');
+      expect(readFileSync(config, 'utf8')).toBe('{"keep":true}');
+      // Also through the variable that relocates the config itself.
+      const moved = join(homeDir, 'elsewhere', 'owner.json');
+      mkdirSync(dirname(moved), { recursive: true });
+      writeFileSync(moved, 'x');
+      expect(() => deleteOlympusData({ sourceId: 'telegram.messages', homeDir, env: { OLYMPUS_CONFIG: moved, OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: moved } } as never))
+        .toThrow('overlaps another source');
+      expect(existsSync(moved)).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('a RELATIVE override is resolved the way its consumer resolves it before the overlap check', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-relative-'));
+    const homeDir = join(dir, 'home');
+    const gw = join(homeDir, '.local', 'share', 'olympus', 'gw');
+    mkdirSync(gw, { recursive: true });
+    writeFileSync(join(gw, 'broker.json'), 'x');
+    const cwd = process.cwd();
+    try {
+      process.chdir(gw);
+      expect(() => deleteOlympusData({
+        sourceId: 'telegram.messages', homeDir,
+        env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, OLYMPUS_CREDENTIAL_BROKER_STATE_PATH: 'broker.json' },
+      } as never)).toThrow('overlaps another source');
+      expect(existsSync(join(gw, 'broker.json'))).toBe(true);
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a source\'s own relocated legacy index and its journal do not read as shared', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-own-journal-'));
+    const homeDir = join(dir, 'home');
+    const gw = join(homeDir, '.local', 'share', 'olympus', 'gw');
+    mkdirSync(gw, { recursive: true });
+    const legacy = join(gw, 'legacy.sqlite');
+    writeFileSync(legacy, 'x');
+    writeFileSync(`${legacy}-journal`, 'x');
+    try {
+      const result = deleteOlympusData({
+        sourceId: 'telegram.messages', homeDir,
+        env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH: legacy },
+      } as never);
+      expect(result.removed).toContain(gw);
+      expect(existsSync(gw)).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('every OLYMPUS_*_PATH / _DB_PATH variable the source reads is covered by the name sweep', () => {
     const { readdirSync, readFileSync, statSync } = require('node:fs');
     const names = new Set<string>();

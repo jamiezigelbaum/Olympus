@@ -12,9 +12,9 @@ import { isSecureSensitivity, type SourceTrustDomain } from '../../core/source-i
 import type { SecretLocationNote } from '../../core/evidence-pack.ts';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { FileLeaseBusyError } from '../../core/file-lease.ts';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
 import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
@@ -269,7 +269,8 @@ import {
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles, thisComputerStateUnreadable } from '../../core/this-computer.ts';
-import { dataDeleteCustody, deleteOlympusDataWithCustody, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { dataDeleteCustody, deleteOlympusDataWithCustody, lifecycleSourceSpecs, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { liftStoreFence, raiseStoreFence, waitForStoreHoldersGone } from '../connector-store/store-fence.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -2487,6 +2488,27 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 'Olympus is still using its stores for another request. Retry deleting its indexed data in a moment.',
               );
             }
+            // The embedding drain can run as a separate supervised process that
+            // keeps these stores open (direct mode), out of this process's
+            // sight. Fence each store file and wait for every live holder to
+            // let go; if one cannot be confirmed gone, nothing is deleted.
+            const storeFiles = (lifecycleSourceSpecs().find((spec) => spec.sourceId === sourceId || spec.sourceAliases?.includes(sourceId))
+              ?.connectorStorePaths?.(pathContext) ?? []).filter((path) => path !== ':memory:');
+            const liftStoreFences = () => { for (const path of storeFiles) { try { liftStoreFence(path); } catch { /* the file may already be gone */ } } };
+            try {
+              for (const path of storeFiles) if (existsSync(dirname(path))) raiseStoreFence(path);
+              if (!(await waitForStoreHoldersGone(storeFiles, restart.drainTimeoutMs ?? 5_000))) {
+                throw new EmailSourceWorkerError(
+                  409,
+                  'delete_source_busy',
+                  'Olympus\'s embedding drain is still using this source\'s stores. Retry deleting its indexed data in a moment.',
+                );
+              }
+            } catch (error) {
+              liftStoreFences();
+              requestCustody.lift();
+              throw error;
+            }
             let removedCount = 0;
             let failed = false;
             try {
@@ -2494,6 +2516,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             } catch {
               failed = true;
             }
+            // The drain gives up its hold for good with the files; a store it
+            // later finds is a new one the restart created.
+            liftStoreFences();
             // Whatever the delete did, some stores may already be gone: the
             // worker reopens them either way. The fence stays up until that
             // restart lands (the process exits); if none could be requested

@@ -217,6 +217,12 @@ export interface SourceAnswerJobRegistryOptions {
    * Checked on every sweep; a revoked owner's jobs are aborted and dropped.
    */
   isOwnerRevoked?: (owner: string) => boolean;
+  /**
+   * Throws while the stores are fenced (indexed data is being deleted):
+   * checked when a result is collected and again just before it is returned,
+   * so a cached answer is never published from deleted data.
+   */
+  assertOpen?: () => void;
   /** Background connections wait behind the owner's own answers; see the module comment. */
   priority?: SourceAnswerPriorityOptions;
 }
@@ -225,12 +231,14 @@ export class SourceAnswerJobRegistry {
   readonly limits: SourceAnswerJobLimits;
   private readonly now: () => number;
   private readonly isOwnerRevoked: ((owner: string) => boolean) | undefined;
+  private readonly assertOpen: (() => void) | undefined;
   private readonly jobs = new Map<string, JobRecord>();
   private readonly running = new Map<string, number>();
   private runningTotal = 0;
   private readonly priority: Priority | undefined;
 
   constructor(options: SourceAnswerJobRegistryOptions = {}) {
+    this.assertOpen = options.assertOpen;
     const limits = {
       handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
       resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
@@ -361,6 +369,7 @@ export class SourceAnswerJobRegistry {
    * id is one indistinguishable refusal.
    */
   async result(owner: string, jobId: unknown, signal?: AbortSignal): Promise<unknown> {
+    this.assertOpen?.();
     this.sweep();
     const job = typeof jobId === 'string' && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
     if (!job || !sameOwner(job.owner, owner)) throw sourceAnswerJobNotFound();
@@ -381,6 +390,7 @@ export class SourceAnswerJobRegistry {
     }
     // Dropped while waiting (its connection was revoked).
     if (!this.jobs.has(job.id)) throw sourceAnswerJobNotFound();
+    this.assertOpen?.();
     if (!job.outcome) return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
     if (job.outcome.ok) {
       // The collecting call revalidates the answer against its manifests.
@@ -428,6 +438,21 @@ export class SourceAnswerJobRegistry {
       job.finish({ ok: false, error: sourceAnswerJobNotFound() });
     }
     this.dispatch();
+  }
+
+  /**
+   * Aborts and forgets every job and waiting call of every owner. Used when
+   * indexed data is deleted: a finished answer cached here was built from it.
+   */
+  dropAll(): void {
+    const owners = new Set<string>();
+    for (const job of this.jobs.values()) owners.add(job.owner);
+    const priority = this.priority;
+    if (priority) {
+      for (const owner of priority.queues.keys()) owners.add(owner);
+      for (const waiter of priority.ownerQueue) owners.add(waiter.owner);
+    }
+    for (const owner of owners) this.dropOwner(owner);
   }
 
   /** Expires finished jobs and drops revoked owners' jobs and waiting calls; also run on a timer by the worker. */

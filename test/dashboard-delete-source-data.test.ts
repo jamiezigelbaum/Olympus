@@ -151,12 +151,83 @@ describe('dashboard Delete indexed data route', () => {
       await expect(search('late')).rejects.toBeInstanceOf(StoreReopeningError);
       expect(() => lanes()).toThrow(StoreReopeningError);
       release();
-      await expect(running).resolves.toBe('rows');
+      // Finished, but read from stores the delete is removing: withheld, not published.
+      await expect(running).rejects.toBeInstanceOf(StoreReopeningError);
       expect((await deleting).status).toBe(200);
       expect(existsSync(f.store)).toBe(false);
       await expect(search('after')).rejects.toBeInstanceOf(StoreReopeningError);
       expect(() => lanes()).toThrow(StoreReopeningError);
     } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a lane read started before the fence and still running when delete begins is waited for, then refused', async () => {
+    const custody = createStoreCustody();
+    const f = fixture({ custody });
+    let release!: () => void;
+    try {
+      // What guardLanes hands out for each adapter: calls retain custody until they settle.
+      const adapter = custody.retain({
+        async search() { await new Promise<void>((resolve) => { release = resolve; }); return ['hit']; },
+      });
+      const reading = adapter.search();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const deleting = post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(existsSync(f.store)).toBe(true);
+      expect(() => adapter.search()).toThrow(StoreReopeningError);
+      release();
+      await expect(reading).resolves.toEqual(['hit']);
+      expect((await deleting).status).toBe(200);
+      expect(existsSync(f.store)).toBe(false);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a cached answer is dropped and its collection refused once the fence is up', async () => {
+    const { SourceAnswerJobRegistry } = await import('../src/core/source-answer-jobs.ts');
+    const custody = createStoreCustody();
+    const registry = new SourceAnswerJobRegistry({ assertOpen: () => custody.assertOpen(), limits: { handoffMs: 1, resultWaitMs: 0 } });
+    custody.onFence(() => registry.dropAll());
+    const pending = await registry.run({ registry, owner: 'remote:c1' }, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return 'answer built from the data a delete removes';
+    }) as { job_id: string };
+    expect(pending.job_id).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Finished and cached: collectable before the fence.
+    await expect(registry.result('remote:c1', pending.job_id)).resolves.toBe('answer built from the data a delete removes');
+    custody.fence();
+    expect(registry.stats().jobs).toBe(0);
+    await expect(registry.result('remote:c1', pending.job_id)).rejects.toBeInstanceOf(StoreReopeningError);
+  });
+
+  test('delete is refused while a live process (the embedding drain) holds the store, and succeeds once it lets go', async () => {
+    const { spawn } = await import('node:child_process');
+    const f = fixture();
+    const child = spawn('sleep', ['30']);
+    const mark = `${f.store}.holder-${child.pid}`;
+    try {
+      writeFileSync(mark, '');
+      const refused = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      expect(refused.status).toBe(409);
+      await expect(refused.json()).resolves.toMatchObject({ error: { code: 'delete_source_busy' } });
+      expect(existsSync(f.store)).toBe(true);
+      // The fence is lifted again so the drain can carry on.
+      expect(existsSync(`${f.store}.fence`)).toBe(false);
+      expect(f.restarts.requested).toBe(0);
+      // Not fenced for good either: the worker serves again.
+      expect((await f.worker.fetch(new Request('http://worker.test/v1/source/index/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }))).status).not.toBe(503);
+      child.kill();
+      await new Promise((resolve) => child.once('exit', resolve));
+      const done = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      expect(done.status).toBe(200);
+      expect(existsSync(f.store)).toBe(false);
+      expect(existsSync(`${f.store}.fence`)).toBe(false);
+    } finally {
+      child.kill();
       rmSync(f.root, { recursive: true, force: true });
     }
   });

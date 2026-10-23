@@ -16,6 +16,7 @@ import {
   createSourceIndexEmbeddingProviderFromSovereignty,
 } from '../src/workers/email-source/server.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { isStoreFenced, markStoreHeld, releaseStoreHeld } from '../src/workers/connector-store/store-fence.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
 import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
@@ -351,6 +352,11 @@ export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainCli
   private readonly secureLocalProvider: SourceEmbeddingProvider;
   private readonly internalProvider: SourceEmbeddingProvider | undefined;
   private readonly secureLocalEndpoint: string | undefined;
+  /** Stores being embedded into right now; a fenced store is closed only between calls. */
+  private inflight = 0;
+  /** A Delete indexed data fenced a store in this process: never reopen a file that is gone. */
+  private sawFence = false;
+  private readonly fenceTimer: ReturnType<typeof setInterval>;
 
   constructor(options: DirectClientOptions) {
     assertEmbeddingProviderForLane('secure_local', options.secureLocalProvider);
@@ -359,6 +365,25 @@ export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainCli
     this.secureLocalProvider = options.secureLocalProvider;
     this.internalProvider = options.internalProvider;
     this.secureLocalEndpoint = options.secureLocalEndpoint?.trim() || undefined;
+    // Delete indexed data fences a store's file and waits for this process to
+    // let go of it. An idle drain would otherwise hold the handle for a whole
+    // sleep, so the fence is watched on a short timer as well as per call.
+    this.fenceTimer = setInterval(() => this.yieldFencedStores(), 200);
+    this.fenceTimer.unref?.();
+  }
+
+  /** Close and release every open store whose file is fenced, unless one is mid-embed. */
+  private yieldFencedStores(): void {
+    if (this.inflight > 0) return;
+    for (const [corpusId, store] of this.connectorStores) {
+      const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === corpusId);
+      if (!config?.dbPath || !isStoreFenced(config.dbPath)) continue;
+      this.sawFence = true;
+      try { store.close(); } finally {
+        this.connectorStores.delete(corpusId);
+        releaseStoreHeld(config.dbPath);
+      }
+    }
   }
 
   /**
@@ -409,8 +434,15 @@ export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainCli
         + 'the current approved content scope. Use the default HTTP drain mode.',
       );
     }
+    const idle: DropboxEmbeddingResult = { chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0, status: 'completed' };
+    this.yieldFencedStores();
+    // While a delete holds the fence this store is not ours to open, and once
+    // it has been fenced here a missing file means deleted, not never-created.
+    if (isStoreFenced(config.dbPath)) { this.sawFence = true; return idle; }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
+      if (this.sawFence && !existsSync(config.dbPath)) return idle;
+      markStoreHeld(config.dbPath);
       store = new LocalConnectorStore({
         dbPath: config.dbPath,
         corpusId: config.corpusId,
@@ -425,10 +457,17 @@ export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainCli
     if (!provider) {
       throw new Error(`Direct connector-store embedding has no sovereignty-resolved ${config.trustDomain} provider.`);
     }
-    const result = await store.embedChunks({
-      provider,
-      ...(request.max_pending_chunks !== undefined ? { limit: request.max_pending_chunks } : {}),
-    });
+    this.inflight += 1;
+    let result;
+    try {
+      result = await store.embedChunks({
+        provider,
+        ...(request.max_pending_chunks !== undefined ? { limit: request.max_pending_chunks } : {}),
+      });
+    } finally {
+      this.inflight -= 1;
+      this.yieldFencedStores();
+    }
     return {
       chunks_seen: result.chunksSeen,
       chunks_embedded: result.chunksEmbedded,
@@ -438,7 +477,13 @@ export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainCli
   }
 
   close(): void {
-    for (const store of this.connectorStores.values()) store.close();
+    clearInterval(this.fenceTimer);
+    for (const [corpusId, store] of this.connectorStores) {
+      store.close();
+      const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === corpusId);
+      if (config?.dbPath) releaseStoreHeld(config.dbPath);
+    }
+    this.connectorStores.clear();
   }
 }
 

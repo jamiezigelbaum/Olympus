@@ -238,6 +238,41 @@ describe('canonical connector-store embedding drain', () => {
     }
   });
 
+  test('a fenced store is closed and released at once, and not reopened while fenced or once deleted', async () => {
+    const { isStoreFenced, liftStoreFence, liveStoreHolders, raiseStoreFence, storeHolderPath } = await import('../src/workers/connector-store/store-fence.ts');
+    const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-fence-'));
+    const dbPath = join(root, 'email.sqlite');
+    const store = new LocalConnectorStore({ dbPath, corpusId: 'secure_local.email.private', family: 'email', trustDomain: 'secure_local' });
+    store.close();
+    const client = new DirectSourceEmbeddingDrainClient({
+      connectorStores: [{ corpusId: 'secure_local.email.private', dbPath, family: 'email', trustDomain: 'secure_local' }],
+      secureLocalProvider: provider('local-openai-compatible', 'local'),
+    });
+    try {
+      await client.embedConnectorStore({ corpus_id: 'secure_local.email.private' });
+      expect(existsSync(storeHolderPath(dbPath))).toBe(true);
+      // The delete (another process) raises the fence; an IDLE drain lets go on its timer.
+      raiseStoreFence(dbPath);
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      expect(existsSync(storeHolderPath(dbPath))).toBe(false);
+      // While fenced it neither opens nor embeds.
+      await expect(client.embedConnectorStore({ corpus_id: 'secure_local.email.private' })).resolves.toMatchObject({ chunks_seen: 0, status: 'completed' });
+      expect(existsSync(storeHolderPath(dbPath))).toBe(false);
+      // The files are deleted and the fence lifted: a deleted store is not recreated by the drain.
+      rmSync(dbPath, { force: true });
+      rmSync(`${dbPath}-wal`, { force: true });
+      rmSync(`${dbPath}-shm`, { force: true });
+      liftStoreFence(dbPath);
+      expect(isStoreFenced(dbPath)).toBe(false);
+      await client.embedConnectorStore({ corpus_id: 'secure_local.email.private' });
+      expect(existsSync(dbPath)).toBe(false);
+      expect(liveStoreHolders(dbPath)).toEqual([]);
+    } finally {
+      client.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('publishes a private content-free readiness receipt bound to the native nonce and pid', () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-ready-'));
     const path = join(root, 'state', 'readiness.json');

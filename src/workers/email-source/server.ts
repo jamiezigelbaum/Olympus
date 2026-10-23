@@ -3610,10 +3610,10 @@ export async function main(): Promise<void> {
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
-        releaseCheck: createReleaseTierCheck(
+        releaseCheck: storeCustody.retain(createReleaseTierCheck(
           () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
           () => secureDerivativeDefault ?? 'allow',
-        ),
+        )),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
@@ -3702,7 +3702,16 @@ export async function main(): Promise<void> {
   const sourceWatchStore = new LocalSourceWatchStore();
   const sourceWatchExecutor = createSourceWatchExecutorCapability({ executorId: 'source-watch-scheduler' });
   const sourceWatchSearch = sourceAnswerLanes
-    ? createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes)
+    ? (() => {
+        const inner = createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes);
+        return {
+          ...inner,
+          // Held from the first lane read to the end, and re-checked before the
+          // hits are handed to the watch pass to publish: a result read from
+          // stores a delete has since removed is discarded, not published.
+          search: storeCustody.guard((input: Parameters<typeof inner.search>[0]) => inner.search(input)),
+        } as typeof inner;
+      })()
     : undefined;
   const sourceWatchDeliveryTransport = createOpenClawSourceWatchDeliveryTransport({
     ...(authToken ? { authToken } : {}),
@@ -4753,10 +4762,10 @@ export async function main(): Promise<void> {
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
-    sourceAnswerReleaseCheck: createReleaseTierCheck(
+    sourceAnswerReleaseCheck: storeCustody.retain(createReleaseTierCheck(
       () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
       () => secureDerivativeDefault ?? 'allow',
-    ),
+    )),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -5049,6 +5058,7 @@ export async function main(): Promise<void> {
   const { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv } = await import('../../core/source-answer-jobs.ts');
   const sourceAnswerJobs = new SourceAnswerJobRegistry({
     limits: sourceAnswerJobLimitsFromEnv(process.env, 'remote'),
+    assertOpen: () => storeCustody.assertOpen(),
     // A revoked connection's jobs are aborted and dropped. Revocation can come
     // from the CLI (another process), so the store is the authority.
     isOwnerRevoked: (owner) => {
@@ -5068,6 +5078,8 @@ export async function main(): Promise<void> {
       },
     },
   });
+  // A finished answer cached here was built from the stores a delete removes.
+  storeCustody.onFence(() => sourceAnswerJobs.dropAll());
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30_000);
   sourceAnswerJobSweep.unref?.();
   // One-time private answers for ChatGPT's private answer panel
@@ -5092,9 +5104,9 @@ export async function main(): Promise<void> {
   // Whether each Private item may be read by a model right now, from live
   // store, ledger and scope state: asked before every model submission and
   // before an answer is sealed. Without the answer lanes nothing is eligible.
-  const privateEvidenceEligible = async (items: readonly Readonly<Record<string, unknown>>[]) => (sourceAnswerLanes
+  const privateEvidenceEligible = storeCustody.guard(async (items: readonly Readonly<Record<string, unknown>>[]) => (sourceAnswerLanes
     ? checkPrivateEvidenceItems({ lanes: sourceAnswerLanes, items })
-    : items.map(() => false));
+    : items.map(() => false)));
   // "Open on this Mac" for a cited file: macOS `open`, on a path this engine
   // resolved for a cited source (never a path from the request), checked
   // again now: no symlink, still inside a Dropbox folder, and only a
@@ -5115,7 +5127,7 @@ export async function main(): Promise<void> {
     )),
     // An item that clearly leads is read again, in depth, from its own store.
     ...(sourceAnswerLanes
-      ? { readItem: (item, request) => readPrivateEvidenceItem({ lanes: sourceAnswerLanes!, item, ...request }) }
+      ? { readItem: storeCustody.guard((item: Readonly<Record<string, unknown>>, request: { question: string; maxChars: number }) => readPrivateEvidenceItem({ lanes: sourceAnswerLanes!, item, ...request })) }
       : {}),
     sourceLinks: (item) => {
       const provenance = item.provenance as { sourceItem?: { provider?: unknown }; citation?: { uri?: unknown } } | undefined;
@@ -5165,10 +5177,10 @@ export async function main(): Promise<void> {
   // The same ledgers and the same derivative posture the answer handler
   // uses, read when a remote agent collects an answer: an item the answer
   // read that was reclassified since it was written is caught there.
-  const remoteReleaseCheck = createReleaseTierCheck(
+  const remoteReleaseCheck = storeCustody.retain(createReleaseTierCheck(
     () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
     () => secureDerivativeDefault ?? 'allow',
-  );
+  ));
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
   // retrieval through the same scoped adapters with only the built-in
@@ -5408,9 +5420,9 @@ export async function main(): Promise<void> {
   // "Couldn't check yet" records are re-probed here every ten minutes.
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
-    probe: (request, timeoutMs) => (sourceAnswerLanes
-      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
-      : Promise.resolve('unknown' as const)),
+    probe: storeCustody.guard((request: object, timeoutMs?: number) => (sourceAnswerLanes
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs: timeoutMs as number })
+      : Promise.resolve('unknown' as const))),
     store: waitingQuestionStore,
     isActive: connectionActive,
     // The re-check is background work: it waits on the model's keyword
