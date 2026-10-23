@@ -104,6 +104,8 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
     await ctx.call('POST', '/dashboard/sync-now', { source: 'local.files' });
     card = await until(async () => { const now = await ctx.cardOf('local_files'); // `synced`, not `syncing`: while the read is under way the row offers fewer actions, and the page would change under the first presses.
       return connected(now) && now?.connection?.state === 'synced' && items(now) > 0 && (!strict || (now?.schedule?.missing_folders?.length ?? 0) === 0) ? now : undefined; }, strict ? 300_000 : 120_000, 3_000);
+    // The engine is busy embedding what it just read, and another source's action (a delete) waits behind that: the state is reached once it is quiet (best effort, a source that never embeds is not held up).
+    if (card) card = (await until(async () => { const now = await ctx.cardOf('local_files'); return Number(now?.coverage?.embedded_items ?? 0) >= items(now) ? now : undefined; }, 240_000, 5_000)) ?? card;
     return card ? { ok: true, detail: `Files on this computer: ${summary(card)}${(card?.schedule?.missing_folders?.length ?? 0) > 0 ? ` (card still lists ${card.schedule.missing_folders.length} missing folder(s) although the folder is back)` : ''}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))}; schedule ${JSON.stringify((await ctx.cardOf('local_files'))?.schedule ?? null).slice(0, 600)})` };
   };
   const disconnect = async (): Promise<StateResult> => {
