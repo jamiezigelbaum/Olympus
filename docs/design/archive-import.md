@@ -27,9 +27,9 @@ same way, with the same privacy and the same status.
   Reflect/Roam privacy-default conflict. A second round added WhatsApp
   message identity, bounded parsing of chat exports and zips, and the
   snapshot-beside-live acceptance cases. A third round, with Codex's PR review, made
-  tiers follow the shared Personal-first classifier, capped Reflect and Roam
-  export size, bound resume to every file read, and required user approval
-  for agent-started imports.
+  tiers follow the shared classifier, moved Reflect and Roam to streaming
+  reads, bound resume to every file read, and required user approval for
+  agent-started imports.
 - **WhatsApp and Telegram exports are in scope** (owner, 2026-10-23), after
   mail.
 
@@ -108,9 +108,12 @@ classifier does not judge content already at that tier
 notes are tiered per item by the shared classifier like every other source.
 
 Both connectors also load a whole export at once (`reflect/connector.ts:139`,
-`roam/connector.ts:69`). Before either is public, they refuse an export over
-a checked size limit with a visible error; incremental parsing can replace
-the limit later.
+`roam/connector.ts:69`), so a large export could run the engine out of
+memory. They change to read incrementally before either is public: a
+streaming JSON parser (a proven library, not our own) for a single export
+file, one zip member at a time with streaming inflate, and only the current
+page of notes held in memory. No size limit: any export a person has must
+import.
 
 ### WhatsApp and Telegram exports
 
@@ -150,7 +153,7 @@ Both are in scope. They come after mail because they reuse the same spine
 1. Format registry, detection, archive identity and checkpoints, per-archive
    removal, `archive_import` operation, Archives source in the dashboard,
    with Reflect as the first format (its connector exists, so this proves the
-   spine without new parsing), with its size limit and `internal` default.
+   spine), with streaming reads and the `internal` default.
 2. Mail (mbox), with the streaming reader and file-selecting picker.
 3. Roam onto the registry; all Reflect and Roam allowlist entries removed.
 4. WhatsApp chat export, with the selected-file, scope-safe reads.
