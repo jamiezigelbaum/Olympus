@@ -167,7 +167,7 @@ describe('credential cross-process fencing', () => {
     const enteredPath = join(dir, 'owner-entered-commit');
     const releasePath = join(dir, 'release-owner');
     const lockPath = `${targetPath}.lock`;
-    const guardPath = `${lockPath}.commit`;
+    const guardPath = `${lockPath}.commit.1`;
     try {
       const owner = spawnBlockedCommitOwner({ targetPath, enteredPath, releasePath });
       await waitForFile(enteredPath);
@@ -207,7 +207,7 @@ describe('credential cross-process fencing', () => {
     const enteredPath = join(dir, 'owner-entered-commit');
     const releasePath = join(dir, 'release-owner');
     const lockPath = `${targetPath}.lock`;
-    const guardPath = `${lockPath}.commit`;
+    const guardPath = `${lockPath}.commit.1`;
     try {
       const owner = spawnBlockedCommitOwner({ targetPath, enteredPath, releasePath });
       await waitForFile(enteredPath);
@@ -263,7 +263,7 @@ describe('credential cross-process fencing', () => {
     const enteredPath = join(dir, 'owner-entered-commit');
     const releasePath = join(dir, 'release-owner');
     const lockPath = `${targetPath}.lock`;
-    const guardPath = `${lockPath}.commit`;
+    const guardPath = `${lockPath}.commit.1`;
     try {
       const owner = spawnBlockedCommitOwner({ targetPath, enteredPath, releasePath });
       await waitForFile(enteredPath);
@@ -363,7 +363,7 @@ describe('credential cross-process fencing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-reused-pid-guard-'));
     const targetPath = join(dir, 'credential-state.json');
     const lockPath = `${targetPath}.lock`;
-    const guardPath = `${lockPath}.commit`;
+    const guardPath = `${lockPath}.commit.1`;
     const orphanedAt = new Date(Date.now() - 60 * 60_000);
     const reusedPidInstance = reusedProcessInstance('orphaned-boot-instance');
     try {
@@ -398,7 +398,8 @@ describe('credential cross-process fencing', () => {
 
       expect(outcome).toBe('committed');
       expect(readFileSync(targetPath, 'utf8')).toBe('recovered\n');
-      expect(existsSync(guardPath)).toBe(false);
+      // The crashed holder's guard is superseded, never deleted; nothing of this run's is left.
+      expect(existsSync(`${lockPath}.commit.2`)).toBe(false);
       expect(existsSync(lockPath)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -414,7 +415,7 @@ describe('credential cross-process fencing', () => {
           throw new Error('deliberate commit failure');
         });
       })).rejects.toThrow('deliberate commit failure');
-      expect(existsSync(`${targetPath}.lock.commit`)).toBe(false);
+      expect(existsSync(`${targetPath}.lock.commit.1`)).toBe(false);
       expect(existsSync(`${targetPath}.lock`)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -425,7 +426,7 @@ describe('credential cross-process fencing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-reused-pid-sync-guard-'));
     const targetPath = join(dir, 'credential-state.json');
     const lockPath = `${targetPath}.lock`;
-    const guardPath = `${lockPath}.commit`;
+    const guardPath = `${lockPath}.commit.1`;
     const orphanedAt = new Date(Date.now() - 60 * 60_000);
     const record = {
       version: 1,
@@ -451,7 +452,8 @@ describe('credential cross-process fencing', () => {
       });
 
       expect(readFileSync(targetPath, 'utf8')).toBe('sync recovered\n');
-      expect(existsSync(guardPath)).toBe(false);
+      // The crashed holder's guard is superseded, never deleted; nothing of this run's is left.
+      expect(existsSync(`${lockPath}.commit.2`)).toBe(false);
       expect(existsSync(lockPath)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -462,7 +464,7 @@ describe('credential cross-process fencing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-unknown-instance-guard-'));
     const targetPath = join(dir, 'credential-state.json');
     const lockPath = `${targetPath}.lock`;
-    const guardPath = `${lockPath}.commit`;
+    const guardPath = `${lockPath}.commit.1`;
     const orphanedAt = new Date(Date.now() - 60 * 60_000);
     const legacyRecord = {
       version: 1,
@@ -761,7 +763,7 @@ async function spawnBlockedOwnerWithShortMicrosecondSuffix(rootDir: string): Pro
     const enteredPath = join(attemptDir, 'owner-entered-commit');
     const releasePath = join(attemptDir, 'release-owner');
     const lockPath = `${targetPath}.lock`;
-    const guardPath = `${lockPath}.commit`;
+    const guardPath = `${lockPath}.commit.1`;
     const owner = spawnBlockedCommitOwner({ targetPath, enteredPath, releasePath });
     await waitForFile(enteredPath);
     const record = JSON.parse(readFileSync(lockPath, 'utf8')) as {

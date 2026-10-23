@@ -2238,16 +2238,18 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 import {
   closeSync as closeSync3,
   fsyncSync as fsyncSync2,
+  linkSync,
   mkdirSync as mkdirSync3,
   openSync as openSync3,
+  readdirSync,
   readFileSync as readFileSync5,
   statSync as statSync4,
   unlinkSync,
   writeFileSync as writeFileSync4
 } from "node:fs";
-import { mkdir, open as open2, readFile, stat, unlink, utimes } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, utimes } from "node:fs/promises";
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname3 } from "node:path";
+import { basename as basename2, dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const normalized = normalizeOptions(options);
   const owner = await acquireFileLease(targetPath, normalized);
@@ -2320,7 +2322,7 @@ class AsyncFileLeaseOwner {
         throw error;
       }
     } finally {
-      await this.descriptor.close();
+      closeSync3(this.descriptor);
     }
   }
 }
@@ -2381,19 +2383,9 @@ async function acquireFileLease(targetPath, options) {
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID2();
-    let descriptor;
-    try {
-      descriptor = await open2(lockPath, "wx", 384);
-      const record = leaseRecord(token);
-      writeFileSync4(descriptor.fd, JSON.stringify(record), "utf8");
-      fsyncSync2(descriptor.fd);
+    const descriptor = publishRecordExclusive(lockPath, token);
+    if (descriptor !== undefined) {
       return new AsyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      await descriptor?.close().catch(() => {
-        return;
-      });
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
     }
     if (await removeStaleLease(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
       lateTakeoverRetry ||= Date.now() >= deadline;
@@ -2411,19 +2403,9 @@ function acquireFileLeaseSync(targetPath, options) {
   mkdirSync3(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID2();
-    try {
-      const descriptor = openSync3(lockPath, "wx", 384);
-      try {
-        writeFileSync4(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
-        fsyncSync2(descriptor);
-      } catch (error) {
-        closeSync3(descriptor);
-        throw error;
-      }
+    const descriptor = publishRecordExclusive(lockPath, token);
+    if (descriptor !== undefined) {
       return new SyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
     }
     if (removeStaleLeaseSync(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
       lateTakeoverRetry ||= Date.now() >= deadline;
@@ -2434,19 +2416,35 @@ function acquireFileLeaseSync(targetPath, options) {
     sleepSync(options.pollIntervalMs);
   }
 }
+function publishRecordExclusive(finalPath, token) {
+  const tempPath = `${finalPath}.tmp-${token}`;
+  const descriptor = openSync3(tempPath, "wx", 384);
+  try {
+    writeFileSync4(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
+    fsyncSync2(descriptor);
+    linkSync(tempPath, finalPath);
+  } catch (error) {
+    closeSync3(descriptor);
+    unlinkQuietSync(tempPath);
+    if (isNodeErrorWithCode(error, "EEXIST"))
+      return;
+    throw error;
+  }
+  unlinkQuietSync(tempPath);
+  return descriptor;
+}
+function unlinkQuietSync(path) {
+  try {
+    unlinkSync(path);
+  } catch {}
+}
 async function removeStaleLease(targetPath, lockPath, options) {
   return withAsyncCommitGuard(targetPath, lockPath, options, async () => {
     const observed = await readLeaseRecord(lockPath);
     if (!await leaseIsStale(lockPath, observed, options.staleAfterMs))
       return false;
-    const confirmed = await readLeaseRecord(lockPath);
-    if (observed && confirmed?.token !== observed.token)
-      return false;
-    await unlink(lockPath).catch((error) => {
-      if (!isNodeErrorWithCode(error, "ENOENT"))
-        throw error;
-    });
-    return true;
+    fileLeaseTestHooks.afterLeaseJudgedStale?.();
+    return unlinkIfStillTheObservedLease(lockPath, observed, readLeaseRecordSync(lockPath));
   });
 }
 function removeStaleLeaseSync(targetPath, lockPath, options) {
@@ -2454,152 +2452,122 @@ function removeStaleLeaseSync(targetPath, lockPath, options) {
     const observed = readLeaseRecordSync(lockPath);
     if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs))
       return false;
-    const confirmed = readLeaseRecordSync(lockPath);
-    if (observed && confirmed?.token !== observed.token)
-      return false;
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "ENOENT"))
-        throw error;
-    }
-    return true;
+    fileLeaseTestHooks.afterLeaseJudgedStale?.();
+    return unlinkIfStillTheObservedLease(lockPath, observed, readLeaseRecordSync(lockPath));
   });
 }
-async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  let lateTakeoverRetry = false;
-  const token = randomUUID2();
-  let descriptor;
-  while (!descriptor) {
-    try {
-      descriptor = await open2(guardPath, "wx", 384);
-      writeFileSync4(descriptor.fd, JSON.stringify(leaseRecord(token)), "utf8");
-      fsyncSync2(descriptor.fd);
-    } catch (error) {
-      const created = descriptor !== undefined;
-      await descriptor?.close().catch(() => {
-        return;
-      });
-      descriptor = undefined;
-      if (!isNodeErrorWithCode(error, "EEXIST")) {
-        if (created)
-          await unlink(guardPath).catch(() => {
-            return;
-          });
-        throw error;
-      }
-      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline)
-        throw new FileLeaseBusyError(targetPath);
-      await sleep(options.pollIntervalMs);
-    }
-  }
+function unlinkIfStillTheObservedLease(lockPath, observed, confirmed) {
+  if (confirmed !== undefined && confirmed.token !== observed?.token)
+    return false;
   try {
-    return await callback();
-  } finally {
-    try {
-      if ((await readLeaseRecord(guardPath))?.token === token) {
-        await unlink(guardPath).catch((error) => {
-          if (!isNodeErrorWithCode(error, "ENOENT"))
-            throw error;
-        });
-      }
-    } finally {
-      await descriptor.close();
-    }
-  }
-}
-function withSyncCommitGuard(targetPath, lockPath, options, callback) {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  let lateTakeoverRetry = false;
-  const token = randomUUID2();
-  let descriptor;
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync3(guardPath, "wx", 384);
-      writeFileSync4(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
-      fsyncSync2(descriptor);
-    } catch (error) {
-      if (descriptor !== undefined) {
-        closeSync3(descriptor);
-        descriptor = undefined;
-        try {
-          unlinkSync(guardPath);
-        } catch {}
-      }
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
-      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline)
-        throw new FileLeaseBusyError(targetPath);
-      sleepSync(options.pollIntervalMs);
-    }
-  }
-  try {
-    return callback();
-  } finally {
-    try {
-      if (readLeaseRecordSync(guardPath)?.token === token) {
-        try {
-          unlinkSync(guardPath);
-        } catch (error) {
-          if (!isNodeErrorWithCode(error, "ENOENT"))
-            throw error;
-        }
-      }
-    } finally {
-      closeSync3(descriptor);
-    }
-  }
-}
-async function removeAbandonedCommitGuard(path, staleAfterMs) {
-  const observed = await readLeaseRecord(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed))
-      return false;
-    const confirmed = await readLeaseRecord(path);
-    if (confirmed?.token !== observed.token)
-      return false;
-  } else {
-    const age = await leaseAgeMs(path);
-    if (age === undefined || age < staleAfterMs)
-      return false;
-  }
-  await unlink(path).catch((error) => {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
-  });
-  return true;
-}
-function removeAbandonedCommitGuardSync(path, staleAfterMs) {
-  const observed = readLeaseRecordSync(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed))
-      return false;
-    const confirmed = readLeaseRecordSync(path);
-    if (confirmed?.token !== observed.token)
-      return false;
-  } else {
-    const age = leaseAgeMsSync(path);
-    if (age === undefined || age < staleAfterMs)
-      return false;
-  }
-  try {
-    unlinkSync(path);
+    unlinkSync(lockPath);
   } catch (error) {
     if (!isNodeErrorWithCode(error, "ENOENT"))
       throw error;
   }
   return true;
+}
+function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
+  const prefix = `${basename2(guardBase)}.`;
+  let highest = 0;
+  for (const name of readdirSync(dirname3(guardBase))) {
+    if (!name.startsWith(prefix))
+      continue;
+    const suffix = name.slice(prefix.length);
+    if (/^\d{1,15}$/.test(suffix))
+      highest = Math.max(highest, Number(suffix));
+  }
+  if (highest > 0) {
+    const currentPath = `${guardBase}.${highest}`;
+    let text2;
+    try {
+      text2 = readFileSync5(currentPath, "utf8");
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ENOENT"))
+        return "retry";
+      throw error;
+    }
+    const record = parseLeaseRecord(text2);
+    if (record) {
+      if (recordedProcessInstanceIsAlive(record))
+        return "busy";
+    } else {
+      const age = leaseAgeMsSync(currentPath);
+      if (age === undefined)
+        return "retry";
+      if (age < staleAfterMs)
+        return "busy";
+    }
+    fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
+  }
+  const path = `${guardBase}.${highest + 1}`;
+  const descriptor = publishRecordExclusive(path, token);
+  if (descriptor === undefined)
+    return "retry";
+  closeSync3(descriptor);
+  return { path, token };
+}
+function releaseCommitGuard(held) {
+  if (readLeaseRecordSync(held.path)?.token !== held.token)
+    return;
+  try {
+    unlinkSync(held.path);
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT"))
+      throw error;
+  }
+}
+async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
+  const guardBase = commitGuardPathFor(lockPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  const token = randomUUID2();
+  let held;
+  let immediateRetries = 0;
+  while (!held) {
+    const attempt = tryAcquireCommitGuardOnce(guardBase, token, options.staleAfterMs);
+    if (typeof attempt === "object") {
+      held = attempt;
+      break;
+    }
+    if (attempt === "retry" && immediateRetries < MAX_IMMEDIATE_GUARD_RETRIES) {
+      immediateRetries += 1;
+      continue;
+    }
+    if (Date.now() >= deadline)
+      throw new FileLeaseBusyError(targetPath);
+    await sleep(options.pollIntervalMs);
+  }
+  try {
+    return await callback();
+  } finally {
+    releaseCommitGuard(held);
+  }
+}
+function withSyncCommitGuard(targetPath, lockPath, options, callback) {
+  const guardBase = commitGuardPathFor(lockPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  const token = randomUUID2();
+  let held;
+  let immediateRetries = 0;
+  while (!held) {
+    const attempt = tryAcquireCommitGuardOnce(guardBase, token, options.staleAfterMs);
+    if (typeof attempt === "object") {
+      held = attempt;
+      break;
+    }
+    if (attempt === "retry" && immediateRetries < MAX_IMMEDIATE_GUARD_RETRIES) {
+      immediateRetries += 1;
+      continue;
+    }
+    if (Date.now() >= deadline)
+      throw new FileLeaseBusyError(targetPath);
+    sleepSync(options.pollIntervalMs);
+  }
+  try {
+    return callback();
+  } finally {
+    releaseCommitGuard(held);
+  }
 }
 async function leaseIsStale(lockPath, observed, staleAfterMs) {
   if (!observed) {
@@ -2925,7 +2893,7 @@ function sleepSync(ms) {
 function isNodeErrorWithCode(error, code) {
   return !!error && typeof error === "object" && "code" in error && error.code === code;
 }
-var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
+var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
 var init_file_lease = __esm(() => {
   DEFAULT_OPTIONS = {
     acquireTimeoutMs: 1e4,
@@ -2952,6 +2920,7 @@ var init_file_lease = __esm(() => {
       this.targetPath = targetPath;
     }
   };
+  fileLeaseTestHooks = {};
   CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
   CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
 });
@@ -4563,7 +4532,7 @@ var init_linux_desktop_entry = __esm(() => {
 });
 
 // src/core/linux-engine-layout.ts
-import { lstatSync as lstatSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync, realpathSync } from "node:fs";
+import { lstatSync as lstatSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync2, realpathSync } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname7, isAbsolute as isAbsolute5, join as join9, relative as relative2, resolve as resolve4, sep as sep2 } from "node:path";
 function absolute(value, name) {
@@ -4589,7 +4558,7 @@ function rawLayout(env, recordedDataDir) {
     const info = stat2(path);
     if (!info)
       return false;
-    return !info.isDirectory() || info.isSymbolicLink() || readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
+    return !info.isDirectory() || info.isSymbolicLink() || readdirSync2(path).some((name) => path !== xdgDataDir || name !== "engine");
   };
   const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
   const stateDir = join9(stateHome, "olympus/engine"), cacheDir = join9(cacheHome, "olympus/engine");
@@ -6708,7 +6677,7 @@ import {
   lstatSync as lstatSync7,
   mkdirSync as mkdirSync10,
   readFileSync as readFileSync18,
-  readdirSync as readdirSync2,
+  readdirSync as readdirSync3,
   realpathSync as realpathSync4,
   renameSync as renameSync3,
   rmSync as rmSync4,
@@ -7531,7 +7500,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes7 } from "node:crypto";
-import { chmodSync as chmodSync4, readFileSync as readFileSync19, readlinkSync, readdirSync as readdirSync3, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import { chmodSync as chmodSync4, readFileSync as readFileSync19, readlinkSync, readdirSync as readdirSync4, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
@@ -7629,7 +7598,7 @@ function connected(options) {
 function processGone(pgid) {
   if (process.platform === "linux") {
     try {
-      for (const name of readdirSync3("/proc")) {
+      for (const name of readdirSync4("/proc")) {
         if (!/^\d+$/.test(name))
           continue;
         try {
@@ -8347,7 +8316,7 @@ import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile2, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash4 } from "node:crypto";
-import { lstatSync as lstatSync8, readFileSync as readFileSync20, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
+import { lstatSync as lstatSync8, readFileSync as readFileSync20, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync5 } from "node:fs";
 import { dirname as dirname18, join as join26 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -8687,7 +8656,7 @@ var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
-  realProc = { read: (p) => readFileSync20(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync4(p) };
+  realProc = { read: (p) => readFileSync20(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync5(p) };
   execFileAsync = promisify(execFile2);
   hostChecks = new Map;
   injectedChecks = new WeakMap;
@@ -8741,7 +8710,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync7, chmodSync as chmodSync5, closeSync as closeSync5, constants as constants3, existsSync as existsSync9, mkdirSync as mkdirSync11, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync21, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync6, statSync as statSync14, writeFileSync as writeFileSync8 } from "node:fs";
+import { accessSync as accessSync7, chmodSync as chmodSync5, closeSync as closeSync5, constants as constants3, existsSync as existsSync9, mkdirSync as mkdirSync11, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync21, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync6, statSync as statSync14, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir11, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname19, isAbsolute as isAbsolute17, join as join27, resolve as resolvePath } from "node:path";
@@ -9666,7 +9635,7 @@ function linuxListenerPids(port) {
     return { kind: "not_visible" };
   let entries;
   try {
-    entries = readdirSync5("/proc").filter((name) => /^\d+$/.test(name));
+    entries = readdirSync6("/proc").filter((name) => /^\d+$/.test(name));
   } catch {
     return { kind: "unavailable" };
   }
@@ -9675,7 +9644,7 @@ function linuxListenerPids(port) {
   for (const pid of entries) {
     let fds;
     try {
-      fds = readdirSync5(`/proc/${pid}/fd`);
+      fds = readdirSync6(`/proc/${pid}/fd`);
     } catch {
       continue;
     }
@@ -23269,7 +23238,7 @@ var OWNER_BRIDGE_HOST_ENV = "OLYMPUS_OWNER_BRIDGE_HOST_SOCKET";
 init_config();
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { statSync as statSync8 } from "node:fs";
-import { basename as basename2, delimiter as delimiter2, isAbsolute as isAbsolute10, join as join15 } from "node:path";
+import { basename as basename3, delimiter as delimiter2, isAbsolute as isAbsolute10, join as join15 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 init_worker_auth();
 var SERVICE_ID3 = "olympus-worker";
@@ -23496,7 +23465,7 @@ function assertExecutableFile(path, label) {
   throw new Error(`Olympus ${label} is unavailable.`);
 }
 function isBunExecutableName(path) {
-  const name = basename2(path).toLowerCase();
+  const name = basename3(path).toLowerCase();
   return name === "bun" || name === "bun.exe";
 }
 async function authenticatedReadinessProbe(fetchWorker, url, authToken, instanceId, timeoutMs) {
@@ -24414,9 +24383,9 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { chmodSync as chmodSync6, closeSync as closeSync6, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync10, linkSync, mkdirSync as mkdirSync12, openSync as openSync5, readFileSync as readFileSync23, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync7, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
+import { chmodSync as chmodSync6, closeSync as closeSync6, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync10, linkSync as linkSync2, mkdirSync as mkdirSync12, openSync as openSync5, readFileSync as readFileSync23, readlinkSync as readlinkSync4, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync7, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
 import { createRequire as createRequire3 } from "node:module";
-import { basename as basename5, dirname as dirname21, join as join29, relative as relative4, resolve as resolve6, sep as sep5 } from "node:path";
+import { basename as basename6, dirname as dirname21, join as join29, relative as relative4, resolve as resolve6, sep as sep5 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();
@@ -24432,9 +24401,9 @@ init_file_lease();
 init_linux_engine_layout();
 import { spawnSync as spawnSync5 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync10, lstatSync as lstatSync9, readdirSync as readdirSync6, readFileSync as readFileSync22, renameSync as renameSync4, statSync as statSync15 } from "node:fs";
+import { existsSync as existsSync10, lstatSync as lstatSync9, readdirSync as readdirSync7, readFileSync as readFileSync22, renameSync as renameSync4, statSync as statSync15 } from "node:fs";
 import { homedir as homedir12, platform as osPlatform } from "node:os";
-import { basename as basename4, dirname as dirname20, isAbsolute as isAbsolute18, join as join28, resolve as resolvePath2 } from "node:path";
+import { basename as basename5, dirname as dirname20, isAbsolute as isAbsolute18, join as join28, resolve as resolvePath2 } from "node:path";
 
 // src/core/engine-children.ts
 init_atomic_file();
@@ -24489,7 +24458,7 @@ init_worker_auth();
 
 // src/core/worker-service.ts
 init_linux_engine_layout();
-import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join23, relative as relative3, sep as sep3 } from "node:path";
+import { basename as basename4, dirname as dirname16, isAbsolute as isAbsolute15, join as join23, relative as relative3, sep as sep3 } from "node:path";
 init_atomic_file();
 init_openclaw_executable();
 init_operation_error();
@@ -25368,7 +25337,7 @@ init_owner_config_read();
 import { createHash as createHash11 } from "node:crypto";
 import { existsSync as existsSync16, readFileSync as readFileSync26, statSync as statSync19 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
-import { basename as basename6, dirname as dirname27, join as join36 } from "node:path";
+import { basename as basename7, dirname as dirname27, join as join36 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 init_opsec();
 init_types();
@@ -25621,7 +25590,7 @@ function verifiedPackFile(path, sha256) {
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname27(fileURLToPath7(moduleUrl));
-  const root = basename6(here) === "core" && basename6(dirname27(here)) === "src" ? dirname27(dirname27(here)) : basename6(here) === "dist" ? dirname27(here) : undefined;
+  const root = basename7(here) === "core" && basename7(dirname27(here)) === "src" ? dirname27(dirname27(here)) : basename7(here) === "dist" ? dirname27(here) : undefined;
   return root !== undefined && existsSync16(join36(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {

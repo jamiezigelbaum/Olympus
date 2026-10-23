@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   statSync,
   unlinkSync,
@@ -12,7 +14,7 @@ import {
 } from 'node:fs';
 import { mkdir, open, readFile, stat, unlink, utimes } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname } from 'node:path';
+import { basename, dirname } from 'node:path';
 
 export interface FileLeaseOptions {
   acquireTimeoutMs?: number;
@@ -142,14 +144,14 @@ class AsyncFileLeaseOwner implements FileLease {
   readonly targetPath: string;
   readonly lockPath: string;
   private readonly token: string;
-  private readonly descriptor: Awaited<ReturnType<typeof open>>;
+  private readonly descriptor: number;
   private readonly options: NormalizedFileLeaseOptions;
 
   constructor(
     targetPath: string,
     lockPath: string,
     token: string,
-    descriptor: Awaited<ReturnType<typeof open>>,
+    descriptor: number,
     options: NormalizedFileLeaseOptions,
   ) {
     this.targetPath = targetPath;
@@ -201,7 +203,7 @@ class AsyncFileLeaseOwner implements FileLease {
         throw error;
       }
     } finally {
-      await this.descriptor.close();
+      closeSync(this.descriptor);
     }
   }
 }
@@ -276,24 +278,14 @@ async function acquireFileLease(
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
     const token = randomUUID();
-    let descriptor: Awaited<ReturnType<typeof open>> | undefined;
-    try {
-      descriptor = await open(lockPath, 'wx', 0o600);
-      const record = leaseRecord(token);
-      // Do not yield between exclusive creation and a parseable owner record:
-      // an aggressive stale observer must never mistake an active creator for
-      // an abandoned empty lockfile.
-      writeFileSync(descriptor.fd, JSON.stringify(record), 'utf8');
-      fsyncSync(descriptor.fd);
+    const descriptor = publishRecordExclusive(lockPath, token);
+    if (descriptor !== undefined) {
       return new AsyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      await descriptor?.close().catch(() => undefined);
-      if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
     }
     // A takeover that freed the lease retries the claim at once, even past the
     // deadline: the takeover itself may have spent the whole timeout (slow
     // runner, busy commit guard), and reporting "busy" for a lease nobody holds
-    // is wrong. O_EXCL still admits exactly one claimant.
+    // is wrong. Exclusive publication still admits exactly one claimant.
     if ((await removeStaleLease(targetPath, lockPath, options)) && (Date.now() < deadline || !lateTakeoverRetry)) {
       lateTakeoverRetry ||= Date.now() >= deadline;
       continue;
@@ -309,24 +301,13 @@ function acquireFileLeaseSync(
 ): SyncFileLeaseOwner {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  // One claim attempt after a takeover past the deadline, never more: a
-  // stream of owners that keep dying must not retry forever (PR #466 review).
   let lateTakeoverRetry = false;
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
     const token = randomUUID();
-    try {
-      const descriptor = openSync(lockPath, 'wx', 0o600);
-      try {
-        writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), 'utf8');
-        fsyncSync(descriptor);
-      } catch (error) {
-        closeSync(descriptor);
-        throw error;
-      }
+    const descriptor = publishRecordExclusive(lockPath, token);
+    if (descriptor !== undefined) {
       return new SyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
     }
     if ((removeStaleLeaseSync(targetPath, lockPath, options)) && (Date.now() < deadline || !lateTakeoverRetry)) {
       lateTakeoverRetry ||= Date.now() >= deadline;
@@ -334,6 +315,52 @@ function acquireFileLeaseSync(
     }
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
+  }
+}
+
+/**
+ * Test-only seams. Production never sets these; they let a test run another
+ * party's whole step between an observer's decision and its action, which is
+ * the interleaving the stale-reclaim races need.
+ */
+export const fileLeaseTestHooks: {
+  /** After a stale-lease observer read the lock and judged it stale, before it confirms. */
+  afterLeaseJudgedStale?: () => void;
+  /** After a guard acquirer judged the current guard abandoned, before it publishes its own. */
+  afterGuardJudgedAbandoned?: () => void;
+} = {};
+
+/**
+ * Publish an owner record at `finalPath` so that the file appears complete or
+ * not at all. The record is written and fsynced to a private temp file, then
+ * link()ed into place: link fails with EEXIST if anyone holds the name, so
+ * creation is exclusive, and no observer can ever see an empty or half-written
+ * record that it would have to guess about (a paused creator is therefore never
+ * mistaken for a crashed one). Returns the open descriptor of the published
+ * file, or undefined when the name is already taken.
+ */
+function publishRecordExclusive(finalPath: string, token: string): number | undefined {
+  const tempPath = `${finalPath}.tmp-${token}`;
+  const descriptor = openSync(tempPath, 'wx', 0o600);
+  try {
+    writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), 'utf8');
+    fsyncSync(descriptor);
+    linkSync(tempPath, finalPath);
+  } catch (error) {
+    closeSync(descriptor);
+    unlinkQuietSync(tempPath);
+    if (isNodeErrorWithCode(error, 'EEXIST')) return undefined;
+    throw error;
+  }
+  unlinkQuietSync(tempPath);
+  return descriptor;
+}
+
+function unlinkQuietSync(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Best-effort cleanup of a private temp name.
   }
 }
 
@@ -345,12 +372,8 @@ async function removeStaleLease(
   return withAsyncCommitGuard(targetPath, lockPath, options, async () => {
     const observed = await readLeaseRecord(lockPath);
     if (!await leaseIsStale(lockPath, observed, options.staleAfterMs)) return false;
-    const confirmed = await readLeaseRecord(lockPath);
-    if (observed && confirmed?.token !== observed.token) return false;
-    await unlink(lockPath).catch((error) => {
-      if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-    });
-    return true;
+    fileLeaseTestHooks.afterLeaseJudgedStale?.();
+    return unlinkIfStillTheObservedLease(lockPath, observed, readLeaseRecordSync(lockPath));
   });
 }
 
@@ -362,16 +385,100 @@ function removeStaleLeaseSync(
   return withSyncCommitGuard(targetPath, lockPath, options, () => {
     const observed = readLeaseRecordSync(lockPath);
     if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs)) return false;
-    const confirmed = readLeaseRecordSync(lockPath);
-    if (observed && confirmed?.token !== observed.token) return false;
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-    }
-    return true;
+    fileLeaseTestHooks.afterLeaseJudgedStale?.();
+    return unlinkIfStillTheObservedLease(lockPath, observed, readLeaseRecordSync(lockPath));
   });
 }
+
+/**
+ * Runs under the commit guard, which every unlink of the lock also holds, so
+ * the only way the file can change between observe and here is a writer that
+ * does not publish atomically. Anything that is not exactly what was judged
+ * stale is left alone: a record that became valid is a live owner, whether the
+ * observation was a parseable record or an empty/malformed file.
+ */
+function unlinkIfStillTheObservedLease(
+  lockPath: string,
+  observed: FileLeaseRecord | undefined,
+  confirmed: FileLeaseRecord | undefined,
+): boolean {
+  if (confirmed !== undefined && confirmed.token !== observed?.token) return false;
+  try {
+    unlinkSync(lockPath);
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
+  }
+  return true;
+}
+
+interface HeldCommitGuard {
+  path: string;
+  token: string;
+}
+
+type CommitGuardAttempt = HeldCommitGuard | 'busy' | 'retry';
+
+/**
+ * The commit guard serializes every compare-and-commit and every stale
+ * takeover. It is a numbered series, `<lock>.commit.<n>`: the holder owns the
+ * highest-numbered file and a successor claims `n + 1` with an exclusive
+ * link(). A crashed holder's file is therefore never deleted by anyone (a
+ * check-then-unlink reclaim cannot be made atomic, and a stale observer could
+ * delete a replacement guard); it is simply superseded, and a late observer's
+ * claim of the same number fails with EEXIST. Only the live holder removes its
+ * own file, at release. Files are never removed except by their own holder, so
+ * the numbers stay a gapless run and a stale view can never name a free number
+ * while a live guard sits above it. A crash while holding leaves one tiny file.
+ */
+function tryAcquireCommitGuardOnce(
+  guardBase: string,
+  token: string,
+  staleAfterMs: number,
+): CommitGuardAttempt {
+  const prefix = `${basename(guardBase)}.`;
+  let highest = 0;
+  for (const name of readdirSync(dirname(guardBase))) {
+    if (!name.startsWith(prefix)) continue;
+    const suffix = name.slice(prefix.length);
+    if (/^\d{1,15}$/.test(suffix)) highest = Math.max(highest, Number(suffix));
+  }
+  if (highest > 0) {
+    const currentPath = `${guardBase}.${highest}`;
+    let text: string;
+    try {
+      text = readFileSync(currentPath, 'utf8');
+    } catch (error) {
+      if (isNodeErrorWithCode(error, 'ENOENT')) return 'retry';
+      throw error;
+    }
+    const record = parseLeaseRecord(text);
+    if (record) {
+      if (recordedProcessInstanceIsAlive(record)) return 'busy';
+    } else {
+      // Not written by this code (publication is atomic); keep the age rule.
+      const age = leaseAgeMsSync(currentPath);
+      if (age === undefined) return 'retry';
+      if (age < staleAfterMs) return 'busy';
+    }
+    fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
+  }
+  const path = `${guardBase}.${highest + 1}`;
+  const descriptor = publishRecordExclusive(path, token);
+  if (descriptor === undefined) return 'retry';
+  closeSync(descriptor);
+  return { path, token };
+}
+
+function releaseCommitGuard(held: HeldCommitGuard): void {
+  if (readLeaseRecordSync(held.path)?.token !== held.token) return;
+  try {
+    unlinkSync(held.path);
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
+  }
+}
+
+const MAX_IMMEDIATE_GUARD_RETRIES = 50;
 
 async function withAsyncCommitGuard<T>(
   targetPath: string,
@@ -379,52 +486,30 @@ async function withAsyncCommitGuard<T>(
   options: NormalizedFileLeaseOptions,
   callback: () => Promise<T>,
 ): Promise<T> {
-  const guardPath = commitGuardPathFor(lockPath);
+  const guardBase = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  // One claim attempt after a takeover past the deadline, never more: a
-  // stream of owners that keep dying must not retry forever (PR #466 review).
-  let lateTakeoverRetry = false;
   const token = randomUUID();
-  let descriptor: Awaited<ReturnType<typeof open>> | undefined;
-  while (!descriptor) {
-    try {
-      descriptor = await open(guardPath, 'wx', 0o600);
-      // The guard becomes parseable in the same event-loop slice as O_EXCL.
-      // A crash may leave an empty orphan, but a live owner is never exposed as
-      // an old malformed guard merely because its first write was awaiting I/O.
-      writeFileSync(descriptor.fd, JSON.stringify(leaseRecord(token)), 'utf8');
-      fsyncSync(descriptor.fd);
-    } catch (error) {
-      // Only a guard this process created may be removed. An open that failed
-      // before the O_EXCL existence check (descriptor exhaustion) leaves a live
-      // holder's guard on disk, and deleting it would admit a second committer.
-      const created = descriptor !== undefined;
-      await descriptor?.close().catch(() => undefined);
-      descriptor = undefined;
-      if (!isNodeErrorWithCode(error, 'EEXIST')) {
-        if (created) await unlink(guardPath).catch(() => undefined);
-        throw error;
-      }
-      if ((await removeAbandonedCommitGuard(guardPath, options.staleAfterMs)) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
-      await sleep(options.pollIntervalMs);
+  let held: HeldCommitGuard | undefined;
+  let immediateRetries = 0;
+  while (!held) {
+    const attempt = tryAcquireCommitGuardOnce(guardBase, token, options.staleAfterMs);
+    if (typeof attempt === 'object') {
+      held = attempt;
+      break;
     }
+    // 'retry' means the series changed under us (a release or a rival's claim);
+    // look again at once, a bounded number of times, then fall back to polling.
+    if (attempt === 'retry' && immediateRetries < MAX_IMMEDIATE_GUARD_RETRIES) {
+      immediateRetries += 1;
+      continue;
+    }
+    if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
+    await sleep(options.pollIntervalMs);
   }
   try {
     return await callback();
   } finally {
-    try {
-      if ((await readLeaseRecord(guardPath))?.token === token) {
-        await unlink(guardPath).catch((error) => {
-          if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-        });
-      }
-    } finally {
-      await descriptor.close();
-    }
+    releaseCommitGuard(held);
   }
 }
 
@@ -434,86 +519,29 @@ function withSyncCommitGuard<T>(
   options: NormalizedFileLeaseOptions,
   callback: () => T,
 ): T {
-  const guardPath = commitGuardPathFor(lockPath);
+  const guardBase = commitGuardPathFor(lockPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  // One claim attempt after a takeover past the deadline, never more: a
-  // stream of owners that keep dying must not retry forever (PR #466 review).
-  let lateTakeoverRetry = false;
   const token = randomUUID();
-  let descriptor: number | undefined;
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync(guardPath, 'wx', 0o600);
-      writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), 'utf8');
-      fsyncSync(descriptor);
-    } catch (error) {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-        descriptor = undefined;
-        try {
-          unlinkSync(guardPath);
-        } catch {
-          // The create/write error is authoritative.
-        }
-      }
-      if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
-      if ((removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs)) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
-      sleepSync(options.pollIntervalMs);
+  let held: HeldCommitGuard | undefined;
+  let immediateRetries = 0;
+  while (!held) {
+    const attempt = tryAcquireCommitGuardOnce(guardBase, token, options.staleAfterMs);
+    if (typeof attempt === 'object') {
+      held = attempt;
+      break;
     }
+    if (attempt === 'retry' && immediateRetries < MAX_IMMEDIATE_GUARD_RETRIES) {
+      immediateRetries += 1;
+      continue;
+    }
+    if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
+    sleepSync(options.pollIntervalMs);
   }
   try {
     return callback();
   } finally {
-    try {
-      if (readLeaseRecordSync(guardPath)?.token === token) {
-        try {
-          unlinkSync(guardPath);
-        } catch (error) {
-          if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-        }
-      }
-    } finally {
-      closeSync(descriptor);
-    }
+    releaseCommitGuard(held);
   }
-}
-
-async function removeAbandonedCommitGuard(path: string, staleAfterMs: number): Promise<boolean> {
-  const observed = await readLeaseRecord(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed)) return false;
-    const confirmed = await readLeaseRecord(path);
-    if (confirmed?.token !== observed.token) return false;
-  } else {
-    const age = await leaseAgeMs(path);
-    if (age === undefined || age < staleAfterMs) return false;
-  }
-  await unlink(path).catch((error) => {
-    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-  });
-  return true;
-}
-
-function removeAbandonedCommitGuardSync(path: string, staleAfterMs: number): boolean {
-  const observed = readLeaseRecordSync(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed)) return false;
-    const confirmed = readLeaseRecordSync(path);
-    if (confirmed?.token !== observed.token) return false;
-  } else {
-    const age = leaseAgeMsSync(path);
-    if (age === undefined || age < staleAfterMs) return false;
-  }
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-  }
-  return true;
 }
 
 async function leaseIsStale(

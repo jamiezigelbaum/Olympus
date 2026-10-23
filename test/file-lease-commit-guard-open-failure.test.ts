@@ -44,7 +44,7 @@ describe('file lease commit guard', () => {
     };
     expect(outcome.code).toMatch(/^E[MN]FILE$/);
     expect(outcome.guardSurvived).toBe(true);
-    expect(existsSync(`${targetPath}.lock.commit`)).toBe(false);
+    expect(existsSync(`${targetPath}.lock.commit.1`)).toBe(false);
   }, 30_000);
 });
 
@@ -54,7 +54,7 @@ import { closeSync, existsSync, openSync, rmSync, writeFileSync } from 'node:fs'
 import { withFileLease } from './src/core/file-lease.ts';
 
 const targetPath = ${JSON.stringify(targetPath)};
-const guardPath = targetPath + '.lock.commit';
+const guardPath = targetPath + '.lock.commit.1';
 
 const outcome = await withFileLease(targetPath, async (lease) => {
   // Another party is inside its guarded region, and its record names a live

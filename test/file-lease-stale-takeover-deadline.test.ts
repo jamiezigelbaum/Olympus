@@ -27,7 +27,7 @@ function setup(): { target: string } {
   writeFileSync(`${target}.lock`, record('dead-owner', 2_147_483_000), { mode: 0o600 });
   // A live process briefly holds the commit guard, so the takeover waits one
   // poll interval, which is longer than the acquire timeout.
-  writeFileSync(`${target}.lock.commit`, record('guard', process.pid), { mode: 0o600 });
+  writeFileSync(`${target}.lock.commit.1`, record('guard', process.pid), { mode: 0o600 });
   return { target };
 }
 
@@ -36,14 +36,14 @@ const options = { acquireTimeoutMs: 50, pollIntervalMs: 120, staleAfterMs: Numbe
 describe('file lease stale takeover vs acquire deadline', () => {
   test('async: a takeover that outlasts the timeout still claims the freed lease', async () => {
     const { target } = setup();
-    setTimeout(() => rmSync(`${target}.lock.commit`, { force: true }), 20);
+    setTimeout(() => rmSync(`${target}.lock.commit.1`, { force: true }), 20);
     await expect(withFileLease(target, async () => 'held', options)).resolves.toBe('held');
     expect(existsSync(`${target}.lock`)).toBe(false);
   });
 
   test('sync: a takeover that outlasts the timeout still claims the freed lease', () => {
     const { target } = setup();
-    const releaser = Bun.spawn(['/bin/sh', '-c', `sleep 0.02; rm -f '${target}.lock.commit'`]);
+    const releaser = Bun.spawn(['/bin/sh', '-c', `sleep 0.02; rm -f '${target}.lock.commit.1'`]);
     expect(withFileLeaseSync(target, () => 'held', options)).toBe('held');
     releaser.kill();
   }, 10_000);
@@ -57,10 +57,9 @@ describe('file lease stale takeover vs acquire deadline', () => {
       await expect(withFileLease(target, async () => 'second', fast)).rejects.toBeInstanceOf(FileLeaseBusyError);
     }, fast);
   });
-
   test('owners that keep dying do not make the acquirer retry forever', async () => {
     const { target } = setup();
-    rmSync(`${target}.lock.commit`, { force: true });
+    rmSync(`${target}.lock.commit.1`, { force: true });
     // Another process keeps planting abandoned leases as fast as it can.
     const dead = record('dead-again', 2_147_483_000).replace(/'/g, '');
     const planter = Bun.spawn(['/bin/sh', '-c', `end=$(( $(date +%s) + 3 )); while [ $(date +%s) -lt $end ]; do printf '%s' '${dead}' > '${target}.lock'; done`]);

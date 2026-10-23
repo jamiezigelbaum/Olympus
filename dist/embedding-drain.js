@@ -8,16 +8,18 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   statSync,
   unlinkSync,
   writeFileSync
 } from "node:fs";
-import { mkdir, open, readFile, stat, unlink, utimes } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, utimes } from "node:fs/promises";
 import { createRequire as createRequire2 } from "node:module";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const normalized = normalizeOptions(options);
   const owner = await acquireFileLease(targetPath, normalized);
@@ -90,7 +92,7 @@ class AsyncFileLeaseOwner {
         throw error;
       }
     } finally {
-      await this.descriptor.close();
+      closeSync(this.descriptor);
     }
   }
 }
@@ -151,19 +153,9 @@ async function acquireFileLease(targetPath, options) {
   await mkdir(dirname(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID();
-    let descriptor;
-    try {
-      descriptor = await open(lockPath, "wx", 384);
-      const record = leaseRecord(token);
-      writeFileSync(descriptor.fd, JSON.stringify(record), "utf8");
-      fsyncSync(descriptor.fd);
+    const descriptor = publishRecordExclusive(lockPath, token);
+    if (descriptor !== undefined) {
       return new AsyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      await descriptor?.close().catch(() => {
-        return;
-      });
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
     }
     if (await removeStaleLease(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
       lateTakeoverRetry ||= Date.now() >= deadline;
@@ -181,19 +173,9 @@ function acquireFileLeaseSync(targetPath, options) {
   mkdirSync(dirname(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID();
-    try {
-      const descriptor = openSync(lockPath, "wx", 384);
-      try {
-        writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
-        fsyncSync(descriptor);
-      } catch (error) {
-        closeSync(descriptor);
-        throw error;
-      }
+    const descriptor = publishRecordExclusive(lockPath, token);
+    if (descriptor !== undefined) {
       return new SyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
     }
     if (removeStaleLeaseSync(targetPath, lockPath, options) && (Date.now() < deadline || !lateTakeoverRetry)) {
       lateTakeoverRetry ||= Date.now() >= deadline;
@@ -204,19 +186,35 @@ function acquireFileLeaseSync(targetPath, options) {
     sleepSync(options.pollIntervalMs);
   }
 }
+function publishRecordExclusive(finalPath, token) {
+  const tempPath = `${finalPath}.tmp-${token}`;
+  const descriptor = openSync(tempPath, "wx", 384);
+  try {
+    writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
+    fsyncSync(descriptor);
+    linkSync(tempPath, finalPath);
+  } catch (error) {
+    closeSync(descriptor);
+    unlinkQuietSync(tempPath);
+    if (isNodeErrorWithCode(error, "EEXIST"))
+      return;
+    throw error;
+  }
+  unlinkQuietSync(tempPath);
+  return descriptor;
+}
+function unlinkQuietSync(path) {
+  try {
+    unlinkSync(path);
+  } catch {}
+}
 async function removeStaleLease(targetPath, lockPath, options) {
   return withAsyncCommitGuard(targetPath, lockPath, options, async () => {
     const observed = await readLeaseRecord(lockPath);
     if (!await leaseIsStale(lockPath, observed, options.staleAfterMs))
       return false;
-    const confirmed = await readLeaseRecord(lockPath);
-    if (observed && confirmed?.token !== observed.token)
-      return false;
-    await unlink(lockPath).catch((error) => {
-      if (!isNodeErrorWithCode(error, "ENOENT"))
-        throw error;
-    });
-    return true;
+    fileLeaseTestHooks.afterLeaseJudgedStale?.();
+    return unlinkIfStillTheObservedLease(lockPath, observed, readLeaseRecordSync(lockPath));
   });
 }
 function removeStaleLeaseSync(targetPath, lockPath, options) {
@@ -224,152 +222,122 @@ function removeStaleLeaseSync(targetPath, lockPath, options) {
     const observed = readLeaseRecordSync(lockPath);
     if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs))
       return false;
-    const confirmed = readLeaseRecordSync(lockPath);
-    if (observed && confirmed?.token !== observed.token)
-      return false;
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "ENOENT"))
-        throw error;
-    }
-    return true;
+    fileLeaseTestHooks.afterLeaseJudgedStale?.();
+    return unlinkIfStillTheObservedLease(lockPath, observed, readLeaseRecordSync(lockPath));
   });
 }
-async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  let lateTakeoverRetry = false;
-  const token = randomUUID();
-  let descriptor;
-  while (!descriptor) {
-    try {
-      descriptor = await open(guardPath, "wx", 384);
-      writeFileSync(descriptor.fd, JSON.stringify(leaseRecord(token)), "utf8");
-      fsyncSync(descriptor.fd);
-    } catch (error) {
-      const created = descriptor !== undefined;
-      await descriptor?.close().catch(() => {
-        return;
-      });
-      descriptor = undefined;
-      if (!isNodeErrorWithCode(error, "EEXIST")) {
-        if (created)
-          await unlink(guardPath).catch(() => {
-            return;
-          });
-        throw error;
-      }
-      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline)
-        throw new FileLeaseBusyError(targetPath);
-      await sleep(options.pollIntervalMs);
-    }
-  }
+function unlinkIfStillTheObservedLease(lockPath, observed, confirmed) {
+  if (confirmed !== undefined && confirmed.token !== observed?.token)
+    return false;
   try {
-    return await callback();
-  } finally {
-    try {
-      if ((await readLeaseRecord(guardPath))?.token === token) {
-        await unlink(guardPath).catch((error) => {
-          if (!isNodeErrorWithCode(error, "ENOENT"))
-            throw error;
-        });
-      }
-    } finally {
-      await descriptor.close();
-    }
-  }
-}
-function withSyncCommitGuard(targetPath, lockPath, options, callback) {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  let lateTakeoverRetry = false;
-  const token = randomUUID();
-  let descriptor;
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync(guardPath, "wx", 384);
-      writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
-      fsyncSync(descriptor);
-    } catch (error) {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-        descriptor = undefined;
-        try {
-          unlinkSync(guardPath);
-        } catch {}
-      }
-      if (!isNodeErrorWithCode(error, "EEXIST"))
-        throw error;
-      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline)
-        throw new FileLeaseBusyError(targetPath);
-      sleepSync(options.pollIntervalMs);
-    }
-  }
-  try {
-    return callback();
-  } finally {
-    try {
-      if (readLeaseRecordSync(guardPath)?.token === token) {
-        try {
-          unlinkSync(guardPath);
-        } catch (error) {
-          if (!isNodeErrorWithCode(error, "ENOENT"))
-            throw error;
-        }
-      }
-    } finally {
-      closeSync(descriptor);
-    }
-  }
-}
-async function removeAbandonedCommitGuard(path, staleAfterMs) {
-  const observed = await readLeaseRecord(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed))
-      return false;
-    const confirmed = await readLeaseRecord(path);
-    if (confirmed?.token !== observed.token)
-      return false;
-  } else {
-    const age = await leaseAgeMs(path);
-    if (age === undefined || age < staleAfterMs)
-      return false;
-  }
-  await unlink(path).catch((error) => {
-    if (!isNodeErrorWithCode(error, "ENOENT"))
-      throw error;
-  });
-  return true;
-}
-function removeAbandonedCommitGuardSync(path, staleAfterMs) {
-  const observed = readLeaseRecordSync(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed))
-      return false;
-    const confirmed = readLeaseRecordSync(path);
-    if (confirmed?.token !== observed.token)
-      return false;
-  } else {
-    const age = leaseAgeMsSync(path);
-    if (age === undefined || age < staleAfterMs)
-      return false;
-  }
-  try {
-    unlinkSync(path);
+    unlinkSync(lockPath);
   } catch (error) {
     if (!isNodeErrorWithCode(error, "ENOENT"))
       throw error;
   }
   return true;
+}
+function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
+  const prefix = `${basename(guardBase)}.`;
+  let highest = 0;
+  for (const name of readdirSync(dirname(guardBase))) {
+    if (!name.startsWith(prefix))
+      continue;
+    const suffix = name.slice(prefix.length);
+    if (/^\d{1,15}$/.test(suffix))
+      highest = Math.max(highest, Number(suffix));
+  }
+  if (highest > 0) {
+    const currentPath = `${guardBase}.${highest}`;
+    let text;
+    try {
+      text = readFileSync(currentPath, "utf8");
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ENOENT"))
+        return "retry";
+      throw error;
+    }
+    const record = parseLeaseRecord(text);
+    if (record) {
+      if (recordedProcessInstanceIsAlive(record))
+        return "busy";
+    } else {
+      const age = leaseAgeMsSync(currentPath);
+      if (age === undefined)
+        return "retry";
+      if (age < staleAfterMs)
+        return "busy";
+    }
+    fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
+  }
+  const path = `${guardBase}.${highest + 1}`;
+  const descriptor = publishRecordExclusive(path, token);
+  if (descriptor === undefined)
+    return "retry";
+  closeSync(descriptor);
+  return { path, token };
+}
+function releaseCommitGuard(held) {
+  if (readLeaseRecordSync(held.path)?.token !== held.token)
+    return;
+  try {
+    unlinkSync(held.path);
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT"))
+      throw error;
+  }
+}
+async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
+  const guardBase = commitGuardPathFor(lockPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  const token = randomUUID();
+  let held;
+  let immediateRetries = 0;
+  while (!held) {
+    const attempt = tryAcquireCommitGuardOnce(guardBase, token, options.staleAfterMs);
+    if (typeof attempt === "object") {
+      held = attempt;
+      break;
+    }
+    if (attempt === "retry" && immediateRetries < MAX_IMMEDIATE_GUARD_RETRIES) {
+      immediateRetries += 1;
+      continue;
+    }
+    if (Date.now() >= deadline)
+      throw new FileLeaseBusyError(targetPath);
+    await sleep(options.pollIntervalMs);
+  }
+  try {
+    return await callback();
+  } finally {
+    releaseCommitGuard(held);
+  }
+}
+function withSyncCommitGuard(targetPath, lockPath, options, callback) {
+  const guardBase = commitGuardPathFor(lockPath);
+  const deadline = Date.now() + options.acquireTimeoutMs;
+  const token = randomUUID();
+  let held;
+  let immediateRetries = 0;
+  while (!held) {
+    const attempt = tryAcquireCommitGuardOnce(guardBase, token, options.staleAfterMs);
+    if (typeof attempt === "object") {
+      held = attempt;
+      break;
+    }
+    if (attempt === "retry" && immediateRetries < MAX_IMMEDIATE_GUARD_RETRIES) {
+      immediateRetries += 1;
+      continue;
+    }
+    if (Date.now() >= deadline)
+      throw new FileLeaseBusyError(targetPath);
+    sleepSync(options.pollIntervalMs);
+  }
+  try {
+    return callback();
+  } finally {
+    releaseCommitGuard(held);
+  }
 }
 async function leaseIsStale(lockPath, observed, staleAfterMs) {
   if (!observed) {
@@ -695,7 +663,7 @@ function sleepSync(ms) {
 function isNodeErrorWithCode(error, code) {
   return !!error && typeof error === "object" && "code" in error && error.code === code;
 }
-var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
+var DEFAULT_OPTIONS, runtimeRequire, FileLeaseBusyError, FileLeaseLostError, fileLeaseTestHooks, MAX_IMMEDIATE_GUARD_RETRIES = 50, CURRENT_BOOT_ID, CURRENT_PROCESS_INSTANCE;
 var init_file_lease = __esm(() => {
   DEFAULT_OPTIONS = {
     acquireTimeoutMs: 1e4,
@@ -722,6 +690,7 @@ var init_file_lease = __esm(() => {
       this.targetPath = targetPath;
     }
   };
+  fileLeaseTestHooks = {};
   CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
   CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
 });
@@ -916,7 +885,7 @@ var init_linux_desktop_entry = __esm(() => {
 });
 
 // src/core/linux-engine-layout.ts
-import { lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, readdirSync, realpathSync } from "node:fs";
+import { lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, readdirSync as readdirSync2, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname as dirname4, isAbsolute as isAbsolute3, join as join2, relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
 function absolute(value, name) {
@@ -942,7 +911,7 @@ function rawLayout(env, recordedDataDir) {
     const info = stat2(path);
     if (!info)
       return false;
-    return !info.isDirectory() || info.isSymbolicLink() || readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
+    return !info.isDirectory() || info.isSymbolicLink() || readdirSync2(path).some((name) => path !== xdgDataDir || name !== "engine");
   };
   const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
   const stateDir = join2(stateHome, "olympus/engine"), cacheDir = join2(cacheHome, "olympus/engine");
@@ -2757,7 +2726,7 @@ import {
   writeSync as writeSync2
 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join5 } from "node:path";
+import { basename as basename2, dirname as dirname5, isAbsolute as isAbsolute4, join as join5 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const dataRoot = env.XDG_DATA_HOME?.trim() || join5(env.HOME?.trim() || homedir3(), ".local", "share");
@@ -2778,7 +2747,7 @@ function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, plat
     modelPath: join5(paths.modelDir, model.model.name),
     ...model.vocabulary ? { vocabularyPath: join5(paths.modelDir, model.vocabulary.name) } : {},
     runtimeDir: paths.runtimeDir,
-    ...liteRt ? { libraryPath: join5(paths.runtimeDir, basename(liteRt.library)) } : {}
+    ...liteRt ? { libraryPath: join5(paths.runtimeDir, basename2(liteRt.library)) } : {}
   };
 }
 function currentPlatform() {
@@ -2942,11 +2911,11 @@ function readLiteRtMarker(runtimeDir) {
 }
 function liteRtInstalled(runtimeDir, wheel) {
   const marker = readLiteRtMarker(runtimeDir);
-  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync4(join5(runtimeDir, basename(wheel.library)));
+  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync4(join5(runtimeDir, basename2(wheel.library)));
 }
 async function liteRtLibraryIntact(runtimeDir, wheel) {
   const expected = readLiteRtMarker(runtimeDir)?.librarySha256;
-  return expected !== undefined && await sha256File(join5(runtimeDir, basename(wheel.library))) === expected;
+  return expected !== undefined && await sha256File(join5(runtimeDir, basename2(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
   const staging = `${runtimeDir}.staging-${randomUUID3()}`;
@@ -2961,7 +2930,7 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const library = readZipEntry(readFileSync5(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync3(join5(staging, basename(wheel.library)), library, { mode: 493 });
+    writeFileSync3(join5(staging, basename2(wheel.library)), library, { mode: 493 });
     rmSync3(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
@@ -16888,7 +16857,7 @@ import {
   mkdirSync as mkdirSync9,
   lstatSync as lstatSync5,
   readFileSync as readFileSync14,
-  readdirSync as readdirSync2,
+  readdirSync as readdirSync3,
   realpathSync as realpathSync2,
   renameSync as renameSync4,
   rmSync as rmSync5,
@@ -16896,7 +16865,7 @@ import {
   statSync as statSync8,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { basename as basename2, dirname as dirname12, isAbsolute as isAbsolute6, join as join13, resolve as resolve6 } from "node:path";
+import { basename as basename3, dirname as dirname12, isAbsolute as isAbsolute6, join as join13, resolve as resolve6 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute6(configured))
@@ -16915,7 +16884,7 @@ function isSha256(value) {
 function isMediaCachePath(path, sha256, dir) {
   if (!isAbsolute6(path) || !isSha256(sha256) || resolve6(path) !== path)
     return false;
-  if (basename2(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename2(dirname12(path))))
+  if (basename3(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename3(dirname12(path))))
     return false;
   if (dir !== undefined && dirname12(path) !== resolve6(dir))
     return false;
@@ -16954,7 +16923,7 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
     const legacy = legacyHolderName(holder);
     if (legacy)
       rmSync5(join13(refs, legacy), { force: true });
-    const remaining = existsSync10(refs) ? readdirSync2(refs) : [];
+    const remaining = existsSync10(refs) ? readdirSync3(refs) : [];
     if (remaining.length > 0)
       return false;
     if (existsSync10(refs))
@@ -16978,7 +16947,7 @@ function sweepMediaCache(dir, options = {}) {
   let removed = 0;
   let entries;
   try {
-    entries = readdirSync2(dir);
+    entries = readdirSync3(dir);
   } catch {
     return 0;
   }
@@ -16994,13 +16963,13 @@ function sweepMediaCache(dir, options = {}) {
         continue;
       const refs = refsDir(path);
       if (existsSync10(refs)) {
-        for (const marker of readdirSync2(refs)) {
+        for (const marker of readdirSync3(refs)) {
           const markerPath = join13(refs, marker);
           if (marker.startsWith("staging-") ? old(markerPath) : holderGone(markerPath, marker)) {
             rmSync5(markerPath, { force: true });
           }
         }
-        if (readdirSync2(refs).length > 0)
+        if (readdirSync3(refs).length > 0)
           continue;
         rmdirSync(refs);
       }
@@ -17037,7 +17006,7 @@ function holderGone(marker, markerName) {
   return !existsSync10(name) && existsSync10(dirname12(name));
 }
 function refsDir(path) {
-  return join13(dirname12(path), `${basename2(path)}.refs`);
+  return join13(dirname12(path), `${basename3(path)}.refs`);
 }
 function holderDigest(name) {
   return createHash7("sha256").update(name).digest("hex").slice(0, 32);
@@ -43621,7 +43590,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync20, readFileSync as readFileSync19, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync20, readFileSync as readFileSync19, readdirSync as readdirSync4, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -43807,7 +43776,7 @@ function defaultUuidsByDevice() {
   try {
     if (!existsSync20(dir))
       return result;
-    for (const name of readdirSync3(dir)) {
+    for (const name of readdirSync4(dir)) {
       try {
         result.set(realpathSync6(`${dir}/${name}`), name);
       } catch {}
@@ -43858,7 +43827,7 @@ init_local_open();
 
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
-import { lstatSync as lstatSync9, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
+import { lstatSync as lstatSync9, readdirSync as readdirSync5, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
 import { join as join34 } from "node:path";
 
@@ -44139,7 +44108,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
   const volumes = options.volumes ?? new VolumeResolver;
   const home = safeRealpath(options.home ?? options.context?.home ?? homedir22());
   const context2 = options.context ?? { ...defaultExclusionContext(), home };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync5(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
     memoryPath: join34(olympusDataDir(), "local-files", "folder-access.json")
