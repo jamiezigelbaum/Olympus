@@ -567,9 +567,10 @@ function withLegacyConsultLease<T>(layout: LinuxEngineLayout, run:()=>T): T {
   return withFileLeaseSync(join(directory,'consult.json'),lease=>lease.commit(()=>{
    if(legacyConsultWriterIsLive(directory))throw new FileLeaseBusyError(join(directory,'consult.json'));
    const result=run();
-   // The old engine has released custody and settings now live in the config
-   // directory, so nothing locks this location again: drop its lease files.
-   for(const name of [...LEGACY_CONSULT_LEASE_FILES,'consult.json.lock.db'])rmSync(join(directory,name),{force:true});
+   // The old engine has released custody, so its record-based lease files go.
+   // The kernel lock file stays: unlinking it while held would let a late
+   // writer lock a fresh inode and write the obsolete legacy settings.
+   for(const name of LEGACY_CONSULT_LEASE_FILES)rmSync(join(directory,name),{force:true});
    return result;
   }),{acquireTimeoutMs:100,pollIntervalMs:10});
  } catch(error){

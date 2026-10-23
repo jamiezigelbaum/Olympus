@@ -2774,7 +2774,7 @@ describe('LocalConnectorStore embeddings', () => {
     )).toEqual([finalItemId]);
     expect(provider.embedCalls).toHaveLength(1);
     store.close();
-  }, 15_000);
+  }, 60_000); // 25,001 real rows; parallel CI runners have taken over 15 s.
 
   test('embeds un-embedded chunks, then re-embed is a no-op via the content_hash guard', async () => {
     const store = newStore();
