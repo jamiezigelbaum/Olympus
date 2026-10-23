@@ -32759,7 +32759,7 @@ var init_vocabulary = __esm(() => {
       chooseAnother: "Choose another"
     },
     listLabel: "Imported archives",
-    status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing" },
+    status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
     dates: "{earliest} to {latest}",
     items: { one: "1 message", many: "{n} messages" },
     importingLine: "{percent}% read · {items} so far",
@@ -32767,6 +32767,9 @@ var init_vocabulary = __esm(() => {
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
+    notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
+    notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
+    removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -32775,18 +32778,22 @@ var init_vocabulary = __esm(() => {
     },
     setUpPrivateModel: "Set up the private model",
     countsUnavailable: {
-      why: "Olympus can’t count the messages in this archive right now: its index could not be opened.",
+      why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
       fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
     },
     notRunning: {
       why: {
-        disabled: "Background reading is turned off on this computer (the worker.scheduler.enabled setting), so imports and removals do not run.",
-        not_selected: "Background reading on this computer leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals do not run."
+        disabled: "Background syncing is turned off in Olympus's settings, so imports can't run.",
+        not_selected: "Background syncing in Olympus's settings leaves out archives, so imports can't run."
       },
       fix: {
-        disabled: "Turn it on, then restart Olympus. Each import and removal goes on from where it is.",
-        not_selected: "Add archive.imports to that setting, or empty it, then restart Olympus. Each import and removal goes on from where it is."
+        disabled: "The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it. Each import and removal goes on from where it is.",
+        not_selected: "The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it. Each import and removal goes on from where it is."
       }
+    },
+    removeNotRunning: {
+      disabled: "Remove can't run while background syncing is turned off.",
+      not_selected: "Remove can't run while background syncing leaves out archives."
     },
     stopped: {
       file_changed: { why: "{file} changed after the import started.", fix: "Remove this archive, then import the file again once it has stopped changing." },
@@ -32821,13 +32828,13 @@ var init_vocabulary = __esm(() => {
     alreadyLineUnnamed: "{name} is already imported.",
     failedLine: "{name} was not imported: {reason}",
     failed: {
-      not_found: "it is no longer there. Choose it again.",
+      not_found: "it is no longer there.",
       permission_denied: "your user account is not allowed to open it.",
-      changed: "it changed while Olympus was reading it. Import it again once it has stopped changing.",
+      changed: "it changed while Olympus was reading it.",
       unreadable: "Olympus could not read it.",
       unsupported: "Olympus does not import this kind of file.",
       ambiguous: "Olympus could not tell which kind of export it is.",
-      replaced: "it was moved, replaced or changed after you chose it. Try again to import it as it is now."
+      replaced: "it was moved, replaced or changed after you chose it."
     },
     tryAgain: "Try again",
     dismiss: "Dismiss",
@@ -32843,8 +32850,8 @@ var init_vocabulary = __esm(() => {
       failed: "An import did not start: {name}",
       counts: "Olympus can't count the messages in {name}",
       scheduler: {
-        disabled: "Imports can't run: background reading is turned off",
-        not_selected: "Imports can't run: background reading leaves out archives"
+        disabled: "Imports can't run: background syncing is turned off",
+        not_selected: "Imports can't run: background syncing leaves out archives"
       },
       held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
@@ -35690,9 +35697,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     add(box, add(el("ul", "plain"), el("li", "", fill2(A.unreadable.why[reason], { file: file || A.thisFile })), el("li", "", A.unreadable.kept), el("li", "", A.unreadable.fix[reason])));
     return box;
   }
+  function archiveSetting(meta) {
+    return meta && (meta.notRunning === "disabled" || meta.notRunning === "not_selected") ? String(meta.notRunning) : "";
+  }
   function archiveNotRunning(meta, id) {
     const A = H.copy.archives;
-    const setting = meta.notRunning === "disabled" || meta.notRunning === "not_selected" ? String(meta.notRunning) : "";
+    const setting = archiveSetting(meta);
     if (!setting)
       return null;
     const box = details("why:" + id, doc.createTextNode(P.seeWhy), "why");
@@ -35705,7 +35715,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     if (!meta || typeof meta !== "object")
       return false;
-    return Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && entry.status === "checking");
+    return !archiveSetting(meta) && Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && entry.status === "checking");
   }
   function startArchivePick(key2) {
     supersede();
@@ -35766,7 +35776,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     for (const request2 of requests)
       add(list, archiveRequestItem(request2));
     for (const archive of archives)
-      add(list, archiveItem(archive, String(meta.privateModel || "")));
+      add(list, archiveItem(archive, String(meta.privateModel || ""), archiveSetting(meta)));
     return list;
   }
   function archiveRequestItem(request2) {
@@ -35796,13 +35806,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(actions, fixControl({ label: A.tryAgain, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":retry", "plain", false));
     return add(item, add(actions, fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":dismiss", "plain", false)));
   }
-  function archiveItem(archive, model) {
+  function archiveItem(archive, model, setting) {
     const A = H.copy.archives;
     const item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
     item.setAttribute("data-archive", archive.status);
     if (archiveLanded("archive:" + archive.id, archiveNeedsPerson(archive)))
       item.className += " landed";
-    add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", A.status[archive.status])));
+    const halted = !!setting && (archive.status === "importing" || archive.status === "removing");
+    if (halted)
+      item.setAttribute("data-not-running", setting);
+    add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", halted ? A.status.notRunning : A.status[archive.status])));
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
     const latest = typeof archive.latest === "string" ? archive.latest : "";
@@ -35819,7 +35832,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     const items = wholeCount(archive.items);
     const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
-    if (archive.status === "importing") {
+    if (halted && archive.status === "importing") {
+      const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+      add(item, el("p", "muted", uncounted ? fill2(A.notRunningLineUncounted, { percent: percent(pct) }) : fill2(A.notRunningLine, { percent: percent(pct), items: messageCount(items) })));
+    } else if (halted) {
+      add(item, el("p", "muted", A.removingNotRunningLine));
+    } else if (archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
       const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: messageCount(items) });
       add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
@@ -35850,7 +35868,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         tool: H.archiveRemoveTool,
         args: { archive_id: archive.id },
         destructive: true,
-        confirmText: fill2(A.removeConfirm, { name: archive.name })
+        confirmText: fill2(A.removeConfirm, { name: archive.name }),
+        ...setting ? { disabledReason: A.removeNotRunning[setting] } : {}
       }, "archive-remove:" + archive.id, "plain", true)));
     }
     return item;
@@ -42910,6 +42929,20 @@ init_linux_engine_layout();
 // src/workers/archive-import/requests.ts
 init_atomic_file();
 init_file_lease();
+
+// src/workers/archive-import/manifest.ts
+init_archive_formats();
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire2 = createRequire4(import.meta.url);
+var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+
+// src/workers/archive-import/requests.ts
 var STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
 
 // src/data-lifecycle.ts
@@ -43112,11 +43145,6 @@ var SOURCE_CODE_EXTENSIONS = new Set([
   "conf",
   "env"
 ]);
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire2 = createRequire4(import.meta.url);
-var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 
 // src/workers/local-files/locations.ts
 init_paths();
@@ -44783,11 +44811,6 @@ var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
 // src/workers/archive-import/start.ts
 init_archive_formats();
 
-// src/workers/archive-import/manifest.ts
-init_archive_formats();
-var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
-var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
-
 // src/workers/archive-import/runtime.ts
 init_store2();
 
@@ -46437,9 +46460,9 @@ class TierSnifferService {
       reason = "awaiting_owner_approval";
     else if (tick.state === "failed")
       reason = "failed";
-    else if (tick.state === "ran" && tick.report.stoppedBy === "transport_failures" && tick.report.pendingSeen > 0)
+    else if (tick.state === "ran" && tick.report.pendingSeen > 0 && (tick.report.stoppedBy === "transport_failures" || tick.report.calls > 0 && tick.report.failedCalls === tick.report.calls)) {
       reason = "model_not_answering";
-    else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
+    } else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
       reason = stop === "yield" || stop === "preempted" || stop === "aborted" ? overran ? "pass_stuck" : this.answering() ? "yielding_to_answers" : this.breakerOpen() ? "breaker_open" : "yielding_to_answers" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;
     }
