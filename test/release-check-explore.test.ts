@@ -9,6 +9,7 @@ import { EXPECTATIONS, exploreChecks, explore, type Seed } from '../scripts/rele
 import { buildInventory, setLiteral } from '../scripts/release-check/explore-inventory.ts';
 import { kindOf } from '../scripts/release-check/explore-kinds.ts';
 import type { ElementInfo, JourneyDriver, PageEvents } from '../scripts/release-check/journey.ts';
+import { describeBody } from '../scripts/release-check/journey-driver.ts';
 import { PROBE_SOURCE, type WireTarget } from '../scripts/release-check/probe.ts';
 import { exploreSection } from '../scripts/release-check/report.ts';
 
@@ -52,6 +53,8 @@ interface PanelState {
   connectAt?: string;
   /** The page keeps showing the old row for this many reads after Disconnect is confirmed (the engine is restarting). */
   staleReads?: number;
+  /** Every read of the stale row logs a console error (while the page waits for the engine). */
+  staleLogs?: boolean;
   /** The page logs a console error while it loads. */
   loadLogs?: boolean;
 }
@@ -120,6 +123,7 @@ class PanelDriver implements JourneyDriver {
   async hasPanel(): Promise<boolean> { return true; }
   async probe(frame: 'host' | 'panel', call: string): Promise<unknown> {
     if (frame === 'panel' && this.gone) throw new Error('the dashboard panel is not on the page');
+    if (this.stale > 0 && frame === 'panel' && call.includes('__rc.controls') && this.state.staleLogs) this.events.console.push('TypeError: engine restarting');
     if (this.stale > 0 && frame === 'panel' && call.includes('__rc.controls') && --this.stale === 0) { this.state.connected = false; this.render(); }
     if (call.includes('openedWindows')) return frame === 'panel' ? [...this.opened] : [];
     if (call.includes('watchWindows')) return 0;
@@ -373,6 +377,19 @@ describe('exploring the Sources section', () => {
     const never = new PanelDriver({ staleReads: 1_000_000 });
     const stuck = await explore({ driver: never, seeds: [populated(never)], inventory: inventory(), ...quick() });
     expect(exploreChecks(stuck).find((entry) => entry.id === 'explore.populated')!.status).toBe('fail');
+  });
+
+  test('errors logged while a confirmed press is awaited count toward that press', async () => {
+    const driver = new PanelDriver({ staleReads: 4, staleLogs: true });
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    const check = exploreChecks(result).find((entry) => entry.id === 'explore.populated')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('engine restarting');
+  });
+
+  test('a failed request is described with the tool it carried, secrets left out', () => {
+    expect(describeBody(JSON.stringify({ name: 'olympus_dashboard', arguments: { source_id: 'readwise.library', api_key: 'abc', limit: 3 } }))).toBe('name="olympus_dashboard" arguments={source_id:"readwise.library", api_key:…, limit:3}');
+    expect(describeBody('not json')).toBe('');
   });
 
   test('the press bound is per seed: a later seed still presses', async () => {
