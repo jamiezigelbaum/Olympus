@@ -9,6 +9,12 @@
  */
 import { existsSync } from 'node:fs';
 import { archiveImportFamilies } from '../../core/archive-formats.ts';
+import { resolveRemoteConnectionsDbPath } from '../../core/remote-connections.ts';
+import {
+  openWaitingPrivateQuestionStore,
+  waitingPrivateQuestionsDbPath,
+  type WaitingQuestionStore,
+} from '../../core/waiting-private-questions.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
@@ -31,6 +37,10 @@ export interface ArchiveImportRuntime {
    * The lanes of families that have an archive or a store already (built now).
    */
   existingLanes(): ArchiveTierLane[];
+  /**
+   * The private inbox, opened for one removal (the caller closes it); undefined when there is none.
+   */
+  openWaitingQuestions(): WaitingQuestionStore | undefined;
 }
 
 export interface ArchiveImportRuntimeOptions {
@@ -48,6 +58,10 @@ export interface ArchiveImportRuntimeOptions {
    * Told once per store, when it opens.
    */
   onStoreOpened?: (store: LocalConnectorStore, lane: ArchiveTierLane) => void;
+  /**
+   * Test seam: where the private inbox lives.
+   */
+  waitingQuestionsDbPath?: string;
 }
 
 export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions = {}): ArchiveImportRuntime {
@@ -94,5 +108,10 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
     families: () => [...families],
     lane,
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),
+    openWaitingQuestions: () => {
+      const path = options.waitingQuestionsDbPath
+        ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
+      return existsSync(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+    },
   };
 }

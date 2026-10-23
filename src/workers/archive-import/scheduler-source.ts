@@ -40,7 +40,7 @@ export interface ArchiveImportsSchedulerSourceInput {
   runtime: ArchiveImportRuntime;
   config: OlympusConfig;
   /**
-   * Opens the private inbox for a removal; undefined when there is none.
+   * Opens the private inbox for a removal (default: the runtime's).
    */
   openWaitingQuestions?: () => WaitingQuestionStore | undefined;
   /**
@@ -85,7 +85,7 @@ export function createArchiveImportsSchedulerSource(
             state: input.runtime.state,
             lane,
             archiveId,
-            ...(input.openWaitingQuestions ? { openWaitingQuestions: input.openWaitingQuestions } : {}),
+            openWaitingQuestions: input.openWaitingQuestions ?? (() => input.runtime.openWaitingQuestions()),
           });
           const counts = 'counts' in outcome ? { ...outcome.counts } : {};
           return {
