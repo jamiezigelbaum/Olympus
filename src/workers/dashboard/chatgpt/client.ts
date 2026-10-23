@@ -1265,11 +1265,21 @@ export function chatgptDashboardClient(
     const item = el('li', 'archive' + (archive.status === 'stopped' ? ' stopped' : ''));
     item.setAttribute('data-archive', archive.status);
     add(item, add(el('p', 'archive-head'), el('span', 'archive-name', archive.name), el('span', 'ftag', (A.status as Any)[archive.status])));
-    const facts = [archive.format, archive.where].filter((part: Any) => typeof part === 'string' && part);
+    const facts: HTMLElement[] = [archive.format, archive.where]
+      .filter((part: Any) => typeof part === 'string' && part)
+      .map((part: string) => el('span', '', part));
     const earliest = typeof archive.earliest === 'string' ? archive.earliest : '';
     const latest = typeof archive.latest === 'string' ? archive.latest : '';
-    if (earliest && latest) facts.push(earliest === latest ? earliest : fill(A.dates, { earliest, latest }));
-    if (facts.length) add(item, el('p', 'muted', facts.join(' · ')));
+    // A date never breaks at its hyphens.
+    if (earliest && latest) facts.push(el('span', 'archive-dates', earliest === latest ? earliest : fill(A.dates, { earliest, latest })));
+    if (facts.length) {
+      const line = el('p', 'muted archive-facts');
+      facts.forEach((fact, index) => {
+        if (index) add(line, doc.createTextNode(' · '));
+        add(line, fact);
+      });
+      add(item, line);
+    }
     const items = wholeCount(archive.items);
     if (archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;

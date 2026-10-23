@@ -220,6 +220,8 @@ summary{cursor:pointer;border-radius:0.375rem}
 .archive>p+p,.archive>p+div,.archive>div+p,.archive>div+div,.archive>div+details,.archive>p+details{margin-top:0.25rem}
 .archive-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .archive-name{font-weight:600;min-width:0;overflow-wrap:anywhere}
+.archive-facts{overflow-wrap:anywhere}
+.archive-dates{white-space:nowrap}
 .archive.stopped .ftag{color:var(--text);border-color:var(--warn)}
 .archive-progress{display:flex;flex-direction:column;gap:0.25rem}
 .archive-progress .bar{height:0.375rem}

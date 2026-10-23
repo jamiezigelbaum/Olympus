@@ -127386,13 +127386,20 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
     item.setAttribute("data-archive", archive.status);
     add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", A.status[archive.status])));
-    const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part);
+    const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
     const latest = typeof archive.latest === "string" ? archive.latest : "";
     if (earliest && latest)
-      facts.push(earliest === latest ? earliest : fill2(A.dates, { earliest, latest }));
-    if (facts.length)
-      add(item, el("p", "muted", facts.join(" · ")));
+      facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill2(A.dates, { earliest, latest })));
+    if (facts.length) {
+      const line = el("p", "muted archive-facts");
+      facts.forEach((fact, index) => {
+        if (index)
+          add(line, doc2.createTextNode(" · "));
+        add(line, fact);
+      });
+      add(item, line);
+    }
     const items = wholeCount(archive.items);
     if (archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
@@ -131164,6 +131171,8 @@ summary{cursor:pointer;border-radius:0.375rem}
 .archive>p+p,.archive>p+div,.archive>div+p,.archive>div+div,.archive>div+details,.archive>p+details{margin-top:0.25rem}
 .archive-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .archive-name{font-weight:600;min-width:0;overflow-wrap:anywhere}
+.archive-facts{overflow-wrap:anywhere}
+.archive-dates{white-space:nowrap}
 .archive.stopped .ftag{color:var(--text);border-color:var(--warn)}
 .archive-progress{display:flex;flex-direction:column;gap:0.25rem}
 .archive-progress .bar{height:0.375rem}
