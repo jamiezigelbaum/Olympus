@@ -700,6 +700,36 @@ export function verifyOlympusDataExport(options: { destination: string }): DataE
   return { ok: true, destination, artifactCount: verified.length, artifacts: verified };
 }
 
+/**
+ * What a per-source delete would remove, decided and checked now: the resolved
+ * target paths after containment and protection (every target, whatever its
+ * kind) and the target-safety checks, and the corpora the source owns. It
+ * changes nothing and throws when the delete would be refused. A deletion
+ * intent records this, and applying the intent re-derives it and refuses on
+ * any difference.
+ */
+export function planSourceDelete(options: { sourceId: string } & LifecyclePathContext): {
+  sourceId: string;
+  corpora: string[];
+  targets: string[];
+} {
+  const selectedSource = requireSource(options.sourceId);
+  const uniqueDeleteTargets = uniqueTargets(sourceDeleteTargets(selectedSource, options));
+  assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
+  for (const target of uniqueDeleteTargets) {
+    if (existsSync(target.path)) assertDeleteTargetSafe(target);
+  }
+  const corpora = createSourceCorpusRegistry().list()
+    .filter((c) => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId))
+    .map((c) => c.corpusId)
+    .sort();
+  return {
+    sourceId: selectedSource.sourceId,
+    corpora,
+    targets: uniqueDeleteTargets.map((target) => resolve(target.path)).sort(),
+  };
+}
+
 export function deleteOlympusData(options: {
   all?: boolean;
   sourceId?: string;
@@ -1800,7 +1830,6 @@ function assertRawStateTargetsContained(
   selectedSource: LifecycleSourceSpec | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
-  if (stateTargets.length === 0) return;
   const roots = knownOlympusDataRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
   const refuse = (path: string, why: string): never => {
     throw new OperationError(
@@ -1848,7 +1877,9 @@ function assertRawStateTargetsContained(
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
   const protectedCanonical = withSqliteSidecars(protectedPaths).flatMap((path) => [resolve(path), canonicalPath(path)]);
-  for (const target of stateTargets) {
+  // Every target, whatever its kind: a relocated index or policy file is just
+  // as able to point at the owner's config as a state directory is.
+  for (const target of targets) {
     const candidates = [resolve(target.path), canonicalPath(target.path)];
     for (const protectedPath of protectedCanonical) {
       for (const candidate of candidates) {
@@ -1892,6 +1923,7 @@ function authoritativeStatePaths(context: LifecyclePathContext): string[] {
       join(dir, 'file-source-scopes.json'),
       join(dir, 'messaging-capture.telegram.json'),
       join(dir, 'messaging-capture.whatsapp.json'),
+      join(dir, 'pending-source-deletes.json'),
     ]) {
       files.add(path);
       files.add(`${path}.lock`);

@@ -38,6 +38,8 @@ import type { BuiltInTranscriptionDashboardState } from '../source-index/built-i
 import {
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
   DASHBOARD_SUPPORTED_SOURCES,
+  DASHBOARD_DELETE_NOT_DONE_LABEL,
+  DASHBOARD_DELETING_LABEL,
   DASHBOARD_UNPAIRED_LABEL,
   type DashboardSourceAction,
   type DashboardSourceCard,
@@ -454,8 +456,11 @@ function sourceEntry(
   // Unpair (the card's `unpaired` label, never an incomplete or unreadable
   // one), and the engine re-checks the durable record and the disk.
   const cleanlyUnpaired = definition.connect_action.kind === 'guided_session'
-    && card.connection.label === DASHBOARD_UNPAIRED_LABEL;
-  if (notConnected && (disconnectable || cleanlyUnpaired) && card.coverage.indexed_items > 0) {
+    && (card.connection.label === DASHBOARD_UNPAIRED_LABEL || card.connection.label === DASHBOARD_DELETE_NOT_DONE_LABEL);
+  // While a delete is waiting for the restart there is nothing to offer; a
+  // delete that did not run can be asked for again.
+  if (notConnected && card.connection.label !== DASHBOARD_DELETING_LABEL
+    && (disconnectable || cleanlyUnpaired) && card.coverage.indexed_items > 0) {
     menu.push({
       label: CHATGPT_SETUP_LABELS.deleteData,
       tool: DELETE_SOURCE_DATA_TOOL_NAME,
@@ -478,6 +483,7 @@ function sourceEntry(
     ...(menu.length > 0 ? { menu } : {}),
     // The same count the row's words come from, with the newest files' names.
     ...(unreadable > 0 ? { unreadable: unreadableView(definition, card, unreadable) } : {}),
+    ...(card.connection.label === DASHBOARD_DELETING_LABEL ? { deleting: true as const } : {}),
     ...(manual
       ? {
           lastManualSync: {

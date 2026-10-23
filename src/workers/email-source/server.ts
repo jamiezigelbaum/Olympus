@@ -1,5 +1,4 @@
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
-import { createStoreCustody, guardLanes } from './store-custody.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
@@ -24,7 +23,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
+import { restartCoversEmbeddingDrain, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
@@ -1951,6 +1950,19 @@ export function createFileExtractionLocalVlmClientFromEnv(
 let workerLaunch: WorkerLaunch = {};
 
 /**
+ * Ask the engine host (this worker's parent) to restart itself. SIGUSR2 is the
+ * host's one "stop everything and exit for the supervisor to restart me"
+ * request (engine-host.ts); it is sent after the HTTP answer can finish.
+ */
+function requestEngineRestart(): boolean {
+  const timer = setTimeout(() => {
+    try { process.kill(process.ppid, 'SIGUSR2'); } catch { /* the host is gone; its supervisor restarts it */ }
+  }, 750);
+  timer.unref?.();
+  return true;
+}
+
+/**
  * The CLI's entry: the launch state runWorkerForeground validated (never an
  * ambient variable) rides into main() for the restart decision.
  */
@@ -3540,10 +3552,6 @@ export async function main(): Promise<void> {
   );
   // `embedding: 'built_in_only'` builds the same lanes for answers on this
   // computer alone (source-index/local-answer.ts, source-answer-lanes.ts).
-  // One admission point for every path that serves indexed data: the worker's
-  // HTTP API (given to createEmailSourceWorker below) and the in-process
-  // readers wired after it. Delete indexed data fences all of them together.
-  const storeCustody = createStoreCustody();
   let sourceAnswerLanes: ReturnType<typeof createSourceAnswerLanes> | undefined;
   const analystSourceAnswer = sourceIndexAnswerEnabled
     ? await (async () => {
@@ -3644,10 +3652,10 @@ export async function main(): Promise<void> {
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
-        releaseCheck: storeCustody.retain(createReleaseTierCheck(
+        releaseCheck: createReleaseTierCheck(
           () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
           () => secureDerivativeDefault ?? 'allow',
-        )),
+        ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
@@ -3700,7 +3708,7 @@ export async function main(): Promise<void> {
         // real bounded content. A registered corpus without a mounted adapter
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
-        lanes: sourceAnswerLanes = guardLanes(storeCustody, createSourceAnswerLanes({
+        lanes: sourceAnswerLanes = createSourceAnswerLanes({
           stores: () => readConnectorStores,
           registry: () => buildSourceIndexCorpusRegistry(
             sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
@@ -3718,7 +3726,7 @@ export async function main(): Promise<void> {
           visibilityGate: tierVisibilityGate,
           secretLocations: tierSecretLocations,
           heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
-        })),
+        }),
       });
     })()
     : undefined;
@@ -3729,23 +3737,14 @@ export async function main(): Promise<void> {
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return storeCustody.admit(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind));
+          return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
         },
       }
     : undefined;
   const sourceWatchStore = new LocalSourceWatchStore();
   const sourceWatchExecutor = createSourceWatchExecutorCapability({ executorId: 'source-watch-scheduler' });
   const sourceWatchSearch = sourceAnswerLanes
-    ? (() => {
-        const inner = createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes);
-        return {
-          ...inner,
-          // Held from the first lane read to the end, and re-checked before the
-          // hits are handed to the watch pass to publish: a result read from
-          // stores a delete has since removed is discarded, not published.
-          search: storeCustody.guard((input: Parameters<typeof inner.search>[0]) => inner.search(input)),
-        } as typeof inner;
-      })()
+    ? createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes)
     : undefined;
   const sourceWatchDeliveryTransport = createOpenClawSourceWatchDeliveryTransport({
     ...(authToken ? { authToken } : {}),
@@ -4807,7 +4806,6 @@ export async function main(): Promise<void> {
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
   const worker = createEmailSourceWorker({
-    storeCustody,
     updateAvailable: () => updateChecker.available(),
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: agentApprovalHost,
@@ -4819,10 +4817,10 @@ export async function main(): Promise<void> {
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
-    sourceAnswerReleaseCheck: storeCustody.retain(createReleaseTierCheck(
+    sourceAnswerReleaseCheck: createReleaseTierCheck(
       () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
       () => secureDerivativeDefault ?? 'allow',
-    )),
+    ),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -4922,12 +4920,14 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
-            // Delete indexed data: the same supervised restart a model-key
-            // change uses. `canRestart` has no side effect, so the route can
-            // check it before deleting anything.
+            // Delete indexed data: only the engine host restarts everything
+            // that holds a store open (worker and embedding drain) and applies
+            // the intent before starting either. Anywhere else the route
+            // answers 409 and deletes nothing. `canRestart` has no side
+            // effect, so the route can check it before recording anything.
             workerRestart: {
-              canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
-              request: () => requestModelReload(),
+              canRestart: () => restartCoversEmbeddingDrain(workerLaunch, process.env),
+              request: () => requestEngineRestart(),
             },
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
@@ -5115,7 +5115,6 @@ export async function main(): Promise<void> {
   const { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv } = await import('../../core/source-answer-jobs.ts');
   const sourceAnswerJobs = new SourceAnswerJobRegistry({
     limits: sourceAnswerJobLimitsFromEnv(process.env, 'remote'),
-    assertOpen: () => storeCustody.assertOpen(),
     // A revoked connection's jobs are aborted and dropped. Revocation can come
     // from the CLI (another process), so the store is the authority.
     isOwnerRevoked: (owner) => {
@@ -5135,8 +5134,6 @@ export async function main(): Promise<void> {
       },
     },
   });
-  // A finished answer cached here was built from the stores a delete removes.
-  storeCustody.onFence(() => sourceAnswerJobs.dropAll());
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30_000);
   sourceAnswerJobSweep.unref?.();
   // One-time private answers for ChatGPT's private answer panel
@@ -5161,9 +5158,9 @@ export async function main(): Promise<void> {
   // Whether each Private item may be read by a model right now, from live
   // store, ledger and scope state: asked before every model submission and
   // before an answer is sealed. Without the answer lanes nothing is eligible.
-  const privateEvidenceEligible = storeCustody.guard(async (items: readonly Readonly<Record<string, unknown>>[]) => (sourceAnswerLanes
+  const privateEvidenceEligible = async (items: readonly Readonly<Record<string, unknown>>[]) => (sourceAnswerLanes
     ? checkPrivateEvidenceItems({ lanes: sourceAnswerLanes, items })
-    : items.map(() => false)));
+    : items.map(() => false));
   // "Open on this Mac" for a cited file: macOS `open`, on a path this engine
   // resolved for a cited source (never a path from the request), checked
   // again now: no symlink, still inside a Dropbox folder, and only a
@@ -5184,7 +5181,7 @@ export async function main(): Promise<void> {
     )),
     // An item that clearly leads is read again, in depth, from its own store.
     ...(sourceAnswerLanes
-      ? { readItem: storeCustody.guard((item: Readonly<Record<string, unknown>>, request: { question: string; maxChars: number }) => readPrivateEvidenceItem({ lanes: sourceAnswerLanes!, item, ...request })) }
+      ? { readItem: (item, request) => readPrivateEvidenceItem({ lanes: sourceAnswerLanes!, item, ...request }) }
       : {}),
     sourceLinks: (item) => {
       const provenance = item.provenance as { sourceItem?: { provider?: unknown }; citation?: { uri?: unknown } } | undefined;
@@ -5234,10 +5231,10 @@ export async function main(): Promise<void> {
   // The same ledgers and the same derivative posture the answer handler
   // uses, read when a remote agent collects an answer: an item the answer
   // read that was reclassified since it was written is caught there.
-  const remoteReleaseCheck = storeCustody.retain(createReleaseTierCheck(
+  const remoteReleaseCheck = createReleaseTierCheck(
     () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
     () => secureDerivativeDefault ?? 'allow',
-  ));
+  );
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
   // retrieval through the same scoped adapters with only the built-in
@@ -5477,9 +5474,9 @@ export async function main(): Promise<void> {
   // "Couldn't check yet" records are re-probed here every ten minutes.
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
-    probe: storeCustody.guard((request: object, timeoutMs?: number) => (sourceAnswerLanes
-      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs: timeoutMs as number })
-      : Promise.resolve('unknown' as const))),
+    probe: (request, timeoutMs) => (sourceAnswerLanes
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
+      : Promise.resolve('unknown' as const)),
     store: waitingQuestionStore,
     isActive: connectionActive,
     // The re-check is background work: it waits on the model's keyword
@@ -5649,7 +5646,7 @@ export async function main(): Promise<void> {
     });
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
-    ? storeCustody.guard(async (input: { question: string; limit?: number }) => {
+    ? async (input: { question: string; limit?: number }) => {
         // Not an answer: no answerActivity lease, so it never preempts the
         // sniffer. It does ask the built-in model, once per new wording, to
         // translate the question's words (core/source-index/keyword-expansion.ts),
@@ -5660,17 +5657,17 @@ export async function main(): Promise<void> {
           ...(input.limit ? { maxResults: input.limit } : {}),
           releaseCheck: remoteReleaseCheck,
         });
-      })
+      }
     : undefined;
   // The same search for every other remote agent, with the tiers read once
   // more right before the result leaves (workers/remote-search.ts).
   const remoteEvidenceSearch = sourceAnswerLanes
-    ? storeCustody.guard(async (input: { question: string; limit?: number }) => searchReleasedEvidence({
+    ? async (input: { question: string; limit?: number }) => searchReleasedEvidence({
         lanes: sourceAnswerLanes!,
         question: input.question,
         ...(input.limit ? { maxResults: input.limit } : {}),
         releaseCheck: remoteReleaseCheck,
-      }))
+      })
     : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
@@ -5678,10 +5675,10 @@ export async function main(): Promise<void> {
   // private answer job (and the built-in model on this computer); only their
   // count leaves the engine. The claim-time refresh runs the same search.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
-    ? storeCustody.guard(async (question: string) => {
+    ? async (question: string) => {
         const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question });
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[] };
-      })
+      }
     : undefined;
   // The dashboard's install progress follows the built-in model's download.
   const chatgptPrivateModelState = () => {

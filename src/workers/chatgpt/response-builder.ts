@@ -1037,8 +1037,8 @@ export function deleteSourceDataToolResult(result: DeleteSourceDataResult): Chat
   const sourceId = DELETE_DATA_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
   if (!sourceId) return errorToolResult(new ChatGptSurfaceError('internal'));
   return {
-    content: [{ type: 'text', text: `Indexed data deleted for ${SOURCE_LABELS[sourceId]}. Your files and accounts were not touched.` }],
-    structuredContent: { status: 'deleted', source_id: sourceId, restarting: result.restarting === true },
+    content: [{ type: 'text', text: `Deleting the indexed data for ${SOURCE_LABELS[sourceId]}. Olympus is restarting to remove it; your files and accounts are not touched.` }],
+    structuredContent: { status: 'deleting', source_id: sourceId, restarting: result.restarting === true },
   };
 }
 

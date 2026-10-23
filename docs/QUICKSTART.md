@@ -558,8 +558,10 @@ invent storage commands; use the selected password-manager method and the
 **Disconnect** stops scheduled and manual reads and removes the local account
 grant without a worker restart. It retains indexed data and reusable app
 registration and does not revoke the provider grant. Use the linked provider
-page for revocation. To delete local source data, preview the CLI custody
-boundary, Disconnect, then execute it:
+page for revocation. To delete local source data, Disconnect, then use
+**Delete indexed data** on the card: Olympus records the request, restarts, and
+the restarted engine removes the data before opening anything. From a terminal,
+stop Olympus first, preview the custody boundary, then execute it:
 
 ```bash
 olympus data delete --source dropbox.files --dry-run

@@ -423,6 +423,26 @@ describe('shared files and stores stay out of a recursive delete, whichever vari
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  test('a NON-recursive target (a relocated legacy index) pointing at the owner config is refused too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-nonrecursive-'));
+    const homeDir = join(dir, 'home');
+    const config = join(homeDir, '.olympus', 'config.json');
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, '{"keep":true}');
+    try {
+      const legacyIndexVariable: Record<string, string> = {
+        'gmail.email': 'OLYMPUS_EMAIL_INDEX_DB_PATH',
+        'dropbox.files': 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH',
+        'telegram.messages': 'OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH',
+      };
+      for (const [sourceId, variable] of Object.entries(legacyIndexVariable)) {
+        const env = { [variable]: config };
+        expect(() => deleteOlympusData({ sourceId, homeDir, env } as never)).toThrow('overlaps another source');
+        expect(readFileSync(config, 'utf8')).toBe('{"keep":true}');
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('a RELATIVE override is resolved the way its consumer resolves it before the overlap check', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-relative-'));
     const homeDir = join(dir, 'home');

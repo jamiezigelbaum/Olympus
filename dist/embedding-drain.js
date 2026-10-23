@@ -32376,7 +32376,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -32398,7 +32398,9 @@ var init_source_dashboard = __esm(() => {
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
     DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
-    DASHBOARD_UNPAIR_INCOMPLETE_LABEL
+    DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
+    DASHBOARD_DELETING_LABEL,
+    DASHBOARD_DELETE_NOT_DONE_LABEL
   ]);
   DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
     "credential_refresh_busy",
@@ -32722,7 +32724,7 @@ var init_vocabulary = __esm(() => {
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
     deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
-    deleteDataDone: "Indexed data deleted",
+    deleteDataDone: "Deleting indexed data. Olympus is restarting to remove it.",
     disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
@@ -36245,7 +36247,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     for (const id of Object.keys(state.deleting)) {
       const row = sources.filter((source) => source && source.id === id)[0];
       const offered = !!row && Array.isArray(row.menu) && row.menu.some((fix) => fix && fix.tool === config.deleteDataTool);
-      if (!offered || Date.now() >= (state.deleting[id] ?? 0))
+      const deleting = !!row && row.deleting === true;
+      if (!offered && !deleting || Date.now() >= (state.deleting[id] ?? 0))
         delete state.deleting[id];
     }
   }
@@ -39392,7 +39395,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync20, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync18 } from "node:fs";
+import { existsSync as existsSync19, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync18 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname25, join as join32 } from "node:path";
 function permissionHostKind(env) {
@@ -39596,7 +39599,7 @@ class MacPermissions {
     if (this.memory)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync20(this.memoryPath)) {
+    if (this.memoryPath && existsSync19(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync18(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -39995,7 +39998,7 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash26 } from "node:crypto";
-import { existsSync as existsSync24, lstatSync as lstatSync11, mkdirSync as mkdirSync17, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync11, mkdirSync as mkdirSync17, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname28, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -42329,20 +42332,11 @@ init_public_source_capabilities();
 init_worker_service();
 init_media_cache();
 
-// src/workers/connector-store/store-fence.ts
-import { closeSync as closeSync8, existsSync as existsSync18, openSync as openSync8, readdirSync as readdirSync3, rmSync as rmSync7, writeFileSync as writeFileSync8 } from "node:fs";
-var HOLDER_INFIX = ".holder-";
-var storeFencePath = (dbPath) => `${dbPath}.fence`;
-var storeHolderPath = (dbPath, pid = process.pid) => `${dbPath}${HOLDER_INFIX}${pid}`;
-function isStoreFenced(dbPath) {
-  return existsSync18(storeFencePath(dbPath));
-}
-function markStoreHeld(dbPath) {
-  closeSync8(openSync8(storeHolderPath(dbPath), "w", 384));
-}
-function releaseStoreHeld(dbPath) {
-  rmSync7(storeHolderPath(dbPath), { force: true });
-}
+// src/pending-source-deletes.ts
+init_atomic_file();
+init_operation_error();
+init_connected_handles();
+init_unpaired_sources();
 
 // src/workers/email-source/index.ts
 init_corpora();
@@ -42554,7 +42548,7 @@ init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire5 } from "node:module";
-import { existsSync as existsSync19, readFileSync as readFileSync17 } from "node:fs";
+import { existsSync as existsSync18, readFileSync as readFileSync17 } from "node:fs";
 import { dirname as dirname24, join as join31 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
@@ -42614,7 +42608,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync19(snapshotPath))
+    if (!existsSync18(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -42744,7 +42738,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join31(dir, "node_modules");
-    if (!existsSync19(join31(candidate, "@parcel", "watcher")))
+    if (!existsSync18(join31(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire5(join31(dirname24(candidate), "package.json"));
@@ -44231,7 +44225,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync21, lstatSync as lstatSync9, readFileSync as readFileSync19, readdirSync as readdirSync4, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync20, lstatSync as lstatSync9, readFileSync as readFileSync19, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -44409,7 +44403,7 @@ class VolumeResolver {
 function probeIgnoresCaseIn(dir) {
   let names;
   try {
-    names = readdirSync4(dir);
+    names = readdirSync3(dir);
   } catch {
     return;
   }
@@ -44464,9 +44458,9 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync21(dir))
+    if (!existsSync20(dir))
       return result;
-    for (const name of readdirSync4(dir)) {
+    for (const name of readdirSync3(dir)) {
       try {
         result.set(realpathSync6(`${dir}/${name}`), name);
       } catch {}
@@ -44517,7 +44511,7 @@ init_local_open();
 
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
-import { lstatSync as lstatSync10, readdirSync as readdirSync5, realpathSync as realpathSync7 } from "node:fs";
+import { lstatSync as lstatSync10, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
 import { join as join34 } from "node:path";
 
@@ -44750,7 +44744,7 @@ init_scope();
 // src/workers/local-files/mac-settings.ts
 init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync22 } from "node:fs";
+import { existsSync as existsSync21 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
 import { join as join33 } from "node:path";
 function helperAppPathForHome(home = homedir21()) {
@@ -44761,7 +44755,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn3(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync22)(helper))
+  if ((deps.exists ?? existsSync21)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -44802,7 +44796,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
     home,
     volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
   };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync5(realPath, { withFileTypes: true }));
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
     memoryPath: join34(olympusDataDir(), "local-files", "folder-access.json")
@@ -45614,7 +45608,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync23 } from "node:fs";
+import { existsSync as existsSync22 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
@@ -45698,7 +45692,7 @@ class TierSnifferService {
         db = new Database6(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync23(path);
+        const hasQueue = existsSync22(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -45897,11 +45891,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync23(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync22(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync23(own3))
+      if (existsSync22(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -46922,9 +46916,6 @@ class DirectSourceEmbeddingDrainClient {
   secureLocalProvider;
   internalProvider;
   secureLocalEndpoint;
-  inflight = 0;
-  sawFence = false;
-  fenceTimer;
   constructor(options) {
     assertEmbeddingProviderForLane("secure_local", options.secureLocalProvider);
     if (options.internalProvider)
@@ -46933,24 +46924,6 @@ class DirectSourceEmbeddingDrainClient {
     this.secureLocalProvider = options.secureLocalProvider;
     this.internalProvider = options.internalProvider;
     this.secureLocalEndpoint = options.secureLocalEndpoint?.trim() || undefined;
-    this.fenceTimer = setInterval(() => this.yieldFencedStores(), 200);
-    this.fenceTimer.unref?.();
-  }
-  yieldFencedStores() {
-    if (this.inflight > 0)
-      return;
-    for (const [corpusId, store] of this.connectorStores) {
-      const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === corpusId);
-      if (!config?.dbPath || !isStoreFenced(config.dbPath))
-        continue;
-      this.sawFence = true;
-      try {
-        store.close();
-      } finally {
-        this.connectorStores.delete(corpusId);
-        releaseStoreHeld(config.dbPath);
-      }
-    }
   }
   observeCoverage() {
     const corpora = [];
@@ -46988,17 +46961,8 @@ class DirectSourceEmbeddingDrainClient {
     if (config.family === "file") {
       throw new Error(`Direct connector-store embedding refuses file-family corpus ${request.corpus_id} because it cannot own ` + "the current approved content scope. Use the default HTTP drain mode.");
     }
-    const idle = { chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0, status: "completed" };
-    this.yieldFencedStores();
-    if (isStoreFenced(config.dbPath)) {
-      this.sawFence = true;
-      return idle;
-    }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
-      if (this.sawFence && !existsSync24(config.dbPath))
-        return idle;
-      markStoreHeld(config.dbPath);
       store = new LocalConnectorStore({
         dbPath: config.dbPath,
         corpusId: config.corpusId,
@@ -47011,17 +46975,10 @@ class DirectSourceEmbeddingDrainClient {
     if (!provider) {
       throw new Error(`Direct connector-store embedding has no sovereignty-resolved ${config.trustDomain} provider.`);
     }
-    this.inflight += 1;
-    let result;
-    try {
-      result = await store.embedChunks({
-        provider,
-        ...request.max_pending_chunks !== undefined ? { limit: request.max_pending_chunks } : {}
-      });
-    } finally {
-      this.inflight -= 1;
-      this.yieldFencedStores();
-    }
+    const result = await store.embedChunks({
+      provider,
+      ...request.max_pending_chunks !== undefined ? { limit: request.max_pending_chunks } : {}
+    });
     return {
       chunks_seen: result.chunksSeen,
       chunks_embedded: result.chunksEmbedded,
@@ -47030,14 +46987,8 @@ class DirectSourceEmbeddingDrainClient {
     };
   }
   close() {
-    clearInterval(this.fenceTimer);
-    for (const [corpusId, store] of this.connectorStores) {
+    for (const store of this.connectorStores.values())
       store.close();
-      const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === corpusId);
-      if (config?.dbPath)
-        releaseStoreHeld(config.dbPath);
-    }
-    this.connectorStores.clear();
   }
 }
 async function runSourceEmbeddingDrain(options) {
@@ -47364,7 +47315,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync24(config.dbPath))
+    if (!config.dbPath || !existsSync23(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
@@ -47823,7 +47774,7 @@ if (__require.main == __require.module) {
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
       mkdirSync17(dirname28(args.reportPath), { recursive: true });
-      writeFileSync9(args.reportPath, `${json}
+      writeFileSync8(args.reportPath, `${json}
 `);
     }
     console.log(json);
@@ -47834,7 +47785,7 @@ if (__require.main == __require.module) {
     if (args.reportPath) {
       mkdirSync17(dirname28(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
-        writeFileSync9(args.reportPath, `${JSON.stringify(report2, null, 2)}
+        writeFileSync8(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);
       };
     }
@@ -47842,7 +47793,7 @@ if (__require.main == __require.module) {
     const report = await runSourceEmbeddingDrain(options);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync9(args.reportPath, `${json}
+      writeFileSync8(args.reportPath, `${json}
 `);
     console.log(json);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {

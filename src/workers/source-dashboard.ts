@@ -127,10 +127,19 @@ export const DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = 'connection state 
 export const DASHBOARD_UNPAIRED_LABEL = 'unpaired';
 export const DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = 'unpair state unreadable';
 export const DASHBOARD_UNPAIR_INCOMPLETE_LABEL = 'Unpair incomplete — manual cleanup required';
+/**
+ * Delete indexed data is applied by the restarted engine before it opens
+ * anything. Until it reports the data gone, the card says so; if the restart's
+ * re-check refused, the card says that and what to do.
+ */
+export const DASHBOARD_DELETING_LABEL = 'Deleting indexed data…';
+export const DASHBOARD_DELETE_NOT_DONE_LABEL = 'Delete didn\'t run — check settings, then delete again';
 export const DASHBOARD_UNSETTLED_CUSTODY_LABELS: ReadonlySet<string> = new Set([
   DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
   DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
   DASHBOARD_UNPAIR_INCOMPLETE_LABEL,
+  DASHBOARD_DELETING_LABEL,
+  DASHBOARD_DELETE_NOT_DONE_LABEL,
 ]);
 
 export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync';
@@ -1308,6 +1317,8 @@ export interface SourceDashboardBuildOptions {
    * a broken file is never an intentional disconnect.
    */
   thisComputerStateUnreadable?: boolean;
+  /** Deletions recorded for the next start, by source id (pending-source-deletes.ts). */
+  sourceDeleteStates?: Readonly<Record<string, { state: 'pending' | 'refused' }>>;
   /**
    * Paired-session sources this worker has itself unpaired, and whether the
    * removal finished.
@@ -2240,6 +2251,14 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       ...(manualSync ? { last_manual_sync: { ...manualSync } } : {}),
       ...(unreadableFiles ? { unreadable_files: unreadableFiles } : {}),
     };
+    const deleteState = options.sourceDeleteStates?.[definition.source_id];
+    if (deleteState) {
+      card.connection = {
+        ...card.connection,
+        state: 'not_connected',
+        label: deleteState.state === 'pending' ? DASHBOARD_DELETING_LABEL : DASHBOARD_DELETE_NOT_DONE_LABEL,
+      };
+    }
     if (card.configured && options.sourceAccountBindings?.[definition.source_id as AccountBoundSourceId]?.purge_required) {
       card.account_change = {
         next_action: `${card.label} is now connected to a different account than the items already stored, so nothing syncs. `

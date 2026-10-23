@@ -23,6 +23,8 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { removeFileDurablySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import { configFromPluginConfig } from './config.ts';
+import { applyPendingSourceDeletes } from '../pending-source-deletes.ts';
+import { handleRegistryPathFromEnv } from '../workers/credential-broker/connected-handles.ts';
 import {
   engineChildrenPath,
   engineChildrenRecorder,
@@ -83,6 +85,8 @@ export interface EngineHostOptions {
   installSignalHandlers?: boolean;
   /** Test seam for the stale child-group cleanup that runs before any service starts. */
   reap?: EngineChildReapDeps;
+  /** Test seam: where pending source deletes are read and applied (default: the handle registry's directory). */
+  pendingDeletes?: { registryPath: string };
   /** Desktop OS seams for isolated lifecycle qualification. */
   desktop?: { ready?: () => Promise<boolean>; openFile?: (path: string) => Promise<void> };
 }
@@ -162,6 +166,20 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     ||reaped.skipped.some(entry=>entry.pgid===child.pgid&&['gone','not_ours'].includes(entry.reason)));
   if(allRecordedReleased)removeFileDurablySync(childrenPath);
   setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
+
+  // Delete indexed data (owner, 2026-10-23) is applied here: after any child a
+  // previous host left behind is stopped, and before this host starts a single
+  // service, so no worker, scheduler, sniffer, watch or embedding-drain child
+  // can have a store open while its files are removed.
+  try {
+    applyPendingSourceDeletes({
+      registryPath: options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(dataEnv, true)!,
+      context: { env: dataEnv },
+      log,
+    });
+  } catch (error) {
+    log(`engine: pending deletes could not be applied: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
 
   const now = () => new Date().toISOString();
   const status: EngineStatusFile = {
@@ -256,6 +274,13 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     const onSignal = () => { void stop().then(() => exit(0)); };
     process.once('SIGTERM', onSignal);
     process.once('SIGINT', onSignal);
+    // A worker that recorded a delete asks its host to restart: stop every
+    // child, then exit non-zero so the supervisor starts a fresh host, which
+    // applies the delete before it spawns anything.
+    process.once('SIGUSR2', () => {
+      log('engine: restarting to apply a requested delete.');
+      void stop().then(() => exit(75));
+    });
   }
   // No worker, no bridge: a worker-disabled engine reserves no port and never
   // touches the worker socket.
