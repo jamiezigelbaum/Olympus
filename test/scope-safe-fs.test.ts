@@ -223,6 +223,27 @@ describe('bounded range reads', () => {
     }
   });
 
+  test('a file replaced or removed at its name is no longer current, though its descriptor is unchanged', () => {
+    const { root } = tree();
+    const scope = ScopeRoot.open(root);
+    try {
+      const reader = scope.openFile('a.txt');
+      try {
+        reader.assertCurrent();
+        writeFileSync(join(root, 'a.new'), 'replacement');
+        renameSync(join(root, 'a.new'), join(root, 'a.txt'));
+        reader.assertUnchanged();
+        expect(codeOf(() => reader.assertCurrent())).toBe('changed');
+        rmSync(join(root, 'a.txt'));
+        expect(codeOf(() => reader.assertCurrent())).toBe('not_found');
+      } finally {
+        reader.close();
+      }
+    } finally {
+      scope.close();
+    }
+  });
+
   test('crossing a mount point is refused', () => {
     const scope = ScopeRoot.open('/');
     try {

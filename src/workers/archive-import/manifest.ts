@@ -8,8 +8,11 @@
  * here: an archive whose file changed or went missing stops and says so
  * instead of resuming against different bytes.
  *
- * The fingerprint is how a second import of the same export is recognised as
- * already imported even when it was copied elsewhere (a new inode).
+ * A second import of the same export is recognised as already imported even
+ * when it was copied elsewhere (a new inode): the fingerprint finds the
+ * imports it could be, and only the SHA-256 of every byte, read in bounded
+ * ranges and kept on the record when an import completes, says it is. Two
+ * exports that share their first and last MiB are still two exports.
  */
 import { createHash } from 'node:crypto';
 import {
@@ -46,7 +49,16 @@ export interface ArchiveManifestFile {
   size: number;
   mtime_ms: number;
   fingerprint: { head_sha256: string; tail_sha256: string };
+  /**
+   * The SHA-256 of the whole file, recorded when the import completes.
+   */
+  sha256?: string;
 }
+
+/**
+ * The bytes one range of a whole-file digest reads.
+ */
+export const ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
 
 function lastComponent(relPath: string, rootPath: string): string {
   const source = relPath === '' ? rootPath : relPath;
@@ -75,7 +87,7 @@ function fileHead(root: ScopeRoot, relPath: string): Uint8Array | undefined {
  * followed and never listed as files.
  */
 export function probeArchivePath(root: ScopeRoot, chosenRelPath: string): ArchiveProbe {
-  const stat = root.statEntry(chosenRelPath === '' ? '.' : chosenRelPath);
+  const stat = chosenRelPath === '' ? root.statRelative('') : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat.kind === 'file') {
     const head = fileHead(root, chosenRelPath);
@@ -185,22 +197,67 @@ export function verifyArchiveManifest(root: ScopeRoot, files: readonly ArchiveMa
 }
 
 /**
+ * The digest of one file of a manifest, a step per range read: the reader
+ * is opened at the recorded version, and the file must still be that
+ * version, at its name and under the descriptor, after every range.
+ */
+export function* archiveFileDigestSteps(root: ScopeRoot, file: ArchiveManifestFile): Generator<void, string, void> {
+  const reader = root.openFile(file.rel_path, { expected: manifestFileVersion(file) });
+  try {
+    const hash = createHash('sha256');
+    for (let offset = 0; offset < file.size; offset += ARCHIVE_DIGEST_RANGE_BYTES) {
+      hash.update(reader.readAt(offset, Math.min(ARCHIVE_DIGEST_RANGE_BYTES, file.size - offset)));
+      reader.assertCurrent();
+      yield;
+    }
+    reader.assertCurrent();
+    return hash.digest('hex');
+  } finally {
+    reader.close();
+  }
+}
+
+/**
+ * The SHA-256 of one file of a manifest, read in bounded ranges.
+ */
+export function archiveFileSha256(root: ScopeRoot, file: ArchiveManifestFile): string {
+  const steps = archiveFileDigestSteps(root, file);
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+/**
  * The import already holding these files: the same files at the same
- * versions, or files with the same content fingerprints (a copy of the same
- * export). An archive being removed does not count.
+ * versions, or a completed import of files with the same whole-file
+ * SHA-256 (a copy of the same export). The fingerprint only picks the
+ * imports worth comparing; `digest` reads a new file whole, and only for
+ * those. An archive being removed does not count.
  */
 export function findAlreadyImported<T extends { status: string; files: readonly ArchiveManifestFile[] }>(
   records: readonly T[],
   files: readonly ArchiveManifestFile[],
+  digest: (index: number) => string,
 ): T | undefined {
   const sameVersion = (a: ArchiveManifestFile, b: ArchiveManifestFile): boolean =>
     a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtime_ms === b.mtime_ms;
-  const sameContent = (a: ArchiveManifestFile, b: ArchiveManifestFile): boolean =>
+  const sameSample = (a: ArchiveManifestFile, b: ArchiveManifestFile): boolean =>
     a.size === b.size
     && a.fingerprint.head_sha256 === b.fingerprint.head_sha256
     && a.fingerprint.tail_sha256 === b.fingerprint.tail_sha256;
-  return records.find((record) => record.status !== 'removing'
-    && record.files.length === files.length
-    && (record.files.every((file, index) => sameVersion(file, files[index]!))
-      || record.files.every((file, index) => sameContent(file, files[index]!))));
+  const digests = new Map<number, string>();
+  const digestOf = (index: number): string => {
+    let value = digests.get(index);
+    if (value === undefined) {
+      value = digest(index);
+      digests.set(index, value);
+    }
+    return value;
+  };
+  const candidates = records.filter((record) => record.status !== 'removing' && record.files.length === files.length);
+  const same = candidates.find((record) => record.files.every((file, index) => sameVersion(file, files[index]!)));
+  if (same) return same;
+  return candidates.find((record) => record.files.every((file, index) => sameSample(file, files[index]!) && file.sha256 !== undefined)
+    && record.files.every((file, index) => file.sha256 === digestOf(index)));
 }

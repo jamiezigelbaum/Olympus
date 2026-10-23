@@ -209,14 +209,20 @@ export class ArchiveImportStateStore {
   }
 
   /**
-   * Applies `change` to the archive's record; undefined when it is not recorded.
+   * Applies `change` to the archive's record, as read under the lease;
+   * undefined when it is not recorded. A change that returns false leaves
+   * the record as it was (nothing is written) and the record is returned.
    */
-  update(archiveId: string, change: (record: ArchiveImportRecord) => void): ArchiveImportRecord | undefined {
+  update(archiveId: string, change: (record: ArchiveImportRecord) => void | false): ArchiveImportRecord | undefined {
     let updated: ArchiveImportRecord | undefined;
     this.mutate((state) => {
       const record = state.archives.find((entry) => entry.archive_id === archiveId);
       if (!record) return false;
-      change(record);
+      const before = structuredClone(record);
+      if (change(record) === false) {
+        updated = before;
+        return false;
+      }
       record.updated_at = this.now().toISOString();
       updated = record;
       return true;

@@ -7,7 +7,8 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
@@ -147,6 +148,27 @@ function storedRows(env: Record<string, string>, scope: string): Array<{ corpusI
   return rows;
 }
 
+/** The real connector, with `action` run once the first page is out and before the next is read. */
+function afterFirstPage(action: () => void): (formatId: string) => ArchiveConnectorFactory {
+  return () => (input) => {
+    const real = createMboxArchiveConnector(input);
+    const connector: SourceConnector = {
+      ...real,
+      listItems(options) {
+        return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+          let pages = 0;
+          for await (const page of real.listItems(options)) {
+            yield page;
+            pages += 1;
+            if (pages === 1) action();
+          }
+        })();
+      },
+    };
+    return connector;
+  };
+}
+
 function dyingAfterFirstPage(): (formatId: string) => ArchiveConnectorFactory {
   return () => (input) => {
     const real = createMboxArchiveConnector(input);
@@ -218,6 +240,64 @@ describe('archive import passes', () => {
 
     // A stopped archive gets no import task.
     expect(createArchiveImportsSchedulerSource({ runtime: f.runtime, config: defaultConfig() })).toBeUndefined();
+  });
+
+  test('a file replaced after the first page stops the import, though its messages were already read', async () => {
+    const f = fixture();
+    const text = mbox([mail(0, { tag: 'r' }), mail(1, { tag: 'r' }), mail(2, { tag: 'r' })]);
+    const replaced = f.start('Replaced.mbox', text);
+    const path = join(f.exports, 'Replaced.mbox');
+    const outcome = await pull(f.runtime, replaced, {
+      pageSize: 1,
+      connectorFactory: afterFirstPage(() => {
+        // The same bytes under a new file: only the name says it is not the file approved.
+        writeFileSync(`${path}.new`, text);
+        renameSync(`${path}.new`, path);
+      }),
+    });
+    expect(outcome.receipt.counts.import_stopped).toBe(1);
+    expect(f.runtime.state.get(replaced)).toMatchObject({ status: 'stopped', stop: { code: 'file_changed', rel_path: 'Replaced.mbox' } });
+  });
+
+  test('a removal asked for while a pass reads is not undone when the pass stops', async () => {
+    const f = fixture();
+    const archiveId = f.start('Removing.mbox', mbox([mail(0, { tag: 'm' }), mail(1, { tag: 'm' }), mail(2, { tag: 'm' })]));
+    await pull(f.runtime, archiveId, {
+      pageSize: 1,
+      connectorFactory: afterFirstPage(() => {
+        requestArchiveRemoval(f.runtime.state, archiveId);
+        appendFileSync(join(f.exports, 'Removing.mbox'), mbox([mail(3, { tag: 'm' })]));
+      }),
+    });
+    expect(f.runtime.state.get(archiveId)?.status).toBe('removing');
+    // So the removal still runs, and takes it.
+    let removal = await runArchiveRemoval({ state: f.runtime.state, lane: f.runtime.lane('email'), archiveId });
+    for (let run = 0; run < 20 && removal.kind === 'progress'; run += 1) {
+      removal = await runArchiveRemoval({ state: f.runtime.state, lane: f.runtime.lane('email'), archiveId });
+    }
+    expect(removal.kind).toBe('removed');
+    expect(itemsByArchive(f.env).has(archiveId)).toBe(false);
+  });
+
+  test('a completed import keeps each file SHA-256: a copy is already imported, an export sharing only its ends is not', async () => {
+    const f = fixture();
+    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const archiveId = f.start('Big.mbox', text);
+    await importAll(f.runtime, archiveId);
+    const record = f.runtime.state.get(archiveId)!;
+    expect(record.status).toBe('imported');
+    expect(record.files[0]!.sha256).toBe(createHash('sha256').update(text).digest('hex'));
+
+    // The same size and the same first and last MiB, one byte apart in the middle.
+    const middle = Math.floor(text.length / 2);
+    writeFileSync(join(f.exports, 'Twin.mbox'), `${text.slice(0, middle)}y${text.slice(middle + 1)}`);
+    expect(f.runtime.start(join(f.exports, 'Twin.mbox')).kind).toBe('started');
+
+    mkdirSync(join(f.base, 'elsewhere'));
+    copyFileSync(join(f.exports, 'Big.mbox'), join(f.base, 'elsewhere', 'Big copy.mbox'));
+    const copy = f.runtime.start(join(f.base, 'elsewhere', 'Big copy.mbox'));
+    expect(copy.kind).toBe('already_imported');
+    if (copy.kind === 'already_imported') expect(copy.archive.archive_id).toBe(archiveId);
   });
 
   test('two archives keep their own resume points', async () => {

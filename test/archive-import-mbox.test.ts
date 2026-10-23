@@ -3,7 +3,7 @@
 // built here, never a real export.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem } from '../src/core/contracts.ts';
@@ -272,5 +272,36 @@ describe('mbox connector', () => {
     await expect(listAll(connector)).rejects.toMatchObject({ code: 'file_changed', relPath: 'Inbox.mbox' });
     unlinkSync(file.path);
     await expect(listAll(connector)).rejects.toMatchObject({ code: 'file_missing', relPath: 'Inbox.mbox' });
+  });
+
+  test('a file changed after the first page stops the listing, though its messages were already read', async () => {
+    const text = mbox([1, 2, 3].map((index) => mail({ subject: `Note ${index}`, body: `entry ${index}` })));
+    // Each change happens once the first page is out; the whole file was read into the buffer by then.
+    const changes: Record<string, (path: string) => void> = {
+      grown: (path) => appendFileSync(path, mbox([mail({ subject: 'Four', body: 'd' })])),
+      replaced: (path) => {
+        writeFileSync(`${path}.new`, text, 'latin1');
+        renameSync(`${path}.new`, path);
+      },
+      removed: (path) => unlinkSync(path),
+    };
+    const expected: Record<string, string> = { grown: 'file_changed', replaced: 'file_changed', removed: 'file_missing' };
+    for (const [name, change] of Object.entries(changes)) {
+      const file = mailFile('Inbox.mbox', text);
+      const { connector } = connectorFor(file.dir, 'Inbox.mbox', { pageSize: 1 });
+      const pages: boolean[] = [];
+      let caught: unknown;
+      try {
+        for await (const page of connector.listItems({})) {
+          pages.push(page.done);
+          if (pages.length === 1) change(file.path);
+        }
+      } catch (error) {
+        caught = error;
+      }
+      expect({ name, pages }).toEqual({ name, pages: [false] });
+      expect(caught).toBeInstanceOf(ArchiveImportStoppedError);
+      expect({ name, code: (caught as ArchiveImportStoppedError).code as string }).toEqual({ name, code: expected[name]! });
+    }
   });
 });

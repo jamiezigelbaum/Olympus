@@ -3,6 +3,7 @@
 // supported archive or is one already imported. Synthetic files only.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -142,6 +143,11 @@ describe('already imported', () => {
     expect(again.kind).toBe('already_imported');
     if (again.kind === 'already_imported') expect(again.archive.archive_id).toBe(first.archive.archive_id);
 
+    // What a completed import records: each file's SHA-256.
+    f.state.update(first.archive.archive_id, (record) => {
+      record.status = 'imported';
+      record.files[0]!.sha256 = createHash('sha256').update(MBOX_TEXT).digest('hex');
+    });
     mkdirSync(join(f.base, 'elsewhere'));
     const copy = join(f.base, 'elsewhere', 'Inbox copy.mbox');
     copyFileSync(path, copy);

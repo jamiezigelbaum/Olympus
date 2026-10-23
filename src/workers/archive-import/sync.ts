@@ -8,6 +8,10 @@
  * more is read from it. The resume point is the set's committed cursor for
  * this archive's own connector id, so two archives never share one.
  *
+ * The listing completes only once every file, read again whole, is still the
+ * version the import started with; its SHA-256 is then kept on the record,
+ * which is how a copy of the same export is known later.
+ *
  * Findings the connector reports (a message too large, a part it could not
  * read) are counted on the record as the pages they belong to are listed.
  * A replay after a restart lists the same positions again and is not counted
@@ -30,7 +34,12 @@ import {
   type TieredLaneReceiptCounts,
 } from '../connector-store/tiered-store-set.ts';
 import type { ArchiveTierLane } from './lane.ts';
-import { archiveFileEntries, verifyArchiveManifest } from './manifest.ts';
+import {
+  archiveFileDigestSteps,
+  archiveFileEntries,
+  verifyArchiveManifest,
+  type ArchiveManifestFile,
+} from './manifest.ts';
 import {
   archiveConnectorId,
   type ArchiveImportRecord,
@@ -136,14 +145,61 @@ function stopFrom(error: ArchiveImportStoppedError | { code: ArchiveImportStop['
   };
 }
 
+function fileStop(error: unknown, relPath: string): unknown {
+  if (!(error instanceof ScopeSafeError)) return error;
+  if (error.code === 'not_found') {
+    return new ArchiveImportStoppedError('file_missing', 'A file of this archive is no longer there.', relPath);
+  }
+  if (error.code === 'changed' || error.code === 'escape' || error.code === 'not_regular') {
+    return new ArchiveImportStoppedError('file_changed', 'A file of this archive changed since the import started.', relPath);
+  }
+  return new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', relPath);
+}
+
+/**
+ * Every file's SHA-256, each read again whole once the listing reached the
+ * end, so an import completes only on files that are still the versions it
+ * read, and its record says what it holds. Undefined when the pass is asked
+ * to stop first.
+ */
+async function digestArchiveFiles(
+  root: ScopeRoot,
+  files: readonly ArchiveManifestFile[],
+  shouldContinue: () => boolean,
+): Promise<string[] | undefined> {
+  const digests: string[] = [];
+  for (const file of files) {
+    const steps = archiveFileDigestSteps(root, file);
+    try {
+      for (;;) {
+        const step = steps.next();
+        if (step.done) {
+          digests.push(step.value);
+          break;
+        }
+        if (!shouldContinue()) {
+          steps.return('');
+          return undefined;
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    } catch (error) {
+      throw fileStop(error, file.rel_path);
+    }
+  }
+  return digests;
+}
+
 /**
  * Watches the listing: counts findings page by page, notes the dates the
- * items carry, and whether the listing reached the end.
+ * items carry, and whether the listing reached the end. The last page goes
+ * on only once `complete` confirmed every file is unchanged.
  */
 function observeListing(
   connector: SourceConnector,
   pending: ArchiveImportFinding[],
   flush: () => void,
+  complete: () => Promise<boolean>,
 ): { connector: SourceConnector; completed(): boolean; dates(): { earliest?: string; latest?: string } } {
   let completed = false;
   let earliest: string | undefined;
@@ -160,7 +216,10 @@ function observeListing(
           if (!latest || authoredAt > latest) latest = authoredAt;
         }
         flush();
-        if (page.done) completed = true;
+        if (page.done) {
+          if (!(await complete())) return;
+          completed = true;
+        }
         yield page;
       }
       flush();
@@ -184,12 +243,15 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
   if (!record || record.status !== 'importing') return idle(record);
   if (record.family !== options.lane.family) throw new Error('This archive belongs to another family\'s stores.');
 
+  // Only an import still importing stops: a removal asked for while this
+  // pass read keeps its `removing` status, or the data would never go.
   const stop = (reason: ArchiveImportStop): ArchiveImportPullOutcome => {
     const stoppedRecord = options.state.update(record.archive_id, (entry) => {
+      if (entry.status !== 'importing') return false;
       entry.status = 'stopped';
       entry.stop = reason;
     });
-    return idle(stoppedRecord, ['archive_import_stopped'], true);
+    return idle(stoppedRecord, stoppedRecord?.status === 'stopped' ? ['archive_import_stopped'] : [], stoppedRecord?.status === 'stopped');
   };
 
   const format = getArchiveFormat(record.format);
@@ -223,6 +285,7 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       options.state.recordFindings(record.archive_id, batch);
     };
     const connectorId = archiveConnectorId(record.archive_id);
+    const shouldContinue = options.shouldContinue ?? (() => true);
     const connector = factory({
       archiveId: record.archive_id,
       connectorId,
@@ -232,11 +295,16 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       files: archiveFileEntries(record.files),
       manifestSha256: record.manifest_sha256,
       report: (finding) => { pending.push(finding); },
-      shouldContinue: options.shouldContinue ?? (() => true),
+      shouldContinue,
       ...(options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {}),
       ...(options.pageSize !== undefined ? { pageSize: options.pageSize } : {}),
     });
-    const observed = observeListing(connector, pending, flush);
+    const completion: { digests?: string[] } = {};
+    const observed = observeListing(connector, pending, flush, async () => {
+      const digests = await digestArchiveFiles(root, record.files, shouldContinue);
+      if (digests) completion.digests = digests;
+      return digests !== undefined;
+    });
 
     // The Private store first: with no store yet, the set would route nothing.
     const set = options.lane.set;
@@ -268,9 +336,11 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
           latest: entry.date_range && entry.date_range.latest > dates.latest ? entry.date_range.latest : dates.latest,
         };
       }
-      if (complete && entry.status === 'importing') {
+      const digests = completion.digests;
+      if (complete && digests && entry.status === 'importing' && entry.manifest_sha256 === record.manifest_sha256) {
         entry.status = 'imported';
         entry.completed_at = now().toISOString();
+        entry.files.forEach((file, index) => { file.sha256 = digests[index]!; });
       }
     });
     const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain]!.sync] : []);

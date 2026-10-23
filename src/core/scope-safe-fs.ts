@@ -584,7 +584,7 @@ export class ScopeRoot {
           throw new ScopeSafeError('changed', 'the file changed since it was seen');
         }
       }
-      return new ScopeFileReader(relPath, fd, version);
+      return new ScopeFileReader(relPath, fd, version, () => this.statRelative(relPath));
     } catch (error) {
       fs.closeSync(fd);
       if (error instanceof ScopeSafeError) throw error;
@@ -631,17 +631,20 @@ export class ScopeRoot {
  * ranges. It was opened through the same link- and mount-refusing walk as
  * every other read, and each range first checks that the file under the
  * descriptor is still the version that was opened (same identity, size and
- * modification time); a file that grew, shrank or was rewritten is `changed`.
+ * modification time), and checks it again once the range is read; a file
+ * that grew, shrank or was rewritten is `changed`.
  */
 export class ScopeFileReader {
   readonly relPath: string;
   readonly version: ScopeFileVersion;
   private fd: number;
+  private readonly statPath: (() => ScopeStat) | undefined;
 
-  constructor(relPath: string, fd: number, version: ScopeFileVersion) {
+  constructor(relPath: string, fd: number, version: ScopeFileVersion, statPath?: () => ScopeStat) {
     this.relPath = relPath;
     this.fd = fd;
     this.version = version;
+    this.statPath = statPath;
   }
 
   get size(): number {
@@ -664,6 +667,21 @@ export class ScopeFileReader {
       mtimeMs: Number(st.mtimeMs),
     };
     if (!sameScopeFileVersion(now, this.version)) throw new ScopeSafeError('changed', 'the file changed while it was read');
+  }
+
+  /**
+   * Throws when the file is no longer the version it was opened at, under the
+   * descriptor or at its name: the name, walked again from the root the same
+   * safe way, must still lead to this same file. A file that was replaced is
+   * `changed`; one that was unlinked is `not_found`.
+   */
+  assertCurrent(): void {
+    this.assertUnchanged();
+    if (!this.statPath) return;
+    const stat = this.statPath();
+    if (stat.kind !== 'file' || stat.dev !== this.version.dev || stat.ino !== this.version.ino) {
+      throw new ScopeSafeError('changed', 'another file is at this name now');
+    }
   }
 
   /**
@@ -690,6 +708,8 @@ export class ScopeFileReader {
       throw mapNodeError(error);
     }
     if (filled < out.length) throw new ScopeSafeError('changed', 'the file is shorter than it was');
+    // A write while the range was read shows as a new size or time.
+    this.assertUnchanged();
     return new Uint8Array(out.buffer, out.byteOffset, filled);
   }
 

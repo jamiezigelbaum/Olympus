@@ -16,6 +16,9 @@
  *   as live Gmail); counted as a gap.
  * - Character sets: text whose declared charset nothing here decodes is read
  *   with postal-mime's fallback and counted as a gap.
+ * - Changes: each page goes out only while its file is still the version
+ *   opened, under the descriptor and at its name; a file changed, replaced
+ *   or removed after the first page stops the import, whatever was buffered.
  * - Resume point: `mbox1:<manifest>:<file>:<offset>`, the byte offset of the
  *   next message in a file of exactly this manifest. Any other manifest, or an
  *   offset that is not a message start, stops the import.
@@ -326,6 +329,15 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
           } catch (error) {
             throw stoppedFrom(error, file.relPath);
           }
+          // Before each page goes out, even one served from messages already
+          // read: the file is still the version opened, at its name too.
+          const current = (): void => {
+            try {
+              reader.assertCurrent();
+            } catch (error) {
+              throw stoppedFrom(error, file.relPath);
+            }
+          };
           try {
             const splitter = new MboxSplitter(reader, {
               start: fileIndex === start.fileIndex ? start.offset : 0,
@@ -335,7 +347,10 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
             let pending = false;
             for (;;) {
               if (!input.shouldContinue()) {
-                if (pending) yield { items: page, nextCursor: cursorAt(input, fileIndex, splitter.position), done: false };
+                if (pending) {
+                  current();
+                  yield { items: page, nextCursor: cursorAt(input, fileIndex, splitter.position), done: false };
+                }
                 return;
               }
               let span: MboxMessageSpan | undefined;
@@ -363,6 +378,7 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
               }
               const budgetLeft = limit - emitted;
               if (page.length >= Math.min(pageSizeDefault, budgetLeft) || bytesRead >= byteBudget) {
+                current();
                 const last = fileIndex === input.files.length - 1 && splitter.done;
                 if (last) {
                   yield { items: page, nextCursor: doneCursor(input), done: true };
@@ -375,6 +391,7 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
                 if (emitted >= limit || bytesRead >= byteBudget) return;
               }
             }
+            current();
             if (fileIndex === input.files.length - 1) {
               yield { items: page, nextCursor: doneCursor(input), done: true };
               return;

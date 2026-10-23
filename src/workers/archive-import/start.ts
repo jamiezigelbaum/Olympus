@@ -16,6 +16,7 @@ import {
 } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError, joinRelative } from '../../core/scope-safe-fs.ts';
 import {
+  archiveFileSha256,
   archiveManifestSha256,
   buildArchiveManifest,
   findAlreadyImported,
@@ -68,7 +69,7 @@ export function startArchiveImport(input: {
     if (detection.kind === 'ambiguous') return { kind: 'ambiguous', formats: detection.formats };
     const relPaths = detection.files.map((file) => (file === '' ? chosenRelPath : joinRelative(chosenRelPath, file)));
     const files = buildArchiveManifest(root, relPaths);
-    const existing = findAlreadyImported(input.state.list(), files);
+    const existing = findAlreadyImported(input.state.list(), files, (index) => archiveFileSha256(root, files[index]!));
     if (existing) return { kind: 'already_imported', archive: existing };
     const archive = input.state.create({
       format: detection.format.id,

@@ -44178,6 +44178,7 @@ init_archive_formats();
 // src/workers/archive-import/manifest.ts
 init_archive_formats();
 var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
 
 // src/workers/archive-import/runtime.ts
 init_store2();
