@@ -36091,7 +36091,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     for (const id of Object.keys(state.deleting)) {
       const row = sources.filter((source) => source && source.id === id)[0];
       const offered = !!row && Array.isArray(row.menu) && row.menu.some((fix) => fix && fix.tool === config.deleteDataTool);
-      if (!offered || Date.now() >= state.deleting[id])
+      if (!offered || Date.now() >= (state.deleting[id] ?? 0))
         delete state.deleting[id];
     }
   }
