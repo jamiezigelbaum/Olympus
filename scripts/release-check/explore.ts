@@ -232,15 +232,14 @@ const AXE_CALL = String.raw`(async () => {
 })()`;
 
 /**
- * Audits the page as it stands with axe-core: the framed panel when there is one (the host page then is the checker's stand-in for ChatGPT), else the page itself. The checker's script is put into the frame
+ * Audits the page as it stands, in the computer's host page (renderComputerHostPage) and in the framed panel, with axe-core. The checker's script is put into the frame
  * once (a frame that already has it keeps it) and run over the frame's own document; the panel is a separate document, so it is
  * audited by itself (`iframes: false`).
  */
 export async function auditAccessibility(driver: JourneyDriver, axeSource: string, state: string): Promise<{ version: string; states: AccessibilityState[] }> {
   const states: AccessibilityState[] = [];
   let version = '';
-  // With a panel, the host page is the checker's own stand-in for ChatGPT, not the product, so only the panel is audited.
-  const frames: Array<'host' | 'panel'> = (await driver.hasPanel().catch(() => false)) ? ['panel'] : ['host'];
+  const frames: Array<'host' | 'panel'> = (await driver.hasPanel().catch(() => false)) ? ['host', 'panel'] : ['host'];
   for (const frame of frames) {
     try {
       await driver.probe(frame, `if (typeof window.axe === 'undefined') {\n${axeSource}\n}\n'loaded'`);
