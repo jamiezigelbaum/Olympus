@@ -419,19 +419,20 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     for (const control of base.filter(inScope)) record(control, idOf(control));
 
     // The queue: every control by itself, from the page as seeded. A control in a closed menu is reached through its menu.
-    const queue: Array<{ path: string[]; parentKind?: ControlKind }> = [];
+    // `row` is the source row the press belongs to, so a source whose data a terminal action removed stops on its own.
+    const queue: Array<{ path: string[]; row: string; parentKind?: ControlKind }> = [];
     const seen = new Set<string>();
-    const enqueue = (path: string[], parentKind?: ControlKind): void => {
+    const enqueue = (path: string[], row: string, parentKind?: ControlKind): void => {
       const id = path.join(' > ');
       if (seen.has(id)) return;
       seen.add(id);
-      queue.push({ path, ...(parentKind ? { parentKind } : {}) });
+      queue.push({ path, row, ...(parentKind ? { parentKind } : {}) });
     };
     for (const control of base.filter(inScope)) {
       // Only the source the machine can drive (its stand-in): another source's Connect would start a real sign-in at its provider.
       if (!drivable(control)) continue;
-      if (control.menuKey && control.tag !== 'summary') enqueue([`summary:${control.menuKey}`, control.key]);
-      else enqueue([control.key]);
+      if (control.menuKey && control.tag !== 'summary') enqueue([`summary:${control.menuKey}`, control.key], control.rowName);
+      else enqueue([control.key], control.rowName);
     }
     const lastKinds = new Set(seed.last ?? []);
     const orderKey = (entry: { path: string[]; parentKind?: ControlKind }): number => (entry.parentKind && lastKinds.has(entry.parentKind) && /:yes$/.test(entry.path[entry.path.length - 1]!) ? 1 : 0);
@@ -440,10 +441,12 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     let dirty = false;
     let pressedHere = 0;
     let failedHere = 0;
-    let destroyed = false;
-    while (queue.length > 0 && presses < maxPresses && !destroyed && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
+    // Sources whose terminal action (a confirmed delete) has run: the rest of their presses are dropped, the other sources' go on.
+    const finishedRows = new Set<string>();
+    while (queue.length > 0 && presses < maxPresses && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
       queue.sort((a, b) => orderKey(a) - orderKey(b));
       const item = queue.shift()!;
+      if (finishedRows.has(item.row)) continue;
       const started = now();
       try {
       if (dirty) {
@@ -592,10 +595,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       const newKeys = afterControls.filter((candidate) => !context.before.keys.includes(candidate.key) && candidate.key.startsWith(`${control.key}:`) && inScope(candidate) && candidate.visible && candidate.tag === 'button');
       for (const child of newKeys) {
         record(child, idOf(child));
-        enqueue([...item.path, child.key], kind);
+        enqueue([...item.path, child.key], item.row, kind);
       }
       if ((seed.resetAfter ?? []).includes(kind) || kind === 'confirm') dirty = true;
-      if (kind === 'confirm' && parent && lastKinds.has(parent)) destroyed = true;
+      if (kind === 'confirm' && parent && lastKinds.has(parent)) finishedRows.add(item.row);
       } catch (error) {
         // The page or the browser failed under a press: that press fails, with the reason, and the exploration goes on.
         steps.push(failureStep(steps.length + 1, item.path, `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`));

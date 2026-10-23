@@ -31,8 +31,8 @@ export interface StateResult { ok: boolean; detail: string }
 export interface SourceDriver {
   /** The name the report uses for the source. */
   label: string;
-  /** The states this source can be in; a state it has no entry for is left as it is. */
-  states: Partial<Record<SeedId, () => Promise<StateResult>>>;
+  /** The states this source can be in; a state it has no entry for is left as it is. Once `signal` aborts, the state stops at its next call or wait. */
+  states: Partial<Record<SeedId, (signal?: AbortSignal) => Promise<StateResult>>>;
 }
 
 const NOT_CONNECTED = ['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required'];
@@ -68,7 +68,13 @@ export function helpers(ctx: SeedContext) {
 
 export const LOCAL_FILES_FOLDER = 'rc-files';
 
-export function localFilesDriver(ctx: SeedContext): SourceDriver {
+export function localFilesDriver(outer: SeedContext): SourceDriver {
+  // A state that ran past its bound is stopped at its next call or wait, so it cannot change the install under the presses that follow.
+  let signal: AbortSignal | undefined;
+  const guard = (): void => { if (signal?.aborted) throw new Error('stopped: the source ran past its bound'); };
+  const guarded = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) => async (...args: A): Promise<R> => { guard(); const out = await fn(...args); guard(); return out; };
+  const ctx: SeedContext = { ...outer, call: guarded(outer.call), cardOf: guarded(outer.cardOf), sleep: guarded(outer.sleep) };
+  const withSignal = (state: () => Promise<StateResult>) => (given?: AbortSignal): Promise<StateResult> => { signal = given; return state(); };
   const { until, ask } = helpers(ctx);
   const folder = join(ctx.home, LOCAL_FILES_FOLDER);
   const away = `${folder}.away`;
@@ -130,8 +136,8 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
   };
   return {
     label: 'Files on this computer',
-    states: {
-      populated,
+    states: Object.fromEntries(Object.entries({
+      populated: () => populated(),
       // The chosen folder is gone: the source cannot read it, and the row has to say so and offer a way to fix it.
       failed: async () => {
         const first = await populated();
@@ -152,7 +158,7 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
         return first.ok ? await disconnect() : first;
       },
       empty: emptyState,
-    },
+    } satisfies Partial<Record<SeedId, () => Promise<StateResult>>>).map(([id, state]) => [id, withSignal(state)])),
   };
 }
 
@@ -178,9 +184,15 @@ export function composeSeeds(primary: readonly Seed[], drivers: readonly SourceD
         const state = driver.states[seed.id];
         if (!state) continue;
         const started = Date.now();
-        // A source that does not come to its state in this time is reported as not produced, so one slow source cannot take the whole exploration.
-        const bound = new Promise<StateResult>((done) => setTimeout(() => done({ ok: false, detail: `${driver.label} did not reach its state within ${STATE_BOUND_MS / 1000} s` }), STATE_BOUND_MS));
-        const result = await Promise.race([state(), bound]).catch((error: unknown): StateResult => ({ ok: false, detail: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200) }));
+        // A source that does not come to its state in this time is reported as not produced, so one slow source cannot take the whole exploration;
+        // it is told to stop, and given a minute to, before the presses start.
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const running = state(controller.signal);
+        const bound = new Promise<StateResult>((done) => { timer = setTimeout(() => { controller.abort(); done({ ok: false, detail: `${driver.label} did not reach its state within ${STATE_BOUND_MS / 1000} s` }); }, STATE_BOUND_MS); });
+        const result = await Promise.race([running, bound]).catch((error: unknown): StateResult => ({ ok: false, detail: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200) }));
+        clearTimeout(timer);
+        if (controller.signal.aborted) await Promise.race([running.catch(() => undefined), new Promise((done) => setTimeout(done, 60_000))]);
         details.push(`${result.ok ? result.detail : `${driver.label} NOT PRODUCED`} (${Math.round((Date.now() - started) / 1000)} s)`);
         if (!result.ok) failedSources.push({ source: driver.label, detail: result.detail });
       }
