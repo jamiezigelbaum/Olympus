@@ -19,6 +19,11 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'source_watch_cancel',
   'olympus_doctor',
   'ask_anonymously',
+  // Importing an old export (owner decision, 2026-10-23): the agent only
+  // asks, and the user approves on the computer's dashboard. Not on the
+  // Hermes, remote or relay lists: those reach Olympus from outside this
+  // computer.
+  'archive_import',
   // Remote mode's agent route (owner decision, 2026-10-10): native only,
   // because only OpenClaw can vouch that the caller is the owner and run the
   // commands on the owner's computer (a paired node).
@@ -42,6 +47,7 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'source_index_search',
   'olympus_doctor',
   'ask_anonymously',
+  'archive_import',
 ] as const;
 
 // Operation names, not typed command lines. `olympus_doctor` is exposed to the
@@ -56,6 +62,7 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'source_index_search',
   'olympus_doctor',
   'ask_anonymously',
+  'archive_import',
 ] as const;
 
 // `ask_anonymously` (one typed question through zkAPI, owner decision
@@ -77,6 +84,7 @@ export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
 export const V0_4_PUBLIC_SKILL_DIRS = [
   'skills/ask-argus',
   'skills/ask-sources',
+  'skills/import-archive',
 ] as const;
 
 export const V0_4_PUBLIC_PACKAGE_NAME = 'olympus' as const;
@@ -192,6 +200,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'tier migrate',
   'doctor',
   'ask',
+  'archive',
   'argus ping',
   'argus list',
   'argus complete',
@@ -350,6 +359,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'skills/manifest.json',
   'skills/ask-argus/SKILL.md',
   'skills/ask-sources/SKILL.md',
+  'skills/import-archive/SKILL.md',
   'config/olympus.example.json',
   'config/source-ingestion/dropbox.personal.ingestion.json',
   'config/sovereignty/presets/local-first.json',

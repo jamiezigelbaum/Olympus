@@ -267,6 +267,7 @@ var init_public_surface = __esm(() => {
     "source_watch_cancel",
     "olympus_doctor",
     "ask_anonymously",
+    "archive_import",
     "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
@@ -278,7 +279,8 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "archive_import"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -288,7 +290,8 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "archive_import"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
@@ -13053,6 +13056,9 @@ var init_answer_ready_coverage = __esm(() => {
   ];
 });
 
+// src/workers/dashboard/display-text.ts
+var init_display_text = () => {};
+
 // src/workers/dashboard/vocabulary.ts
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${syncMid(label)}…`;
@@ -13064,6 +13070,7 @@ var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
+  init_display_text();
   init_scheduler_markers();
   DASHBOARD_UNCONNECTED_STATES = new Set([
     "not_connected",
@@ -13364,6 +13371,10 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    fullPath: "Full path: {path}",
+    removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
+    removeRequestLineNoWhere: "An agent asked to remove {name}.",
+    removeRequestNote: "Removing deletes everything Olympus made from it. The file itself stays where it is.",
     approve: "Import",
     decline: "Decline",
     checkingLine: "Checking whether {name} is already imported. Olympus reads it once to compare.",
@@ -13392,6 +13403,7 @@ var init_vocabulary = __esm(() => {
     needsYou: {
       stopped: "An import stopped: {name}",
       request: "An agent asked to import {name}",
+      removal: "An agent asked to remove {name}",
       failed: "An import did not start: {name}",
       counts: "Olympus can't count the messages in {name}",
       scheduler: {
@@ -21554,6 +21566,23 @@ class EmailClient {
       ...options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}
     });
   }
+  async archiveImport(options) {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) {
+      throw new OperationError("source_index_not_enabled", "Archive import is off because the source index is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
+    }
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before importing an archive.");
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/archive-import/${options.action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
+      body: JSON.stringify({
+        ...options.path !== undefined ? { path: options.path } : {},
+        ...options.archiveId !== undefined ? { archive_id: options.archiveId } : {}
+      })
+    });
+  }
   async sourceAnswer(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
@@ -28923,6 +28952,16 @@ var ASK_ANONYMOUSLY_PARAMS = {
   model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; a model from the provider hosting this conversation is refused. Omit to use the model configured for this provider." },
   timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000)." }
 };
+var ARCHIVE_IMPORT_PARAMS = {
+  action: {
+    type: "string",
+    required: true,
+    enum: ["start", "status", "remove"],
+    description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).'
+  },
+  path: { type: "string", description: "start only: the full path of the export (an .mbox file, or an Apple Mail .mbox folder), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
+  archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
+};
 var operations = [
   {
     name: "argus_ping",
@@ -29350,6 +29389,46 @@ var operations = [
       });
       const jobs = ctx.sourceAnswerJobs;
       return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+    }
+  },
+  {
+    name: "archive_import",
+    description: [
+      "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
+      "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
+      "Never open, read or copy the file yourself, and never retry to get around the approval.",
+      `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
+      "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
+      "remove {archive_id}: also needs the user's approval on the dashboard (same needs_approval result); removing deletes what Olympus made from the archive and never touches the file.",
+      "Any other {ok: false, message} is a refusal to tell the user in those words."
+    ].join(" "),
+    params: ARCHIVE_IMPORT_PARAMS,
+    mutating: true,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "archive", positional: ["action"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(ARCHIVE_IMPORT_PARAMS, params, "Archive import");
+      const action = asString(params.action, "action");
+      if (action !== "start" && action !== "status" && action !== "remove") {
+        throw new OperationError("invalid_params", 'action must be "start", "status" or "remove".');
+      }
+      const path = optionalString4(params.path);
+      const archiveId = optionalString4(params.archive_id);
+      if (action === "start" && (path === undefined || archiveId !== undefined)) {
+        throw new OperationError("invalid_params", "start needs path, and takes no archive_id.");
+      }
+      if (action === "remove" && (archiveId === undefined || path !== undefined)) {
+        throw new OperationError("invalid_params", "remove needs archive_id, and takes no path.");
+      }
+      if (action === "status" && path !== undefined) {
+        throw new OperationError("invalid_params", "status takes no path; give archive_id to show one archive.");
+      }
+      return ctx.email.archiveImport({
+        action,
+        ...path !== undefined ? { path } : {},
+        ...archiveId !== undefined ? { archiveId } : {},
+        ...ctx.signal ? { signal: ctx.signal } : {}
+      });
     }
   },
   {
@@ -30331,7 +30410,28 @@ function contentTextForOperation(operation, payload2) {
     if (summary)
       return summary;
   }
+  if (operation.name === "archive_import") {
+    const summary = archiveImportContentText(payload2);
+    if (summary)
+      return summary;
+  }
   return JSON.stringify(payload2, null, 2);
+}
+function archiveImportContentText(payload2) {
+  const result = asRecord17(payload2);
+  if (!result || result.ok !== false || typeof result.message !== "string")
+    return;
+  if (result.code === "needs_approval") {
+    const lines = ["Waiting for the user to approve on their computer: " + result.message];
+    if (typeof result.request_id === "string")
+      lines.push("request_id: " + result.request_id);
+    const open2 = asRecord17(result.open);
+    if (open2 && typeof open2.url === "string")
+      lines.push("Opens the Archives page: " + open2.url);
+    return lines.join(`
+`);
+  }
+  return "Not done: " + result.message;
 }
 function askAnonymouslyContentText(payload2) {
   const result = asRecord17(payload2);

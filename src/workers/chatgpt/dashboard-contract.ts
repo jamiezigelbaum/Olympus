@@ -539,10 +539,10 @@ export interface ComputerArchivesMeta {
   privateModel: 'ready' | 'waiting' | 'off';
   /**
    * The list of imports (or of the imports asked for) cannot be read: why,
-   * as a closed code, and where it is kept (home folder shown as ~). The
-   * lists above are then what could still be read, or empty.
+   * as a closed code, which list it is, and where it is kept (home folder
+   * shown as ~). The lists above are then what could still be read, or empty.
    */
-  unreadable?: { reason: 'damaged' | 'unknown_form' | 'permission' | 'other'; file: string };
+  unreadable?: { reason: 'damaged' | 'unknown_form' | 'permission' | 'other'; file: string; list: 'archives' | 'requests' };
   /**
    * With any archive here, imports and removals cannot run: Olympus's
    * background syncing is turned off (`disabled`), or its list of sources
@@ -554,7 +554,12 @@ export interface ComputerArchivesMeta {
 
 export interface ComputerArchiveEntry {
   id: string;
-  /** The chosen file's or folder's name. */
+  /**
+   * The chosen file's or folder's name. Every name, folder and path in this
+   * list is written for display: what cannot be seen or reorders its
+   * neighbours is shown as `⟨U+XXXX⟩` and the value is direction-isolated
+   * (workers/dashboard/display-text.ts).
+   */
   name: string;
   /** The format's own label ("Mail (mbox)"). */
   format: string;
@@ -594,12 +599,25 @@ export interface ComputerArchiveEntry {
 
 export interface ComputerArchiveRequest {
   id: string;
+  /**
+   * What is asked: to import a file or folder, or (an agent's only) to remove
+   * an imported archive. Absent: an import.
+   */
+  kind?: 'import' | 'remove';
+  /** The file's name; for a removal, the archive's. */
   name: string;
+  /** The folder it is in; for a removal, the folder the archive was imported from. */
   where: string;
+  /**
+   * The whole path asked for, as the person reads what they approve; for a
+   * removal, the path the archive was imported from. Written out in full,
+   * with every character that cannot be seen shown as `⟨U+XXXX⟩`.
+   */
+  path?: string;
   /** An agent asked (waiting for Approve or Decline), or the person chose it here. */
   origin: 'agent' | 'dashboard';
   status: 'pending' | 'checking' | 'already_imported' | 'failed';
-  /** already_imported: the archive that holds it. */
+  /** already_imported: the archive that holds it. A removal: the archive it asks to remove. */
   archiveId?: string;
   archiveName?: string;
   /** failed: why (a closed code). */
@@ -662,9 +680,12 @@ export const ARCHIVE_BROWSE_TOOL_NAME = 'olympus_archive_browse';
  * outcome arrives with a later dashboard read.
  */
 export const ARCHIVE_APPROVE_TOOL_NAME = 'olympus_archive_approve';
-/** Computer only: decline an agent's request, or dismiss a finished check (`{request_id}`). */
+/** Computer only: decline an agent's request (to import or to remove), or dismiss a finished check (`{request_id}`). */
 export const ARCHIVE_DECLINE_TOOL_NAME = 'olympus_archive_decline';
-/** Computer only (destructive, the panel confirms): remove one imported archive (`{archive_id}`). */
+/**
+ * Computer only (destructive, the panel confirms): remove one imported archive
+ * (`{archive_id}`), or approve an agent's request to remove one (`{request_id}`).
+ */
 export const ARCHIVE_REMOVE_TOOL_NAME = 'olympus_archive_remove';
 /**
  * The archive tools only the person at this computer's dashboard may use: a

@@ -63,6 +63,18 @@ export interface ConsultAskClientOptions {
 }
 
 /**
+ * What `archive_import` sends the worker (workers/archive-import/agent.ts):
+ * the action, and the path or archive id it names. The path is text; nothing
+ * on this side opens it either.
+ */
+export interface ArchiveImportClientOptions {
+  action: 'start' | 'status' | 'remove';
+  path?: string;
+  archiveId?: string;
+  signal?: AbortSignal;
+}
+
+/**
  * A zkAPI session may take many minutes: the owner's writer (up to its
  * timeout, 3 min by default), the route becoming ready (2 min), the consult
  * (6 min by default, configurable up to 30), then settlement. Off the
@@ -441,6 +453,38 @@ export class EmailClient {
     }, {
       timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,
       ...(options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}),
+    });
+  }
+
+  /**
+   * Ask the worker to import an archive or remove one, or list them
+   * (archive_import). The worker only records the request and reads; the
+   * person approves on the computer's dashboard. Its outcome, refusals
+   * included, comes back as a result, never as an error.
+   */
+  async archiveImport(options: ArchiveImportClientOptions): Promise<unknown> {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) {
+      throw new OperationError(
+        'source_index_not_enabled',
+        'Archive import is off because the source index is disabled.',
+        'Enable sourceIndex.enabled to turn on the source read surface.',
+      );
+    }
+    if (!this.config.email.enabled) {
+      throw new OperationError(
+        'email_not_configured',
+        'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before importing an archive.',
+      );
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/archive-import/${options.action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      ...(options.signal ? { signal: options.signal } : {}),
+      body: JSON.stringify({
+        ...(options.path !== undefined ? { path: options.path } : {}),
+        ...(options.archiveId !== undefined ? { archive_id: options.archiveId } : {}),
+      }),
     });
   }
 

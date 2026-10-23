@@ -4836,6 +4836,8 @@ export async function main(): Promise<void> {
       () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
       () => secureDerivativeDefault ?? 'allow',
     ),
+    // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
+    archiveImportAgent: archiveImportDashboard.agent,
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {

@@ -9,6 +9,11 @@
       "name": "ask-sources",
       "path": "skills/ask-sources/SKILL.md",
       "description": "Search Olympus source-index corpora through calling-assistant-safe source tools; email/Gmail, Dropbox, Telegram, X/Twitter bookmarks, Drive, Readwise, and unified private asks use source_answer. Chat poster/sender rankings use the content-free source_index_status aggregation before sender-scoped source_answer follow-up. Private material is searched by default when policy approves a private analyst (include_secure_local false opts out); omit corpus_id unless intentionally force-narrowing. Locator questions use source_index_search. Never use bash, raw databases, local files, shell fallback, or skill-file inspection for ordinary source questions. Leave analyst_provider unset for secure-pool health/latency selection unless the owner explicitly constrains the configured pool; E2EE secure-answer ids are gated pending local key handling. Issue source_answer calls one at a time; never run them concurrently."
+    },
+    {
+      "name": "import-archive",
+      "path": "skills/import-archive/SKILL.md",
+      "description": "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder). Offer it when the user mentions one. archive_import only asks: the user approves every import and every removal on the Olympus dashboard on their computer. Never open, read or copy the export yourself, and never retry to get around the approval; status shows progress without any message text."
     }
   ]
 }
