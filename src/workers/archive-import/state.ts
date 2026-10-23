@@ -86,6 +86,11 @@ export interface ArchiveImportRecord {
    * Earliest and latest item dates seen.
    */
   date_range?: { earliest: string; latest: string };
+  /**
+   * How far the import has read (a file of `files` and a byte offset in it),
+   * for progress only: the resume point is the store's committed cursor.
+   */
+  read_position?: { file_index: number; offset: number };
 }
 
 interface PersistedArchiveImportState {
@@ -233,11 +238,23 @@ export class ArchiveImportStateStore {
   /**
    * Counts the findings an import met, each once: a finding at or before the
    * position already counted was counted on an earlier pass (the same bytes
-   * listed again after a restart).
+   * listed again after a restart). With `position`, also notes how far the
+   * import has read, in the same write.
    */
-  recordFindings(archiveId: string, findings: readonly ArchiveImportFinding[]): void {
-    if (findings.length === 0) return;
+  recordFindings(
+    archiveId: string,
+    findings: readonly ArchiveImportFinding[],
+    position?: { fileIndex: number; offset: number },
+  ): void {
+    if (findings.length === 0 && !position) return;
     this.update(archiveId, (record) => {
+      // How far the import read, for its progress: only forward, and only while it imports.
+      const read = record.read_position;
+      const movesOn = position !== undefined && record.status === 'importing'
+        && (!read || position.fileIndex > read.file_index
+          || (position.fileIndex === read.file_index && position.offset > read.offset));
+      if (findings.length === 0 && !movesOn) return false;
+      if (movesOn) record.read_position = { file_index: position!.fileIndex, offset: position!.offset };
       const tally = record.findings;
       // Positions counted by an earlier call. One call carries every finding
       // of the messages it covers, so several findings at one position count.
