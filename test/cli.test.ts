@@ -485,6 +485,9 @@ describe('CLI tool surface', () => {
       mkdirSync(shimDir, { recursive: true });
       writeFileSync(join(shimDir, 'systemctl'), '#!/bin/sh\ncase "$*" in *" show "*) echo LoadState=not-found; exit 0;; esac\necho inactive\nexit 3\n', { mode: 0o755 });
       writeFileSync(join(shimDir, 'launchctl'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
+      // The process table is the host's too (a live engine would refuse the
+      // delete): an empty one, so only the service managers decide here.
+      writeFileSync(join(shimDir, 'ps'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 
       const result = await runSourceCliExit([
         'data',
@@ -504,6 +507,48 @@ describe('CLI tool surface', () => {
         custody: { requirement: 'worker_inactive', ready: true, observed: 'missing' },
       });
       expect(existsSync(storePath)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('per-source delete refuses while a Gateway, a foreground worker or a separate drain still runs, though the engine and worker units are absent', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-source-delete-worker-custody-'));
+    const home = join(dir, 'home');
+    const registryPath = join(dir, 'connected-handles.json');
+    try {
+      const storeDir = join(home, '.local', 'share', 'openclaw', 'olympus');
+      const storePath = join(storeDir, 'reflect-notes.sqlite');
+      mkdirSync(storeDir, { recursive: true });
+      writeFileSync(storePath, 'reflect notes');
+      writeFileSync(registryPath, JSON.stringify({ version: 1, handles: [] }));
+      // The probe must not depend on the host's service manager (CI runners
+      // have no user bus and report `unknown`, which fails custody closed).
+      // Shim both managers to the no-unit answer so the observed state is
+      // deterministically `missing` on every platform.
+      const shimDir = join(dir, 'bin');
+      mkdirSync(shimDir, { recursive: true });
+      writeFileSync(join(shimDir, 'systemctl'), '#!/bin/sh\ncase "$*" in *" show "*) echo LoadState=not-found; exit 0;; esac\necho inactive\nexit 3\n', { mode: 0o755 });
+      writeFileSync(join(shimDir, 'launchctl'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
+      // The process table is the host's too (a live engine would refuse the
+      // delete): an empty one, so only the service managers decide here.
+      writeFileSync(join(shimDir, 'ps'), "#!/bin/sh\necho '  4242  4242 Mon Jan  1 00:00:00 2024 /usr/bin/openclaw-gateway'\necho '  4243  4243 Mon Jan  1 00:00:00 2024 node /repo/dist/embedding-drain.js'\nexit 0\n", { mode: 0o755 });
+
+      const result = await runSourceCliExit([
+        'data',
+        'delete',
+        '--source',
+        'reflect.notes',
+      ], {
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
+      });
+
+      expect(result.code).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`).toContain('OpenClaw gateway');
+      expect(`${result.stdout}${result.stderr}`).toContain('embedding step');
+      expect(existsSync(storePath)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

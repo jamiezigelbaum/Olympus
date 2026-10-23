@@ -5,6 +5,8 @@ import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { DASHBOARD_SUPPORTED_SOURCES } from '../src/workers/source-dashboard.ts';
+import { scrubCard } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { applyPendingSourceDeletes, readSourceDeleteIntents } from '../src/pending-source-deletes.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
@@ -128,12 +130,12 @@ describe('dashboard Delete indexed data route', () => {
     const f = fixture();
     try {
       await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
-      const applied = applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      const applied = await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
       expect(applied).toEqual({ applied: ['dropbox.files'], refused: [] });
       expect(existsSync(f.store)).toBe(false);
       expect(readSourceDeleteIntents(f.registryPath).intents).toEqual([]);
       // Idempotent: a second start has nothing to do.
-      expect(applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context })).toEqual({ applied: [], refused: [] });
+      expect(await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context })).toEqual({ applied: [], refused: [] });
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
@@ -148,8 +150,32 @@ describe('dashboard Delete indexed data route', () => {
         return view.sources.find((source) => source.source_id === 'dropbox.files')?.connection.label;
       };
       expect(await label()).toBe('Deleting indexed data…');
-      applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
       expect(await label()).not.toBe('Deleting indexed data…');
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('both delete states survive the ChatGPT sanitization as explicit fields with a closed reason', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      const card = async () => {
+        const view = await (await f.worker.fetch(new Request('http://worker.test/dashboard.json'))).json() as { sources: Array<{ source_id: string }> };
+        return view.sources.find((source) => source.source_id === 'dropbox.files')!;
+      };
+      const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === 'dropbox.files')!;
+      const pending = scrubCard(definition, await card() as never);
+      expect(pending.delete_state).toEqual({ state: 'pending' });
+      expect(pending.connection.label).toBe('Deleting indexed data…');
+      // The re-check refuses (holders still running): the explanation and the retry survive.
+      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context, holders: () => false });
+      const refused = scrubCard(definition, await card() as never);
+      expect(refused.delete_state).toEqual({ state: 'refused', reason: 'holders_running' });
+      expect(refused.connection.label).toContain("Delete didn't run");
+      // A reason outside the closed set is dropped, never passed through.
+      expect(scrubCard(definition, { ...(await card()), delete_state: { state: 'refused', reason: '/home/me/secret' } } as never).delete_state).toEqual({ state: 'refused' });
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
@@ -312,7 +338,7 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
       const response = await post(f.worker, { source_id: 'telegram.messages', acknowledge: true });
       expect(response.status).toBe(202);
       expect(existsSync(f.files.tgStore)).toBe(true);
-      applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
       expect(existsSync(f.files.tgStore)).toBe(false);
       // Olympus's raw copy of the messages goes with the index.
       expect(existsSync(f.files.tgSpool)).toBe(false);
@@ -329,7 +355,7 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     try {
       const response = await post(f.worker, { source_id: 'whatsapp.personal.messages', acknowledge: true });
       expect(response.status).toBe(202);
-      applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
       expect(existsSync(f.files.waStore)).toBe(false);
       expect(existsSync(f.files.waSpool)).toBe(false);
       expect(existsSync(f.files.waMedia)).toBe(false);

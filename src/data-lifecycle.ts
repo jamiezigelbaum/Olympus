@@ -47,6 +47,11 @@ import {
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
+import { defaultSourceIngestionExclusionsPath } from './core/source-ingestion-exclusions.ts';
+import { workerSetupEnvPath } from './core/worker-auth.ts';
+import { resolveEmbeddingLedgerPath } from './workers/embedding-ledger.ts';
+import { resolveClassificationLedgerPath } from './workers/classification-ledger.ts';
+import { defaultSourceSchedulerStateDbPath } from './workers/source-scheduler-state.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
 import { archiveImportFamilies } from './core/archive-formats.ts';
@@ -498,7 +503,7 @@ function legacySourceIndexPath(
 
 function olympusSharedDataFile(env: Record<string, string | undefined>, fileName: string): string {
   return join(
-    env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share'),
+    env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share'),
     'openclaw',
     'olympus',
     fileName,
@@ -708,17 +713,17 @@ export function verifyOlympusDataExport(options: { destination: string }): DataE
  * intent records this, and applying the intent re-derives it and refuses on
  * any difference.
  */
-export function planSourceDelete(options: { sourceId: string } & LifecyclePathContext): {
+export function planSourceDelete(options: { sourceId: string; verifiedPrimaries?: readonly string[] } & LifecyclePathContext): {
   sourceId: string;
   corpora: string[];
   targets: string[];
+  /** External SQLite primaries proven to be Olympus stores by this check. */
+  verifiedPrimaries: string[];
 } {
   const selectedSource = requireSource(options.sourceId);
   const uniqueDeleteTargets = uniqueTargets(sourceDeleteTargets(selectedSource, options));
   assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
-  for (const target of uniqueDeleteTargets) {
-    if (existsSync(target.path)) assertDeleteTargetSafe(target);
-  }
+  const verifiedPrimaries = assertTargetsSafe(uniqueDeleteTargets, options.verifiedPrimaries);
   const corpora = createSourceCorpusRegistry().list()
     .filter((c) => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId))
     .map((c) => c.corpusId)
@@ -727,6 +732,7 @@ export function planSourceDelete(options: { sourceId: string } & LifecyclePathCo
     sourceId: selectedSource.sourceId,
     corpora,
     targets: uniqueDeleteTargets.map((target) => resolve(target.path)).sort(),
+    verifiedPrimaries: [...new Set([...verifiedPrimaries, ...(options.verifiedPrimaries ?? []).map((path) => resolve(path))])].sort(),
   };
 }
 
@@ -734,6 +740,8 @@ export function deleteOlympusData(options: {
   all?: boolean;
   sourceId?: string;
   dryRun?: boolean;
+  /** Primaries an earlier check of this same delete proved (see assertTargetsSafe). */
+  verifiedPrimaries?: readonly string[];
 } & LifecyclePathContext): DataDeleteResult {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
@@ -753,9 +761,7 @@ export function deleteOlympusData(options: {
   // target must be provably Olympus's own and nobody else's (see
   // assertRawStateTargetsContained). A refusal here deletes nothing.
   assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
-  for (const target of uniqueDeleteTargets) {
-    if (existsSync(target.path)) assertDeleteTargetSafe(target);
-  }
+  assertTargetsSafe(uniqueDeleteTargets, options.verifiedPrimaries);
   // A source's photo copies live in the shared media cache. Every store's
   // references are read before anything is deleted; each copy is released
   // only once its stores are gone, and removed unless another source's store
@@ -835,6 +841,7 @@ export function deleteOlympusDataWithCustody(options: {
   all?: boolean;
   sourceId?: string;
   dryRun?: boolean;
+  verifiedPrimaries?: readonly string[];
   connectedRegistry?: ConnectedHandleRegistry;
   unpairedSources?: UnpairedSourcesRead;
   artifactPresence?: (path: string) => 'gone' | 'present' | 'unknown';
@@ -1699,6 +1706,32 @@ function serviceUnitTarget(path: string): DeleteTarget {
   };
 }
 
+/**
+ * Check every existing target. An external SQLite file family is normally
+ * proven ours by opening its primary store. Once the primary has been removed
+ * (the delete removes it first), a surviving sidecar can no longer be proven
+ * that way, so the ownership the earlier, successful check recorded
+ * (`priorVerifiedPrimaries`) carries the cleanup to the end. Returns the
+ * primaries proven now, for the caller to record.
+ */
+function assertTargetsSafe(targets: readonly DeleteTarget[], priorVerifiedPrimaries: readonly string[] = []): string[] {
+  const prior = new Set(priorVerifiedPrimaries.map((path) => resolve(path)));
+  const verified = new Set<string>();
+  for (const target of targets) {
+    if (!existsSync(target.path)) continue;
+    const primary = target.externalSourcePath === true && target.kind !== 'source_state_path' && target.kind !== 'known_root'
+      ? resolve(target.sqlitePrimaryPath ?? target.path)
+      : undefined;
+    if (primary && !existsSync(primary) && prior.has(primary)) {
+      assertRegularFileTarget(target.path);
+      continue;
+    }
+    assertDeleteTargetSafe(target);
+    if (primary) verified.add(primary);
+  }
+  return [...verified].sort();
+}
+
 function assertDeleteTargetSafe(target: DeleteTarget): void {
   if (target.kind === 'source_state_path') {
     // Raw state carries no Olympus schema marker to verify, so a state
@@ -1947,12 +1980,38 @@ function authoritativeStatePaths(context: LifecyclePathContext): string[] {
     ...configured('OLYMPUS_SOVEREIGNTY_CONFIG'),
     ...configured('OLYMPUS_SOVEREIGNTY_CONFIG_PATH'),
     defaultFileExtractionJobsDbPath(env),
+    ...authoritativeDefaultsFromConsumers(env),
     defaultSovereigntyConfigPathForHome(context.homeDir),
     defaultSovereigntyConfigPath(env),
     ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
     ...mediaCacheDeleteTargets(context).map((target) => target.path),
   ]) files.add(path);
   return [...files];
+}
+
+/**
+ * The default location of every shared authoritative file, from the resolver
+ * its consumer uses (not a copy of its layout): the worker environment file
+ * that carries the install's credentials and path settings, and the shared
+ * ledgers and state beside the stores. A source-path override aimed at one of
+ * them is refused whatever the override variable's name is.
+ */
+function authoritativeDefaultsFromConsumers(env: Record<string, string | undefined>): string[] {
+  const resolvers: Array<() => string> = [
+    () => workerSetupEnvPath({ env }),
+    () => resolveEmbeddingLedgerPath(env),
+    () => resolveClassificationLedgerPath(env),
+    () => defaultSourceSchedulerStateDbPath(env),
+    () => defaultSourceIngestionExclusionsPath(env),
+  ];
+  const out: string[] = [];
+  for (const resolver of resolvers) {
+    try {
+      const path = resolve(resolver());
+      out.push(path, `${path}-wal`, `${path}-shm`, `${path}-journal`, `${path}.lock`);
+    } catch { /* an unresolvable layout adds nothing */ }
+  }
+  return out;
 }
 
 /**

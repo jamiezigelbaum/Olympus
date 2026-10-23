@@ -18399,7 +18399,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir16(), ".local", "share");
   return join35(standaloneLinuxDataDir(env) ?? join35(dataHome, "openclaw", "olympus"), "source-dashboard.sqlite");
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETE_REFUSAL_CODES, DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -18418,6 +18418,14 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_DELETE_REFUSAL_CODES = new Set([
+    "settings_changed",
+    "protected_path",
+    "not_disconnected",
+    "failed",
+    "holders_running",
+    "connection_changed"
+  ]);
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
     DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,

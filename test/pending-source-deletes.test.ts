@@ -4,10 +4,12 @@
  * a crash part-way resumes, and a re-check that now refuses deletes nothing and
  * leaves a visible error state.
  */
+import { Database } from 'bun:sqlite';
+import { currentStoreMigrations, runSqliteMigrations } from '../src/core/sqlite-migrations.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { startEngineHost } from '../src/core/engine-host.ts';
 import { engineChildrenPath } from '../src/core/engine-children.ts';
 import { defaultEngineConfig, enginePaths } from '../src/core/engine-service.ts';
@@ -20,6 +22,8 @@ import {
   recordSourceDeleteIntent,
   sourceDeleteStates,
 } from '../src/pending-source-deletes.ts';
+import { findStoreHolders } from '../src/core/store-holders.ts';
+import { withConnectedHandleGrantCustody, readConnectedHandleGrantEpoch } from '../src/workers/credential-broker/connected-handles.ts';
 import { writeConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 
 const roots: string[] = [];
@@ -28,6 +32,18 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+/** Refuse to write anything that is not inside the fixture's own temp root. */
+function mustBeInside(root: string, path: string): string {
+  const rel = relative(root, path);
+  if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`fixture path ${path} resolves outside ${root}; refusing to write`);
+  return path;
+}
+
+function createMarkedSqliteStore(path: string): void {
+  const db = new Database(path);
+  try { runSqliteMigrations(db, 'connector-store', currentStoreMigrations()); } finally { db.close(); }
+}
+
 function lab(env: Record<string, string> = {}) {
   const root = mkdtempSync(join(tmpdir(), 'olympus-pending-deletes-'));
   roots.push(root);
@@ -35,9 +51,10 @@ function lab(env: Record<string, string> = {}) {
   const registryPath = join(root, 'cfg', 'handles.json');
   mkdirSync(dirname(registryPath), { recursive: true });
   writeConnectedHandleRegistry({ version: 1, handles: [] }, registryPath);
-  const context = { env: { HOME: home, ...env } };
+  const context = { homeDir: home, env: { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), ...env } };
   const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!;
-  const store = spec.connectorStorePaths!(context)[0]!;
+  const store = mustBeInside(root, spec.connectorStorePaths!(context)[0]!);
+  mustBeInside(root, registryPath);
   mkdirSync(dirname(store), { recursive: true });
   writeFileSync(store, 'indexed');
   writeFileSync(`${store}-wal`, 'wal');
@@ -45,7 +62,7 @@ function lab(env: Record<string, string> = {}) {
 }
 
 describe('deletion intents', () => {
-  test('are written atomically under the registry directory and name source, corpora and the exact targets', () => {
+  test('are written atomically under the registry directory and name source, corpora and the exact targets', async () => {
     const l = lab();
     const intent = recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     expect(existsSync(pendingSourceDeletesPath(l.registryPath))).toBe(true);
@@ -57,12 +74,12 @@ describe('deletion intents', () => {
     expect(existsSync(l.store)).toBe(true);
   });
 
-  test('a crash part-way resumes on the next start, and a repeat is harmless', () => {
+  test('a crash part-way resumes on the next start, and a repeat is harmless', async () => {
     const l = lab();
     const recorded = recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     // The previous start died after removing the store but before the sidecar and the intent.
     rmSync(l.store);
-    expect(applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: ['dropbox.files'], refused: [] });
+    expect(await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: ['dropbox.files'], refused: [] });
     expect(existsSync(`${l.store}-wal`)).toBe(false);
     expect(readSourceDeleteIntents(l.registryPath).intents).toEqual([]);
     // Died after everything was deleted but before the intent was removed.
@@ -70,33 +87,33 @@ describe('deletion intents', () => {
       version: 1,
       intents: [recorded],
     }));
-    expect(applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context }).applied).toEqual(['dropbox.files']);
+    expect((await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).applied).toEqual(['dropbox.files']);
     expect(readSourceDeleteIntents(l.registryPath).intents).toEqual([]);
   });
 
-  test('a re-check that now refuses deletes nothing and leaves a visible error state, retried by asking again', () => {
+  test('a re-check that now refuses deletes nothing and leaves a visible error state, retried by asking again', async () => {
     const l = lab();
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     // The settings changed between asking and restarting: the targets are no longer what was approved.
     const moved = join(dirname(l.store), 'other-dropbox.sqlite');
-    writeFileSync(moved, 'other');
+    createMarkedSqliteStore(moved);
     const changed = { env: { ...l.context.env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: moved } };
-    const result = applyPendingSourceDeletes({ registryPath: l.registryPath, context: changed });
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: changed });
     expect(result).toEqual({ applied: [], refused: [{ sourceId: 'dropbox.files', reason: 'settings_changed' }] });
     expect(existsSync(l.store)).toBe(true);
     expect(existsSync(moved)).toBe(true);
     expect(sourceDeleteStates(l.registryPath)).toEqual({ 'dropbox.files': { state: 'refused', reason: 'settings_changed' } });
     // The refused record is not re-run on every start, and shows no path.
-    expect(applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: [], refused: [] });
+    expect(await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: [], refused: [] });
     expect(JSON.stringify(sourceDeleteStates(l.registryPath))).not.toContain(l.root);
     // Asking again replaces it, and applies.
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     expect(sourceDeleteStates(l.registryPath)).toEqual({ 'dropbox.files': { state: 'pending' } });
-    expect(applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context }).applied).toEqual(['dropbox.files']);
+    expect((await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).applied).toEqual(['dropbox.files']);
     expect(existsSync(l.store)).toBe(false);
   });
 
-  test('a source reconnected before the restart is not deleted', () => {
+  test('a source reconnected before the restart is not deleted', async () => {
     const l = lab();
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     writeConnectedHandleRegistry({
@@ -106,7 +123,7 @@ describe('deletion intents', () => {
         allowedCapabilities: ['dropbox.files.sync'], scopes: ['files.content.read'], connectedAt: '2026-08-30T00:00:00.000Z',
       }],
     }, l.registryPath);
-    expect(applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context }).refused).toEqual([{ sourceId: 'dropbox.files', reason: 'not_disconnected' }]);
+    expect((await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).refused).toEqual([{ sourceId: 'dropbox.files', reason: 'not_disconnected' }]);
     expect(existsSync(l.store)).toBe(true);
   });
 });
@@ -122,8 +139,8 @@ describe('engine host start', () => {
   test('applies pending deletes after stale children are stopped and before any service starts', async () => {
     const l = hostLab();
     // Same registry directory the host resolves from its environment.
-    const env = { HOME: l.home, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath };
-    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: { env } });
+    const env = { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath };
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     const childrenPath = engineChildrenPath({ HOME: l.home });
     mkdirSync(dirname(childrenPath), { recursive: true });
     writeFileSync(childrenPath, JSON.stringify({ schema: 'olympus.engine.children.v1', host_pid: 1, children: [{ service: 'olympus-source-embedding-drain', pgid: 5151 }] }));
@@ -147,6 +164,7 @@ describe('engine host start', () => {
       log: () => undefined,
       exit: () => { throw new Error('must not exit'); },
       installSignalHandlers: false,
+      storeHoldersReleased: () => true,
     });
     // Every service sees the store already gone; none started before the delete.
     expect(order.filter((line) => line.startsWith('start'))).toEqual([
@@ -184,16 +202,169 @@ describe('engine host start', () => {
 });
 
 describe('which installs may delete while running', () => {
-  test('only the engine host restarts the embedding drain with the worker, so every other supervisor is refused', async () => {
+  test('only a worker the engine host launched may delete; an inherited engine marker proves nothing', async () => {
     const { restartCoversEmbeddingDrain } = await import('../src/core/model-key-reload.ts');
-    // Standalone engine host: worker and drain are one supervised unit.
-    expect(restartCoversEmbeddingDrain({ nativeServiceSupervised: true }, { OLYMPUS_ENGINE_HOST: '1' })).toBe(true);
-    // OpenClaw Gateway: the drain is a separately registered service.
-    expect(restartCoversEmbeddingDrain({ nativeServiceSupervised: true }, {})).toBe(false);
-    // Generated worker LaunchAgent/systemd unit: the drain is its own unit.
+    // Standalone engine host: the launcher stamps the supervisor identity.
+    expect(restartCoversEmbeddingDrain({ nativeServiceSupervised: true }, { OLYMPUS_WORKER_SUPERVISOR: 'engine' })).toBe(true);
+    // OpenClaw Gateway: its worker is stamped 'gateway', and the drain is a separately registered service.
+    expect(restartCoversEmbeddingDrain({ nativeServiceSupervised: true }, { OLYMPUS_WORKER_SUPERVISOR: 'gateway' })).toBe(false);
+    // A Gateway worker that inherited OLYMPUS_ENGINE_HOST=1 is still a Gateway worker.
+    expect(restartCoversEmbeddingDrain({ nativeServiceSupervised: true }, { OLYMPUS_ENGINE_HOST: '1', OLYMPUS_WORKER_SUPERVISOR: 'gateway' })).toBe(false);
+    expect(restartCoversEmbeddingDrain({ nativeServiceSupervised: true }, { OLYMPUS_ENGINE_HOST: '1' })).toBe(false);
+    // Generated worker LaunchAgent/systemd unit, and hand-started workers (even with a stray marker).
     expect(restartCoversEmbeddingDrain({}, { OLYMPUS_MANAGED_WORKER: '1' })).toBe(false);
-    // A hand-started worker, even one that inherited the engine marker.
-    expect(restartCoversEmbeddingDrain({}, { OLYMPUS_ENGINE_HOST: '1' })).toBe(false);
+    expect(restartCoversEmbeddingDrain({}, { OLYMPUS_WORKER_SUPERVISOR: 'engine', OLYMPUS_ENGINE_HOST: '1' })).toBe(false);
     expect(restartCoversEmbeddingDrain({}, {})).toBe(false);
+  });
+});
+
+function hostConfig(l: ReturnType<typeof lab>) {
+  mkdirSync(join(l.home, '.olympus'), { recursive: true });
+  writeFileSync(enginePaths(l.home).configPath, JSON.stringify(defaultEngineConfig()));
+}
+
+async function startHostWith(l: ReturnType<typeof lab>, extra: { children?: unknown; released: boolean; env?: Record<string, string>; psFails?: boolean }) {
+  const env = { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath, ...(extra.env ?? {}) };
+  if (extra.children) {
+    const childrenPath = engineChildrenPath({ HOME: l.home });
+    mkdirSync(dirname(childrenPath), { recursive: true });
+    writeFileSync(childrenPath, JSON.stringify(extra.children));
+  }
+  hostConfig(l);
+  const order: string[] = [];
+  const handle = await startEngineHost({
+    moduleUrl: 'file:///x/dist/cli.js',
+    env,
+    homeDir: l.home,
+    platform: 'darwin',
+    services: () => [{ id: 'olympus-worker', reload: { configPrefixes: [] }, async start() { order.push(`start: store ${existsSync(l.store) ? 'present' : 'gone'}`); }, async stop() {} }],
+    reap: { listProcesses: () => (extra.psFails ? undefined : []), kill: () => undefined, sleep: () => undefined, selfPid: 1 },
+    log: () => undefined,
+    exit: () => { throw new Error('must not exit'); },
+    installSignalHandlers: false,
+    storeHoldersReleased: () => extra.released,
+  });
+  return { order, handle };
+}
+
+describe('apply only when every holder is verified released', () => {
+  test('a holder that cannot be verified gone refuses every pending delete and deletes nothing', async () => {
+    const l = lab();
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    const { order, handle } = await startHostWith(l, { released: false });
+    expect(order).toEqual(['start: store present']);
+    expect(existsSync(l.store)).toBe(true);
+    expect(sourceDeleteStates(l.registryPath)).toEqual({ 'dropbox.files': { state: 'refused', reason: 'holders_running' } });
+    await handle!.stop();
+  });
+
+  test('a previous host child that could not be reaped counts as an unreleased holder', async () => {
+    const l = lab();
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    // A recorded group the reaper cannot stop or prove gone (the process table cannot be read).
+    const children = { schema: 'olympus.engine.children.v1', host_pid: 1, children: [{ service: 'olympus-source-embedding-drain', pgid: 4242, started: 'Mon Jan  1 00:00:00 2024' }] };
+    const { handle } = await startHostWith(l, { children, released: true, psFails: true });
+    expect(existsSync(l.store)).toBe(true);
+    expect(sourceDeleteStates(l.registryPath)['dropbox.files']).toEqual({ state: 'refused', reason: 'holders_running' });
+    await handle!.stop();
+  });
+
+  test('the process table finds a Gateway, a foreground worker and a separate drain, and an unreadable table proves nothing', () => {
+    const row = (pid: number, command: string) => ({ pid, pgid: pid, started: 'x', command });
+    const found = findStoreHolders({
+      listProcesses: () => [
+        row(10, '/usr/bin/openclaw-gateway'),
+        row(11, 'bun /repo/dist/cli.js worker run'),
+        row(12, 'node /repo/dist/embedding-drain.js'),
+        row(13, 'bun scripts/source-embedding-drain.ts'),
+        row(14, 'node /usr/bin/openclaw gateway status'),
+        row(15, 'vim notes-about-the-worker.md'),
+        row(16, 'bun /repo/dist/cli.js data delete --source dropbox.files'),
+      ],
+    });
+    expect(found).toEqual({ ok: true, holders: [
+      { pid: 10, kind: 'gateway' }, { pid: 11, kind: 'worker' }, { pid: 12, kind: 'drain' }, { pid: 13, kind: 'drain' },
+    ] });
+    expect(findStoreHolders({ listProcesses: () => undefined })).toEqual({ ok: false });
+    expect(findStoreHolders({ listProcesses: () => [row(10, 'x/openclaw-gateway')], ignorePids: [10] })).toEqual({ ok: true, holders: [] });
+  });
+});
+
+describe('the host applies with the worker\'s effective environment', () => {
+  test('a registry override that lives only in worker.env is the registry the host reads', async () => {
+    const l = lab();
+    const elsewhere = join(l.root, 'elsewhere', 'handles.json');
+    mkdirSync(dirname(elsewhere), { recursive: true });
+    writeConnectedHandleRegistry({ version: 1, handles: [] }, elsewhere);
+    const ctx = { homeDir: l.home, env: { ...l.context.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: elsewhere } };
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: elsewhere, context: ctx });
+    // The override is in worker.env only, not in the host's own environment.
+    const workerEnv = join(l.home, '.config', 'olympus', 'worker.env');
+    mkdirSync(dirname(workerEnv), { recursive: true, mode: 0o700 });
+    writeFileSync(workerEnv, `OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH=${elsewhere}\n`, { mode: 0o600 });
+    const env = { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share') };
+    hostConfig(l);
+    const handle = await startEngineHost({
+      moduleUrl: 'file:///x/dist/cli.js', env, homeDir: l.home, platform: 'darwin',
+      services: () => [],
+      reap: { listProcesses: () => [], kill: () => undefined, sleep: () => undefined, selfPid: 1 },
+      log: () => undefined, exit: () => { throw new Error('must not exit'); }, installSignalHandlers: false,
+      storeHoldersReleased: () => true,
+    });
+    expect(existsSync(l.store)).toBe(false);
+    expect(readSourceDeleteIntents(elsewhere).intents).toEqual([]);
+    await handle!.stop();
+  });
+});
+
+describe('grant custody and connection generation', () => {
+  test('a connection change in progress stops the apply and deletes nothing', async () => {
+    const l = lab();
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    const result = await withConnectedHandleGrantCustody(l.registryPath, {}, async () =>
+      await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context }));
+    expect(result.applied).toEqual([]);
+    expect(existsSync(l.store)).toBe(true);
+    expect(sourceDeleteStates(l.registryPath)['dropbox.files']).toEqual({ state: 'refused', reason: 'failed' });
+  }, 60_000);
+
+  test('the intent is bound to the grant generation: a Disconnect or Connect since it was judged refuses it', async () => {
+    const l = lab();
+    const intent = recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    expect(intent.grant_epoch).toBe(readConnectedHandleGrantEpoch(l.registryPath));
+    await withConnectedHandleGrantCustody(l.registryPath, { advanceEpoch: true }, () => undefined);
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    expect(result.refused).toEqual([{ sourceId: 'dropbox.files', reason: 'connection_changed' }]);
+    expect(existsSync(l.store)).toBe(true);
+  });
+});
+
+describe('an external SQLite family finishes after its primary is gone', () => {
+  test('a crash after the primary was removed still removes the sidecars', async () => {
+    const l = lab();
+    const external = join(l.root, 'external', 'dropbox-elsewhere.sqlite');
+    mkdirSync(dirname(external), { recursive: true });
+    createMarkedSqliteStore(external);
+    writeFileSync(`${external}-wal`, 'wal');
+    writeFileSync(`${external}-shm`, 'shm');
+    const ctx = { homeDir: l.home, env: { ...l.context.env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: external } };
+    const intent = recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: ctx });
+    expect(intent.verified_primaries).toContain(external);
+    // The previous start removed the primary, then died.
+    rmSync(external);
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: ctx });
+    expect(result).toEqual({ applied: ['dropbox.files'], refused: [] });
+    expect(existsSync(`${external}-wal`)).toBe(false);
+    expect(existsSync(`${external}-shm`)).toBe(false);
+  });
+
+  test('without the recorded ownership a lone sidecar is still refused', async () => {
+    const l = lab();
+    const stray = join(l.root, 'external', 'stray.sqlite');
+    mkdirSync(dirname(stray), { recursive: true });
+    writeFileSync(`${stray}-wal`, 'not ours');
+    const ctx = { homeDir: l.home, env: { ...l.context.env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: stray } };
+    expect(() => recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: ctx })).toThrow();
+    expect(existsSync(`${stray}-wal`)).toBe(true);
   });
 });

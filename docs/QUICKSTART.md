@@ -560,8 +560,15 @@ grant without a worker restart. It retains indexed data and reusable app
 registration and does not revoke the provider grant. Use the linked provider
 page for revocation. To delete local source data, Disconnect, then use
 **Delete indexed data** on the card: Olympus records the request, restarts, and
-the restarted engine removes the data before opening anything. From a terminal,
-stop Olympus first, preview the custody boundary, then execute it:
+the restarted engine removes the data before opening anything. The card offers
+this only on the standalone Olympus Engine, which restarts the worker and the
+embedding step together; under the OpenClaw Gateway or a separately managed
+worker the request is refused and nothing is deleted. If the engine finds
+another Olympus process still running when it starts, it deletes nothing and the
+card says the delete did not run. From a terminal, quit every Olympus process
+first (the engine, the OpenClaw Gateway, any worker and the embedding step; the
+command checks and refuses otherwise), preview the custody boundary, then
+execute it:
 
 ```bash
 olympus data delete --source dropbox.files --dry-run

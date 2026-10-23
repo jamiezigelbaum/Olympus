@@ -6,8 +6,9 @@
  * nothing running can safely unlink them. The route therefore only RECORDS an
  * intent, durably, and asks for the supervised restart. The next start applies
  * pending intents first, before any store, ledger, registry, scheduler or child
- * process exists to hold a file (engine-host.ts, and the worker's own boot for
- * installs without an engine host).
+ * process exists to hold a file (engine-host.ts). The route only records an
+ * intent where one restart also restarts the embedding drain (the engine host);
+ * everywhere else it answers 409.
  *
  * Crash safety: an intent is removed only after the delete finished, and the
  * delete is idempotent, so a crash part-way resumes on the next start. An intent
@@ -26,10 +27,15 @@ import {
   planSourceDelete,
   type LifecyclePathContext,
 } from './data-lifecycle.ts';
-import { readConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
+import {
+  ConnectedHandleGrantMutationError,
+  readConnectedHandleGrantEpoch,
+  readConnectedHandleRegistry,
+  withConnectedHandleGrantCustody,
+} from './workers/credential-broker/connected-handles.ts';
 import { readReconciledUnpairedSources } from './workers/credential-broker/unpaired-sources.ts';
 
-export type SourceDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed';
+export type SourceDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed' | 'holders_running' | 'connection_changed';
 
 export interface SourceDeleteIntent {
   id: string;
@@ -37,6 +43,14 @@ export interface SourceDeleteIntent {
   corpora: string[];
   /** The exact resolved target paths, after protection, when the owner asked. */
   targets: string[];
+  /**
+   * External SQLite primaries proven to be Olympus stores when the intent was
+   * recorded. The delete removes a primary first; a crash before its sidecars
+   * are gone must still let the next start finish them.
+   */
+  verified_primaries?: string[];
+  /** The credential-grant generation the owner's disconnect was judged against. */
+  grant_epoch?: string;
   created_at: string;
   state: 'pending' | 'refused';
   /** Present when refused: a reason code only, never a path. */
@@ -110,6 +124,8 @@ export function recordSourceDeleteIntent(input: {
     source_id: plan.sourceId,
     corpora: plan.corpora,
     targets: plan.targets,
+    verified_primaries: plan.verifiedPrimaries,
+    grant_epoch: readConnectedHandleGrantEpoch(input.registryPath),
     created_at: new Date().toISOString(),
     state: 'pending',
   };
@@ -129,15 +145,22 @@ export interface AppliedSourceDeletes {
 }
 
 /**
- * Apply every pending intent. Runs before anything opens a store. Each intent
+ * Apply every pending intent. Runs before anything opens a store, and only
+ * when `holders()` confirms every process that could hold one is verifiably
+ * gone: otherwise every pending intent is refused (`holders_running`) and
+ * nothing is deleted. The whole pass holds the credential-grant custody, so a
+ * connection cannot be published between the re-check and the delete, and an
+ * intent is bound to the grant generation it was judged against. Each intent
  * is re-validated against the settings as they are now; a refusal deletes
  * nothing and leaves the intent marked refused.
  */
-export function applyPendingSourceDeletes(input: {
+export async function applyPendingSourceDeletes(input: {
   registryPath: string;
   context: LifecyclePathContext;
   log?: (line: string) => void;
-}): AppliedSourceDeletes {
+  /** True only when every holder of the stores is verified released. Absent: the caller guarantees it. */
+  holders?: () => boolean;
+}): Promise<AppliedSourceDeletes> {
   const log = input.log ?? (() => undefined);
   const result: AppliedSourceDeletes = { applied: [], refused: [] };
   const read = readSourceDeleteIntents(input.registryPath);
@@ -145,43 +168,78 @@ export function applyPendingSourceDeletes(input: {
     log('pending source deletes: the intent record is unreadable; nothing was deleted.');
     return result;
   }
-  let intents = read.intents;
-  for (const intent of intents.filter((entry) => entry.state === 'pending')) {
-    let refusal: SourceDeleteRefusal | undefined;
-    try {
-      const plan = planSourceDelete({ sourceId: intent.source_id, ...input.context, registryPath: input.registryPath });
-      if (JSON.stringify(plan.targets) !== JSON.stringify([...intent.targets].sort())) {
-        refusal = 'settings_changed';
-      } else {
-        const custody = dataDeleteCustody({ ...sourceDeleteCustodyInput(intent.source_id, input.registryPath), ...input.context });
-        if (!custody.ready) refusal = 'not_disconnected';
-        else deleteOlympusDataWithCustody({
-          ...sourceDeleteCustodyInput(intent.source_id, input.registryPath),
-          ...input.context,
-          registryPath: input.registryPath,
-        });
+  if (read.intents.every((entry) => entry.state !== 'pending')) return result;
+
+  const refuseAll = (reason: SourceDeleteRefusal) => {
+    const now = new Date().toISOString();
+    const fresh = readSourceDeleteIntents(input.registryPath).intents;
+    writeIntents(input.registryPath, fresh.map((entry) => entry.state === 'pending'
+      ? { ...entry, state: 'refused' as const, reason, refused_at: now }
+      : entry));
+    for (const entry of fresh.filter((candidate) => candidate.state === 'pending')) {
+      result.refused.push({ sourceId: entry.source_id, reason });
+      log(`pending source deletes: ${entry.source_id} not deleted (${reason}).`);
+    }
+  };
+
+  if (input.holders && !input.holders()) {
+    refuseAll('holders_running');
+    return result;
+  }
+  try {
+    await withConnectedHandleGrantCustody(input.registryPath, {}, () => {
+      let intents = readSourceDeleteIntents(input.registryPath).intents;
+      for (const intent of intents.filter((entry) => entry.state === 'pending')) {
+        let refusal: SourceDeleteRefusal | undefined;
+        try {
+          if (intent.grant_epoch !== undefined && intent.grant_epoch !== readConnectedHandleGrantEpoch(input.registryPath)) {
+            refusal = 'connection_changed';
+          } else {
+            const plan = planSourceDelete({
+              sourceId: intent.source_id,
+              ...input.context,
+              registryPath: input.registryPath,
+              verifiedPrimaries: intent.verified_primaries ?? [],
+            });
+            if (JSON.stringify(plan.targets) !== JSON.stringify([...intent.targets].sort())) {
+              refusal = 'settings_changed';
+            } else {
+              const custody = dataDeleteCustody({ ...sourceDeleteCustodyInput(intent.source_id, input.registryPath), ...input.context });
+              if (!custody.ready) refusal = 'not_disconnected';
+              else deleteOlympusDataWithCustody({
+                ...sourceDeleteCustodyInput(intent.source_id, input.registryPath),
+                ...input.context,
+                registryPath: input.registryPath,
+                verifiedPrimaries: intent.verified_primaries ?? [],
+              });
+            }
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          refusal = error instanceof OperationError && /overlaps|symbolic link|Refusing to delete/.test(message)
+            ? 'protected_path'
+            : 'failed';
+          log(`pending source deletes: ${intent.source_id}: ${message}`);
+        }
+        if (refusal) {
+          intents = intents.map((entry) => entry.id === intent.id
+            ? { ...entry, state: 'refused' as const, reason: refusal, refused_at: new Date().toISOString() }
+            : entry);
+          result.refused.push({ sourceId: intent.source_id, reason: refusal });
+          log(`pending source deletes: ${intent.source_id} not deleted (${refusal}).`);
+        } else {
+          intents = intents.filter((entry) => entry.id !== intent.id);
+          result.applied.push(intent.source_id);
+          log(`pending source deletes: ${intent.source_id} deleted.`);
+        }
+        writeIntents(input.registryPath, intents);
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      refusal = error instanceof OperationError && /overlaps|symbolic link|Refusing to delete/.test(message)
-        ? 'protected_path'
-        : 'failed';
-      log(`pending source deletes: ${intent.source_id}: ${message}`);
-    }
-    if (refusal) {
-      // A crash or an error part-way through the delete itself is 'failed' and
-      // stays pending-equivalent for the owner: they ask again.
-      intents = intents.map((entry) => entry.id === intent.id
-        ? { ...entry, state: 'refused', reason: refusal, refused_at: new Date().toISOString() }
-        : entry);
-      result.refused.push({ sourceId: intent.source_id, reason: refusal });
-      log(`pending source deletes: ${intent.source_id} not deleted (${refusal}).`);
-    } else {
-      intents = intents.filter((entry) => entry.id !== intent.id);
-      result.applied.push(intent.source_id);
-      log(`pending source deletes: ${intent.source_id} deleted.`);
-    }
-    writeIntents(input.registryPath, intents);
+    });
+  } catch (error) {
+    if (!(error instanceof ConnectedHandleGrantMutationError)) throw error;
+    // A connection change is in progress: do not race it. The owner asks again.
+    log('pending source deletes: a connection change was in progress; nothing was deleted.');
+    refuseAll('failed');
   }
   return result;
 }

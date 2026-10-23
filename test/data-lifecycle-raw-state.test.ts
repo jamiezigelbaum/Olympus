@@ -443,6 +443,30 @@ describe('shared files and stores stay out of a recursive delete, whichever vari
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  test('the worker environment file and the default embedding ledger are protected whatever variable points at them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-authoritative-defaults-'));
+    const homeDir = join(dir, 'home');
+    const dataHome = join(homeDir, '.local', 'share');
+    const workerEnv = join(homeDir, '.config', 'olympus', 'worker.env');
+    const ledger = join(dataHome, 'openclaw', 'olympus', 'embedding-ledger.jsonl');
+    for (const path of [workerEnv, ledger]) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, 'KEEP=1\n');
+    }
+    try {
+      for (const protectedFile of [workerEnv, ledger]) {
+        for (const [sourceId, variable] of [
+          ['gmail.email', 'OLYMPUS_EMAIL_INDEX_DB_PATH'],
+          ['dropbox.files', 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH'],
+        ] as const) {
+          expect(() => deleteOlympusData({ sourceId, homeDir, env: { XDG_DATA_HOME: dataHome, [variable]: protectedFile } } as never))
+            .toThrow('overlaps another source');
+          expect(readFileSync(protectedFile, 'utf8')).toBe('KEEP=1\n');
+        }
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('a RELATIVE override is resolved the way its consumer resolves it before the overlap check', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-relative-'));
     const homeDir = join(dir, 'home');

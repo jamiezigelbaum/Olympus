@@ -132,6 +132,10 @@ export const DASHBOARD_UNPAIR_INCOMPLETE_LABEL = 'Unpair incomplete — manual c
  * anything. Until it reports the data gone, the card says so; if the restart's
  * re-check refused, the card says that and what to do.
  */
+export type DashboardDeleteRefusal = 'settings_changed' | 'protected_path' | 'not_disconnected' | 'failed' | 'holders_running' | 'connection_changed';
+export const DASHBOARD_DELETE_REFUSAL_CODES: ReadonlySet<string> = new Set<DashboardDeleteRefusal>([
+  'settings_changed', 'protected_path', 'not_disconnected', 'failed', 'holders_running', 'connection_changed',
+]);
 export const DASHBOARD_DELETING_LABEL = 'Deleting indexed data…';
 export const DASHBOARD_DELETE_NOT_DONE_LABEL = 'Delete didn\'t run — check settings, then delete again';
 export const DASHBOARD_UNSETTLED_CUSTODY_LABELS: ReadonlySet<string> = new Set([
@@ -818,6 +822,13 @@ export interface DashboardSourceCard {
     ingestion_enabled?: boolean;
   };
   setup?: DashboardSourceSetupStatus;
+  /**
+   * Delete indexed data, as an explicit state (not read back from the
+   * connection label, which later passes may rewrite): `pending` until the
+   * restarted engine has applied it, `refused` when its re-check did not.
+   * The reason is a closed code, never a path.
+   */
+  delete_state?: { state: 'pending' | 'refused'; reason?: DashboardDeleteRefusal };
   configured: boolean;
   freshness: {
     label: string;
@@ -1318,7 +1329,7 @@ export interface SourceDashboardBuildOptions {
    */
   thisComputerStateUnreadable?: boolean;
   /** Deletions recorded for the next start, by source id (pending-source-deletes.ts). */
-  sourceDeleteStates?: Readonly<Record<string, { state: 'pending' | 'refused' }>>;
+  sourceDeleteStates?: Readonly<Record<string, { state: 'pending' | 'refused'; reason?: DashboardDeleteRefusal }>>;
   /**
    * Paired-session sources this worker has itself unpaired, and whether the
    * removal finished.
@@ -2253,6 +2264,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     };
     const deleteState = options.sourceDeleteStates?.[definition.source_id];
     if (deleteState) {
+      card.delete_state = { state: deleteState.state, ...(deleteState.reason ? { reason: deleteState.reason } : {}) };
       card.connection = {
         ...card.connection,
         state: 'not_connected',

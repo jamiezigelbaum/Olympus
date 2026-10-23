@@ -32376,7 +32376,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETE_REFUSAL_CODES, DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -32395,6 +32395,14 @@ var init_source_dashboard = __esm(() => {
   init_credential_health();
   init_status();
   init_public_source_capabilities();
+  DASHBOARD_DELETE_REFUSAL_CODES = new Set([
+    "settings_changed",
+    "protected_path",
+    "not_disconnected",
+    "failed",
+    "holders_running",
+    "connection_changed"
+  ]);
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
     DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
@@ -39397,7 +39405,7 @@ var init_delphi = __esm(() => {
 // src/workers/local-files/mac-permissions.ts
 import { existsSync as existsSync19, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync18 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname25, join as join32 } from "node:path";
+import { dirname as dirname26, join as join33 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -39480,10 +39488,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join32(this.home, "Desktop")],
-      ["documents", join32(this.home, "Documents")],
-      ["downloads", join32(this.home, "Downloads")],
-      ["icloud", join32(this.home, "Library", "Mobile Documents")]
+      ["desktop", join33(this.home, "Desktop")],
+      ["documents", join33(this.home, "Documents")],
+      ["downloads", join33(this.home, "Downloads")],
+      ["icloud", join33(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -39501,7 +39509,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join32(this.home, "Desktop"), join32(this.home, "Documents"), join32(this.home, "Downloads"), join32(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join33(this.home, "Desktop"), join33(this.home, "Documents"), join33(this.home, "Downloads"), join33(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.recall(guard) === "granted")
@@ -39536,7 +39544,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join32(this.home, "Library", "Safari"), join32(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join33(this.home, "Library", "Safari"), join33(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -39590,7 +39598,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync15(dirname25(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync15(dirname26(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -42300,6 +42308,134 @@ init_sqlite_migrations();
 init_remote_connections();
 init_waiting_private_questions();
 init_source_ingestion_policy();
+init_source_ingestion_exclusions();
+init_worker_auth();
+init_embedding_ledger();
+
+// src/workers/classification-ledger.ts
+init_linux_engine_layout();
+import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
+import { dirname as dirname24, join as join31 } from "node:path";
+var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
+var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
+async function appendClassificationLedgerEntry(path, entry) {
+  if (!isClassificationLedgerEntry(entry))
+    throw new Error("Refusing to append a malformed classification ledger entry.");
+  await mkdir4(dirname24(path), { recursive: true, mode: 448 });
+  const handle = await open4(path, "a", 384);
+  try {
+    await handle.chmod(384);
+    await handle.appendFile(`${JSON.stringify(entry)}
+`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+async function appendClassificationLedgerEntryOnce(path, entry) {
+  const id = entry.entry_id?.trim();
+  if (id) {
+    const existing = await readClassificationLedger(path);
+    if (existing.entries.some((recorded) => recorded.entry_id === id))
+      return false;
+  }
+  await appendClassificationLedgerEntry(path, entry);
+  return true;
+}
+async function readClassificationLedger(path) {
+  let raw = "";
+  try {
+    raw = await readFile5(path, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      throw error;
+  }
+  const { entries, skipped } = parseClassificationLedgerJsonl(raw);
+  return { entries: newestFirst(entries), skipped, path };
+}
+function parseClassificationLedgerJsonl(text2) {
+  const entries = [];
+  let skipped = 0;
+  for (const line of text2.split(`
+`)) {
+    if (line.trim() === "")
+      continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (isClassificationLedgerEntry(parsed))
+      entries.push(parsed);
+    else
+      skipped += 1;
+  }
+  return { entries, skipped };
+}
+function isClassifierApproved(entries, key2, options = {}) {
+  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key2);
+  for (const entry of entries) {
+    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
+      continue;
+    const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
+    const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
+    if (!owner && !builtInDefault)
+      continue;
+    if (owner && entry.kind === "classifier_model_revoked")
+      return false;
+    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
+      return true;
+  }
+  return false;
+}
+function builtInDefaultRevoked(entries, key2) {
+  for (const entry of entries) {
+    if (entry.model_id !== key2.modelId || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
+      continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
+      continue;
+    if (entry.kind === "classifier_model_revoked")
+      return true;
+    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
+      return false;
+  }
+  return false;
+}
+function isClassificationLedgerEntry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const record = value;
+  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
+    return false;
+  if (typeof record.what !== "string" || record.what.trim() === "")
+    return false;
+  if (!["classifier_model_decision", "classifier_model_revoked", "note"].includes(record.kind))
+    return false;
+  if (!["owner", "built_in_default", "system-automatic", "unattributed-historical"].includes(record.approved_by))
+    return false;
+  if (!["pending", "complete", "n/a"].includes(record.status))
+    return false;
+  for (const key2 of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
+    if (record[key2] !== undefined && typeof record[key2] !== "string")
+      return false;
+  }
+  return true;
+}
+function newestFirst(entries) {
+  return entries.map((entry, index) => ({ entry, index, at: stampOrder2(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
+}
+function stampOrder2(recordedAt) {
+  const at = Date.parse(recordedAt);
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
+
+// src/workers/source-scheduler-state.ts
+init_linux_engine_layout();
+init_sqlite_migrations();
+
+// src/data-lifecycle.ts
 init_dropbox_files();
 init_store();
 init_archive_formats();
@@ -42549,7 +42685,7 @@ init_scope();
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire5 } from "node:module";
 import { existsSync as existsSync18, readFileSync as readFileSync17 } from "node:fs";
-import { dirname as dirname24, join as join31 } from "node:path";
+import { dirname as dirname25, join as join32 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
   constructor(detail) {
@@ -42737,11 +42873,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join31(dir, "node_modules");
-    if (!existsSync18(join31(candidate, "@parcel", "watcher")))
+    const candidate = join32(dir, "node_modules");
+    if (!existsSync18(join32(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire5(join31(dirname24(candidate), "package.json"));
+      const requireFrom = createRequire5(join32(dirname25(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -42784,12 +42920,6 @@ init_embeddings();
 init_x_bookmarks();
 init_live_control2();
 init_telegram_messages();
-
-// src/workers/source-scheduler-state.ts
-init_linux_engine_layout();
-init_sqlite_migrations();
-
-// src/workers/source-scheduler.ts
 init_credential_broker();
 var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1000;
 var SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000;
@@ -44513,7 +44643,7 @@ init_local_open();
 init_remote_access();
 import { lstatSync as lstatSync10, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
-import { join as join34 } from "node:path";
+import { join as join35 } from "node:path";
 
 // src/workers/source-scope-browser.ts
 init_credential_broker();
@@ -44746,9 +44876,9 @@ init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync21 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
-import { join as join33 } from "node:path";
+import { join as join34 } from "node:path";
 function helperAppPathForHome(home = homedir21()) {
-  return join33(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+  return join34(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run = deps.run ?? ((command, args) => {
@@ -44799,7 +44929,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
-    memoryPath: join34(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: join35(olympusDataDir(), "local-files", "folder-access.json")
   });
   const node = (scopePath, name, parentKey, access) => {
     const reason = defaultExclusionForFolder(scopePath, context2);
@@ -44834,7 +44964,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
     }
     return entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => {
-      const childReal = join34(realPath, entry.name);
+      const childReal = join35(realPath, entry.name);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
       return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
@@ -45097,127 +45227,6 @@ init_privacy_profile();
 init_tier_move();
 init_secret_locations();
 import { Database as Database6 } from "bun:sqlite";
-
-// src/workers/classification-ledger.ts
-init_linux_engine_layout();
-import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname26, join as join35 } from "node:path";
-var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
-var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
-async function appendClassificationLedgerEntry(path, entry) {
-  if (!isClassificationLedgerEntry(entry))
-    throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname26(path), { recursive: true, mode: 448 });
-  const handle = await open4(path, "a", 384);
-  try {
-    await handle.chmod(384);
-    await handle.appendFile(`${JSON.stringify(entry)}
-`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-async function appendClassificationLedgerEntryOnce(path, entry) {
-  const id = entry.entry_id?.trim();
-  if (id) {
-    const existing = await readClassificationLedger(path);
-    if (existing.entries.some((recorded) => recorded.entry_id === id))
-      return false;
-  }
-  await appendClassificationLedgerEntry(path, entry);
-  return true;
-}
-async function readClassificationLedger(path) {
-  let raw = "";
-  try {
-    raw = await readFile5(path, "utf8");
-  } catch (error) {
-    if (error?.code !== "ENOENT")
-      throw error;
-  }
-  const { entries, skipped } = parseClassificationLedgerJsonl(raw);
-  return { entries: newestFirst(entries), skipped, path };
-}
-function parseClassificationLedgerJsonl(text2) {
-  const entries = [];
-  let skipped = 0;
-  for (const line of text2.split(`
-`)) {
-    if (line.trim() === "")
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      skipped += 1;
-      continue;
-    }
-    if (isClassificationLedgerEntry(parsed))
-      entries.push(parsed);
-    else
-      skipped += 1;
-  }
-  return { entries, skipped };
-}
-function isClassifierApproved(entries, key2, options = {}) {
-  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key2);
-  for (const entry of entries) {
-    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
-      continue;
-    const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
-    const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
-    if (!owner && !builtInDefault)
-      continue;
-    if (owner && entry.kind === "classifier_model_revoked")
-      return false;
-    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
-      return true;
-  }
-  return false;
-}
-function builtInDefaultRevoked(entries, key2) {
-  for (const entry of entries) {
-    if (entry.model_id !== key2.modelId || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
-      continue;
-    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
-      continue;
-    if (entry.kind === "classifier_model_revoked")
-      return true;
-    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
-      return false;
-  }
-  return false;
-}
-function isClassificationLedgerEntry(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const record = value;
-  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
-    return false;
-  if (typeof record.what !== "string" || record.what.trim() === "")
-    return false;
-  if (!["classifier_model_decision", "classifier_model_revoked", "note"].includes(record.kind))
-    return false;
-  if (!["owner", "built_in_default", "system-automatic", "unattributed-historical"].includes(record.approved_by))
-    return false;
-  if (!["pending", "complete", "n/a"].includes(record.status))
-    return false;
-  for (const key2 of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
-    if (record[key2] !== undefined && typeof record[key2] !== "string")
-      return false;
-  }
-  return true;
-}
-function newestFirst(entries) {
-  return entries.map((entry, index) => ({ entry, index, at: stampOrder2(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
-}
-function stampOrder2(recordedAt) {
-  const at = Date.parse(recordedAt);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-
-// src/workers/classification/sniffer-service.ts
 init_secrets_disposition();
 init_tier_move();
 init_provider();

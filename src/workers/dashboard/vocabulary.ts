@@ -397,7 +397,7 @@ function dashboardIsUnconnectedState(source: DashboardSourceCard): boolean {
 export function dashboardUnsettledWithData(source: DashboardSourceCard): boolean {
   return source.coverage.indexed_items > 0
     && dashboardIsUnconnectedState(source)
-    && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
+    && (source.delete_state !== undefined || DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label));
 }
 
 /**

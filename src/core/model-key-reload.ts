@@ -54,5 +54,9 @@ export function createModelKeyReload(options: {
  * worker would leave the deleted stores open in a live drain.
  */
 export function restartCoversEmbeddingDrain(launch: WorkerLaunch, env: Record<string, string | undefined>): boolean {
-  return env.OLYMPUS_ENGINE_HOST === '1' && launch.nativeServiceSupervised === true;
+  // The supervisor identity the native worker service itself assigns at launch
+  // (WORKER_SUPERVISOR_ENV), together with the validated launch. An inherited
+  // OLYMPUS_ENGINE_HOST is ambient and proves nothing: a Gateway-launched
+  // worker can carry it.
+  return env.OLYMPUS_WORKER_SUPERVISOR === 'engine' && launch.nativeServiceSupervised === true;
 }

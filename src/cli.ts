@@ -1,3 +1,4 @@
+import { findStoreHolders } from './core/store-holders.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
@@ -2636,12 +2637,40 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     // requirement, which is unsatisfiable unless the observed state is passed
     // in — the delete was refused at every worker state without it.
     const { workerState, engineLoaded } = observedWorkerServiceState();
+    // The worker's effective environment, worker.env included: the registry
+    // and every store path resolve the way the worker resolves them.
+    const effectiveEnv = environmentWithWorkerSetupEnv({ env: process.env });
+    const context = { env: effectiveEnv };
+    // Nothing else may hold a store: not only the engine and the legacy worker
+    // unit but a Gateway, a foreground worker or a separate embedding drain.
+    // Checked again inside the custody below, right before the delete.
+    const assertNoOtherHolders = () => {
+      if (options.dryRun === true) return;
+      const found = findStoreHolders();
+      if (!found.ok) {
+        throw new OperationError(
+          'invalid_params',
+          'Olympus could not list running processes to confirm nothing else holds its stores, so it did not delete anything.',
+          'Quit Olympus (the engine, the OpenClaw gateway, the worker and its embedding step), then retry.',
+        );
+      }
+      if (found.holders.length > 0) {
+        const kinds = [...new Set(found.holders.map((holder) => ({ engine: 'the engine', gateway: 'the OpenClaw gateway', worker: 'a worker', drain: 'the embedding step' })[holder.kind]))];
+        throw new OperationError(
+          'invalid_params',
+          `${kinds.join(', ')} still running (pid ${found.holders.map((holder) => holder.pid).join(', ')}), so it could keep these stores open. Nothing was deleted.`,
+          'Quit Olympus (the engine, the OpenClaw gateway, the worker and its embedding step), then retry.',
+        );
+      }
+    };
     if (options.sourceId) {
       const sourceId = options.sourceId;
       assertNoRunningWorkerForSourceDelete({ sourceId, dryRun: options.dryRun === true, engineLoaded, workerState });
-      const registryPath = handleRegistryPathFromEnv(process.env, true)!;
-      return withConnectedHandleGrantCustody(registryPath, {}, async () =>
-        deleteOlympusDataWithCustody({
+      const registryPath = handleRegistryPathFromEnv(effectiveEnv, true)!;
+      // Grant custody is held from the last check through the delete.
+      return withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        assertNoOtherHolders();
+        return deleteOlympusDataWithCustody({
           sourceId,
           dryRun: options.dryRun,
           connectedRegistry: readConnectedHandleRegistry(registryPath),
@@ -2652,15 +2681,18 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           registryPath,
           workerState,
           engineLoaded,
-        })
-      );
+          ...context,
+        });
+      });
     }
+    assertNoOtherHolders();
     return deleteOlympusDataWithCustody({
       all: options.all,
       dryRun: options.dryRun,
       workerState,
       engineLoaded,
       relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
+      ...context,
     });
   }
   if (command === '--help' || command === '-h') {
