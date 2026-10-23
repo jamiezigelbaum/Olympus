@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import {
+  assertNoRunningWorkerForSourceDelete,
   dataDeleteCustody,
   deleteOlympusData,
   deleteOlympusDataWithCustody,
@@ -82,6 +83,25 @@ describe('Olympus data lifecycle', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('custody refuses a this-computer source whose record cannot be read, and the CLI guard refuses a running worker', () => {
+    const base = { sourceId: 'local.files', homeDir: '/nonexistent-olympus-home', connectedRegistry: { version: 1 as const, handles: [] } };
+    expect(dataDeleteCustody({ ...base, thisComputerStateUnreadable: true })).toMatchObject({ ready: false, observed: 'unknown_registry' });
+    expect(dataDeleteCustody({ ...base, thisComputerStateUnreadable: false })).toMatchObject({ ready: true });
+    // Sources outside that record are not affected by it.
+    expect(dataDeleteCustody({ ...base, sourceId: 'dropbox.files', thisComputerStateUnreadable: true })).toMatchObject({ ready: true });
+
+    const running = { sourceId: 'dropbox.files', dryRun: false, engineLoaded: true, workerState: 'inactive' as const };
+    expect(() => assertNoRunningWorkerForSourceDelete(running)).toThrow('Nothing was deleted');
+    try {
+      assertNoRunningWorkerForSourceDelete({ ...running, engineLoaded: false, workerState: 'active' });
+      throw new Error('expected a refusal');
+    } catch (error) {
+      expect(JSON.stringify(error) + String((error as { nextAction?: string }).nextAction ?? '')).toContain('Delete indexed data');
+    }
+    expect(() => assertNoRunningWorkerForSourceDelete({ ...running, dryRun: true })).not.toThrow();
+    expect(() => assertNoRunningWorkerForSourceDelete({ ...running, engineLoaded: false })).not.toThrow();
   });
 
   test('custody treats a paired-session source as disconnected only after a CLEAN Unpair', () => {

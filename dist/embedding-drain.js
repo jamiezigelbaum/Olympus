@@ -42057,6 +42057,9 @@ init_file_scope_sources();
 // src/data-lifecycle.ts
 init_atomic_file();
 init_operation_error();
+init_file_scope_sources();
+init_linux_secret_backend();
+init_secret_store();
 init_sqlite_migrations();
 init_remote_connections();
 init_waiting_private_questions();
@@ -42079,6 +42082,7 @@ init_store_sync2();
 init_sovereignty();
 init_unpaired_sources();
 init_source_corpus_registry();
+init_job_names();
 init_public_source_capabilities();
 init_worker_service();
 init_media_cache();

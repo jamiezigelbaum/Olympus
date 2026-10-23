@@ -267,7 +267,7 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
-import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../../core/this-computer.ts';
+import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles, thisComputerStateUnreadable } from '../../core/this-computer.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody, type LifecyclePathContext } from '../../data-lifecycle.ts';
 import type {
   WorkerCredentialDegradation,
@@ -601,7 +601,7 @@ export interface EmailSourceWorkerOptions {
      * schedules the restart after the response is sent. Absent: the route
      * refuses with `delete_reopen_unavailable` rather than leave stale handles.
      */
-    workerRestart?: { canRestart: () => boolean; request: () => boolean };
+    workerRestart?: { canRestart: () => boolean; request: () => boolean; /** How long a delete waits for running requests to finish (default 5000). */ drainTimeoutMs?: number };
     /**
      * The registry mutator Unpair uses to drop a handle.
      *
@@ -884,6 +884,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // and when each source was last started, for `busy` and the once-a-minute
   // limit. Keyed like `dashboardManualSyncs`, by the dashboard source id.
   const dashboardManualSyncRuns = new Map<string, Promise<void>>();
+  // Exclusive custody for a Delete indexed data (owner, 2026-10-23). Every
+  // request on the worker API (search, answers, embedding, extraction, any
+  // operator route) passes through `fetch` below, so this is the one shared
+  // point: `reopening` refuses them while the stores are being deleted and
+  // until the supervised restart reopens them; `inflight` counts the ones
+  // already running so the delete can wait for them to finish before it
+  // unlinks a file a writer still holds. /dashboard and the health probes are
+  // exempt: the dashboard is how the owner sees the result, and its own
+  // mutations queue behind the delete's grant lock, so counting them would
+  // deadlock.
+  const requestCustody = { reopening: false, inflight: 0 };
   const dashboardManualSyncStarts = new Map<string, number>();
   // Paired-session sources this worker has unpaired. Separate from the
   // Disconnect latch because it answers a different question: Disconnect's
@@ -924,7 +935,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const dashboardExclusionDebt: DashboardExclusionDebtCache = new Map();
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
 
-  return {
+  const innerWorker = {
     close(): void {
       dashboardWorkerClosed = true;
       if (dashboardSchedulerAdoptionTick === undefined) return;
@@ -1445,6 +1456,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
               connectedHandleRegistry: registry,
               ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
+              ...(thisComputerStateUnreadableSafe(sourceDashboard.registryPath) ? { thisComputerStateUnreadable: true } : {}),
               ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
               unpairedSources: dashboardUnpairedSourceStates(
                 dashboardUnpairedSources,
@@ -2430,6 +2442,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               sourceId,
               connectedRegistry: readConnectedHandleRegistry(registryPath),
               thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
+              thisComputerStateUnreadable: thisComputerStateUnreadableSafe(registryPath),
               // A paired-session source (Telegram, WhatsApp) is disconnected
               // only after a clean Unpair, which the durable record carries.
               unpairedSources: readReconciledUnpairedSources(registryPath),
@@ -2457,16 +2470,36 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 throw new EmailSourceWorkerError(409, 'delete_unavailable', 'Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.');
               }
             }
+            // Exclusive custody: refuse new requests on the worker API, then let
+            // the ones already running (a search, an embed awaiting its
+            // provider, an extraction) finish, so nothing reads rows or writes
+            // to a file that is about to be unlinked. One that will not finish
+            // in time means the source is in use: lift the fence and refuse.
+            requestCustody.reopening = true;
+            const drainUntil = Date.now() + (restart.drainTimeoutMs ?? 5_000);
+            while (requestCustody.inflight > 0 && Date.now() < drainUntil) await new Promise((resolve) => setTimeout(resolve, 25));
+            if (requestCustody.inflight > 0) {
+              requestCustody.reopening = false;
+              throw new EmailSourceWorkerError(
+                409,
+                'delete_source_busy',
+                'Olympus is still using its stores for another request. Retry deleting its indexed data in a moment.',
+              );
+            }
             let removedCount = 0;
             let failed = false;
             try {
-              removedCount = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext }).removed.length;
+              removedCount = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext, registryPath }).removed.length;
             } catch {
               failed = true;
             }
             // Whatever the delete did, some stores may already be gone: the
-            // worker reopens them either way.
+            // worker reopens them either way. The fence stays up until that
+            // restart lands (the process exits); if none could be requested
+            // there is nothing to wait for, so it is lifted rather than leave
+            // the worker refusing everything forever.
             const restarting = restart.request();
+            if (!restarting) requestCustody.reopening = false;
             if (failed) {
               throw new EmailSourceWorkerError(
                 500,
@@ -3582,6 +3615,39 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           },
           500,
         );
+      }
+    },
+  };
+
+  const custodyExempt = (pathname: string): boolean =>
+    pathname.startsWith('/dashboard')
+    || pathname.startsWith('/oauth/callback/')
+    || pathname === `${basePath}/health`
+    || pathname === `${basePath}/service/readiness`
+    || pathname === `${basePath}/health/dependencies`;
+
+  return {
+    close: innerWorker.close,
+    async fetch(request: Request): Promise<Response> {
+      const pathname = new URL(request.url).pathname;
+      if (custodyExempt(pathname)) return innerWorker.fetch(request);
+      if (requestCustody.reopening) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 'source_stores_reopening',
+              message: 'Olympus is reopening its stores after indexed data was deleted. Try again in a moment.',
+            },
+            policy: { raw_email_exposed: false },
+          }),
+          { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '5' } },
+        );
+      }
+      requestCustody.inflight += 1;
+      try {
+        return await innerWorker.fetch(request);
+      } finally {
+        requestCustody.inflight -= 1;
       }
     },
   };
@@ -6337,6 +6403,10 @@ function withThisComputerHandles(
     return registry;
   }
   return synthetic.length === 0 ? registry : { ...registry, handles: [...registry.handles, ...synthetic] };
+}
+
+function thisComputerStateUnreadableSafe(registryPath: string | undefined): boolean {
+  try { return thisComputerStateUnreadable(registryPath ?? defaultHandleRegistryPath()); } catch { return true; }
 }
 
 function readDashboardRegistry(registryPath: string | undefined): ConnectedHandleRegistry {

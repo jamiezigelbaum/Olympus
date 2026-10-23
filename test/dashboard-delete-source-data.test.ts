@@ -10,7 +10,7 @@ import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../s
 
 /** Delete indexed data: the engine route behind olympus_delete_source_data. */
 describe('dashboard Delete indexed data route', () => {
-  function fixture(options: { connected?: boolean; canRestart?: boolean; busy?: boolean } = {}) {
+  function fixture(options: { connected?: boolean; canRestart?: boolean; busy?: boolean; slowRequest?: Promise<void> } = {}) {
     const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-delete-data-'));
     const homeDir = join(root, 'home');
     const registryPath = join(root, 'handles.json');
@@ -44,6 +44,9 @@ describe('dashboard Delete indexed data route', () => {
             } as never,
           }
         : {}),
+      ...(options.slowRequest
+        ? { sourceIndexStatus: { status: async () => { await options.slowRequest; return { corpora: [] } as never; } } as never }
+        : {}),
       sourceDashboard: {
         sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
         registryPath,
@@ -55,6 +58,7 @@ describe('dashboard Delete indexed data route', () => {
               workerRestart: {
                 canRestart: () => { restarts.asked += 1; return true; },
                 request: () => { restarts.requested += 1; return true; },
+                drainTimeoutMs: 300,
               },
             }),
       },
@@ -94,6 +98,53 @@ describe('dashboard Delete indexed data route', () => {
       await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_source_connected' } });
       expect(existsSync(f.store)).toBe(true);
       expect(f.restarts.requested).toBe(0);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  const statusCall = (worker: { fetch(request: Request): Promise<Response> }) =>
+    worker.fetch(new Request('http://worker.test/v1/source/index/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+
+  test('waits for a running worker request (an embed awaiting its provider), then deletes, then fences reads until the restart', async () => {
+    let release!: () => void;
+    const f = fixture({ slowRequest: new Promise<void>((resolve) => { release = resolve; }) });
+    try {
+      const slow = statusCall(f.worker);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const deleting = post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      // The delete is waiting: nothing is unlinked under the running request, and a new one is refused.
+      expect(existsSync(f.store)).toBe(true);
+      const refused = await statusCall(f.worker);
+      expect(refused.status).toBe(503);
+      expect((await refused.json() as { error: { code: string } }).error.code).toBe('source_stores_reopening');
+      release();
+      expect((await slow).status).toBeLessThan(600);
+      const done = await deleting;
+      expect(done.status).toBe(200);
+      expect(existsSync(f.store)).toBe(false);
+      // Fenced until the worker restarts: reads answer "reopening", not deleted rows.
+      expect((await statusCall(f.worker)).status).toBe(503);
+      // The dashboard itself stays reachable to show the result.
+      expect((await f.worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', { method: 'GET' }))).status).not.toBe(503);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a request that will not finish means the source is in use: nothing is deleted and the fence lifts', async () => {
+    const f = fixture({ slowRequest: new Promise<void>(() => undefined) });
+    try {
+      void statusCall(f.worker);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const response = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_source_busy' } });
+      expect(existsSync(f.store)).toBe(true);
+      expect(f.restarts.requested).toBe(0);
+      const other = await f.worker.fetch(new Request('http://worker.test/v1/source/index/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+      expect(other.status).not.toBe(503);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

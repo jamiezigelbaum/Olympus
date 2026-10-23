@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
+import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { deleteOlympusData, exportOlympusData, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
 
 const SPOOL_LINE = JSON.stringify({
@@ -340,5 +341,65 @@ describe('recursive raw-state deletes stay inside Olympus\'s own, unshared direc
       expect(() => l.del({}, 'whatsapp.personal.messages')).toThrow('symbolic link');
       expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
     } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test('a gateway-state override that holds the handle registry is refused, files intact', () => {
+    const l = lab();
+    try {
+      const gw = join(l.olympusRoot, 'gw-override');
+      mkdirSync(gw, { recursive: true });
+      writeFileSync(join(gw, 'cursor.json'), '{}');
+      const registry = join(gw, 'handles.json');
+      writeFileSync(registry, '{"handles":[]}');
+      writeFileSync(`${registry}.grant-epoch.json`, '{}');
+      writeFileSync(join(gw, 'this-computer.json'), '{}');
+      // Through the engine's context value and through the env override.
+      expect(() => deleteOlympusData({
+        sourceId: 'telegram.messages', homeDir: l.homeDir, registryPath: registry,
+        env: { OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw },
+      } as never)).toThrow('overlaps another source');
+      expect(() => l.del({ OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: gw, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registry }))
+        .toThrow('overlaps another source');
+      for (const path of [registry, `${registry}.grant-epoch.json`, join(gw, 'this-computer.json'), join(gw, 'cursor.json')]) {
+        expect(`${path}:${existsSync(path)}`).toBe(`${path}:true`);
+      }
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('a per-source delete clears that source\'s shared file-extraction job rows', () => {
+  test('rows of the deleted source go (jobs and artifacts); another source\'s rows stay', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-extraction-jobs-'));
+    const homeDir = join(dir, 'home');
+    const jobsPath = join(dir, 'jobs.sqlite');
+    const env = { OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH: jobsPath };
+    try {
+      const store = new LocalFileExtractionJobStore(jobsPath);
+      const extractor = { extractorKind: 'local_text', extractorVersion: 'text-v1' } as const;
+      const ref = (corpusId: string, provider: string, id: string) => ({
+        corpusId, provider, accountScope: 'a', approvedScopeKey: 'k',
+        providerItemId: id, localItemId: `l:${id}`, sourceVersion: 'v1', contentHash: `h${id}`,
+        name: `${id}.txt`, mimeType: 'text/plain', sizeBytes: 4,
+      });
+      store.enqueue({ refs: [ref('secure_local.dropbox.files', 'dropbox', 'd1')], ...extractor, policyDecision: 'index_allowed' });
+      store.enqueue({ refs: [ref('secure_local.local.files', 'local_files', 'f1')], ...extractor, policyDecision: 'index_allowed' });
+      store.close();
+      const count = (sql: string) => {
+        const db = new Database(jobsPath, { readonly: true });
+        try { return (db.query(sql).get() as { n: number }).n; } finally { db.close(); }
+      };
+      expect(count('SELECT COUNT(*) n FROM extraction_jobs')).toBe(2);
+
+      const dry = deleteOlympusData({ sourceId: 'dropbox.files', homeDir, env, dryRun: true });
+      expect(dry.removed.some((entry) => entry.includes('extraction jobs'))).toBe(false);
+      expect(count('SELECT COUNT(*) n FROM extraction_jobs')).toBe(2);
+
+      const result = deleteOlympusData({ sourceId: 'dropbox.files', homeDir, env });
+      expect(result.removed).toContain(`${jobsPath} (extraction jobs: 1)`);
+      expect(count("SELECT COUNT(*) n FROM extraction_jobs WHERE corpus_id = 'secure_local.dropbox.files'")).toBe(0);
+      expect(count("SELECT COUNT(*) n FROM extraction_jobs WHERE corpus_id = 'secure_local.local.files'")).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

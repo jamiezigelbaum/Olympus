@@ -27,6 +27,9 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
+import { getFileScopeSource } from './core/file-scope-sources.ts';
+import { resolveLinuxSecretPaths } from './core/linux-secret-backend.ts';
+import { defaultOlympusConfigDir } from './core/secret-store.ts';
 import {
   readSqliteSchemaVersion,
   runSqliteMigrations,
@@ -83,6 +86,8 @@ import {
 } from './core/pairing-session-paths.ts';
 import { artifactPresence, type UnpairedSourcesRead } from './workers/credential-broker/unpaired-sources.ts';
 import { createSourceCorpusRegistry } from './core/source-corpus-registry.ts';
+import { defaultFileExtractionJobsDbPath } from './workers/file-extraction/job-names.ts';
+import { LocalFileExtractionJobStore } from './workers/file-extraction/job-store.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
@@ -92,6 +97,11 @@ import type { ConnectedHandleRegistry } from './workers/credential-broker/connec
 export interface LifecyclePathContext {
   homeDir?: string;
   env?: Record<string, string | undefined>;
+  /**
+   * The handle registry the caller is actually running against (the worker's
+   * configured one), so the files beside it are protected wherever it lives.
+   */
+  registryPath?: string;
 }
 
 export interface LifecycleSourceSpec {
@@ -721,6 +731,20 @@ export function deleteOlympusData(options: {
         if (count > 0) removed.push(`${inboxPath} (private answers: ${count})`);
       } finally { inbox.close(); }
     }
+    // The shared file-extraction queue holds this source's job rows (file
+    // names, derivation metadata) outside its own stores. Cleared by corpus,
+    // from the registry, so no source is named here.
+    const jobsPath = defaultFileExtractionJobsDbPath(envForContext(options));
+    if (jobsPath !== ':memory:' && existsSync(jobsPath)) {
+      const corpora = createSourceCorpusRegistry().list()
+        .filter(c => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId))
+        .map(c => c.corpusId);
+      const jobs = new LocalFileExtractionJobStore(jobsPath);
+      try {
+        const count = jobs.deleteForCorpora(corpora);
+        if (count > 0) removed.push(`${jobsPath} (extraction jobs: ${count})`);
+      } finally { jobs.close(); }
+    }
   }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
@@ -763,6 +787,8 @@ export function deleteOlympusDataWithCustody(options: {
   artifactPresence?: (path: string) => 'gone' | 'present' | 'unknown';
   /** Source ids connected on this computer without a credential (see core/this-computer.ts). */
   thisComputerSources?: readonly string[];
+  /** The this-computer record exists but cannot be read: a this-computer source cannot be proven disconnected. */
+  thisComputerStateUnreadable?: boolean;
   workerState?: WorkerServiceState;
   /** A remote-access relay child is running (it would recreate its keys and keep forwarding). */
   relayRunning?: boolean;
@@ -797,11 +823,36 @@ export function deleteOlympusDataWithCustody(options: {
   };
 }
 
+/**
+ * A running worker holds a source's stores open (and may be writing to them).
+ * Deleting under it leaves it serving deleted rows from files it no longer
+ * owns. The CLI has no authenticated channel to the engine's dashboard route,
+ * which is the path that waits for running requests, fences reads and
+ * restarts the worker to reopen its stores, so a per-source delete from the
+ * CLI is refused while one runs, naming that route. A preview mutates nothing
+ * and is always allowed.
+ */
+export function assertNoRunningWorkerForSourceDelete(input: {
+  sourceId: string;
+  dryRun: boolean;
+  engineLoaded: boolean;
+  workerState: WorkerServiceState;
+}): void {
+  if (input.dryRun || !(input.engineLoaded || input.workerState === 'active')) return;
+  throw new OperationError(
+    'invalid_params',
+    `Olympus is running, so it would keep serving ${input.sourceId} from the stores this delete removes. Nothing was deleted.`,
+    'Use Delete indexed data on the source in the Olympus dashboard (it also reopens the worker\'s stores), or run olympus engine stop (olympus worker stop for a legacy worker), then retry.',
+  );
+}
+
 export function dataDeleteCustody(options: {
   all?: boolean;
   sourceId?: string;
   connectedRegistry?: ConnectedHandleRegistry;
   thisComputerSources?: readonly string[];
+  /** The this-computer record exists but cannot be read: a this-computer source cannot be proven disconnected. */
+  thisComputerStateUnreadable?: boolean;
   /**
    * The durable unpaired-source record, read the way the dashboard reads it
    * (reconciled against the disk). Required for a paired-session source.
@@ -841,6 +892,14 @@ export function dataDeleteCustody(options: {
     const connected = (lane !== undefined
       && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider))
       || (options.thisComputerSources?.includes(source!.sourceId) ?? false);
+    if (options.thisComputerStateUnreadable === true && getFileScopeSource(source!.sourceId)?.account === 'this_computer') {
+      return {
+        requirement: 'source_disconnected',
+        ready: false,
+        observed: 'unknown_registry',
+        next_action: 'Repair or remove the Olympus this-computer record (this-computer.json beside the handle registry), then retry.',
+      };
+    }
     const pairingPaths = source!.pairingSessionPaths?.(options);
     if (connected) {
       // A paired-session source ends with Unpair, not Disconnect.
@@ -1738,9 +1797,8 @@ function assertRawStateTargetsContained(
     if (canonicalPath(lexical) !== expectedReal) refuse(target.path, 'because it, or a directory above it, is a symbolic link');
   }
   if (!selectedSource) return;
-  const home = resolveHome(context.homeDir);
   const own = new Set([selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
-  const protectedPaths = new Set<string>();
+  const protectedPaths = new Set<string>(authoritativeStatePaths(context));
   for (const other of lifecycleSourceSpecs()) {
     if (own.has(other.sourceId)) continue;
     for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
@@ -1748,14 +1806,6 @@ function assertRawStateTargetsContained(
     for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
-  for (const path of [
-    join(home, '.olympus', 'config.json'),
-    defaultSovereigntyConfigPathForHome(context.homeDir),
-    join(home, '.config', 'olympus', 'handles.json'),
-    join(home, '.config', 'olympus', 'handles.json.unpaired'),
-    ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
-    ...mediaCacheDeleteTargets(context).map((target) => target.path),
-  ]) protectedPaths.add(path);
   const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve(path), canonicalPath(path)]);
   for (const target of stateTargets) {
     const candidates = [resolve(target.path), canonicalPath(target.path)];
@@ -1769,6 +1819,59 @@ function assertRawStateTargetsContained(
       }
     }
   }
+}
+
+/**
+ * The files Olympus cannot run without, resolved the way the running engine
+ * resolves them, overrides applied: the credential handle registry and every
+ * record and lock beside it, the this-computer and unpaired records, the
+ * owner config, the secret store and its key, the remote-connections store and
+ * the media cache. A recursive raw-state delete must never reach any of them,
+ * whatever directory an override points it at. Both the configured and the
+ * default locations are named, since either may be the live one.
+ */
+function authoritativeStatePaths(context: LifecyclePathContext): string[] {
+  const home = resolveHome(context.homeDir);
+  const env = envForContext(context);
+  const registries = new Set<string>([join(home, '.config', 'olympus', 'handles.json')]);
+  const configuredRegistry = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
+  if (configuredRegistry) registries.add(resolve(configuredRegistry));
+  if (context.registryPath?.trim()) registries.add(resolve(context.registryPath));
+  const files = new Set<string>();
+  for (const registry of registries) {
+    const dir = dirname(registry);
+    for (const path of [
+      registry,
+      `${registry}.grant-custody`,
+      `${registry}.grant-epoch.json`,
+      `${registry}.unpaired`,
+      join(dir, 'this-computer.json'),
+      join(dir, 'source-account-bindings.json'),
+      join(dir, 'mail-source-scopes.json'),
+      join(dir, 'file-source-scopes.json'),
+      join(dir, 'messaging-capture.telegram.json'),
+      join(dir, 'messaging-capture.whatsapp.json'),
+    ]) {
+      files.add(path);
+      files.add(`${path}.lock`);
+    }
+  }
+  const configDirs = new Set<string>([join(home, '.config', 'olympus')]);
+  try { configDirs.add(defaultOlympusConfigDir(env)); } catch { /* an unresolvable layout adds nothing */ }
+  for (const dir of configDirs) {
+    for (const name of ['secrets.enc', 'secrets.key', 'secret-backend.json']) files.add(join(dir, name));
+  }
+  try {
+    for (const path of Object.values(resolveLinuxSecretPaths(env))) files.add(path);
+  } catch { /* not a Linux layout */ }
+  for (const path of [
+    join(home, '.olympus', 'config.json'),
+    defaultSovereigntyConfigPathForHome(context.homeDir),
+    defaultSovereigntyConfigPath(env),
+    ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
+    ...mediaCacheDeleteTargets(context).map((target) => target.path),
+  ]) files.add(path);
+  return [...files];
 }
 
 function isInsideKnownOlympusRoot(path: string, context: LifecyclePathContext): boolean {

@@ -1302,6 +1302,13 @@ export interface SourceDashboardBuildOptions {
    */
   connectedHandleRegistryUnreadable?: boolean;
   /**
+   * The record of sources connected on this computer exists but could not be
+   * read (malformed, wrong shape, another host's). Only the cards that connect
+   * through it (this-computer sources) read as "connection state unreadable";
+   * a broken file is never an intentional disconnect.
+   */
+  thisComputerStateUnreadable?: boolean;
+  /**
    * Paired-session sources this worker has itself unpaired, and whether the
    * removal finished.
    *
@@ -2216,7 +2223,8 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       now,
       ingestionRowForDefinition(definition, ingestionBySource),
       options.contentExtractionStallThresholdHours,
-      options.connectedHandleRegistryUnreadable === true,
+      options.connectedHandleRegistryUnreadable === true
+        || (definition.connect_action.kind === 'this_computer' && options.thisComputerStateUnreadable === true),
       unpairedSources.get(definition.source_id),
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,

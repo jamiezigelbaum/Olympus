@@ -658,6 +658,25 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
+   * Remove every job and derived artifact row of the given corpora, settled
+   * or not. A deleted source's rows name its files and keep derivation
+   * metadata, so they go with the source rather than lingering in the shared
+   * queue. Returns the job rows removed.
+   */
+  deleteForCorpora(corpusIds: readonly string[]): number {
+    this.assertWritable('source deletion');
+    let removed = 0;
+    this.db.transaction(() => {
+      for (const corpusId of new Set(corpusIds)) {
+        const id = requireBoundedString(corpusId, 'corpusId');
+        this.db.query('DELETE FROM extraction_artifacts WHERE corpus_id = ?').run(id);
+        removed += this.db.query('DELETE FROM extraction_jobs WHERE corpus_id = ?').run(id).changes;
+      }
+    })();
+    return removed;
+  }
+
+  /**
    * Create or refresh jobs for a batch of refs.
    *
    * There is no "missing item" outcome here, unlike the queue this ports: the
