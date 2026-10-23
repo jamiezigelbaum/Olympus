@@ -8,6 +8,7 @@ import { findLeaks, type LeakFinding, type LeakMarker } from './leak.ts';
 import type { Difference } from './upgrade.ts';
 import type { JourneyTrace } from './journey.ts';
 import type { VisualResult } from './visual.ts';
+import type { ExploreResult } from './explore.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -104,6 +105,8 @@ export interface MachineReport {
   traces?: JourneyTrace[];
   /** The screens compared with the approved pictures. */
   visual?: VisualResult[];
+  /** Bounded exploration of the Sources section: coverage against the source-derived list. */
+  explore?: ExploreResult;
   upgrade?: UpgradeReport;
 }
 
@@ -315,6 +318,16 @@ export function traceSections(traces: readonly JourneyTrace[] | undefined): stri
   )).join('')}`;
 }
 
+/** Coverage of the bounded exploration: what the source says the page can offer, what was found and pressed, and why each miss. */
+export function exploreSection(explore: ExploreResult | undefined): string {
+  if (!explore) return '';
+  const s = explore.summary;
+  const rows = explore.coverage.map((entry) => `<tr><td><span class="badge ${entry.status === 'pressed' ? 'pass' : 'warn'}">${entry.status === 'pressed' ? 'PRESSED' : 'MISSED'}</span></td><td>${escapeHtml(entry.sourceLabel)}</td><td>${escapeHtml(entry.label)}${entry.destructive ? ' <span class="muted">(destructive)</span>' : ''}</td><td>${escapeHtml(entry.kind)}</td><td class="muted">${escapeHtml(entry.detail)}</td></tr>`).join('');
+  const seeds = explore.seeds.map((seed) => `<li>${escapeHtml(seed.title)}: ${seed.produced ? `${seed.pressed} pressed, ${seed.failed} broke a rule or an outcome <span class="muted">(${escapeHtml(seed.detail)})</span>` : `<strong>not produced</strong>: ${escapeHtml(seed.detail)}`}</li>`).join('');
+  const unlisted = explore.unlisted.length > 0 ? `<p>Found on the page but not named by the source-derived list (${explore.unlisted.length}):</p><ul>${explore.unlisted.map((entry) => `<li>${escapeHtml(entry.rowName)}: ${escapeHtml(entry.label || entry.key)} <span class="muted">[${escapeHtml(entry.key)}]${entry.pressed ? '' : ' not pressed'}</span></li>`).join('')}</ul>` : '';
+  return `<h3>Control exploration: the Sources section</h3><p><strong>${s.listed}</strong> controls listed from the product's source; <strong>${s.found}</strong> found on the page, <strong>${s.pressed}</strong> pressed, <strong>${s.missed}</strong> missed (${s.presses} presses in all). Coverage is advisory; the rules are blocking.</p><ul>${seeds}</ul><table class="checks"><thead><tr><th></th><th>Source</th><th>Control</th><th>Kind</th><th>Pressed, or why not</th></tr></thead><tbody>${rows}</tbody></table>${unlisted}<p class="muted">Accessibility audit: ${escapeHtml(explore.accessibility.reason)}</p>`;
+}
+
 /** The screens against their approved pictures: the approved one, this run's, and what differs. */
 export function visualSection(results: readonly VisualResult[] | undefined): string {
   if (!results || results.length === 0) return '';
@@ -348,7 +361,7 @@ function machineSection(machine: MachineReport): string {
       + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
       + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
       + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
-      + traceSections(machine.traces) + visualSection(machine.visual)
+      + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual)
       + `<h3>Logs</h3>${fileLinks(machine.logs)}</section>`;
   }
   const { from, step } = machine.upgrade;
@@ -369,7 +382,7 @@ function machineSection(machine: MachineReport): string {
     + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
     + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
     + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
-    + traceSections(machine.traces) + visualSection(machine.visual)
+    + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual)
     + `<h3>Logs</h3>${fileLinks(from.logs)}${fileLinks(machine.logs)}</section>`;
 }
 

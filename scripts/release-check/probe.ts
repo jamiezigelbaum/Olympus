@@ -175,6 +175,48 @@ export const PROBE_SOURCE = String.raw`(() => {
       }
       return { text, controls };
     },
+    /**
+     * Every control the page's own code gave a key (data-key), whether or not it is showing: a closed menu's items are on the page but
+     * not visible. With what the exploration needs to know about each: its row, the menu it sits in, and the reason shown beside it.
+     */
+    controls: (scopeCss) => {
+      const root = scopeCss ? document.querySelector(scopeCss) : document;
+      if (!root) return [];
+      const out = [];
+      for (const el of root.querySelectorAll('[data-key]')) {
+        const tag = el.tagName.toLowerCase();
+        if (!['button', 'a', 'summary', 'input', 'select', 'textarea'].includes(tag) && el.getAttribute('role') !== 'button') continue;
+        const row = el.closest('li.source, li.row');
+        const rowName = row ? row.querySelector('.source-name') : null;
+        const menu = el.closest('details.menu');
+        const fix = el.closest('.fix, .source-actions') || el.parentElement;
+        const reason = fix ? fix.querySelector('.reason') : null;
+        out.push({
+          key: el.getAttribute('data-key'), tag, role: roleOf(el), name: nameOf(el), text: clean(el.textContent).slice(0, 120),
+          disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+          visible: isVisible(el), expanded: el.getAttribute('aria-expanded'),
+          reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : '',
+          rowName: rowName ? clean(rowName.textContent) : '', rowKind: row ? (row.classList.contains('source') ? 'source' : (row.classList.contains('need') ? 'need' : '')) : '',
+          menuKey: menu ? menu.getAttribute('data-open-key') : '', href: el.getAttribute('href'),
+        });
+      }
+      return out;
+    },
+    /** Starts recording every window.open the page makes (a window that flashes up and goes is still counted). */
+    watchWindows: () => {
+      if (window.__rcOpened) return window.__rcOpened.length;
+      window.__rcOpened = [];
+      const original = window.open;
+      window.open = function () { window.__rcOpened.push(String(arguments[0] || '').slice(0, 120)); return original ? original.apply(window, arguments) : null; };
+      return 0;
+    },
+    openedWindows: () => (window.__rcOpened ? window.__rcOpened.slice() : []),
+    /** Every details element's state, for the menus and See why. */
+    openDetails: () => Array.from(document.querySelectorAll('details[data-open-key]')).map((el) => {
+      const summary = el.querySelector('summary');
+      const body = clean(el.textContent).replace(summary ? clean(summary.textContent) : '', '').trim();
+      return { key: el.getAttribute('data-open-key'), open: el.open === true, text: body.slice(0, 200) };
+    }),
     /** The rectangle of the framed panel in this page, if there is one. */
     frameBox: (id) => { const el = document.getElementById(id); if (!el) return null; const box = el.getBoundingClientRect(); return { x: box.left, y: box.top, w: box.width, h: box.height }; },
     scrollHeight: () => Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),

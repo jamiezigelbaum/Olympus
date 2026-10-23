@@ -35,6 +35,8 @@ import { findBrowser, openBrowser, type Cdp, type OpenedBrowser } from './browse
 import { captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey-driver.ts';
 import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
+import { explore, type Seed } from './explore.ts';
+import type { InventoryControl } from './explore-inventory.ts';
 
 export { ISOLATED_BROWSER_FLAGS } from './browser.ts';
 import type { AskView, CardView, DestinationId, EgressView, EntryView, FixView, InboxObservation, PageView, ShotView } from './inbox.ts';
@@ -1177,6 +1179,187 @@ async function journeysCommand(outDir: string, only: string[], skipScreens: bool
   emit({ ok: failure === undefined, ...(failure === undefined ? {} : { detail: failure }), traces, screens, archive });
 }
 
+
+// ---------------------------------------------------------------------------
+// Bounded exploration of the Sources section (explore.ts)
+
+const EXPLORE_DEBUG_PORT = 9336;
+const WRONG_TOKEN = 'release-check-rejected-token';
+
+function stopFake(): void {
+  spawnSync('pkill', ['-f', 'fake-readwise'], { encoding: 'utf8' });
+}
+
+/** The stand-in for Readwise, started detached with the given token (the right one, or one the connector's stored key will not match). */
+async function startFakeWith(config: AgentConfig, token: string): Promise<void> {
+  stopFake();
+  await sleep(500);
+  mkdirSync(WORKDIR, { recursive: true });
+  const logFd = openSync(join(WORKDIR, 'fake-readwise.log'), 'a');
+  const child = spawn(process.execPath, [process.argv[1]!, 'fake-readwise', '--token', token], { detached: true, stdio: ['ignore', logFd, logFd] });
+  child.unref();
+  closeSync(logFd);
+  for (let i = 0; i < 40; i += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${config.fakePort}/api/v2/auth/`, { headers: { authorization: `Token ${token}` } });
+      if (response.status === 204) return;
+    } catch { /* not up yet */ }
+    await sleep(250);
+  }
+  throw new Error('the Readwise stand-in did not start');
+}
+
+/** The Readwise card; the engine can be briefly unreachable right after a delete or a restart, so a failed read is tried again. */
+async function readwiseCard(): Promise<any> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const dash = await dashboardJson();
+      return (dash.json?.sources ?? []).find((card: any) => card.provider === 'readwise');
+    } catch (error) { last = error; await sleep(3_000); }
+  }
+  throw last;
+}
+
+async function until<T>(read: () => Promise<T | undefined>, timeoutMs: number, everyMs = 2_000): Promise<T | undefined> {
+  const stop = Date.now() + timeoutMs;
+  for (;;) {
+    const got = await read().catch(() => undefined);
+    if (got !== undefined) return got;
+    if (Date.now() >= stop) return undefined;
+    await sleep(everyMs);
+  }
+}
+
+const cardSummary = (card: any): string => `connection ${String(card?.connection?.state ?? '?')}, ${String(card?.coverage?.indexed_items ?? '?')} indexed, answers ${String(card?.answer_readiness?.state ?? '?')}${card?.connection?.provider_refusal ? ', refused by the provider' : ''}`;
+
+/** The seeded states of the install the exploration starts from, produced through the dashboard's own routes and the stand-in. */
+function exploreSeeds(config: AgentConfig): Seed[] {
+  // The card's connection reads `synced` once the source has been read; not connected, needs setup, awaiting consent and reauth are the others.
+  const connected = (card: any): boolean => !!card && !['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required'].includes(String(card.connection?.state ?? 'not_connected'));
+  const connect = async (): Promise<void> => {
+    const session = await ownerSession();
+    await startFakeWith(config, config.fakeToken);
+    const response = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: config.fakeToken });
+    if (response.status !== 200 || response.json?.ok !== true) throw new Error(`connect answered ${response.status}`);
+  };
+  const populated = async (): Promise<{ ok: boolean; detail: string }> => {
+    let card = await readwiseCard();
+    if (!connected(card) || card?.connection?.provider_refusal || card?.connection?.state === 'reauth_required') await connect();
+    else await startFakeWith(config, config.fakeToken);
+    const session = await ownerSession();
+    await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
+    card = await until(async () => { const now = await readwiseCard(); return connected(now) && !now?.connection?.provider_refusal && (now?.coverage?.indexed_items ?? 0) > 0 ? now : undefined; }, 120_000);
+    return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not come back to connected with its data: ${cardSummary(await readwiseCard())}` };
+  };
+  return [
+    { id: 'populated', title: 'populated', apply: populated, resetAfter: ['confirm'] },
+    {
+      id: 'failed', title: 'failed',
+      apply: async () => {
+        const first = await populated();
+        if (!first.ok) return first;
+        // The stored key stops being accepted: the next sync is refused, and the page owes the owner a way to fix it.
+        await startFakeWith(config, WRONG_TOKEN);
+        const refused = async (): Promise<any> => {
+          const now = await readwiseCard();
+          return now?.connection?.provider_refusal || now?.connection?.state === 'reauth_required' || now?.answer_readiness?.state === 'needs_attention' ? now : undefined;
+        };
+        const session = await ownerSession();
+        const sync = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
+        let card = await until(refused, 240_000, 5_000);
+        // A key the provider no longer accepts, entered again, is the other way a source ends up needing the owner.
+        let entered = 0;
+        if (!card) {
+          const again = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: config.fakeToken });
+          entered = again.status;
+          card = await until(refused, 60_000);
+        }
+        return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `a sync with a rejected key (sync answered ${sync.status}${entered ? `, a rejected key entered again answered ${entered}` : ''}) did not leave the source needing attention: ${cardSummary(await readwiseCard())}` };
+      },
+      resetAfter: ['confirm', 'sync'],
+    },
+    {
+      id: 'disconnected', title: 'disconnected, its data kept',
+      apply: async () => {
+        const first = await populated();
+        if (!first.ok) return first;
+        const session = await ownerSession();
+        const response = await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
+        if (response.status !== 200) return { ok: false, detail: `disconnect answered ${response.status}` };
+        const card = await until(async () => { const now = await readwiseCard(); return now && !connected(now) && (now?.coverage?.indexed_items ?? 0) > 0 ? now : undefined; }, 60_000);
+        return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not read as disconnected with its data kept: ${cardSummary(await readwiseCard())}` };
+      },
+      resetAfter: ['confirm'],
+      last: ['delete-data'],
+    },
+    {
+      id: 'empty', title: 'empty (disconnected, nothing indexed)',
+      apply: async () => {
+        await startFakeWith(config, config.fakeToken).catch(() => undefined);
+        const session = await ownerSession();
+        let card = await readwiseCard();
+        if (connected(card)) {
+          const response = await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
+          if (response.status !== 200) return { ok: false, detail: `disconnect answered ${response.status}` };
+          card = await until(async () => { const now = await readwiseCard(); return now && !connected(now) ? now : undefined; }, 60_000);
+        }
+        if (card && (card?.coverage?.indexed_items ?? 0) > 0) {
+          const response = await session.call('POST', '/dashboard/delete-source-data', { source_id: 'readwise.library', acknowledge: true });
+          if (response.status !== 200) return { ok: false, detail: `delete-source-data answered ${response.status}` };
+          card = await until(async () => { const now = await readwiseCard(); return now && (now?.coverage?.indexed_items ?? 0) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
+        }
+        return card && !connected(card) && (card?.coverage?.indexed_items ?? 0) === 0 ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not read as empty (not connected, nothing indexed): ${cardSummary(await readwiseCard())}` };
+      },
+    },
+  ];
+}
+
+async function exploreCommand(outDir: string, inventoryPath: string): Promise<never> {
+  const browser = findBrowser();
+  if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  const inventory = JSON.parse(readFileSync(inventoryPath, 'utf8')) as InventoryControl[];
+  const config = readConfig();
+  let stopBridge: () => void = () => undefined;
+  let bridgeStarted = false;
+  let opened: OpenedBrowser | undefined;
+  let failure: string | undefined;
+  let result: Awaited<ReturnType<typeof explore>> | undefined;
+  try {
+    opened = await openBrowser(browser!, 'chrome-profile-explore', EXPLORE_DEBUG_PORT, true);
+    const driver = new CdpJourneyDriver({
+      cdp: opened.cdp,
+      debugPort: EXPLORE_DEBUG_PORT,
+      outDir,
+      mintLink: async (place) => {
+        const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
+        const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
+        if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
+        return url;
+      },
+      onOrigin: (origin) => {
+        if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
+      },
+    });
+    await driver.start();
+    // The first opening link signs the browser in and Unlock opens the controls (the Private answers page offers it); the dashboard then opens in that session.
+    await driver.open('private');
+    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true });
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  } finally {
+    opened?.close();
+    stopBridge();
+  }
+  writeFileSync(join(outDir, 'explore.json'), JSON.stringify(result ?? null));
+  const archive = join(WORKDIR, 'explore.tgz');
+  const packed = spawnSync('tar', ['-czf', archive, '-C', outDir, '.'], { encoding: 'utf8' });
+  if (packed.status !== 0) emit({ ok: false, detail: `the exploration files could not be archived: ${packed.stderr.slice(0, 160)}` });
+  emit({ ok: failure === undefined, ...(failure === undefined ? {} : { detail: failure }), result: result ?? null, archive });
+}
+
 // ---------------------------------------------------------------------------
 // Logs
 
@@ -1366,7 +1549,7 @@ async function main(): Promise<void> {
       const config = existsSync(CONFIG_PATH) ? readConfig() : undefined;
       startFakeReadwise({
         port: config?.fakePort ?? FAKE_READWISE_PORT,
-        token: config?.fakeToken ?? FAKE_READWISE_TOKEN,
+        token: flag('--token', config?.fakeToken ?? FAKE_READWISE_TOKEN),
         documents: config?.documents as never,
       });
       await new Promise(() => undefined);
@@ -1389,6 +1572,7 @@ async function main(): Promise<void> {
     case 'screenshots': return await screenshots(flag('--out'));
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
     case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'));
+    case 'explore': return await exploreCommand(flag('--out'), flag('--inventory'));
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();
@@ -1396,7 +1580,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
       process.exit(2);
   }
 }

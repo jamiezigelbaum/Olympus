@@ -65,6 +65,8 @@ import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation }
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
+import { buildInventory } from './explore-inventory.ts';
+import { exploreChecks, type ExploreResult } from './explore.ts';
 import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type VisualResult } from './visual.ts';
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
 
@@ -110,6 +112,8 @@ export interface RunOptions {
   skipInbox?: boolean;
   /** Leave out the journeys and the screens for the visual baselines. */
   skipJourneys?: boolean;
+  /** Leave out the bounded exploration of the Sources section. */
+  skipExplore?: boolean;
   /** Run only these journeys (by id); omitted runs them all. */
   onlyJourneys?: string[];
   /** Where the approved pictures are (one folder per platform, `<screen>-<width>-<theme>.png`). Omitted, the screens are not compared. */
@@ -168,6 +172,7 @@ interface Stage {
   traces?: JourneyTrace[];
   /** The screens compared with the approved pictures. */
   visual?: VisualResult[];
+  explore?: ExploreResult;
 }
 
 const newStage = (id: string, label: string): Stage => ({ id, label, timings: {}, checks: [], agents: [], screenshots: [], logs: [] });
@@ -865,6 +870,44 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
 }
 
 /**
+ * Bounded exploration of every control in the dashboard's Sources section (explore.ts): the controls are listed from the product's
+ * source here, on the host; the machine seeds the install in each state, presses each control by itself and judges it. The rules
+ * block; the coverage is advisory. Destructive controls are pressed here only because this is the throwaway machine.
+ */
+async function runExploreLeg(run: Run, outDir: string): Promise<void> {
+  if (run.options.skipExplore) return;
+  const inventory = buildInventory();
+  const scratch = join(outDir, '_explore');
+  rmSync(scratch, { recursive: true, force: true });
+  mkdirSync(scratch, { recursive: true });
+  const inventoryPath = join(scratch, 'inventory.json');
+  writeFileSync(inventoryPath, JSON.stringify(inventory));
+  await run.machine!.put(inventoryPath, '~/rc/explore-inventory.json');
+  const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json', 2_400_000));
+  const result = done.result;
+  if (!result || result.result === undefined) {
+    run.add({ id: 'explore.ran', title: 'Every control of the Sources section was pressed', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
+    rmSync(scratch, { recursive: true, force: true });
+    return;
+  }
+  if (result.ok !== true || result.result === null) run.add({ id: 'explore.ran', title: 'Every control of the Sources section was pressed', status: 'fail', detail: String(result.detail ?? 'the machine reported a problem') });
+  try {
+    await run.machine!.get(String(result.archive), join(scratch, 'explore.tgz'));
+    const unpacked = spawnSync('tar', ['-xzf', join(scratch, 'explore.tgz'), '-C', scratch], { encoding: 'utf8' });
+    if (unpacked.status !== 0) throw new Error(`tar: ${unpacked.stderr.slice(0, 120)}`);
+    if (existsSync(join(scratch, 'traces'))) cpSync(join(scratch, 'traces'), join(outDir, 'traces'), { recursive: true });
+  } catch (error) {
+    run.add({ id: 'explore.fetch', title: 'The exploration traces were brought back', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+  }
+  rmSync(scratch, { recursive: true, force: true });
+  if (result.result === null) return;
+  const explored = result.result as ExploreResult;
+  run.stage.explore = explored;
+  (run.stage.traces ??= []).push(...explored.traces);
+  for (const check of exploreChecks(explored)) run.add(check);
+}
+
+/**
  * The journeys and the screens, in the owner's browser on the machine (journeys.ts, visual.ts). The machine takes the screens and walks
  * the journeys; one archive comes back with a trace (and a picture after each step) per journey and the screens. The screens are
  * compared with the approved pictures where `--baselines` names them; `--update-baselines` writes them as candidates instead.
@@ -1018,6 +1061,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   await captureScreenshots(run, options.outDir);
   if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
   if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
+  if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
   await collectEvidence(run, options.outDir);
 }
 
@@ -1060,6 +1104,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         await captureScreenshots(run, options.outDir);
         if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
+        if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
       }
       await collectEvidence(run, options.outDir);
     }
@@ -1106,6 +1151,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     logs: last.logs,
     ...(last.traces ? { traces: last.traces } : {}),
     ...(last.visual ? { visual: last.visual } : {}),
+    ...(last.explore ? { explore: last.explore } : {}),
     ...(upgrading ? {
       upgrade: {
         from: toPhase(run.stages.get('before')!),
@@ -1212,6 +1258,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(inboxSelftest ? { inboxSelftest: inboxSelftest as InboxSelftest } : {}),
     skipInbox: has('--skip-inbox'),
     skipJourneys: has('--skip-journeys'),
+    skipExplore: has('--skip-explore'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
     updateBaselines: has('--update-baselines'),

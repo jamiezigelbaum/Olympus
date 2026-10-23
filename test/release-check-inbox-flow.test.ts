@@ -33,6 +33,7 @@ if (verb === 'provision') {
   console.log('{"machine":"fake-' + arg('--run-id') + '","label":"Scripted machine","os":"linux","driver":"fake"}');
 } else if (verb === 'get') {
   if (/journeys\.tgz$/.test(arg('--from'))) copyFileSync(state + '/journeys.tgz', arg('--to'));
+  else if (/explore\.tgz$/.test(arg('--from'))) copyFileSync(state + '/explore.tgz', arg('--to'));
   else writeFileSync(arg('--to'), 'png');
 } else if (verb === 'exec') {
   const script = await new Response(Bun.stdin.stream()).text();
@@ -105,6 +106,7 @@ if (verb === 'provision') {
     else say(observation);
   }
   else if (sub === 'journeys') say(JSON.parse(readFileSync(state + '/journeys.json', 'utf8')));
+  else if (sub === 'explore') say(JSON.parse(readFileSync(state + '/explore.json', 'utf8')));
   else if (sub === 'dashboard-json') say({ ok: true, status: 200, body: '{}' });
   else if (sub === 'collect-logs') say({ ok: true, files: [] });
   else say({ ok: false, detail: 'scripted machine: unknown ' + sub });
@@ -153,7 +155,7 @@ const agentLog = (): string[] => readFileSync(join(dir, 'agent.log'), 'utf8').sp
 function options(extra: Record<string, unknown> = {}) {
   const runId = newRunId();
   const config: RunConfigFile = { driver: [driverPath], agents: [], settleTimeoutS: 5 };
-  return { runId, candidateDir, candidateLabel: 'inbox test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipJourneys: true, ...extra };
+  return { runId, candidateDir, candidateLabel: 'inbox test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipJourneys: true, skipExplore: true, ...extra };
 }
 type Report = Awaited<ReturnType<typeof runReleaseCheck>>;
 const allChecks = (report: Report) => [...report.machines[0]!.checks, ...report.machines[0]!.agents.flatMap((agent) => agent.checks)];
@@ -417,6 +419,50 @@ describe('the journeys and the visual baselines against a scripted machine', () 
     expect(html).toContain('traces/inbox-check/trace-01.jpg');
     expect(agentLog().find((line) => line.startsWith('journeys'))).toContain('--out ~/rc/journeys');
   }, 120_000);
+
+  /** What the machine hands back from the exploration: a result with one pressed control and one missed, and a picture per step. */
+  function prepareExplore(opts: { failing?: boolean } = {}): void {
+    const stage = join(dir, 'explore-stage');
+    mkdirSync(join(stage, 'traces', 'explore-populated'), { recursive: true });
+    writeFileSync(join(stage, 'traces', 'explore-populated', '02.jpg'), 'jpg');
+    const step = { n: 2, name: 'Readwise: Sync now', action: 'press button "Sync now"', expected: 'something happens, and the generic rules hold', actual: opts.failing ? 'nothing changed' : 'the page changed', ok: !opts.failing, ms: 900, at: '/dashboard', screenshot: 'explore-populated/02.jpg', consoleErrors: [], failedRequests: [], findings: opts.failing ? ['pressing "Sync now" did nothing: nothing on the page changed'] : [] };
+    const result = {
+      seeds: [{ id: 'populated', title: 'populated', produced: true, detail: 'connected', pressed: 1, failed: opts.failing ? 1 : 0 }],
+      traces: [{ id: 'explore-populated', title: 'Pressing every control in the Sources section, from the populated state', source: 'bounded exploration', ok: !opts.failing, steps: [step], ms: 900 }],
+      coverage: [
+        { id: 'readwise.library:sync', sourceLabel: 'Readwise', kind: 'sync', label: 'Sync now', destructive: false, status: 'pressed', detail: 'pressed from: populated', seeds: ['populated'] },
+        { id: 'gmail.email:sync', sourceLabel: 'Gmail', kind: 'sync', label: 'Sync now', destructive: false, status: 'missed', detail: 'unreachable on a throwaway machine: needs a real sign-in', seeds: ['populated'] },
+      ],
+      unlisted: [], summary: { listed: 2, found: 1, pressed: 1, missed: 1, unlisted: 0, presses: 1 },
+      accessibility: { status: 'skipped', reason: 'no accessibility checker is installed' },
+    };
+    spawnSync('tar', ['-czf', join(dir, 'explore.tgz'), '-C', stage, '.']);
+    writeFileSync(join(dir, 'explore.json'), JSON.stringify({ ok: true, result, archive: '/home/test/rc/explore.tgz' }));
+  }
+
+  test('the exploration: its inventory goes to the machine, a failing press fails the seed\'s check, the coverage is advisory and in the report with each miss\'s reason', async () => {
+    prepareMachine();
+    prepareExplore();
+    const opts = options({ skipJourneys: false, skipExplore: false });
+    const report = await runReleaseCheck(opts);
+    expect(failedIds(report)).toEqual([]);
+    expect(checkOf(report, 'explore.populated')?.status).toBe('pass');
+    expect(checkOf(report, 'explore.coverage')?.status).toBe('warn');
+    expect(checkOf(report, 'explore.accessibility')?.status).toBe('skip');
+    expect(agentLog().find((line) => line.startsWith('explore'))).toContain('--inventory ~/rc/explore-inventory.json');
+    expect(driverLog().some((line) => line.startsWith('put') && line.includes('inventory.json'))).toBe(true);
+    const html = readFileSync(join(opts.outDir, 'report.html'), 'utf8');
+    expect(html).toContain('Control exploration');
+    expect(html).toContain('unreachable on a throwaway machine');
+    expect(html).toContain('traces/explore-populated/02.jpg');
+    expect(existsSync(join(opts.outDir, 'traces', 'explore-populated', '02.jpg'))).toBe(true);
+
+    prepareExplore({ failing: true });
+    const broken = await runReleaseCheck(options({ skipJourneys: false, skipExplore: false }));
+    expect(broken.verdict).toBe('fail');
+    expect(failedIds(broken)).toContain('explore.populated');
+    expect(checkOf(broken, 'explore.populated')?.detail).toContain('did nothing');
+  }, 240_000);
 
   test('a journey that did not reach its outcome fails the run on journey.<id>', async () => {
     prepareMachine({ failing: true });
