@@ -51,9 +51,11 @@ export interface ChatGptDashboardClientConfig {
    * while something is moving (a source working or signing in, setup
    * unfinished, the Mac unreachable), every `idleMs` otherwise, doubling
    * after each failure up to `maxBackoffMs`. The "Updated … ago" line is
-   * redrawn every `staleTickMs` even when nothing new arrives.
+   * redrawn every `staleTickMs` even when nothing new arrives. After Delete
+   * indexed data ran, the page re-reads every `settleMs` (for at most
+   * `settleForMs`) until the row stops offering it.
    */
-  refresh: { activeMs: number; idleMs: number; maxBackoffMs: number; staleTickMs: number };
+  refresh: { activeMs: number; idleMs: number; maxBackoffMs: number; staleTickMs: number; settleMs: number; settleForMs: number };
   /** The in-place Connect flow and folder/mail pickers (picker.ts). */
   picker: ChatGptPickerConfig;
   /** The privacy setup screen and the dashboard's Privacy row (privacy.ts). */
@@ -154,9 +156,12 @@ export function chatgptDashboardClient(
     landed: { id: string; until: number } | null;
     /** What the last failed read got back, for the unreachable banner's See why. */
     lastFailure: RelayFailure | null;
+    /** Sources whose Delete indexed data ran: source id to when to stop waiting for the row to settle. */
+    deleting: Record<string, number>;
   } = {
     data: null,
     relayDown: false,
+    deleting: {},
     busy: '',
     confirming: '',
     helpOpen: false,
@@ -356,6 +361,7 @@ export function chatgptDashboardClient(
       // A fresh list starts from its first page (its tokens are new too).
       state.unreadablePages = {};
       state.relayDown = false;
+      settleDeleting(content);
       // The engine's own `lastManualSync` now says whether a press is still checking.
       if (!state.busy) state.syncPressed = {};
       // Any good dashboard, from any path, ends a failure streak.
@@ -436,6 +442,10 @@ export function chatgptDashboardClient(
         // Deleted: the row reads as a source with no data once the engine
         // has reopened its stores (it restarts; the page re-reads until it
         // answers). The brief result line stays until the next action.
+        // The engine restarts right after it answers, so this read can still
+        // come from the old process: keep re-reading until the row settles.
+        const deletedId = args && typeof args.source_id === 'string' ? args.source_id : '';
+        if (deletedId) state.deleting[deletedId] = Date.now() + R.settleForMs;
         refresh();
         state.notice = P.deleteDataDone;
         redraw();
@@ -1985,8 +1995,24 @@ export function chatgptDashboardClient(
     return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed');
   }
 
+  /** A source whose Delete indexed data ran and whose row still offers it (or is not yet read again). */
+  function deletePending(): boolean {
+    return Object.keys(state.deleting).length > 0;
+  }
+
+  /** Drops a source from the wait once its row no longer offers Delete indexed data, or the wait ran out. */
+  function settleDeleting(data: Any): void {
+    const sources = data && Array.isArray(data.sources) ? data.sources : [];
+    for (const id of Object.keys(state.deleting)) {
+      const row = sources.filter((source: Any) => source && source.id === id)[0];
+      const offered = !!row && Array.isArray(row.menu)
+        && row.menu.some((fix: Any) => fix && fix.tool === config.deleteDataTool);
+      if (!offered || Date.now() >= state.deleting[id]) delete state.deleting[id];
+    }
+  }
+
   function refreshDelay(): number {
-    const base = moving() ? R.activeMs : R.idleMs;
+    const base = deletePending() ? R.settleMs : moving() ? R.activeMs : R.idleMs;
     return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
   }
 

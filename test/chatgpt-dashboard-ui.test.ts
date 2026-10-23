@@ -1134,6 +1134,43 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
     expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataDone);
   });
 
+  // The engine restarts to reopen its stores right after it answers, so the
+  // read straight after can still come from the old process: the row would
+  // keep offering Delete indexed data until the idle 60 s poll. Every source
+  // that offers it behaves the same, so the page keeps re-reading until the
+  // offer is gone.
+  test('a read that still offers Delete after it ran is not trusted: the page re-reads soon until the row is settled', async () => {
+    jest.useFakeTimers();
+    try {
+      const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+      const dashboardCalls = (host: Host) => host.toolCalls().filter((call) => call.name === 'olympus_dashboard').length;
+      const host = mount();
+      host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+      host.button('Delete indexed data').click();
+      host.button('Yes, delete indexed data').click();
+      host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+      await flush();
+      expect(dashboardCalls(host)).toBe(1);
+      // The old process answers: still 4 items, still offering Delete.
+      host.respond('tools/call', { structuredContent: model({ sources: [dropbox([DELETE])] }) });
+      await flush();
+      expect(host.buttons().some((b) => b.textContent === 'Delete indexed data' || b.textContent === '⋯')).toBe(true);
+      jest.advanceTimersByTime(5_000);
+      await flush();
+      expect(dashboardCalls(host)).toBe(2);
+      // The restarted process: nothing indexed, no offer.
+      host.respond('tools/call', { structuredContent: model({ sources: [dropbox([])] }) });
+      await flush();
+      expect(host.text()).not.toContain('Delete indexed data');
+      // Settled: back to the idle cadence, no fast polling.
+      jest.advanceTimersByTime(5_000);
+      await flush();
+      expect(dashboardCalls(host)).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a source that keeps raw message copies says the delete removes them (and media where it has them)', () => {
     const chat = (copies: 'messages' | 'messages_and_media', id: string, label: string): DashboardViewModelV1['sources'][number] => ({
       id, label, group: 'local', status: 'Off', detail: 'Disconnected · indexed data kept',

@@ -125503,6 +125503,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const state = {
     data: null,
     relayDown: false,
+    deleting: {},
     busy: "",
     confirming: "",
     helpOpen: false,
@@ -125684,6 +125685,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       state.computerMeta = meta2 && typeof meta2 === "object" ? meta2 : null;
       state.unreadablePages = {};
       state.relayDown = false;
+      settleDeleting(content);
       if (!state.busy)
         state.syncPressed = {};
       refreshFailures = 0;
@@ -125754,6 +125756,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         return;
       }
       if (name === config2.deleteDataTool && !(result && result.isError)) {
+        const deletedId = args && typeof args.source_id === "string" ? args.source_id : "";
+        if (deletedId)
+          state.deleting[deletedId] = Date.now() + R.settleForMs;
         refresh();
         state.notice = P.deleteDataDone;
         redraw();
@@ -127142,8 +127147,20 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return true;
     return !!data2.models && !!data2.models.embedding && installLines(data2.models).some((entry) => entry.state !== "failed");
   }
+  function deletePending() {
+    return Object.keys(state.deleting).length > 0;
+  }
+  function settleDeleting(data2) {
+    const sources = data2 && Array.isArray(data2.sources) ? data2.sources : [];
+    for (const id of Object.keys(state.deleting)) {
+      const row = sources.filter((source) => source && source.id === id)[0];
+      const offered = !!row && Array.isArray(row.menu) && row.menu.some((fix) => fix && fix.tool === config2.deleteDataTool);
+      if (!offered || Date.now() >= state.deleting[id])
+        delete state.deleting[id];
+    }
+  }
   function refreshDelay() {
-    const base = moving() ? R.activeMs : R.idleMs;
+    const base = deletePending() ? R.settleMs : moving() ? R.activeMs : R.idleMs;
     return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
   }
   function scheduleRefresh() {
@@ -129806,7 +129823,9 @@ var init_page = __esm(() => {
     activeMs: 15000,
     idleMs: 60000,
     maxBackoffMs: 5 * 60000,
-    staleTickMs: 30000
+    staleTickMs: 30000,
+    settleMs: 2000,
+    settleForMs: 60000
   };
   STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
   CHATGPT_DASHBOARD_LIGHT = {
