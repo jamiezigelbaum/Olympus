@@ -42,8 +42,13 @@ export interface PanelControl {
 export interface Seed {
   id: SeedId;
   title: string;
-  /** Puts the install in this state (and checks it got there). `ok: false` says why it could not, and the seed is reported as missed. */
-  apply(): Promise<{ ok: boolean; detail: string }>;
+  /**
+   * Puts the install in this state (and checks it got there). `ok: false` says why it could not, and the seed is reported as missed.
+   * A seed that drives several sources reports each one that did not reach the state it should have in `failedSources`: the seed is
+   * still pressed for the others, and the `explore.sources` check fails for the one that did not (a source the machine claims to
+   * drive has to be driven).
+   */
+  apply(): Promise<{ ok: boolean; detail: string; failedSources?: Array<{ source: string; detail: string }> }>;
   /** The press changed the install in a way a reload does not undo (a disconnect): the next press starts by applying the seed again. */
   resetAfter?: ControlKind[];
   /** Presses whose effect cannot be undone (the data is gone): run last, and nothing is replayed after them. */
@@ -62,6 +67,8 @@ export interface ExploreOptions {
   signedIn?: boolean;
   /** The most presses one seed may make (bounded exploration). */
   maxPresses?: number;
+  /** The time (epoch ms) after which no new seed or press is started, so a slow machine still returns what it covered. */
+  deadlineAt?: number;
   /** Milliseconds the page may take to settle after a press. */
   settleMs?: number;
   /** The accessibility checker's own script (axe-core's axe.min.js), injected into each frame. Without it the audit is skipped, and says so. */
@@ -89,6 +96,8 @@ export interface ExploreResult {
   /** Controls the page showed in the Sources section that the source-derived list does not name. */
   unlisted: Array<{ key: string; label: string; rowName: string; pressed: boolean }>;
   summary: { listed: number; found: number; pressed: number; missed: number; unlisted: number; presses: number };
+  /** Sources a seed was meant to drive and could not bring to the state: the machine claims to drive them, so this blocks. */
+  sourceFailures?: Array<{ seed: SeedId; source: string; detail: string }>;
   /** Why there is no accessibility audit, or its result. */
   accessibility: Accessibility;
   /** The other dashboard pages (explore-pages.ts), when the machine crawled them. */
@@ -114,6 +123,8 @@ const LEAVES = new Set<ControlKind>(['connect', 'reconnect', 'scope', 'check-aga
 const CONFIRM_WAIT_MS = 60_000;
 /** How long a page with a busy control (a sync running) is waited on before it is judged. */
 const BUSY_WAIT_MS = 90_000;
+/** A file in a source's sample list: pressing it asks the desktop to open the file. */
+const OPENS_A_FILE = /^Open .+\.[A-Za-z0-9]{1,5}$/;
 const OWN_HOSTS = /^https:\/\/(www\.)?olympusplugin\.ai\//;
 
 const keyed = (key: string): { css: string } => ({ css: `[data-key="${key.replace(/"/g, '\\"')}"]` });
@@ -125,7 +136,7 @@ export interface PressContext {
   seed: SeedId;
   control: PanelControl;
   kind: ControlKind;
-  before: { keys: string[]; seeded: string[]; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
+  before: { keys: string[]; seeded: string[]; rows: Record<string, string>; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
   after: { controls: PanelControl[]; text: string; open: Array<{ key: string; open: boolean; text?: string }>; url: string };
   opened: string[];
 }
@@ -156,8 +167,10 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
     const base = c.control.key.replace(/:no$/, '');
     const gone = !c.after.controls.some((control) => control.key === `${base}:yes`);
     // Left as it was: the page offers the same controls as when it was seeded, apart from the question itself (a Cancel that did the action would swap Disconnect for Connect, or remove Delete).
-    const rest = (keys: string[]): string => keys.filter((key) => !key.startsWith(`${base}:`)).sort().join('|');
-    const same = rest(c.before.seeded) === rest(c.after.controls.map((control) => control.key));
+    // Only the source's own row is compared: another source's row can change under the page while it syncs.
+    const row = c.control.rowName;
+    const rest = (keys: string[]): string => keys.filter((key) => !key.startsWith(`${base}:`) && (c.before.rows[key] ?? row) === row).sort().join('|');
+    const same = rest(c.before.seeded) === rest(c.after.controls.filter((control) => control.rowName === row).map((control) => control.key));
     return { ok: gone && same, expected: 'Cancel closes the question and leaves things as they were', actual: !gone ? 'the question is still showing' : same ? 'the question closed' : 'the question closed, but the controls on the page changed: Cancel changed the source' };
   },
 };
@@ -291,6 +304,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const foundIds = new Map<string, { seeds: Set<SeedId>; pressed: boolean; disabled: boolean }>();
   const unlisted = new Map<string, { key: string; label: string; rowName: string; pressed: boolean }>();
   const seedFailures = new Map<SeedId, string>();
+  /** Sources a seed was meant to drive and did not reach the state for. */
+  const sourceFailures: Array<{ seed: SeedId; source: string; detail: string }> = [];
   const axeStates: AccessibilityState[] = [];
   let axeVersion = '';
   let totalPresses = 0;
@@ -350,12 +365,18 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   };
 
   for (const seed of options.seeds) {
-    const applied = await seed.apply().catch((error: unknown) => ({ ok: false, detail: error instanceof Error ? error.message : String(error) }));
+    if (options.deadlineAt !== undefined && now() >= options.deadlineAt) {
+      seeds.push({ id: seed.id, title: seed.title, produced: false, detail: 'the time bound for the exploration was reached before this state', pressed: 0, failed: 0 });
+      seedFailures.set(seed.id, 'the time bound was reached');
+      continue;
+    }
+    const applied: Awaited<ReturnType<Seed['apply']>> = await seed.apply().catch((error: unknown) => ({ ok: false, detail: error instanceof Error ? error.message : String(error) }));
     if (!applied.ok) {
       seeds.push({ id: seed.id, title: seed.title, produced: false, detail: applied.detail, pressed: 0, failed: 0 });
       seedFailures.set(seed.id, applied.detail);
       continue;
     }
+    for (const failure of applied.failedSources ?? []) sourceFailures.push({ seed: seed.id, ...failure });
     await freshPage();
     await watch();
     // What the page logged and requested while loading is judged here, once, with the seeded page; each press then starts from a clean log.
@@ -420,28 +441,35 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     let pressedHere = 0;
     let failedHere = 0;
     let destroyed = false;
-    while (queue.length > 0 && presses < maxPresses && !destroyed) {
+    while (queue.length > 0 && presses < maxPresses && !destroyed && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
       queue.sort((a, b) => orderKey(a) - orderKey(b));
       const item = queue.shift()!;
       const started = now();
       try {
       if (dirty) {
-        const again = await seed.apply().catch((error: unknown) => ({ ok: false, detail: String(error) }));
+        const again: Awaited<ReturnType<Seed["apply"]>> = await seed.apply().catch((error: unknown) => ({ ok: false, detail: String(error) }));
         if (!again.ok) { steps.push(failureStep(steps.length + 1, item.path, `the seed could not be applied again: ${again.detail}`)); failedHere += 1; break; }
+        for (const failure of again.failedSources ?? []) if (!sourceFailures.some((known) => known.seed === seed.id && known.source === failure.source)) sourceFailures.push({ seed: seed.id, ...failure });
         dirty = false;
       }
-      await freshPage();
-      await watch();
-      let controlsNow = await panelControls(driver);
-      // The path's earlier keys are pressed first (a menu opens, a question is asked); the last is the press being judged.
+      // A row can change between two loads (a source that was syncing has finished, and its menu has different entries): a control that is not found is looked for once more on another fresh load before it is failed.
+      let controlsNow: Awaited<ReturnType<typeof panelControls>> = [];
       let reachable = true;
-      for (const key of item.path.slice(0, -1)) {
-        if (!(await press(key))) { reachable = false; break; }
-        await settle();
-      }
-      controlsNow = await panelControls(driver);
+      let control: Awaited<ReturnType<typeof panelControls>>[number] | undefined;
       const finalKey = item.path[item.path.length - 1]!;
-      const control = controlsNow.find((candidate) => candidate.key === finalKey);
+      for (let attempt = 0; attempt < 2 && !control; attempt += 1) {
+        await freshPage();
+        await watch();
+        reachable = true;
+        // The path's earlier keys are pressed first (a menu opens, a question is asked); the last is the press being judged.
+        for (const key of item.path.slice(0, -1)) {
+          if (!(await press(key))) { reachable = false; break; }
+          await settle();
+        }
+        controlsNow = await panelControls(driver);
+        control = controlsNow.find((candidate) => candidate.key === finalKey);
+        if (!reachable) break;
+      }
       if (!reachable || !control) {
         steps.push(failureStep(steps.length + 1, item.path, !reachable ? 'a control on its way could not be pressed' : 'it was on the page as seeded but is not there on a fresh page'));
         failedHere += 1;
@@ -449,6 +477,11 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       const kind = kindOf(control.key, control.name);
       const listed = idOf(control);
+      if (OPENS_A_FILE.test(control.name)) {
+        // A file in a source's sample list asks the desktop to open it; the throwaway machine has no desktop, so there is nothing to see.
+        steps.push({ n: steps.length + 1, name: `${control.name} (not pressed)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a control that needs a desktop is named, with why it is not pressed', actual: 'it asks the desktop to open a file, and the machine has none', ok: true, ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: [] });
+        continue;
+      }
       if (control.disabled) {
         // Pressed: a disabled control must do nothing, and has to say why (the page rule above); it counts as found, not as pressed.
         steps.push({ n: steps.length + 1, name: `${control.name || control.key} (disabled)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a disabled control says why', actual: control.reason || 'it says nothing', ok: control.reason !== '', ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: control.reason ? [] : [`"${control.name}" is disabled and says nothing about why`] });
@@ -487,7 +520,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
 
       const context: PressContext = {
         seed: seed.id, control, kind,
-        before: { keys: controlsNow.map((candidate) => candidate.key), seeded: base.map((candidate) => candidate.key), text: beforeText, open: beforeOpen },
+        before: { keys: controlsNow.map((candidate) => candidate.key), seeded: base.map((candidate) => candidate.key), rows: Object.fromEntries(base.map((candidate) => [candidate.key, candidate.rowName])), text: beforeText, open: beforeOpen },
         after: { controls: afterControls, text: afterText, open: afterOpen, url: at },
         opened: openedWindows,
       };
@@ -572,7 +605,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     }
     traces.push({ id: `explore-${seed.id}`, title: `Pressing every control in the Sources section, from the ${seed.title} state`, source: 'bounded exploration (layer 3 of the release-testing design)', ok: steps.every((step) => step.ok), steps, ms: steps.reduce((sum, step) => sum + step.ms, 0) });
     seeds.push({ id: seed.id, title: seed.title, produced: true, detail: applied.detail, pressed: pressedHere, failed: failedHere });
-    if (queue.length > 0 && presses >= maxPresses) steps.push({ n: steps.length + 1, name: 'Stopped at the bound', action: 'bounded exploration', expected: 'every control pressed', actual: `${queue.length} control(s) left when the ${maxPresses}-press bound was reached`, ok: true, ms: 0, at: '', consoleErrors: [], failedRequests: [], findings: [] });
+    if (queue.length > 0) steps.push({ n: steps.length + 1, name: 'Stopped at the bound', action: 'bounded exploration', expected: 'every control pressed', actual: `${queue.length} control(s) left when the press or time bound was reached`, ok: true, ms: 0, at: '', consoleErrors: [], failedRequests: [], findings: [] });
   }
 
   // Coverage, against the list taken from the source.
@@ -593,6 +626,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   return {
     seeds, traces, coverage, unlisted: [...unlisted.values()],
     summary: { listed, found, pressed, missed: listed - pressed, unlisted: unlisted.size, presses: totalPresses },
+    sourceFailures,
     accessibility: options.axeSource
       ? { status: 'ran', version: axeVersion, states: axeStates }
       : { status: 'skipped', reason: 'the accessibility checker (axe-core) was not given to the explorer, so no audit ran; the generic rules above cover names, reasons and overflow only' },
@@ -622,6 +656,14 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
       status: failed.length === 0 ? 'pass' : 'fail',
       detail: failed.length === 0 ? `${seed.pressed} control(s) pressed, each with its outcome and no rule broken` : failed.slice(0, 4).map((step) => `${step.name}: ${step.findings.length > 0 ? step.findings.join('; ') : `expected ${step.expected}; got ${step.actual}`}`).join(' | '),
       ...(trace ? { ms: trace.ms } : {}),
+    });
+  }
+  const failures = result.sourceFailures ?? [];
+  if (failures.length > 0) {
+    checks.push({
+      id: 'explore.sources', title: 'Every source the machine drives reached the states it has',
+      status: 'fail',
+      detail: failures.slice(0, 6).map((failure) => `${failure.source} (${failure.seed}): ${failure.detail.slice(0, 200)}`).join(' | '),
     });
   }
   const s = result.summary;

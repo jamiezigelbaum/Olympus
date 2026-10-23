@@ -115,6 +115,8 @@ export interface RunOptions {
   skipJourneys?: boolean;
   /** Leave out the bounded exploration of the Sources section. */
   skipExplore?: boolean;
+  /** Leave out the agent suite (the questions put to each agent), for a run that is after another leg; a partial run, like the other skips. */
+  skipSuite?: boolean;
   /** Run only these journeys (by id); omitted runs them all. */
   onlyJourneys?: string[];
   /** Where the approved pictures are (one folder per platform, `<screen>-<width>-<theme>.png`). Omitted, the screens are not compared. */
@@ -877,7 +879,7 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
  */
 async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   if (run.options.skipExplore) return;
-  const inventory = buildInventory();
+  const inventory = buildInventory(undefined, run.machine!.os);
   const scratch = join(outDir, '_explore');
   rmSync(scratch, { recursive: true, force: true });
   mkdirSync(scratch, { recursive: true });
@@ -890,7 +892,7 @@ async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   // The accessibility checker (axe-core, a dev dependency): its script goes to the machine beside the inventory. Missing (no bun install), the audit is skipped and says so.
   const axePath = join(import.meta.dir, '..', '..', 'node_modules', 'axe-core', 'axe.min.js');
   if (existsSync(axePath)) await run.machine!.put(axePath, '~/rc/axe.min.js');
-  const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json --pages-inventory ~/rc/explore-pages-inventory.json', 3_000_000));
+  const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json --pages-inventory ~/rc/explore-pages-inventory.json', 5_100_000));
   const result = done.result;
   if (!result || result.result === undefined) {
     run.add({ id: 'explore.ran', title: 'Every control of the Sources section was pressed', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
@@ -1102,9 +1104,9 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
     } else {
       const ready = await setupMachine(run, workDir, bundlePath);
-      if (ready && Date.now() < deadline) {
+      if (ready && !options.skipSuite && Date.now() < deadline) {
         await runSuite(run, workDir, judge, { mintToken: true });
-      } else if (ready) {
+      } else if (ready && !options.skipSuite) {
         run.errors.push('the run exceeded its time budget before the agent suite');
       }
       if (ready) {
@@ -1266,6 +1268,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     skipInbox: has('--skip-inbox'),
     skipJourneys: has('--skip-journeys'),
     skipExplore: has('--skip-explore'),
+    skipSuite: has('--skip-suite'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
     updateBaselines: has('--update-baselines'),

@@ -451,17 +451,24 @@ describe('exploring the Sources section', () => {
     expect(result.summary.presses).toBeGreaterThan(2);
   });
 
-  test('Telegram and WhatsApp Unpair are listed, destructive, and unreachable on a throwaway machine', () => {
+  test('which sources a machine can drive: Readwise and (on Linux) Files on this computer; the others say why not', () => {
+    const reach = (os: 'linux' | 'macos'): Map<string, string[]> => {
+      const all = buildInventory(undefined, os);
+      return new Map([...new Set(all.map((entry) => entry.sourceId))].map((id) => [id, all.filter((entry) => entry.sourceId === id && entry.unreachable === undefined).map((entry) => entry.kind)]));
+    };
+    const linux = reach('linux');
+    expect(linux.get('readwise.library')!.length).toBeGreaterThan(0);
+    expect(linux.get('local.files')).toEqual(expect.arrayContaining(['connect', 'scope', 'disconnect', 'delete-data']));
+    expect(linux.get('local.files')).not.toContain('privacy-settings');
+    for (const id of ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'telegram.messages', 'whatsapp.personal.messages']) expect(linux.get(id)).toEqual([]);
+    // A Mac asks for a permission the machine cannot grant.
+    expect(reach('macos').get('local.files')).toEqual([]);
+    expect(buildInventory().find((entry) => entry.sourceId === 'gmail.email')!.unreachable).toContain('closed table');
+    // Telegram and WhatsApp offer Unpair, listed and destructive, with the reason it is not pressed.
     const unpair = buildInventory().filter((entry) => entry.kind === 'unpair');
     expect(unpair.map((entry) => entry.sourceId).sort()).toEqual(['telegram.messages', 'whatsapp.personal.messages']);
-    expect(unpair.every((entry) => entry.destructive && typeof entry.unreachable === 'string')).toBe(true);
+    expect(unpair.every((entry) => entry.destructive && /test-only product hook/.test(entry.unreachable ?? ''))).toBe(true);
     expect(kindOf('x', 'Unpair Telegram')).toBe('unpair');
-    // Sources that cannot be synced here offer Check again when they need the owner.
-    const again = buildInventory().filter((entry) => entry.kind === 'check-again');
-    expect(again.map((entry) => entry.sourceId)).toContain('telegram.messages');
-    expect(again.map((entry) => entry.sourceId)).toContain('whatsapp.personal.messages');
-    expect(again.every((entry) => typeof entry.unreachable === 'string' || entry.sourceId !== 'readwise.library')).toBe(true);
-    expect(kindOf('x', 'Check again')).toBe('check-again');
   });
 
   test('the press bound stops the exploration and says so', async () => {
@@ -473,5 +480,29 @@ describe('exploring the Sources section', () => {
 
   test('the expectation table names a kind only where one is cheap to state', () => {
     expect(Object.keys(EXPECTATIONS).sort()).toEqual(['cancel', 'delete-data', 'disconnect', 'menu', 'see-why']);
+  });
+});
+
+describe('what the page-side script reads', () => {
+  test('a disabled control that carries its reason in a title or a description is not one that says nothing', () => {
+    const window = new Window({ url: 'http://127.0.0.1:8010/dashboard' });
+    (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = () => ({ left: 1, top: 1, width: 10, height: 10, right: 11, bottom: 11 });
+    window.document.body.innerHTML = '<li class="row source"><span class="source-name">Files</span><button data-key="a" disabled title="Not possible here">One</button><button data-key="b" disabled aria-description="Saving">Two</button><button data-key="c" disabled>Three</button></li>';
+    evalIn(window, PROBE_SOURCE);
+    const controls = evalIn(window, '__rc.controls()') as Array<{ key: string; reason: string }>;
+    expect(controls.map((control) => [control.key, control.reason])).toEqual([['a', 'Not possible here'], ['b', 'Saving'], ['c', '']]);
+  });
+});
+
+describe('a file in a sample list', () => {
+  test('is named and not pressed, because the machine has no desktop to open it on', async () => {
+    const driver = new PanelDriver();
+    const seed: Seed = { id: 'populated', title: 'populated', apply: async () => ({ ok: true, detail: 'x' }) };
+    // A control named like a file, in the Readwise row.
+    const render = (driver as unknown as { render(): void }).render.bind(driver);
+    (driver as unknown as { render(): void }).render = () => { render(); driver.panel.document.querySelector('.menu-panel')?.insertAdjacentHTML('beforeend', '<span class="fix"><button data-key="menu:readwise.library:9">Open trip-notes.txt</button></span>'); };
+    const result = await explore({ driver, seeds: [seed], inventory: inventory(), ...quick() });
+    const step = result.traces[0]!.steps.find((entry) => entry.name === 'Open trip-notes.txt (not pressed)');
+    expect(step).toMatchObject({ ok: true });
   });
 });

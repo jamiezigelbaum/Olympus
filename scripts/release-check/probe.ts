@@ -195,7 +195,8 @@ export const PROBE_SOURCE = String.raw`(() => {
           key: el.getAttribute('data-key'), tag, role: roleOf(el), name: nameOf(el), text: clean(el.textContent).slice(0, 120),
           disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
           visible: isVisible(el), expanded: el.getAttribute('aria-expanded'),
-          reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : '',
+          // The reason shown beside the control, else the one it carries itself (a title or a description a screen reader reads).
+          reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : clean(el.getAttribute('aria-description') || el.getAttribute('title') || '').slice(0, 200),
           rowName: rowName ? clean(rowName.textContent) : '', rowKind: row ? (row.classList.contains('source') ? 'source' : (row.classList.contains('need') ? 'need' : '')) : '',
           menuKey: menu ? menu.getAttribute('data-open-key') : '', href: el.getAttribute('href'),
         });

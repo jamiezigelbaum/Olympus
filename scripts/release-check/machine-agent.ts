@@ -36,6 +36,7 @@ import { captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey
 import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
 import { explore, type Seed } from './explore.ts';
+import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
 import { explorePages } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
@@ -1211,17 +1212,18 @@ async function startFakeWith(config: AgentConfig, token: string): Promise<void> 
   throw new Error('the Readwise stand-in did not start');
 }
 
-/** The Readwise card; the engine can be briefly unreachable right after a delete or a restart, so a failed read is tried again. */
-async function readwiseCard(): Promise<any> {
+/** A source's card; the engine can be briefly unreachable right after a delete or a restart, so a failed read is tried again. */
+async function cardOf(provider: string): Promise<any> {
   let last: unknown;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       const dash = await dashboardJson();
-      return (dash.json?.sources ?? []).find((card: any) => card.provider === 'readwise');
+      return (dash.json?.sources ?? []).find((card: any) => card.provider === provider);
     } catch (error) { last = error; await sleep(3_000); }
   }
   throw last;
 }
+const readwiseCard = (): Promise<any> => cardOf('readwise');
 
 async function until<T>(read: () => Promise<T | undefined>, timeoutMs: number, everyMs = 2_000): Promise<T | undefined> {
   const stop = Date.now() + timeoutMs;
@@ -1245,8 +1247,22 @@ async function disconnectReadwise(session: { call(method: string, path: string, 
   return response;
 }
 
-/** The seeded states of the install the exploration starts from, produced through the dashboard's own routes and the stand-in. */
+/**
+ * The seeded states of the install the exploration starts from, produced through the dashboard's own routes: Readwise through the stand-in
+ * for its API, Telegram and WhatsApp through stand-ins for their capture daemons, and on Linux Files on this computer with a real folder.
+ */
 function exploreSeeds(config: AgentConfig): Seed[] {
+  const ctx: SeedContext = {
+    call: async (method, path, body) => await (await ownerSession()).call(method, path, body),
+    cardOf, sleep, now: () => Date.now(), home: homedir(), env: process.env,
+  };
+  return composeSeeds(readwiseSeeds(config), [
+    ...(platform().os === 'linux' ? [localFilesDriver(ctx)] : []),
+  ]);
+}
+
+/** Readwise's seeded states: the stand-in API, with the stored key accepted, rejected, or the source disconnected or emptied. */
+function readwiseSeeds(config: AgentConfig): Seed[] {
   // The card's connection reads `synced` once the source has been read; not connected, needs setup, awaiting consent and reauth are the others.
   const connected = (card: any): boolean => !!card && !['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required'].includes(String(card.connection?.state ?? 'not_connected'));
   const connect = async (): Promise<void> => {
@@ -1265,6 +1281,7 @@ function exploreSeeds(config: AgentConfig): Seed[] {
     return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not come back to connected with its data: ${cardSummary(await readwiseCard())}` };
   };
   return [
+    // Unpair ends a pairing the machine cannot make again (there is no phone), so its Confirm runs last, like Delete indexed data.
     { id: 'populated', title: 'populated', apply: populated, resetAfter: ['confirm'] },
     {
       id: 'failed', title: 'failed',
@@ -1371,11 +1388,11 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     await driver.open('private');
     // The accessibility checker's script, put on the machine by the orchestrator beside the inventory; without it the audit is skipped and says so.
     const axePath = join(WORKDIR, 'axe.min.js');
-    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, ...(existsSync(axePath) ? { axeSource: readFileSync(axePath, 'utf8') } : {}) });
+    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: startedAt + 45 * 60_000, ...(existsSync(axePath) ? { axeSource: readFileSync(axePath, 'utf8') } : {}) });
     // The computer's other pages, in the same signed-in browser, after the Sources section (Lock ends the session, so it comes last).
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
-      result = { ...result, pages: await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 33 * 60_000 }) };
+      result = { ...result, pages: await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 75 * 60_000 }) };
     }
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);

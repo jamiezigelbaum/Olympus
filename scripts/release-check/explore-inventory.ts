@@ -39,17 +39,30 @@ export function setLiteral(source: string, name: string): string[] {
   return [...match[1]!.matchAll(/'([^']+)'/g)].map((entry) => entry[1]!);
 }
 
-/** The one source the throwaway machine can really drive: Readwise, through the stand-in for its API (readwise-fake.ts). */
-const DRIVABLE = 'readwise.library';
+/**
+ * The sources the throwaway machine can drive, and how:
+ * - Readwise, through the stand-in for its API, reached by the connector's own base-URL settings (readwise-fake.ts);
+ * - Files on this computer on a Linux machine, with a real folder of files made on it (a Mac asks for a privacy permission the
+ *   machine cannot grant).
+ */
+export type MachineOs = 'linux' | 'macos';
+const DRIVABLE = new Set(['readwise.library']);
 
 const UNREACHABLE: Record<string, string> = {
-  oauth: 'needs a real sign-in at the provider, which a throwaway machine does not have',
-  local: 'needs this computer\'s own folders and, on a Mac, its privacy permission',
-  pairing: 'needs a paired phone',
-  api_token: 'the machine\'s one stand-in source is Readwise; this source has no stand-in',
+  oauth: 'needs a real sign-in at the provider, and the sign-in and API addresses are a closed table in the product with no setting to point them at a stand-in; a stand-in would need a hook that exists only for tests',
+  local: 'needs this computer\'s own folders and, on a Mac, its privacy permission, which a throwaway machine cannot grant',
+  pairing: 'needs a paired session: a credential-broker handle for a local Telethon or whatsmeow reader, which only the pairing daemon makes (a stand-in would need a test-only product hook)',
+  api_token: 'this source has no stand-in',
 };
 
-export function buildInventory(root = join(import.meta.dir, '..', '..')): InventoryControl[] {
+/** Why a source cannot be driven on this kind of machine; absent when it can. */
+export function unreachableOn(connectKind: string, sourceId: string, os: MachineOs): string | undefined {
+  if (DRIVABLE.has(sourceId)) return undefined;
+  if (connectKind === 'local' && os === 'linux') return undefined;
+  return UNREACHABLE[connectKind] ?? UNREACHABLE.oauth!;
+}
+
+export function buildInventory(root = join(import.meta.dir, '..', '..'), os: MachineOs = 'linux'): InventoryControl[] {
   const view = readFileSync(join(root, 'src', 'workers', 'chatgpt', 'dashboard-view-model.ts'), 'utf8');
   const scopeIds = new Set(setLiteral(view, 'SCOPE_SOURCE_IDS'));
   const disconnectIds = new Set(setLiteral(view, 'DISCONNECT_SOURCE_IDS'));
@@ -58,8 +71,7 @@ export function buildInventory(root = join(import.meta.dir, '..', '..')): Invent
   for (const definition of DASHBOARD_SUPPORTED_SOURCES) {
     if (definition.family === 'model') continue;
     const id = definition.source_id;
-    const own = id === DRIVABLE;
-    const why = own ? undefined : UNREACHABLE[definition.connect_kind] ?? UNREACHABLE.oauth!;
+    const why = unreachableOn(definition.connect_kind, id, os);
     const add = (kind: ControlKind, label: string, destructive: boolean, seeds: SeedId[], onlyWhere?: string): void => {
       const unreachable = why ?? onlyWhere;
       out.push({ id: `${id}:${kind}`, sourceId: id, sourceLabel: definition.label, kind, label: `^(${label})$`, destructive, seeds, ...(unreachable ? { unreachable } : {}) });
@@ -69,9 +81,9 @@ export function buildInventory(root = join(import.meta.dir, '..', '..')): Invent
     if (syncIds.has(id)) add('sync', escape(LABELS.syncNow), false, ['populated', 'failed']);
     // A source this worker cannot sync offers Check again on its Needs-you row (checkAgainFix() in the view model).
     else add('check-again', escape(VOCABULARY.checkAgain), false, ['failed']);
-    if (scopeIds.has(id)) add('scope', `${escape(LABELS.chooseFolders)}|${escape(LABELS.chooseMail)}`, false, ['populated'], 'its folders and mail are chosen in a picker that needs the provider');
+    if (scopeIds.has(id)) add('scope', `${escape(LABELS.chooseFolders)}|${escape(LABELS.chooseMail)}`, false, ['populated'], definition.connect_kind === 'local' ? undefined : 'its folders and mail are chosen in a picker that lists the provider\'s folders, which needs the provider');
     // A Mac that will not open a chosen folder stalls the source, and the row then links to the privacy settings page (client.ts, scope_root_permission_needed).
-    if (definition.connect_action.kind === 'this_computer') add('privacy-settings', escape(PICKER.openPrivacySettings), false, ['failed'], 'it shows only when a Mac refuses a chosen folder');
+    if (definition.connect_action.kind === 'this_computer') add('privacy-settings', escape(PICKER.openPrivacySettings), false, ['failed'], 'it shows only when a Mac refuses a chosen folder, and a Linux machine never does');
     // A paired chat app (Telegram, WhatsApp) offers Unpair, with the engine's own confirmation, on the computer (unpairEntry() in the dashboard client).
     if (definition.connect_kind === 'pairing') add('unpair', escape(`Unpair ${definition.label}`), true, ['populated']);
     if (disconnectIds.has(id) || definition.connect_action.kind === 'this_computer') {
