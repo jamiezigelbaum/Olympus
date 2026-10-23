@@ -1,3 +1,4 @@
+import { openStoreDatabase } from './store-open.ts';
 /**
  * Private answers inbox, worker private state (owner decision 2026-10-14).
  * Questions retain their exact bounded selectors; v4 also retains anonymous
@@ -329,7 +330,7 @@ export function openWaitingPrivateQuestionStore(
   const listeners = new Set<() => void>();
   const notify = () => queueMicrotask(() => { for (const listener of listeners) listener(); });
   hardenPrivatePath(dbPath);
-  const db = new Database(dbPath, { create: true });
+  const db = openStoreDatabase(dbPath, { create: true });
   try {
     chmodSync(dbPath, 0o600);
     const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));

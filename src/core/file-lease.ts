@@ -224,6 +224,29 @@ function acquireFileLeaseSync(
 interface SqliteConnection {
   exec(sql: string): unknown;
   close(): void;
+  /** bun:sqlite */
+  query?(sql: string): { get(): unknown };
+  /** node:sqlite */
+  prepare?(sql: string): { get(): unknown };
+}
+
+function pragmaText(connection: SqliteConnection, sql: string): string {
+  const statement = connection.query ? connection.query(sql) : connection.prepare!(sql);
+  const row = statement.get() as Record<string, unknown> | undefined;
+  return String(row ? Object.values(row)[0] : '').toLowerCase();
+}
+
+/**
+ * Exclusive and shared locks only exclude each other in rollback-journal mode:
+ * in WAL an exclusive transaction coexists with readers. Establish it before
+ * either lock is granted; if it cannot be established, fail closed.
+ */
+function requireRollbackJournal(connection: SqliteConnection, lockPath: string): void {
+  if (pragmaText(connection, 'PRAGMA journal_mode') === 'delete') return;
+  try { connection.exec('PRAGMA busy_timeout = 0; PRAGMA journal_mode = DELETE'); } catch { /* verified below */ }
+  if (pragmaText(connection, 'PRAGMA journal_mode') !== 'delete') {
+    throw new Error(`Lock database ${lockPath} is not in rollback-journal mode and could not be switched.`);
+  }
 }
 
 function openSqlite(path: string): SqliteConnection {
@@ -266,6 +289,13 @@ export function tryKernelLockAt(lockPath: string, mode: 'exclusive' | 'shared'):
     }
   }
   const connection = openSqlite(lockPath);
+  try {
+    requireRollbackJournal(connection, lockPath);
+  } catch (error) {
+    closeQuietly(connection);
+    if (isSqliteBusy(error)) return undefined;
+    throw error;
+  }
   try {
     if (mode === 'exclusive') {
       connection.exec('BEGIN EXCLUSIVE');

@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 /**
  * The generic extraction job side database.
  *
@@ -616,8 +617,8 @@ export class LocalFileExtractionJobStore {
       mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     }
     this.db = this.readonly
-      ? new Database(dbPath, { readonly: true })
-      : new Database(dbPath, { create: true });
+      ? openStoreDatabase(dbPath, { readonly: true })
+      : openStoreDatabase(dbPath, { create: true });
     if (!inMemory && !this.readonly) chmodSync(dbPath, 0o600);
 
     const busyTimeoutMs = options.busyTimeoutMs

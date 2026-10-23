@@ -1,3 +1,4 @@
+import { openStoreDatabase } from './store-open.ts';
 /**
  * Remote agent connections: one owner approval each, revocable.
  *
@@ -201,7 +202,7 @@ export function openRemoteConnectionStore(
 ): RemoteConnectionStore {
   const now = options.now ?? (() => new Date());
   hardenPrivateDatabasePath(dbPath);
-  const db = new Database(dbPath, { create: true });
+  const db = openStoreDatabase(dbPath, { create: true });
   try {
     chmodSync(dbPath, 0o600);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);

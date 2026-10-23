@@ -1469,7 +1469,7 @@ if (import.meta.main) {
   }
   // Shared store custody for this process's whole life (Delete indexed data
   // takes it exclusive and so cannot run under a live drain).
-  holdStoreCustodyShared([resolveEmbeddingLedgerPath(process.env)]);
+  holdStoreCustodyShared();
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {

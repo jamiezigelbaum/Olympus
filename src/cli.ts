@@ -27,7 +27,6 @@ import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenH
 import {
   deleteAllConfirmationPrompts,
   assertNoRunningWorkerForSourceDelete,
-  deleteCustodyPaths,
   deleteOlympusDataWithCustody,
   exportOlympusData,
   validateDeleteAllConfirmations,
@@ -2620,14 +2619,16 @@ async function runDataCommand(args: string[]): Promise<unknown> {
   const command = args[0];
   if (command === 'export') {
     const options = parseDataOptions(args.slice(1));
+    // One context for custody, the files exported and (below) the files
+    // deleted: the worker's effective environment, so a store relocated through
+    // worker.env or the service credentials is the store that is exported.
+    const context = { env: effectiveWorkerEnvironment({ env: process.env }) };
     // Reading the stores is an opener: shared custody until this command ends.
-    holdStoreCustodyShared(deleteCustodyPaths({
-      ...(options.sourceId ? { sourceId: options.sourceId } : { all: true }),
-      env: effectiveWorkerEnvironment({ env: process.env }),
-    }));
+    holdStoreCustodyShared();
     return exportOlympusData({
       destination: options.output,
       ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+      ...context,
     });
   }
   if (command === 'verify') {
@@ -2654,9 +2655,9 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     // its store directories for its whole life, so exclusive custody here
     // proves, without looking for processes, that none holds them, and it
     // stays held through the delete: an opener that starts meanwhile waits.
-    const holdStores = (target: { sourceId?: string; all?: boolean }) => {
+    const holdStores = (_target: { sourceId?: string; all?: boolean }) => {
       if (options.dryRun === true) return undefined;
-      const hold = tryHoldStoreCustodyExclusive(deleteCustodyPaths({ ...target, ...context }));
+      const hold = tryHoldStoreCustodyExclusive();
       if (!hold) {
         throw new OperationError(
           'invalid_params',

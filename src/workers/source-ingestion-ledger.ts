@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../core/store-open.ts';
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -544,7 +545,7 @@ export class SqliteSourceIngestionLedgerStore {
 
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
-    this.db = new Database(dbPath);
+    this.db = openStoreDatabase(dbPath);
     this.db.exec('PRAGMA busy_timeout = 10000;');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (

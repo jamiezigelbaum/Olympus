@@ -1,3 +1,4 @@
+import { storeCustodyLockPath } from './core/store-custody.ts';
 import {
   SECRET_LOCATIONS_SQLITE_STORE_ID,
   TIER_LEDGER_SQLITE_STORE_ID,
@@ -760,6 +761,8 @@ export function planSourceDelete(options: { sourceId: string; verifiedPrimaries?
   targets: string[];
   /** External SQLite primaries proven to be Olympus stores by this check. */
   verifiedPrimaries: string[];
+  /** Where each target really is (symlinks resolved) and the directory it hangs from. */
+  bindings: TargetBinding[];
 } {
   const selectedSource = requireSource(options.sourceId);
   const uniqueDeleteTargets = markRelocatedStores(uniqueTargets(sourceDeleteTargets(selectedSource, options)), options);
@@ -774,18 +777,59 @@ export function planSourceDelete(options: { sourceId: string; verifiedPrimaries?
     corpora,
     targets: uniqueDeleteTargets.map((target) => resolve(target.path)).sort(),
     verifiedPrimaries: [...new Set([...verifiedPrimaries, ...(options.verifiedPrimaries ?? []).map((path) => resolve(path))])].sort(),
+    bindings: targetBindings(uniqueDeleteTargets),
   };
 }
 
 /**
- * Every path a delete of this source (or of everything) would remove, for
- * store custody: the locks it must hold exclusively are keyed to these.
+ * An approved target's real destination. A path is only a name: a symlinked
+ * Olympus root retargeted, or a directory above a target swapped, between the
+ * request and the restart leaves every recorded string intact while the delete
+ * would land on something else. The binding records the canonical destination
+ * and the identity (inode) of the nearest existing directory above it.
  */
-export function deleteCustodyPaths(options: { sourceId?: string; all?: boolean } & LifecyclePathContext): string[] {
-  const targets = options.all === true
-    ? allDeleteTargets(options)
-    : sourceDeleteTargets(requireSource(options.sourceId), options);
-  return uniqueTargets(targets).map((target) => resolve(target.path));
+export interface TargetBinding {
+  path: string;
+  real: string;
+  anchor: string;
+  anchor_ino: number;
+}
+
+function nearestExistingDirectory(path: string): string {
+  let current = dirname(resolve(path));
+  for (;;) {
+    try {
+      if (lstatSync(current).isDirectory() || existsSync(current)) return current;
+    } catch { /* keep climbing */ }
+    const parent = dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+}
+
+function inodeOf(path: string): number {
+  try { return statSync(path).ino; } catch { return -1; }
+}
+
+export function targetBindings(targets: readonly DeleteTarget[]): TargetBinding[] {
+  return targets.map((target) => {
+    const anchor = nearestExistingDirectory(target.path);
+    return { path: resolve(target.path), real: canonicalPath(target.path), anchor, anchor_ino: inodeOf(anchor) };
+  }).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/** The first approved target whose real destination or anchor directory is no longer what was approved. */
+export function changedBinding(expected: readonly TargetBinding[], actual: readonly TargetBinding[]): string | undefined {
+  const now = new Map(actual.map((binding) => [binding.path, binding]));
+  for (const binding of expected) {
+    const current = now.get(binding.path);
+    // The target must still resolve to the same real place, and the approved
+    // directory above it must still be the same directory.
+    if (!current || current.real !== binding.real || inodeOf(binding.anchor) !== binding.anchor_ino) {
+      return binding.path;
+    }
+  }
+  return undefined;
 }
 
 export function deleteOlympusData(options: {
@@ -794,6 +838,8 @@ export function deleteOlympusData(options: {
   dryRun?: boolean;
   /** Primaries an earlier check of this same delete proved (see assertTargetsSafe). */
   verifiedPrimaries?: readonly string[];
+  /** The destinations the owner's request approved; any change refuses before the first removal. */
+  expectedBindings?: readonly TargetBinding[];
 } & LifecyclePathContext): DataDeleteResult {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
@@ -857,6 +903,18 @@ export function deleteOlympusData(options: {
       } finally { jobs.close(); }
     }
   }
+  // The last look before the first removal: the approved destinations are still
+  // where they were approved (see TargetBinding).
+  if (options.expectedBindings && options.dryRun !== true) {
+    const moved = changedBinding(options.expectedBindings, targetBindings(uniqueDeleteTargets));
+    if (moved) {
+      throw new OperationError(
+        'invalid_params',
+        `Refusing to delete ${moved}: it, or a directory above it, is not where it was when the delete was approved.`,
+        'Ask for the delete again once the folders are settled. Nothing was deleted.',
+      );
+    }
+  }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -894,6 +952,7 @@ export function deleteOlympusDataWithCustody(options: {
   sourceId?: string;
   dryRun?: boolean;
   verifiedPrimaries?: readonly string[];
+  expectedBindings?: readonly TargetBinding[];
   connectedRegistry?: ConnectedHandleRegistry;
   unpairedSources?: UnpairedSourcesRead;
   artifactPresence?: (path: string) => 'gone' | 'present' | 'unknown';
@@ -1960,6 +2019,20 @@ function assertRawStateTargetsContained(
   selectedSource: LifecycleSourceSpec | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
+  // The store-custody lock must outlive every delete: a target that is, or
+  // contains, it would let the next opener lock a fresh file.
+  const custodyLock = storeCustodyLockPath(resolveHome(context.homeDir));
+  for (const target of targets) {
+    for (const candidate of [resolve(target.path), canonicalPath(target.path)]) {
+      if (candidate === custodyLock || isStrictlyInside(custodyLock, candidate)) {
+        throw new OperationError(
+          'invalid_params',
+          `Refusing to delete ${target.path}: it holds the lock that keeps Olympus stores safe while they are deleted.`,
+          'Check the configured paths. Nothing was deleted.',
+        );
+      }
+    }
+  }
   const roots = knownOlympusDataRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
   const refuse = (path: string, why: string): never => {
     throw new OperationError(

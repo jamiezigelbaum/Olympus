@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 // `olympus tier ...` (design section 2.4): per-item overrides, explanations,
 // owner tier rules, and the classifier approval.
 //
@@ -114,7 +115,7 @@ interface StoreMatch {
 }
 
 function matchStore(dbPath: string, needle: string): StoreMatch[] {
-  const db = new Database(dbPath, { readonly: true });
+  const db = openStoreDatabase(dbPath, { readonly: true });
   try {
     db.exec('PRAGMA busy_timeout = 10000;');
     const rows = db.query(`

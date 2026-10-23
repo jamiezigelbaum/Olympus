@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../src/core/store-open.ts';
 // Gated maintenance command for WhatsApp connector-store identity repair.
 //
 // Default mode is dry-run. Pass --apply to update an existing connector store
@@ -323,8 +324,8 @@ function parseArgs(argv: readonly string[]): Args {
 if (import.meta.main) {
   try {
     const args = parseArgs(process.argv.slice(2));
-    const connectorStoreDb = new Database(args.db);
-    const sessionDb = new Database(args.sessionDb, { readonly: true });
+    const connectorStoreDb = openStoreDatabase(args.db);
+    const sessionDb = openStoreDatabase(args.sessionDb, { readonly: true });
     // This backfill writes the same connector store the live-drain unit is
     // writing, so without a timeout its first contended UPDATE fails instantly
     // with SQLITE_BUSY and leaves the run part-applied.

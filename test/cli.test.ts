@@ -1,3 +1,5 @@
+import { Database } from 'bun:sqlite';
+import { currentStoreMigrations, runSqliteMigrations } from '../src/core/sqlite-migrations.ts';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -548,6 +550,38 @@ describe('CLI tool surface', () => {
       expect(result.code).not.toBe(0);
       expect(`${result.stdout}${result.stderr}`).toContain('still using these stores');
       expect(existsSync(storePath)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('export and delete resolve the same relocated store (the worker.env override), not the default one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-export-delete-context-'));
+    const home = join(dir, 'home');
+    const registryPath = join(dir, 'connected-handles.json');
+    try {
+      const moved = join(dir, 'elsewhere', 'moved-dropbox.sqlite');
+      mkdirSync(join(dir, 'elsewhere'), { recursive: true });
+      const db = new Database(moved, { create: true });
+      try { runSqliteMigrations(db, 'connector-store', currentStoreMigrations()); } finally { db.close(); }
+      const defaultStore = join(home, '.local', 'share', 'openclaw', 'olympus', 'dropbox-files-connector-store.sqlite');
+      mkdirSync(join(home, '.local', 'share', 'openclaw', 'olympus'), { recursive: true });
+      writeFileSync(defaultStore, 'not the store the worker uses');
+      writeFileSync(registryPath, JSON.stringify({ version: 1, handles: [] }));
+      const workerEnv = join(home, '.config', 'olympus', 'worker.env');
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(workerEnv, `OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH=${moved}\n`, { mode: 0o600 });
+      const env = { HOME: home, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath };
+      const out = join(dir, 'export');
+      const exported = await runSourceCliExit(['data', 'export', '--source', 'dropbox.files', '--output', out], env);
+      expect(exported.code).toBe(0);
+      const manifest = readFileSync(join(out, 'manifest.json'), 'utf8');
+      expect(manifest).toContain('moved-dropbox');
+      expect(manifest).not.toContain('dropbox-files-connector-store.sqlite');
+      const preview = await runSourceCliExit(['data', 'delete', '--source', 'dropbox.files', '--dry-run'], env);
+      const removed = JSON.stringify(JSON.parse(preview.stdout).removed);
+      expect(removed).toContain(moved);
+      expect(removed).not.toContain('dropbox-files-connector-store.sqlite-never');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

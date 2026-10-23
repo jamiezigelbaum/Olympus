@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../src/core/store-open.ts';
 // Bounded operator for the shared connector-store locator identity projection.
 // Dry-run is the default and never upgrades a schema. `--execute` applies the
 // additive schema migration when needed and advances exactly one bounded
@@ -147,7 +148,7 @@ export function runConnectorStoreLocatorIndex(
 }
 
 function readSchemaVersion(dbPath: string): number {
-  const db = new Database(dbPath, { readonly: true, create: false });
+  const db = openStoreDatabase(dbPath, { readonly: true, create: false });
   try {
     db.exec('PRAGMA busy_timeout = 10000;');
     const row = db.query(`

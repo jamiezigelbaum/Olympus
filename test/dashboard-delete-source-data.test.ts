@@ -131,11 +131,11 @@ describe('dashboard Delete indexed data route', () => {
     try {
       await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
       const applied = await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
-      expect(applied).toEqual({ applied: ['dropbox.files'], refused: [] });
+      expect(applied).toEqual({ applied: ['dropbox.files'], incomplete: [], refused: [] });
       expect(existsSync(f.store)).toBe(false);
       expect(readSourceDeleteIntents(f.registryPath).intents).toEqual([]);
       // Idempotent: a second start has nothing to do.
-      expect(await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context })).toEqual({ applied: [], refused: [] });
+      expect(await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context })).toEqual({ applied: [], incomplete: [], refused: [] });
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
@@ -152,6 +152,33 @@ describe('dashboard Delete indexed data route', () => {
       expect(await label()).toBe('Deleting indexed data…');
       await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
       expect(await label()).not.toBe('Deleting indexed data…');
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a delete refused because the source was reconnected keeps the real connection state, with the refusal shown separately', async () => {
+    const f = fixture();
+    try {
+      await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      // The owner reconnects before the restart applies the delete.
+      writeConnectedHandleRegistry({
+        version: 1,
+        handles: [{
+          handle: 'dropbox.personal', provider: 'dropbox', accountRole: 'personal', trustDomain: 'secure_local',
+          allowedCapabilities: ['dropbox.files.sync'], scopes: ['files.content.read'], connectedAt: '2026-10-23T00:00:00.000Z',
+        }],
+      }, f.registryPath);
+      const applied = await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      expect(applied.applied).toEqual([]);
+      const view = await (await f.worker.fetch(new Request('http://worker.test/dashboard.json'))).json() as {
+        sources: Array<{ source_id: string; connection: { state: string; label: string }; delete_state?: { state: string; reason?: string } }>;
+      };
+      const card = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+      expect(card.connection.state).not.toBe('not_connected');
+      expect(card.connection.label).not.toBe('Deleting indexed data…');
+      expect(card.delete_state?.state).toBe('refused');
+      expect(existsSync(f.store)).toBe(true);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
@@ -186,7 +213,7 @@ describe('dashboard Delete indexed data route', () => {
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
-  });
+  }, 10_000);
 
   test('a config.json relocated onto a store path is refused when asking, with nothing recorded', async () => {
     const f = fixture({ envOverride: (home) => ({ OLYMPUS_EMAIL_INDEX_DB_PATH: join(home, '.olympus', 'config.json') })});

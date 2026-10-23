@@ -7,9 +7,9 @@
 import { Database } from 'bun:sqlite';
 import { currentStoreMigrations, runSqliteMigrations } from '../src/core/sqlite-migrations.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { effectiveWorkerEnvironment } from '../src/core/worker-effective-env.ts';
 import { startEngineHost } from '../src/core/engine-host.ts';
 import { engineChildrenPath } from '../src/core/engine-children.ts';
@@ -80,7 +80,7 @@ describe('deletion intents', () => {
     const recorded = recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
     // The previous start died after removing the store but before the sidecar and the intent.
     rmSync(l.store);
-    expect(await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: ['dropbox.files'], refused: [] });
+    expect(await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: ['dropbox.files'], incomplete: [], refused: [] });
     expect(existsSync(`${l.store}-wal`)).toBe(false);
     expect(readSourceDeleteIntents(l.registryPath).intents).toEqual([]);
     // Died after everything was deleted but before the intent was removed.
@@ -100,12 +100,12 @@ describe('deletion intents', () => {
     createMarkedSqliteStore(moved);
     const changed = { env: { ...l.context.env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: moved } };
     const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: changed });
-    expect(result).toEqual({ applied: [], refused: [{ sourceId: 'dropbox.files', reason: 'settings_changed' }] });
+    expect(result).toEqual({ applied: [], incomplete: [], refused: [{ sourceId: 'dropbox.files', reason: 'settings_changed' }] });
     expect(existsSync(l.store)).toBe(true);
     expect(existsSync(moved)).toBe(true);
     expect(sourceDeleteStates(l.registryPath)).toEqual({ 'dropbox.files': { state: 'refused', reason: 'settings_changed' } });
     // The refused record is not re-run on every start, and shows no path.
-    expect(await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: [], refused: [] });
+    expect(await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context })).toEqual({ applied: [], incomplete: [], refused: [] });
     expect(JSON.stringify(sourceDeleteStates(l.registryPath))).not.toContain(l.root);
     // Asking again replaces it, and applies.
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
@@ -247,8 +247,8 @@ async function startHostWith(l: ReturnType<typeof lab>, extra: { children?: unkn
 }
 
 const HOLDER = join(import.meta.dir, 'support', 'custody-holder.ts');
-async function holdCustody(path: string): Promise<ChildProcess> {
-  const child = spawn(process.execPath, [HOLDER, 'lib', path], { stdio: ['ignore', 'pipe', 'inherit'], env: { PATH: process.env.PATH } });
+async function holdCustody(home: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, [HOLDER, 'lib', ''], { stdio: ['ignore', 'pipe', 'inherit'], env: { PATH: process.env.PATH, HOME: home } });
   await new Promise<void>((resolve, reject) => {
     child.stdout!.on('data', () => resolve());
     child.on('exit', (code) => reject(new Error(`holder exited ${code}`)));
@@ -260,7 +260,7 @@ describe('apply only when the stores are not held open', () => {
   test('a live holder refuses every pending delete and deletes nothing; once it is killed the retry deletes', async () => {
     const l = lab();
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
-    const holder = await holdCustody(l.store);
+    const holder = await holdCustody(l.home);
     try {
       const { order, handle } = await startHostWith(l, {});
       expect(order).toEqual(['start: store present']);
@@ -341,6 +341,104 @@ describe('the engine configuration\'s service credentials are part of the effect
   });
 });
 
+describe('an intent is bound to where its targets really are', () => {
+  test('a symlinked root retargeted between asking and restarting deletes nothing at the new place', async () => {
+    const l = lab();
+    const dataDir = dirname(l.store);
+    const first = join(l.root, 'real-one');
+    const second = join(l.root, 'real-two');
+    renameSync(dataDir, first);
+    mkdirSync(second, { recursive: true });
+    symlinkSync(first, dataDir);
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    // Same names, another place: the link now leads to a folder that holds a store of its own.
+    rmSync(dataDir);
+    writeFileSync(join(second, basename(l.store)), 'someone else');
+    symlinkSync(second, dataDir);
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    expect(result.applied).toEqual([]);
+    expect(result.refused).toEqual([{ sourceId: 'dropbox.files', reason: 'settings_changed' }]);
+    expect(readFileSync(join(second, basename(l.store)), 'utf8')).toBe('someone else');
+    expect(existsSync(join(first, basename(l.store)))).toBe(true);
+  }, 10_000);
+
+  test('a directory swapped for another at the same name is refused by its identity', async () => {
+    const l = lab();
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    const dataDir = dirname(l.store);
+    renameSync(dataDir, `${dataDir}-old`);
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(l.store, 'replacement');
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    expect(result.refused).toEqual([{ sourceId: 'dropbox.files', reason: 'settings_changed' }]);
+    expect(readFileSync(l.store, 'utf8')).toBe('replacement');
+  }, 10_000);
+});
+
+describe('a delete that has begun is retried, never abandoned', () => {
+  test('an unlink that fails part-way keeps durable retry state, and the next run finishes it', async () => {
+    const l = lab();
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    const dataDir = dirname(l.store);
+    chmodSync(dataDir, 0o500);
+    let first;
+    try {
+      first = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    } finally {
+      chmodSync(dataDir, 0o700);
+    }
+    expect(first.incomplete).toEqual(['dropbox.files']);
+    expect(first.refused).toEqual([]);
+    expect(readSourceDeleteIntents(l.registryPath).intents.map((entry) => entry.state)).toEqual(['applying']);
+    expect(existsSync(l.store)).toBe(true);
+    const second = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    expect(second.applied).toEqual(['dropbox.files']);
+    expect(existsSync(l.store)).toBe(false);
+    expect(readSourceDeleteIntents(l.registryPath).intents).toEqual([]);
+  }, 10_000);
+
+  test('the engine starts no service while a started delete is unfinished, and exits to be retried', async () => {
+    const l = lab();
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
+    const dataDir = dirname(l.store);
+    hostConfig(l);
+    const started: string[] = [];
+    const exits: number[] = [];
+    chmodSync(dataDir, 0o500);
+    try {
+      await startEngineHost({
+        moduleUrl: 'file:///x/dist/cli.js',
+        env: { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath },
+        homeDir: l.home, platform: 'darwin',
+        services: () => [{ id: 'olympus-worker', reload: { configPrefixes: [] }, async start() { started.push('worker'); }, async stop() {} }],
+        reap: { listProcesses: () => [], kill: () => undefined, sleep: () => undefined, selfPid: 1 },
+        log: () => undefined,
+        exit: (code: number) => { exits.push(code); },
+        installSignalHandlers: false,
+      });
+    } finally {
+      chmodSync(dataDir, 0o700);
+    }
+    expect(started).toEqual([]);
+    expect(exits).toEqual([1]);
+    expect(readSourceDeleteIntents(l.registryPath).intents.map((entry) => entry.state)).toEqual(['applying']);
+    // The retry finishes it, and only then does a service start.
+    const handle = await startEngineHost({
+      moduleUrl: 'file:///x/dist/cli.js',
+      env: { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath },
+      homeDir: l.home, platform: 'darwin',
+      services: () => [{ id: 'olympus-worker', reload: { configPrefixes: [] }, async start() { started.push('worker'); }, async stop() {} }],
+      reap: { listProcesses: () => [], kill: () => undefined, sleep: () => undefined, selfPid: 1 },
+      log: () => undefined,
+      exit: () => { throw new Error('must not exit'); },
+      installSignalHandlers: false,
+    });
+    expect(started).toEqual(['worker']);
+    expect(existsSync(l.store)).toBe(false);
+    await handle!.stop();
+  }, 10_000 * 3);
+});
+
 describe('grant custody and connection generation', () => {
   test('a connection change in progress stops the apply and deletes nothing', async () => {
     const l = lab();
@@ -377,7 +475,7 @@ describe('an external SQLite family finishes after its primary is gone', () => {
     // The previous start removed the primary, then died.
     rmSync(external);
     const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: ctx });
-    expect(result).toEqual({ applied: ['dropbox.files'], refused: [] });
+    expect(result).toEqual({ applied: ['dropbox.files'], incomplete: [], refused: [] });
     expect(existsSync(`${external}-wal`)).toBe(false);
     expect(existsSync(`${external}-shm`)).toBe(false);
   });

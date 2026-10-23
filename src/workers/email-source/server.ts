@@ -1983,7 +1983,7 @@ export async function main(): Promise<void> {
   // foreground, managed, Gateway service): Delete indexed data takes it
   // exclusive, so it cannot run under a live worker, and a worker that starts
   // during a delete waits for it.
-  holdStoreCustodyShared([resolveEmbeddingLedgerPath(process.env)]);
+  holdStoreCustodyShared();
   // Startup signals can close only this instance's listener/client. A second
   // foreground worker never revokes the engine host's epoch or runtime path.
   let closeDesktopBridge = () => {};

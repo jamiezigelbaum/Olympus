@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { openStoreDatabase } from '../src/core/store-open.ts';
 /**
  * Before/after measurement for the vector-scan rewrite, against a real
  * connector store.
@@ -126,7 +127,7 @@ function heapMb(): number {
 
 function main(): void {
   const options = parseArgs(process.argv.slice(2));
-  const db = new Database(options.dbPath, { readonly: true, strict: true });
+  const db = openStoreDatabase(options.dbPath, { readonly: true, strict: true });
   try {
     db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
 

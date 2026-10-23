@@ -7,7 +7,11 @@ const ROOT = join(import.meta.dir, '..');
 describe('verification contract', () => {
   test('focused, explicit local checks remain available without running in pre-push', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-    expect(pkg.scripts['test:focus']).toBe('bun test');
+    // HOME is a throwaway directory BEFORE Bun starts: Bun reads it once at process
+    // start and every descendant inherits it, so no test, however deep its process
+    // tree, resolves the account's real home (test/support/isolated-home.ts refuses
+    // to run otherwise). Still one explicit, ungated `bun test`.
+    expect(pkg.scripts['test:focus']).toBe('HOME="$(mktemp -d)" bun test');
     expect(pkg.scripts['contracts:check']).toBe('bun scripts/contract-version.ts');
     expect(pkg.scripts['credentials:check']).toBe('bun scripts/credential-pattern-check.ts');
     expect(pkg.scripts['risk:check']).toBe('bun scripts/change-risk.ts');

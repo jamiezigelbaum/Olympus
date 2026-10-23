@@ -24,7 +24,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { removeFileDurablySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import { configFromPluginConfig } from './config.ts';
-import { applyPendingSourceDeletes } from '../pending-source-deletes.ts';
+import { applyPendingSourceDeletes, readSourceDeleteIntents } from '../pending-source-deletes.ts';
 import { handleRegistryPathFromEnv } from '../workers/credential-broker/connected-handles.ts';
 import {
   engineChildrenPath,
@@ -50,6 +50,8 @@ import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket } fr
 export const ENGINE_STATUS_SCHEMA = 'olympus.engine.status.v1';
 /** EX_CONFIG: launchd's throttle keeps a misconfigured engine from spinning. */
 const EXIT_CONFIG = 78;
+/** Ordinary failure: the supervisor restarts the engine, which retries. */
+const EXIT_RETRY = 1;
 const STOP_DEADLINE_MS = 15_000;
 
 export interface EngineServiceHealth {
@@ -175,15 +177,26 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   // The worker's effective environment, worker.env included: the registry and
   // every store path resolve the way the worker resolves them, or the worker
   // would record an intent this host never reads.
+  let deleteBlocksStart = false;
   try {
     const workerEnv = effectiveWorkerEnvironment({ env: dataEnv, homeDir, platform: options.platform ?? process.platform, pluginConfig });
-    await applyPendingSourceDeletes({
-      registryPath: options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(workerEnv, true)!,
-      context: { homeDir, env: workerEnv },
-      log,
-    });
+    const registryPath = options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(workerEnv, true)!;
+    const applied = await applyPendingSourceDeletes({ registryPath, context: { homeDir, env: workerEnv }, log });
+    // A delete that has begun and not finished leaves stores half removed: no
+    // service may open them until a later start completes it.
+    deleteBlocksStart = applied.incomplete.length > 0;
   } catch (error) {
     log(`engine: pending deletes could not be applied: ${error instanceof Error ? error.message : 'unknown error'}`);
+    try {
+      const workerEnv = effectiveWorkerEnvironment({ env: dataEnv, homeDir, platform: options.platform ?? process.platform, pluginConfig });
+      const registryPath = options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(workerEnv, true)!;
+      deleteBlocksStart = readSourceDeleteIntents(registryPath).intents.some((entry) => entry.state === 'applying');
+    } catch { /* unknown: the apply itself failed before touching anything */ }
+  }
+  if (deleteBlocksStart) {
+    log('engine: a started Delete indexed data is not finished; not starting any service. The next start retries it.');
+    exit(EXIT_RETRY);
+    return undefined;
   }
 
   const now = () => new Date().toISOString();

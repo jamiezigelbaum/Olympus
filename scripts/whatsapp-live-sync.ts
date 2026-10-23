@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const stateDir = process.env['OLYMPUS_WHATSAPP_STATE_DIR']?.trim() || DEFAULT_STATE_DIR;
   const spoolDir = join(stateDir, 'spool');
-  holdStoreCustodyShared([stateDir]);
+  holdStoreCustodyShared();
   const dbPath = args.dbPath ?? join(stateDir, 'connector-store.db');
 
   const connector = createWhatsAppLiveSourceConnector({

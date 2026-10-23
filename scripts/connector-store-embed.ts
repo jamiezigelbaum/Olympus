@@ -184,7 +184,7 @@ async function runConnectorStoreEmbed(argv: readonly string[]): Promise<{
 }
 
 if (import.meta.main) {
-  holdStoreCustodyShared([resolveEmbeddingLedgerPath(process.env)]);
+  holdStoreCustodyShared();
   runConnectorStoreEmbed(process.argv.slice(2))
     .then((summary) => {
       console.log(JSON.stringify(summary, null, 2));

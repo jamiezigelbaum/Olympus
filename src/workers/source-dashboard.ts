@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../core/store-open.ts';
 import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
@@ -1958,7 +1959,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
 
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
-    this.db = new Database(dbPath);
+    this.db = openStoreDatabase(dbPath);
     this.db.exec('PRAGMA busy_timeout = 10000;');
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
@@ -2337,11 +2338,18 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     const deleteState = options.sourceDeleteStates?.[definition.source_id];
     if (deleteState) {
       card.delete_state = { state: deleteState.state, ...(deleteState.reason ? { reason: deleteState.reason } : {}) };
-      card.connection = {
-        ...card.connection,
-        state: 'not_connected',
-        label: deleteState.state === 'pending' ? DASHBOARD_DELETING_LABEL : DASHBOARD_DELETE_NOT_DONE_LABEL,
-      };
+      // A refusal because the source is (again) connected describes the delete,
+      // not the connection: the card keeps its real connection state, so
+      // Disconnect stays reachable, and the refusal rides in delete_state.
+      const refusedWhileConnected = deleteState.state === 'refused'
+        && (deleteState.reason === 'not_disconnected' || deleteState.reason === 'connection_changed');
+      if (!refusedWhileConnected) {
+        card.connection = {
+          ...card.connection,
+          state: 'not_connected',
+          label: deleteState.state === 'pending' ? DASHBOARD_DELETING_LABEL : DASHBOARD_DELETE_NOT_DONE_LABEL,
+        };
+      }
     }
     if (card.configured && options.sourceAccountBindings?.[definition.source_id as AccountBoundSourceId]?.purge_required) {
       card.account_change = {

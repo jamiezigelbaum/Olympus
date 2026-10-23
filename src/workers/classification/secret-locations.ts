@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 // The secret-locations index (design docs/design/per-item-four-tier-classification.md,
 // section 2.3): where the owner's Secrets live, and nothing else.
 //
@@ -139,7 +140,7 @@ export class SecretLocationsIndex {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date());
     if (options.readOnly === true) {
-      this.db = new Database(this.dbPath, { readonly: true, create: false });
+      this.db = openStoreDatabase(this.dbPath, { readonly: true, create: false });
       this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
       return;
     }
@@ -152,7 +153,7 @@ export class SecretLocationsIndex {
       if (!existsSync(this.dbPath)) closeSync(openSync(this.dbPath, 'a', 0o600));
       chmodSync(this.dbPath, 0o600);
     }
-    this.db = new Database(this.dbPath, { create: true });
+    this.db = openStoreDatabase(this.dbPath, { create: true });
     try {
       this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());

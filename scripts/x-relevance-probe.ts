@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { openStoreDatabase } from '../src/core/store-open.ts';
 
 import { Database } from 'bun:sqlite';
 import {
@@ -66,7 +67,7 @@ export async function runXRelevanceProbe(
   env: Record<string, string | undefined> = process.env,
   writeLine: (line: string) => void = console.log,
 ): Promise<void> {
-  const db = new Database(options.dbPath, { readonly: true, create: false, strict: true });
+  const db = openStoreDatabase(options.dbPath, { readonly: true, create: false, strict: true });
   try {
     db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;');
     const modelId = options.modelId

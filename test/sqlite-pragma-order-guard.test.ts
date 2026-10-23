@@ -23,6 +23,8 @@ const SCANNED_GLOBS = ['src/**/*.ts', 'scripts/**/*.ts'];
 function scanOpeners(scan: (path: string, source: string) => { line: number; reason: string }[]): string[] {
   return SCANNED_GLOBS
     .flatMap((pattern) => [...new Glob(pattern).scanSync({ cwd: repoRoot })])
+    // The custody boundary hands the connection to its caller, which is scanned.
+    .filter((relativePath) => relativePath !== 'src/core/store-open.ts')
     .flatMap((relativePath) => {
       const source = readFileSync(join(repoRoot, relativePath), 'utf8');
       return scan(relativePath, source).map((entry) => `${relativePath}:${entry.line}: ${entry.reason}`);
@@ -83,6 +85,18 @@ test('open-site audit flags a connection that executes no pragma at all', () => 
     'const reader = new Database(path, { readonly: true });',
     'reader.query(`SELECT 1`).get();',
     'const writer = new Database(path, { create: true });',
+    `writer.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');`,
+  ].join('\n');
+
+  expect(scanSqliteBusyTimeoutOpens('src/fixture.ts', source))
+    .toEqual([{ line: 1, reason: 'opens a connection that never sets busy_timeout' }]);
+});
+
+test('open-site audit judges a connection opened through the custody boundary like a raw open', () => {
+  const source = [
+    'const reader = openStoreDatabase(path, { readonly: true });',
+    'reader.query(`SELECT 1`).get();',
+    'const writer = openStoreDatabase(path, { create: true });',
     `writer.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');`,
   ].join('\n');
 

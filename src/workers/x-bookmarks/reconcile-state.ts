@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
@@ -302,7 +303,7 @@ export class LocalXBookmarksReconcileStateStore {
   constructor(dbPath = defaultXBookmarksReconcileStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
-    this.db = new Database(dbPath, { create: true });
+    this.db = openStoreDatabase(dbPath, { create: true });
     if (dbPath !== ':memory:') chmodSync(dbPath, 0o600);
     this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
     assertSqliteSchemaCanOpen(

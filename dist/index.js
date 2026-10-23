@@ -2334,6 +2334,21 @@ function acquireFileLeaseSync(targetPath, options) {
     sleepSync(options.pollIntervalMs);
   }
 }
+function pragmaText(connection, sql) {
+  const statement = connection.query ? connection.query(sql) : connection.prepare(sql);
+  const row = statement.get();
+  return String(row ? Object.values(row)[0] : "").toLowerCase();
+}
+function requireRollbackJournal(connection, lockPath) {
+  if (pragmaText(connection, "PRAGMA journal_mode") === "delete")
+    return;
+  try {
+    connection.exec("PRAGMA busy_timeout = 0; PRAGMA journal_mode = DELETE");
+  } catch {}
+  if (pragmaText(connection, "PRAGMA journal_mode") !== "delete") {
+    throw new Error(`Lock database ${lockPath} is not in rollback-journal mode and could not be switched.`);
+  }
+}
 function openSqlite(path) {
   if (typeof globalThis.Bun !== "undefined") {
     const { Database } = runtimeRequire("bun:sqlite");
@@ -2359,6 +2374,14 @@ function tryKernelLockAt(lockPath, mode) {
     }
   }
   const connection = openSqlite(lockPath);
+  try {
+    requireRollbackJournal(connection, lockPath);
+  } catch (error) {
+    closeQuietly(connection);
+    if (isSqliteBusy(error))
+      return;
+    throw error;
+  }
   try {
     if (mode === "exclusive") {
       connection.exec("BEGIN EXCLUSIVE");
@@ -5033,6 +5056,19 @@ var storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because i
 var init_release_manifest = __esm(() => {
   storage = new AsyncLocalStorage;
   withheldAnswers = new WeakSet;
+});
+
+// src/core/store-custody.ts
+var heldShared, heldExclusiveHere;
+var init_store_custody = __esm(() => {
+  init_file_lease();
+  heldShared = new Map;
+  heldExclusiveHere = new Set;
+});
+
+// src/core/store-open.ts
+var init_store_open = __esm(() => {
+  init_store_custody();
 });
 
 // src/core/sqlite-migrations.ts
@@ -14129,6 +14165,7 @@ function metadataStringArray(metadata, key) {
 // src/workers/google-connectors/request-budget.ts
 var GoogleRequestBudgetError;
 var init_request_budget = __esm(() => {
+  init_store_open();
   GoogleRequestBudgetError = class GoogleRequestBudgetError extends Error {
     retryAt;
     provider;
@@ -15398,15 +15435,6 @@ var init_corpus_adapter = __esm(() => {
   init_source_corpus_registry();
 });
 
-// src/core/store-custody.ts
-var STORE_CUSTODY_LOCK_NAME = "store-lifecycle", LOCK_FILE_NAME, heldShared, heldExclusiveHere;
-var init_store_custody = __esm(() => {
-  init_file_lease();
-  LOCK_FILE_NAME = `${STORE_CUSTODY_LOCK_NAME}.lock.db`;
-  heldShared = new Map;
-  heldExclusiveHere = new Set;
-});
-
 // src/core/source-index/keyword-languages.ts
 var profiles;
 var init_keyword_languages = __esm(() => {
@@ -15867,6 +15895,7 @@ var init_tier_classifier = __esm(() => {
 });
 // src/workers/classification/tier-ledger.ts
 var init_tier_ledger = __esm(() => {
+  init_store_open();
   init_sqlite_migrations();
   init_tier_classifier();
 });
@@ -15874,6 +15903,7 @@ var init_tier_ledger = __esm(() => {
 // src/workers/classification/secret-locations.ts
 var STOP_WORDS;
 var init_secret_locations = __esm(() => {
+  init_store_open();
   init_sqlite_migrations();
   init_engine();
   init_tier_classifier();
@@ -15949,6 +15979,7 @@ var init_delphi_scorer = __esm(() => {
 
 // src/workers/classification/sniffer-store.ts
 var init_sniffer_store = __esm(() => {
+  init_store_open();
   init_sqlite_migrations();
   init_tier_classifier();
 });
@@ -16028,6 +16059,7 @@ var init_sniffer = __esm(() => {
 // src/workers/file-extraction/job-names.ts
 var openLedgerPaths;
 var init_job_names = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   openLedgerPaths = new Map;
 });
@@ -16202,7 +16234,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
-  init_store_custody();
+  init_store_open();
   init_keyword_context();
   init_keyword_languages();
   init_keyword_expansion();
@@ -17398,6 +17430,7 @@ var init_grant_fence = __esm(() => {
 // src/workers/x-bookmarks/live-control.ts
 var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
 var init_live_control2 = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   init_sqlite_migrations();
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60000;
@@ -17412,6 +17445,7 @@ var init_live_control2 = __esm(() => {
 // src/workers/x-bookmarks/reconcile-state.ts
 var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2, FOLDER_FACET_REFRESH_LEASE_MS;
 var init_reconcile_state = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   init_sqlite_migrations();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
@@ -18190,6 +18224,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
 }
 var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_DELETE_REFUSAL_CODES, DASHBOARD_DELETING_LABEL = "Deleting indexed data…", DASHBOARD_DELETE_NOT_DONE_LABEL = "Delete didn't run — check settings, then delete again", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_store_open();
   init_linux_engine_layout();
   init_google_handle_compatibility();
   init_publisher_oauth_client();
@@ -18914,6 +18949,7 @@ function formatNumber(value) {
 }
 var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
+  init_store_open();
   init_config();
   init_source_corpus_registry();
   init_source_ingestion_exclusions();
@@ -21503,6 +21539,7 @@ var inProcessRemoteRequests = new WeakSet;
 init_source_corpus_registry();
 
 // src/core/source-watch.ts
+init_store_open();
 init_linux_engine_layout();
 init_sqlite_migrations();
 var SOURCE_WATCH_MIN_LEASE_MS = 1000;

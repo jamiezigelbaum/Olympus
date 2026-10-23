@@ -1,3 +1,4 @@
+import { openStoreDatabase } from '../../core/store-open.ts';
 // The privacy-safe sniffer's local state (design section 2.2): a verdict cache
 // and a queue of unanswered questions, one SQLite file per connector store
 // (`<store>.tier-sniffer.sqlite`, tier-ledger-path.ts), owner-only (0600).
@@ -74,7 +75,7 @@ export class TierSnifferStore {
     this.now = options.now ?? (() => new Date());
     if (options.readOnly === true) {
       // A reader (the status backlog): never creates, migrates or writes.
-      this.db = new Database(this.dbPath, { readonly: true, create: false });
+      this.db = openStoreDatabase(this.dbPath, { readonly: true, create: false });
       this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
       this.readOnly = true;
       return;
@@ -85,7 +86,7 @@ export class TierSnifferStore {
     const previousUmask = onDisk ? process.umask(0o077) : undefined;
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, { create: true });
+      db = openStoreDatabase(this.dbPath, { create: true });
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk) restrictFiles(this.dbPath);

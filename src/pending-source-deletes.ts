@@ -24,10 +24,11 @@ import { tryHoldStoreCustodyExclusive } from './core/store-custody.ts';
 import { readThisComputerHandles, thisComputerStateUnreadable } from './core/this-computer.ts';
 import {
   dataDeleteCustody,
-  deleteCustodyPaths,
   deleteOlympusDataWithCustody,
+  changedBinding,
   planSourceDelete,
   type LifecyclePathContext,
+  type TargetBinding,
 } from './data-lifecycle.ts';
 import {
   ConnectedHandleGrantMutationError,
@@ -51,10 +52,19 @@ export interface SourceDeleteIntent {
    * are gone must still let the next start finish them.
    */
   verified_primaries?: string[];
+  /**
+   * Where the targets really were when the owner asked (symlinks resolved, plus
+   * the identity of the directory above each). A changed binding refuses.
+   */
+  bindings?: TargetBinding[];
   /** The credential-grant generation the owner's disconnect was judged against. */
   grant_epoch?: string;
   created_at: string;
-  state: 'pending' | 'refused';
+  /**
+   * `applying`: the delete has begun (some store may already be gone). It is
+   * retried until it completes; it is never turned into a refusal.
+   */
+  state: 'pending' | 'applying' | 'refused';
   /** Present when refused: a reason code only, never a path. */
   reason?: SourceDeleteRefusal;
   refused_at?: string;
@@ -86,7 +96,7 @@ function isIntent(value: unknown): value is SourceDeleteIntent {
   const intent = value as Partial<SourceDeleteIntent> | null;
   return !!intent && typeof intent.id === 'string' && typeof intent.source_id === 'string'
     && Array.isArray(intent.targets) && Array.isArray(intent.corpora)
-    && (intent.state === 'pending' || intent.state === 'refused');
+    && (intent.state === 'pending' || intent.state === 'applying' || intent.state === 'refused');
 }
 
 function writeIntents(registryPath: string, intents: SourceDeleteIntent[]): void {
@@ -127,6 +137,7 @@ export function recordSourceDeleteIntent(input: {
     corpora: plan.corpora,
     targets: plan.targets,
     verified_primaries: plan.verifiedPrimaries,
+    bindings: plan.bindings,
     grant_epoch: readConnectedHandleGrantEpoch(input.registryPath),
     created_at: new Date().toISOString(),
     state: 'pending',
@@ -143,6 +154,13 @@ export function discardSourceDeleteIntent(registryPath: string, id: string): voi
 
 export interface AppliedSourceDeletes {
   applied: string[];
+  /**
+   * Sources whose delete has begun and is not finished (an unlink failed, or
+   * the stores could not be taken). Retried on the next start; the engine
+   * host starts no service while any remains, because a service would reopen
+   * the half-deleted stores.
+   */
+  incomplete: string[];
   refused: Array<{ sourceId: string; reason: SourceDeleteRefusal }>;
 }
 
@@ -164,13 +182,13 @@ export async function applyPendingSourceDeletes(input: {
   custodyTimeoutMs?: number;
 }): Promise<AppliedSourceDeletes> {
   const log = input.log ?? (() => undefined);
-  const result: AppliedSourceDeletes = { applied: [], refused: [] };
+  const result: AppliedSourceDeletes = { applied: [], incomplete: [], refused: [] };
   const read = readSourceDeleteIntents(input.registryPath);
   if (read.unreadable) {
     log('pending source deletes: the intent record is unreadable; nothing was deleted.');
     return result;
   }
-  if (read.intents.every((entry) => entry.state !== 'pending')) return result;
+  if (read.intents.every((entry) => entry.state === 'refused')) return result;
 
   const refuseAll = (reason: SourceDeleteRefusal) => {
     const now = new Date().toISOString();
@@ -182,16 +200,20 @@ export async function applyPendingSourceDeletes(input: {
       result.refused.push({ sourceId: entry.source_id, reason });
       log(`pending source deletes: ${entry.source_id} not deleted (${reason}).`);
     }
+    for (const entry of fresh.filter((candidate) => candidate.state === 'applying')) result.incomplete.push(entry.source_id);
   };
 
   try {
     await withConnectedHandleGrantCustody(input.registryPath, {}, () => {
       let intents = readSourceDeleteIntents(input.registryPath).intents;
-      for (const intent of intents.filter((entry) => entry.state === 'pending')) {
+      for (const intent of intents.filter((entry) => entry.state !== 'refused')) {
+        // `applying`: an earlier run began this delete and did not finish it.
+        const resumed = intent.state === 'applying';
+        let begun = resumed;
         let refusal: SourceDeleteRefusal | undefined;
         let hold: ReturnType<typeof tryHoldStoreCustodyExclusive>;
         try {
-          if (intent.grant_epoch !== undefined && intent.grant_epoch !== readConnectedHandleGrantEpoch(input.registryPath)) {
+          if (!resumed && intent.grant_epoch !== undefined && intent.grant_epoch !== readConnectedHandleGrantEpoch(input.registryPath)) {
             refusal = 'connection_changed';
           } else {
             const plan = planSourceDelete({
@@ -202,27 +224,41 @@ export async function applyPendingSourceDeletes(input: {
             });
             if (JSON.stringify(plan.targets) !== JSON.stringify([...intent.targets].sort())) {
               refusal = 'settings_changed';
+            } else if (intent.bindings && changedBinding(intent.bindings, plan.bindings)) {
+              // A symlinked root retargeted, or a directory above a target
+              // swapped, since the owner asked: the same names, another place.
+              refusal = 'settings_changed';
             } else {
-              // Exclusive store custody, kernel-held: a worker, the embedding
-              // drain, a foreground run or any other opener holds it shared for
-              // its whole life. Not obtainable: delete nothing. Kept through the
-              // delete and the completion write below, so no opener can start
-              // between the check and the unlink.
-              hold = tryHoldStoreCustodyExclusive(
-                [...plan.targets, ...deleteCustodyPaths({ sourceId: intent.source_id, ...input.context })],
-                input.custodyTimeoutMs !== undefined ? { timeoutMs: input.custodyTimeoutMs } : {},
-              );
+              // Exclusive store custody, kernel-held: every opener (the worker
+              // in any mode, the embedding drain, repair scripts, CLI commands)
+              // holds it shared for its whole life. Not obtainable: delete
+              // nothing. Kept through the delete and the completion write, so
+              // no opener can start between the check and the unlink.
+              hold = tryHoldStoreCustodyExclusive({
+                ...(input.context.homeDir ? { homeDir: input.context.homeDir } : {}),
+                ...(input.custodyTimeoutMs !== undefined ? { timeoutMs: input.custodyTimeoutMs } : {}),
+              });
               if (!hold) {
                 refusal = 'holders_running';
               } else {
                 const custody = dataDeleteCustody({ ...sourceDeleteCustodyInput(intent.source_id, input.registryPath), ...input.context });
-                if (!custody.ready) refusal = 'not_disconnected';
-                else deleteOlympusDataWithCustody({
-                  ...sourceDeleteCustodyInput(intent.source_id, input.registryPath),
-                  ...input.context,
-                  registryPath: input.registryPath,
-                  verifiedPrimaries: intent.verified_primaries ?? [],
-                });
+                if (!custody.ready && !resumed) refusal = 'not_disconnected';
+                else {
+                  if (!resumed) {
+                    // From here some store may be gone: the record says so, durably,
+                    // before the first unlink, and is never downgraded to a refusal.
+                    intents = intents.map((entry) => entry.id === intent.id ? { ...entry, state: 'applying' as const } : entry);
+                    writeIntents(input.registryPath, intents);
+                    begun = true;
+                  }
+                  deleteOlympusDataWithCustody({
+                    ...sourceDeleteCustodyInput(intent.source_id, input.registryPath),
+                    ...input.context,
+                    registryPath: input.registryPath,
+                    verifiedPrimaries: intent.verified_primaries ?? [],
+                    ...(intent.bindings ? { expectedBindings: intent.bindings } : {}),
+                  });
+                }
               }
             }
           }
@@ -234,18 +270,26 @@ export async function applyPendingSourceDeletes(input: {
           log(`pending source deletes: ${intent.source_id}: ${message}`);
         }
         try {
-          if (refusal) {
+          // A delete that has begun is retried, not refused, unless a preflight
+          // now says the recorded targets are no longer safe to touch.
+          const unfinished = refusal !== undefined && begun
+            && (refusal === 'failed' || refusal === 'holders_running');
+          if (unfinished) {
+            result.incomplete.push(intent.source_id);
+            log(`pending source deletes: ${intent.source_id} is only partly deleted (${refusal}); it will be retried and the engine will not start meanwhile.`);
+          } else if (refusal) {
             intents = intents.map((entry) => entry.id === intent.id
               ? { ...entry, state: 'refused' as const, reason: refusal, refused_at: new Date().toISOString() }
               : entry);
             result.refused.push({ sourceId: intent.source_id, reason: refusal });
             log(`pending source deletes: ${intent.source_id} not deleted (${refusal}).`);
+            writeIntents(input.registryPath, intents);
           } else {
             intents = intents.filter((entry) => entry.id !== intent.id);
             result.applied.push(intent.source_id);
             log(`pending source deletes: ${intent.source_id} deleted.`);
+            writeIntents(input.registryPath, intents);
           }
-          writeIntents(input.registryPath, intents);
         } finally {
           hold?.release();
         }
@@ -265,7 +309,7 @@ export function sourceDeleteStates(registryPath: string): Record<string, { state
   const out: Record<string, { state: 'pending' | 'refused'; reason?: SourceDeleteRefusal }> = {};
   try {
     for (const intent of readSourceDeleteIntents(registryPath).intents) {
-      out[intent.source_id] = { state: intent.state, ...(intent.reason ? { reason: intent.reason } : {}) };
+      out[intent.source_id] = { state: intent.state === 'applying' ? 'pending' : intent.state, ...(intent.reason ? { reason: intent.reason } : {}) };
     }
   } catch { /* the dashboard shows no delete state rather than fail to render */ }
   return out;
