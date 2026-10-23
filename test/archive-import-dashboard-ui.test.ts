@@ -372,7 +372,7 @@ describe('each archive under the Archives row', () => {
     expect(page.calls(ARCHIVE_REMOVE_TOOL_NAME)).toEqual([]);
     answer = dashboard('archives-removing', meta([{ ...ARCHIVE, status: 'removing' }]));
     page.button('Yes, remove').click();
-    await until(() => page.text().includes(fill(A.removing, { name: ARCHIVE.name })));
+    await until(() => page.doc.querySelector('li.archive[data-archive="removing"]') !== null);
     expect(page.calls(ARCHIVE_REMOVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_REMOVE_TOOL_NAME, arguments: { archive_id: ARCHIVE.id } }]);
     expect(page.text()).toContain(fill(A.removing, { name: ARCHIVE.name }));
     const removing = archiveItem(page, 'removing');
@@ -393,7 +393,7 @@ describe('imports asked for', () => {
     });
     expect(page.text()).toContain(fill(A.requestLine, { name: REQUEST.name, where: REQUEST.where }));
     page.button(A.approve).click();
-    await until(() => page.text().includes(fill(A.started, { name: REQUEST.name })));
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.started, { name: REQUEST.name })));
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(page.text()).toContain(fill(A.started, { name: REQUEST.name }));
 
@@ -404,7 +404,7 @@ describe('imports asked for', () => {
     });
     answer = dashboard('archives-none', meta([], []));
     again.button(A.decline).click();
-    await until(() => again.text().includes(A.declined));
+    await until(() => again.calls(ARCHIVE_DECLINE_TOOL_NAME).length > 0 && again.text().includes(A.declined));
     expect(again.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(again.text()).toContain(A.declined);
     expect(again.text()).not.toContain(fill(A.requestLine, { name: REQUEST.name, where: REQUEST.where }));
@@ -448,14 +448,14 @@ describe('imports asked for', () => {
     expect(page.text()).toContain(fill(A.failedLine, { name: 'Moved.mbox', reason: A.failed.replaced }));
     answer = dashboard('archives-checking', meta([ARCHIVE], [{ ...REQUEST, id: FAILED, name: 'Moved.mbox', origin: 'dashboard', status: 'failed', code: 'replaced' }]));
     page.button(A.cancel).click();
-    await until(() => page.text().includes(fill(A.cancelled, { name: REQUEST.name })));
+    await until(() => page.text().includes(fill(A.cancelled, { name: REQUEST.name })) && !page.hasButton(A.cancel));
     expect(page.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(page.text()).toContain(fill(A.cancelled, { name: REQUEST.name }));
     expect(page.hasButton(A.cancel)).toBe(false);
 
     answer = dashboard('archives-checking', meta([ARCHIVE], []));
     page.button(A.tryAgain).click();
-    await until(() => page.text().includes(fill(A.started, { name: 'Moved.mbox' })));
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.started, { name: 'Moved.mbox' })));
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { request_id: FAILED } }]);
     expect(page.text()).toContain(fill(A.started, { name: 'Moved.mbox' }));
   });
